@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r><w:t>Serious Reading</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Dense material benefits from visual structure.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>First bullet clarifies the key idea.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Second bullet keeps the outline readable.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Closing thought: readers need structure to stay oriented.</w:t></w:r>
+    </w:p>
+    <w:sectPr/>
+  </w:body>
+</w:document>

@@ -1,0 +1,6 @@
+Wait... what happens here? Dr. Posey reads e.g. difficult prose, abbreviations, and odd punctuation!!!
+
+This line has no final punctuation
+but it still should produce a usable fallback chunk
+
+"Quoted clauses," she said, "can confuse naive tokenizers; semicolons, colons: and ellipses... should not crash the reader."

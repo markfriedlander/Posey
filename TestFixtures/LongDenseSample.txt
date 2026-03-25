@@ -1,0 +1,9 @@
+Strategy is rarely difficult because it is mysterious. It is difficult because it demands tradeoffs that people would prefer to avoid. A serious reading companion should make those tradeoffs easier to revisit, not flatter the reader with speed.
+
+Dense documents often resist casual attention. A paragraph may define a term, narrow it, qualify it, and then quietly reverse the intuition that the opening sentence created. When that happens, a practical listen and read loop matters more than cosmetic formatting.
+
+Legal and philosophical writing can extend a single argument over many clauses. The reader may understand each clause locally and still lose the overall movement. Returning to the exact sentence that was last heard is therefore not a luxury but part of the reading task itself.
+
+Technical prose behaves similarly. Definitions accumulate. Dependencies appear late. Important caveats are easy to miss when attention slips for even a moment. A lightweight local tool can help by preserving place, speaking steadily, and avoiding every unnecessary interruption.
+
+The goal of this fixture is not literary elegance. It is to provide enough structure, punctuation, and sentence variety to exercise segmentation, playback state changes, scrolling, and restored position behavior over a longer passage.

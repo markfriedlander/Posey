@@ -1,0 +1,2 @@
+Duplicate imports should not create duplicate library entries when the file name and normalized text are unchanged.
+Importing this fixture again should update the existing record instead.

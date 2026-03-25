@@ -1,0 +1,3 @@
+The first sentence is short.
+The second sentence is a little longer so the reader has something to follow.
+The third sentence closes the sample.

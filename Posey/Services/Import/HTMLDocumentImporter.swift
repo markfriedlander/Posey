@@ -5,6 +5,7 @@ import UIKit
 import AppKit
 #endif
 
+// ========== BLOCK 1: ERROR TYPES - START ==========
 struct HTMLDocumentImporter {
     enum ImportError: LocalizedError, Equatable {
         case unreadableDocument
@@ -19,13 +20,22 @@ struct HTMLDocumentImporter {
             }
         }
     }
+// ========== BLOCK 1: ERROR TYPES - END ==========
 
+// ========== BLOCK 2: IMPORT ENTRY POINTS - START ==========
     func loadText(from url: URL) throws -> String {
         let data = try Data(contentsOf: url)
         return try loadText(fromData: data)
     }
 
+    /// NSAttributedString HTML parsing uses WebKit internally under UIKit and
+    /// must be called on the main thread. This method asserts that requirement
+    /// so violations surface immediately rather than as subtle threading bugs.
     func loadText(fromData data: Data) throws -> String {
+        #if canImport(UIKit)
+        dispatchPrecondition(condition: .onQueue(.main))
+        #endif
+
         let attributedString: NSAttributedString
 
         do {
@@ -45,7 +55,9 @@ struct HTMLDocumentImporter {
 
         return normalized
     }
+// ========== BLOCK 2: IMPORT ENTRY POINTS - END ==========
 
+// ========== BLOCK 3: TEXT NORMALIZATION - START ==========
     private func normalize(_ text: String) -> String {
         text
             .replacingOccurrences(of: "\u{00A0}", with: " ")
@@ -56,3 +68,4 @@ struct HTMLDocumentImporter {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+// ========== BLOCK 3: TEXT NORMALIZATION - END ==========

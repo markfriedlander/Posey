@@ -65,6 +65,7 @@ Responsibilities:
 - separate primary transport controls from lower-frequency reader preferences
 - expose note and bookmark entry anchored to the active reading context
 - pause playback at explicit visual stop blocks when the current format exposes them in the current V1 model
+- expose Ask Posey as a primary reader chrome entry point for document-scoped queries
 
 Initial examples:
 
@@ -265,15 +266,20 @@ When the reader opens Notes:
 
 The reader control surface is intentionally split into two layers:
 
-1. Primary chrome:
-   - previous marker
-   - play or pause
-   - next marker
-   - restart
+1. Primary chrome — bottom bar:
+   - Ask Posey (far left, speech bubble or question mark glyph)
+   - previous marker (centered group)
+   - play or pause (centered group)
+   - next marker (centered group)
+   - restart (far right)
+2. Top-right cluster:
+   - preferences
    - Notes
-2. Secondary preferences sheet:
+3. Secondary preferences sheet:
    - font size
    - later listening and presentation options such as in-motion behavior
+
+Ask Posey and restart sit at opposite ends of the bottom bar. The three transport controls (previous, play/pause, next) stay centered. This keeps the bar symmetrical and gives Ask Posey a first-class permanent home without crowding the top-right cluster or competing with transport controls.
 
 The primary chrome fades away after a short idle period and reappears when the reader taps the screen. It should stay glyph-first, visually restrained, and mostly monochrome so the document remains the main focus. Restart rewinds to the beginning without autoplaying, and real-world audio interruptions such as calls should leave playback paused until the reader resumes intentionally. Speech voice and speed are currently left to Apple Spoken Content behavior rather than Posey-owned in-app controls.
 
@@ -407,6 +413,106 @@ Posey/
 
 This is a recommendation, not a mandate to create every file immediately.
 Only create files as the current block demands.
+
+## Ask Posey Architecture
+
+Ask Posey is the on-device AI reading assistance feature, powered by Apple Foundation Models. It is fully offline, never requires a network connection, and is grounded in the source document.
+
+### Three Interaction Patterns
+
+**Pattern 1 — Selection-scoped**
+
+- Entry point: text selection contextual menu
+- Context input: the selected text
+- No document-level retrieval needed; the selection is the complete context
+- Surface: full modal Ask Posey sheet with the selection quoted at the top
+
+**Pattern 2 — Document-scoped**
+
+- Entry point: Ask Posey glyph, far left of the bottom reader bar
+- Context input: `Document.plainText` — the full normalized plain text stored in SQLite
+- Surface: full modal Ask Posey sheet with the current sentence quoted at the top
+- Context window constraint: for long documents, `plainText` may exceed the model's context window. The architecture must not assume the full text always fits. A relevant-chunk selection strategy is required — for shorter documents the full text can be passed directly; for longer documents a windowed or retrieval-based approach is needed. A proven implementation of this pattern exists in a prior project and will be brought in as a named resource when the time comes. Do not build this from scratch without that reference.
+
+**Pattern 3 — Annotation-scoped**
+
+- Entry point: Notes surface
+- Context input: document context plus the active annotation or reading position
+- Surface: Ask Posey sheet opened from within the Notes sheet
+
+### Session Model
+
+Pattern 3 uses a transient session model. While the Ask Posey sheet is open, a local `[Message]` array is maintained in the sheet's view model. Each turn appends to this array and feeds it to the model as context, supporting natural followup questions within the session. When the sheet closes, the exchange is either saved as a note by the user or discarded. No new tables, no persistent threading concept. Persistent conversation history is explicitly deferred — if usage proves it valuable, it will be added as a deliberate scope revision at that time.
+
+Patterns 1 and 2 are single-turn by default; they can adopt the same transient session model if followup questions prove useful in practice.
+
+### Data Model Implications
+
+- `Document.plainText` is the natural context input for all three patterns. No new fields are needed on `Document` for query purposes.
+- Ask Posey responses that the user wants to keep are saved as `Note` records, using the existing notes model. No new persistence layer is required.
+- The `currentSegment` and adjacent segments already accessible from `ReaderViewModel` provide the natural selection context for Patterns 1 and 3.
+
+### Surface Design
+
+The Ask Posey sheet is a full modal sheet for all three patterns. On a phone-sized screen, a panel that coexists with the document splits the screen in a way that serves neither surface. A full modal sheet gives the conversation room to breathe and works consistently across device sizes. The relevant text — selected text for Pattern 1, current sentence for Patterns 2 and 3 — is quoted at the top of the sheet so the reader has context without needing to see the full document simultaneously.
+
+On iPad, a split panel layout may be considered as a later enhancement. Design for phone-first.
+
+### Swift 6 Compliance
+
+All Ask Posey feature code must be strictly Swift 6 compliant. AFM calls are async and must be dispatched from clearly isolated contexts. The Ask Posey sheet view model must be `@MainActor` and all model responses must arrive on the main actor before updating published state.
+
+## OCR Architecture (Planned)
+
+OCR for scanned and image-only PDFs is a planned near-term feature. It is not yet implemented.
+
+### Approach
+
+- Use Apple's Vision framework: `VNRecognizeTextRequest` with `recognitionLevel: .accurate`
+- On-device, fully offline, no dependencies
+- Fits the native-frameworks-first principle
+
+### Integration Point
+
+OCR extends the existing PDF import pipeline. The current flow rejects pages with no extractable text by marking them as visual placeholders (or rejecting the document entirely if all pages are visual). The OCR extension would:
+
+1. Detect image-only pages during import (currently done via the empty `page.string` check)
+2. Run `VNRecognizeTextRequest` on each image-only page
+3. Collect recognized text and stitch it into the normal page text flow
+4. Store the result in the same `plainText` field — the reader, playback, notes, and position model require no changes
+
+### Constraints
+
+- OCR is computationally expensive; long scanned documents may take meaningful time to import. Progress indication and background processing will be needed.
+- OCR accuracy varies. The first pass should not attempt to correct or clean OCR output; store what Vision produces and let the user work with it.
+- The scanned-document error path should remain for cases where Vision also finds nothing (pure image pages without text content).
+
+## Search Architecture (Planned)
+
+In-document search is planned in three tiers. Only tier 1 is near-term implementation work.
+
+### Tier 1 — String Match (Near Term)
+
+- Find bar UI accessible from the reader
+- Search runs against `Document.plainText` stored in SQLite
+- Results are character offset ranges; the existing offset model maps directly to sentence indices for jump-to-match
+- Highlight matched sentences in the sentence-row reader using the same highlight mechanism as playback
+- Forward and backward navigation between matches
+
+Implementation note: SQLite `LIKE` or `INSTR` queries against `plain_text` are sufficient for this tier. For very large documents, a full-text search index (`FTS5`) would improve performance and is worth considering from the start.
+
+### Tier 2 — Notes-Inclusive Search (Roadmap)
+
+- Same find bar surface as tier 1
+- Extends the query to also search `notes.body` in SQLite
+- Single unified result set covering document text and annotation bodies
+- Notes results jump to the anchored sentence, consistent with the existing jump behavior
+
+### Tier 3 — Semantic Search via Ask Posey (Later)
+
+- Natural language queries: "find where the author talks about grief" even when the literal word does not appear
+- Natural extension of the AFM and Ask Posey layer
+- Same find bar surface as tiers 1 and 2; the distinction is the query engine, not the UI
 
 ## Testing Architecture
 

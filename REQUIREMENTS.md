@@ -43,12 +43,17 @@ Version 1 implementation order:
 - `EPUB` is the first larger container-format block after the lighter steps
 - `PDF` follows as a text-based first pass before richer handling or OCR
 
-Out of scope:
+Out of scope for current pass:
 
-- OCR correction
 - layout-perfect reconstruction
-- AI cleanup
 - smart chapter inference
+
+Planned near-term — OCR via Apple Vision:
+
+- Scanned or image-only PDFs are currently rejected with an explicit error.
+- OCR support via `VNRecognizeTextRequest` is a planned near-term extension to the PDF import pipeline.
+- On-device, no dependencies, consistent with the native-frameworks-first principle.
+- Does not require changes to the reader, playback, or persistence model.
 
 First PDF-pass constraint:
 
@@ -161,6 +166,65 @@ Required behavior:
 - Restore last position on reopen
 - Keep reading and playback positions aligned closely enough for practical use
 
+### 7. Ask Posey — AI-Assisted Reading
+
+Ask Posey provides on-device, offline AI reading assistance via Apple Foundation Models. It operates in three distinct interaction patterns, each with its own surface and context model.
+
+**Pattern 1 — Selection-scoped queries**
+
+- Entry point: text selection contextual menu, alongside Copy
+- Trigger: user selects text and chooses Ask Posey
+- Context input: the selected text
+- Example queries: "Simplify this paragraph," "What does this term mean," "Explain this sentence"
+- The selection is the natural and complete context; no document-level retrieval needed
+
+**Pattern 2 — Document-scoped queries**
+
+- Entry point: dedicated glyph in the bottom reader bar, far left, opposite restart
+- Trigger: user taps the Ask Posey glyph from the reader
+- Context input: the full document plain text, with a relevant-chunk selection strategy for documents that exceed the model's context window
+- Example queries: "Summarize this book," "What are the three main arguments," "Rewrite this for someone unfamiliar with the subject"
+- Context window note: for long documents, the full plain text may exceed the model's context window; the architecture must plan for a relevant-chunk selection strategy even if the first implementation uses the full text for shorter documents. A proven approach for this exists in a prior project and will be brought in when the time comes.
+
+**Pattern 3 — Annotation-scoped queries**
+
+- Entry point: via the Notes surface
+- Trigger: user opens Notes and engages Ask Posey from within that sheet
+- Context input: document context plus the current annotation or reading position
+- Example queries: "I have questions about this section," ongoing dialogue about the document over time
+- Session model: transient. A local message array is maintained while the Ask Posey sheet is open, supporting natural followup questions within a session. When the sheet closes, the exchange is either saved as a note or discarded. Nothing persists beyond what the user explicitly saves. No new tables or threading concept required. Persistent conversation history is a deliberate deferral — if it proves valuable in practice, it will be added as an explicit scope revision.
+
+**Shared constraints for all three patterns:**
+
+- Apple Foundation Models only — no network requests, no third-party AI services
+- Fully offline — Ask Posey must work without a connection
+- The Ask Posey sheet is a full modal surface
+- The active sentence or selected text is quoted at the top of the sheet so the reader has context without needing to see the full document simultaneously
+- AI-generated content is always clearly labeled and never presented as the source document
+
+### 8. In-Document Search
+
+Search is planned in three tiers. Only tier 1 is near-term implementation work.
+
+**Tier 1 — String match search (near term)**
+
+- Find bar behavior accessible from the reader
+- Jumps between matches in the sentence-row reader
+- Highlights matching text
+- The existing character offset model makes jump-to-match straightforward
+
+**Tier 2 — Notes-inclusive search (roadmap)**
+
+- Same find bar surface as tier 1
+- Extends search scope to include note bodies alongside document text
+- Single result set from SQLite covering both sources
+
+**Tier 3 — Semantic search via Ask Posey (later)**
+
+- Natural language queries: "find where the author talks about grief" even when the word does not appear
+- Natural extension of the Ask Posey and AFM layer
+- Same search surface as tiers 1 and 2
+
 ## Non-Functional Requirements
 
 - Fast launch for existing library items
@@ -184,10 +248,8 @@ Block 01 is complete only when a sample `TXT` file can:
 
 ## Explicit Version 1 Exclusions
 
-- AI features of any kind
 - server or cloud dependency for core flow
 - multi-device sync
-- search
 - document export
 - collaboration
 - marketplace features

@@ -69,6 +69,7 @@ struct SearchBarView: View {
                 .font(.footnote)
                 .accessibilityIdentifier("search.done")
         }
+        .tint(.primary)
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.regularMaterial)

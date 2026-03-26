@@ -129,13 +129,15 @@ struct ReaderView: View {
                 viewModel.scrollToSearchMatch(with: proxy)
             }
             .overlay(alignment: .topTrailing) {
-                topControls
-                    .padding(.top, 12)
-                    .padding(.trailing, 12)
-                    .opacity(isChromeVisible ? 1 : 0)
-                    .offset(y: isChromeVisible ? 0 : -12)
-                    .allowsHitTesting(isChromeVisible)
-                    .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+                if !viewModel.isSearchActive {
+                    topControls
+                        .padding(.top, 12)
+                        .padding(.trailing, 12)
+                        .opacity(isChromeVisible ? 1 : 0)
+                        .offset(y: isChromeVisible ? 0 : -12)
+                        .allowsHitTesting(isChromeVisible)
+                        .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+                }
             }
             .overlay(alignment: .topLeading) {
                 if isTestMode {
@@ -311,22 +313,22 @@ struct ReaderView: View {
 
     private func segmentBackground(_ segment: TextSegment) -> Color {
         if viewModel.isCurrentSearchMatch(segment: segment) {
-            return Color.yellow.opacity(0.55)
+            return Color.primary.opacity(0.28)
         } else if viewModel.isSearchMatch(segment: segment) {
-            return Color.yellow.opacity(0.22)
+            return Color.primary.opacity(0.10)
         } else if viewModel.isActive(segment: segment) {
-            return Color.accentColor.opacity(0.18)
+            return Color.primary.opacity(0.14)
         }
         return Color.clear
     }
 
     private func blockBackground(_ block: DisplayBlock) -> Color {
         if viewModel.isCurrentSearchMatch(block: block) {
-            return Color.yellow.opacity(0.55)
+            return Color.primary.opacity(0.28)
         } else if viewModel.isSearchMatch(block: block) {
-            return Color.yellow.opacity(0.22)
+            return Color.primary.opacity(0.10)
         } else if viewModel.isActive(block: block) {
-            return Color.accentColor.opacity(0.18)
+            return Color.primary.opacity(0.14)
         }
         return Color.clear
     }

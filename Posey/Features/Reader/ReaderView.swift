@@ -312,6 +312,10 @@ private struct ReaderPreferencesSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                #if DEBUG
+                VoiceQualityTestSection()
+                #endif
             }
             .navigationTitle("Reader Preferences")
             .navigationBarTitleDisplayMode(.inline)

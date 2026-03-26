@@ -227,8 +227,15 @@ editing existing ones.
 5. Explain your plan before writing code
 6. Wait for explicit go-ahead before implementing consequential changes
 
+**After every meaningful commit:**
+- Update HISTORY.md with what was done and why it matters
+- Update DECISIONS.md with any architectural or product decisions made
+- Update NEXT.md if the status of any planned item changed
+- These updates are part of the commit, not optional housekeeping afterward
+- A commit without corresponding doc updates is an incomplete commit
+
 **Ending a session:**
-- Note what was done, what decisions were made, and what is next
+- Confirm HISTORY.md, DECISIONS.md, and NEXT.md are current before closing
 - Commit and push to GitHub so the repo stays current
 
 **On the docs:**

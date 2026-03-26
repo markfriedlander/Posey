@@ -2,7 +2,7 @@
 
 ## Current Target
 
-Use the now-working real-device loop to keep `TXT`, `MD`, `RTF`, `DOCX`, `HTML`, `EPUB`, and first-pass text-based `PDF` stable on hardware, then decide whether the next highest-value step is deeper rich-content preservation or the next listening-comfort follow-through after the new playback-controls pass.
+Keep core format and playback stable on hardware. Tier 1 in-document search is now implemented. Next candidates: inline non-text element pause behavior (figures/tables/charts in EPUB/DOCX/HTML), OCR for scanned PDFs, and Ask Posey.
 
 ## Priority Order
 
@@ -25,11 +25,10 @@ Use the now-working real-device loop to keep `TXT`, `MD`, `RTF`, `DOCX`, `HTML`,
    - preserve visual-only pages as explicit visual stop blocks
    - pause playback at those visual stop boundaries by default
    - do not add OCR yet
-11. Reassess the next step after the current PDF slice settles:
-   - richer inline non-text preservation beyond visual-only page stops
-   - playback-settings investigation: voice quality tiers and rate control (see AVSpeech research note)
-   - revisit the playback-engine tradeoff between high-quality Spoken Content voices and live mid-playback speech-rate changes
+11. Next up (in rough priority order):
+   - richer inline non-text preservation beyond visual-only page stops (figures, tables, charts in EPUB/DOCX/HTML — high priority, PDF visual-stop pattern is the proven architecture to generalize)
    - OCR for scanned PDFs via Apple Vision framework (VNRecognizeTextRequest — on-device, no dependencies, extends the existing PDF import pipeline without touching the reader or persistence model)
+   - in-document search tier 1: **Done.** String match find bar implemented and deployed.
    - Safari/share-sheet import only after the local format blocks are stable enough to justify extension work
 12. Keep `.webarchive` on the roadmap only; do not begin it without a concrete need.
 13. Keep Safari or share-sheet import on the future roadmap only; do not begin app-extension work until the local file-ingestion blocks are stable.
@@ -108,11 +107,10 @@ Use the now-working real-device loop to keep `TXT`, `MD`, `RTF`, `DOCX`, `HTML`,
 
 ### In-Document Search
 
-- Planned in three tiers.
-- Tier 1 (near-term): string match find bar, jumps between matches, highlights in the sentence-row reader.
+- Three tiers planned.
+- Tier 1: **Implemented.** String match find bar, jumps between matches with wrap-around, highlights matches in the sentence-row reader. Works across both plain-segment and displayBlocks rendering modes.
 - Tier 2 (roadmap): same surface, extends scope to include note bodies.
 - Tier 3 (later): semantic search via Ask Posey — natural language queries without exact word match.
-- Only tier 1 is near-term implementation work.
 
 ### OCR for Scanned PDFs
 

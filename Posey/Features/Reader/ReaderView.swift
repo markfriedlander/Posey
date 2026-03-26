@@ -68,7 +68,7 @@ struct ReaderView: View {
                             .padding(.vertical, 6)
                             .background(
                                 RoundedRectangle(cornerRadius: 10)
-                                    .fill(viewModel.isActive(block: block) ? Color.accentColor.opacity(0.18) : Color.clear)
+                                    .fill(blockBackground(block))
                             )
                             .id(block.id)
                             .accessibilityIdentifier("reader.segment.\(block.id)")
@@ -83,7 +83,7 @@ struct ReaderView: View {
                             .padding(.vertical, 6)
                             .background(
                                 RoundedRectangle(cornerRadius: 10)
-                                    .fill(viewModel.isActive(segment: segment) ? Color.accentColor.opacity(0.18) : Color.clear)
+                                    .fill(segmentBackground(segment))
                             )
                             .id(segment.id)
                             .accessibilityIdentifier("reader.segment.\(segment.id)")
@@ -104,6 +104,29 @@ struct ReaderView: View {
                     .offset(y: isChromeVisible ? 0 : 20)
                     .allowsHitTesting(isChromeVisible)
                     .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+            }
+            .safeAreaInset(edge: .top) {
+                if viewModel.isSearchActive {
+                    SearchBarView(
+                        query: Binding(
+                            get: { viewModel.searchQuery },
+                            set: { viewModel.updateSearchQuery($0) }
+                        ),
+                        matchCount: viewModel.searchMatchCount,
+                        currentMatchPosition: viewModel.currentSearchMatchPosition,
+                        onPrevious: { viewModel.goToPreviousSearchMatch() },
+                        onNext: { viewModel.goToNextSearchMatch() },
+                        onDismiss: {
+                            viewModel.deactivateSearch()
+                            revealChrome()
+                        }
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: viewModel.isSearchActive)
+            .onChange(of: viewModel.searchScrollSignal) { _, _ in
+                viewModel.scrollToSearchMatch(with: proxy)
             }
             .overlay(alignment: .topTrailing) {
                 topControls
@@ -170,6 +193,18 @@ struct ReaderView: View {
 
     private var topControls: some View {
         HStack(spacing: 10) {
+            Button {
+                revealChrome()
+                viewModel.isSearchActive = true
+                chromeFadeTask?.cancel()
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.headline)
+                    .foregroundStyle(chromeTint)
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityIdentifier("reader.search")
+
             Button {
                 revealChrome()
                 isShowingPreferencesSheet = true
@@ -272,6 +307,28 @@ struct ReaderView: View {
         }
         .padding()
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func segmentBackground(_ segment: TextSegment) -> Color {
+        if viewModel.isCurrentSearchMatch(segment: segment) {
+            return Color.yellow.opacity(0.55)
+        } else if viewModel.isSearchMatch(segment: segment) {
+            return Color.yellow.opacity(0.22)
+        } else if viewModel.isActive(segment: segment) {
+            return Color.accentColor.opacity(0.18)
+        }
+        return Color.clear
+    }
+
+    private func blockBackground(_ block: DisplayBlock) -> Color {
+        if viewModel.isCurrentSearchMatch(block: block) {
+            return Color.yellow.opacity(0.55)
+        } else if viewModel.isSearchMatch(block: block) {
+            return Color.yellow.opacity(0.22)
+        } else if viewModel.isActive(block: block) {
+            return Color.accentColor.opacity(0.18)
+        }
+        return Color.clear
     }
 
     private func revealChrome() {
@@ -480,6 +537,24 @@ final class ReaderViewModel: ObservableObject {
     @Published var noteDraft = ""
     @Published private(set) var notes: [Note] = []
     @Published private(set) var voiceMode: SpeechPlaybackService.VoiceMode = .bestAvailable
+
+    // ========== BLOCK VM-SEARCH: SEARCH STATE - START ==========
+    @Published var searchQuery: String = ""
+    @Published var isSearchActive: Bool = false
+    @Published private(set) var searchMatchIndices: [Int] = []
+    @Published private(set) var currentSearchMatchPosition: Int? = nil
+    /// Emitted each time the view should scroll to a search match.
+    /// Uses a counter so repeated navigation to the same index still fires onChange.
+    @Published private(set) var searchScrollSignal: SearchScrollSignal? = nil
+
+    struct SearchScrollSignal: Equatable {
+        let segmentIndex: Int
+        let id: Int
+    }
+    private var searchScrollCounter = 0
+
+    var searchMatchCount: Int { searchMatchIndices.count }
+    // ========== BLOCK VM-SEARCH: SEARCH STATE - END ==========
 
     let document: Document
     let segments: [TextSegment]
@@ -736,6 +811,104 @@ final class ReaderViewModel: ObservableObject {
     }
 
     // ========== BLOCK VM-VOICE: VOICE MODE CONTROLS - END ==========
+
+    // ========== BLOCK VM-SEARCH: SEARCH METHODS - START ==========
+
+    func updateSearchQuery(_ query: String) {
+        searchQuery = query
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            searchMatchIndices = []
+            currentSearchMatchPosition = nil
+            searchScrollSignal = nil
+            return
+        }
+        searchMatchIndices = segments.indices.filter {
+            segments[$0].text.localizedCaseInsensitiveContains(trimmed)
+        }
+        if searchMatchIndices.isEmpty {
+            currentSearchMatchPosition = nil
+            searchScrollSignal = nil
+        } else {
+            currentSearchMatchPosition = 0
+            emitSearchScroll(to: searchMatchIndices[0])
+        }
+    }
+
+    func goToNextSearchMatch() {
+        guard !searchMatchIndices.isEmpty else { return }
+        let next = ((currentSearchMatchPosition ?? -1) + 1) % searchMatchIndices.count
+        currentSearchMatchPosition = next
+        emitSearchScroll(to: searchMatchIndices[next])
+    }
+
+    func goToPreviousSearchMatch() {
+        guard !searchMatchIndices.isEmpty else { return }
+        let prev = ((currentSearchMatchPosition ?? 0) - 1 + searchMatchIndices.count) % searchMatchIndices.count
+        currentSearchMatchPosition = prev
+        emitSearchScroll(to: searchMatchIndices[prev])
+    }
+
+    func deactivateSearch() {
+        isSearchActive = false
+        searchQuery = ""
+        searchMatchIndices = []
+        currentSearchMatchPosition = nil
+        searchScrollSignal = nil
+    }
+
+    func scrollToSearchMatch(with proxy: ScrollViewProxy) {
+        guard let signal = searchScrollSignal else { return }
+        let idx = signal.segmentIndex
+        guard segments.indices.contains(idx) else { return }
+        let scrollID: Int
+        if usesDisplayBlocks {
+            let seg = segments[idx]
+            scrollID = displayBlocks.first(where: {
+                seg.startOffset < $0.endOffset && seg.endOffset > $0.startOffset
+            })?.id ?? idx
+        } else {
+            scrollID = idx
+        }
+        withAnimation(.easeInOut(duration: 0.25)) {
+            proxy.scrollTo(scrollID, anchor: .center)
+        }
+    }
+
+    func isSearchMatch(segment: TextSegment) -> Bool {
+        !searchMatchIndices.isEmpty && searchMatchIndices.contains(segment.id)
+    }
+
+    func isCurrentSearchMatch(segment: TextSegment) -> Bool {
+        guard let pos = currentSearchMatchPosition,
+              searchMatchIndices.indices.contains(pos) else { return false }
+        return segment.id == searchMatchIndices[pos]
+    }
+
+    func isSearchMatch(block: DisplayBlock) -> Bool {
+        guard !searchMatchIndices.isEmpty else { return false }
+        return searchMatchIndices.contains { idx in
+            guard segments.indices.contains(idx) else { return false }
+            let seg = segments[idx]
+            return seg.startOffset < block.endOffset && seg.endOffset > block.startOffset
+        }
+    }
+
+    func isCurrentSearchMatch(block: DisplayBlock) -> Bool {
+        guard let pos = currentSearchMatchPosition,
+              searchMatchIndices.indices.contains(pos) else { return false }
+        let idx = searchMatchIndices[pos]
+        guard segments.indices.contains(idx) else { return false }
+        let seg = segments[idx]
+        return seg.startOffset < block.endOffset && seg.endOffset > block.startOffset
+    }
+
+    private func emitSearchScroll(to segmentIndex: Int) {
+        searchScrollCounter += 1
+        searchScrollSignal = SearchScrollSignal(segmentIndex: segmentIndex, id: searchScrollCounter)
+    }
+
+    // ========== BLOCK VM-SEARCH: SEARCH METHODS - END ==========
 
     func isActive(segment: TextSegment) -> Bool {
         segment.id == currentSentenceIndex

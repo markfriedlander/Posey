@@ -6,6 +6,23 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		C0DE00412F70864A001A55D8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 85B4AE952F70864A001A55D8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 85B4AE9C2F70864A001A55D8;
+			remoteInfo = Posey;
+		};
+		C0DE00422F70864A001A55D8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 85B4AE952F70864A001A55D8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 85B4AE9C2F70864A001A55D8;
+			remoteInfo = Posey;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		85B4AE9D2F70864A001A55D8 /* Posey.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Posey.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0DE00012F70864A001A55D8 /* PoseyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PoseyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -155,23 +172,6 @@
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
-
-/* Begin PBXContainerItemProxy section */
-		C0DE00412F70864A001A55D8 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 85B4AE952F70864A001A55D8 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 85B4AE9C2F70864A001A55D8;
-			remoteInfo = Posey;
-		};
-		C0DE00422F70864A001A55D8 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 85B4AE952F70864A001A55D8 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 85B4AE9C2F70864A001A55D8;
-			remoteInfo = Posey;
-		};
-/* End PBXContainerItemProxy section */
 
 /* Begin PBXProject section */
 		85B4AE952F70864A001A55D8 /* Project object */ = {

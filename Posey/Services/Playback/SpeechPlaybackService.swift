@@ -2,11 +2,25 @@ import AVFoundation
 import Combine
 import Foundation
 
+// ========== BLOCK 01: TYPES AND CONSTANTS - START ==========
 @MainActor
 final class SpeechPlaybackService: NSObject, ObservableObject {
+
+    /// Whether to use the real AVSpeechSynthesizer or a deterministic timer (tests only).
     enum Mode: Equatable {
         case system
         case simulated(stepInterval: TimeInterval)
+    }
+
+    /// Voice quality mode.
+    ///
+    /// - bestAvailable: prefersAssistiveTechnologySettings = true. Siri-quality voice.
+    ///   utterance.rate is NOT set — the system Spoken Content rate slider applies.
+    /// - custom: Specific voice from AVSpeechSynthesisVoice.speechVoices() with explicit
+    ///   in-app rate control. Lower quality than bestAvailable, but fully user-controlled.
+    enum VoiceMode: Equatable {
+        case bestAvailable
+        case custom(voiceIdentifier: String, rate: Float)
     }
 
     enum PlaybackState: Equatable {
@@ -16,25 +30,48 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         case finished
     }
 
+    /// Utterances to keep queued ahead of the current position.
+    private static let windowSize = 50
+
+    // ========== BLOCK 01: TYPES AND CONSTANTS - END ==========
+
+    // ========== BLOCK 02: PROPERTIES AND INIT - START ==========
+
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var currentSentenceIndex: Int?
 
     private let synthesizer = AVSpeechSynthesizer()
     private let mode: Mode
-    private var speechRate: Float = AVSpeechUtteranceDefaultSpeechRate
-    private var voiceIdentifier: String?
+    private(set) var voiceMode: VoiceMode
+
+    /// Utterance ID → sentence index, for the window currently in the synthesizer queue.
     private var sentenceIndicesByUtteranceID: [ObjectIdentifier: Int] = [:]
-    private var simulatedSegments: [TextSegment] = []
+    /// Full segment array for the active document.
     private var activeSegments: [TextSegment] = []
+    /// Next segment index to feed into the synthesizer window.
+    private var nextEnqueueIndex: Int = 0
+
+    private var simulatedSegments: [TextSegment] = []
     private var simulatedTimer: Timer?
     private var audioSessionObservers: [NSObjectProtocol] = []
 
-    init(mode: Mode = .system) {
+    init(mode: Mode = .system, voiceMode: VoiceMode = .bestAvailable) {
         self.mode = mode
+        self.voiceMode = voiceMode
         super.init()
         synthesizer.delegate = self
         configureAudioSessionIfNeeded()
     }
+
+    deinit {
+        for observer in audioSessionObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    // ========== BLOCK 02: PROPERTIES AND INIT - END ==========
+
+    // ========== BLOCK 03: PUBLIC API - START ==========
 
     func prepare(at sentenceIndex: Int) {
         currentSentenceIndex = sentenceIndex
@@ -43,27 +80,65 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         }
     }
 
-    func setSpeechRate(_ rate: Float) {
-        speechRate = rate
-    }
-
-    func setVoiceIdentifier(_ identifier: String?) {
-        voiceIdentifier = identifier
+    /// Apply a new voice mode, taking effect immediately.
+    ///
+    /// If currently playing: stops and re-enqueues from current position with new settings.
+    /// If paused: stops synthesizer and returns to idle so the next play uses new settings.
+    /// If idle/finished: stores the mode for next play.
+    func applyVoiceMode(_ newMode: VoiceMode) {
+        guard newMode != voiceMode else { return }
+        voiceMode = newMode
+        guard state == .playing || state == .paused else { return }
+        let resumeIndex = currentSentenceIndex ?? 0
+        let wasPlaying = state == .playing
+        stopSynthesizer()
+        if wasPlaying {
+            enqueueWindow(startingAt: resumeIndex)
+            state = .playing
+        }
+        // If was paused: state is now idle, currentSentenceIndex preserved.
+        // User taps play to resume with new settings.
     }
 
     func play(segments: [TextSegment], startingAt startIndex: Int) {
-        play(segments: segments, startingAt: startIndex, shouldResumeIfPaused: true)
+        playInternal(segments: segments, startingAt: startIndex, shouldResumeIfPaused: true)
     }
 
     func restart(segments: [TextSegment], startingAt startIndex: Int) {
-        play(segments: segments, startingAt: startIndex, shouldResumeIfPaused: false)
+        playInternal(segments: segments, startingAt: startIndex, shouldResumeIfPaused: false)
     }
 
-    private func play(segments: [TextSegment], startingAt startIndex: Int, shouldResumeIfPaused: Bool) {
-        guard segments.isEmpty == false else {
-            return
+    func pause() {
+        switch mode {
+        case .system:
+            guard synthesizer.isSpeaking else { return }
+            if synthesizer.pauseSpeaking(at: .word) {
+                state = .paused
+            }
+        case .simulated:
+            guard state == .playing else { return }
+            invalidateSimulatedTimer()
+            state = .paused
         }
+    }
 
+    func stop() {
+        stopSynthesizer()
+        invalidateSimulatedTimer()
+        simulatedSegments = []
+        activeSegments = []
+    }
+
+    // ========== BLOCK 03: PUBLIC API - END ==========
+
+    // ========== BLOCK 04: SYSTEM PLAYBACK - START ==========
+
+    private func playInternal(
+        segments: [TextSegment],
+        startingAt startIndex: Int,
+        shouldResumeIfPaused: Bool
+    ) {
+        guard segments.isEmpty == false else { return }
         activeSegments = segments
 
         switch mode {
@@ -81,14 +156,17 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
             }
         }
 
-        stop()
+        stopSynthesizer()
+        invalidateSimulatedTimer()
 
         let boundedIndex = min(max(startIndex, 0), segments.count - 1)
         currentSentenceIndex = boundedIndex
 
         switch mode {
         case .system:
-            enqueueSystemPlayback(segments: segments, startingAt: boundedIndex)
+            activateAudioSessionIfNeeded()
+            enqueueWindow(startingAt: boundedIndex)
+            state = .playing
         case .simulated:
             simulatedSegments = Array(segments)
             state = .playing
@@ -96,55 +174,45 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         }
     }
 
-    private func enqueueSystemPlayback(segments: [TextSegment], startingAt startIndex: Int) {
-        activateAudioSessionIfNeeded()
+    /// Fills the synthesizer queue with up to windowSize utterances starting at startIndex.
+    private func enqueueWindow(startingAt startIndex: Int) {
+        nextEnqueueIndex = startIndex
+        let endIndex = min(startIndex + Self.windowSize, activeSegments.count)
+        for index in startIndex..<endIndex {
+            enqueueOneSegment(at: index)
+        }
+    }
 
-        for segment in segments[startIndex...] {
-            let utterance = AVSpeechUtterance(string: segment.text)
+    /// Builds one utterance from the segment at index and adds it to the synthesizer queue.
+    private func enqueueOneSegment(at index: Int) {
+        guard activeSegments.indices.contains(index) else { return }
+        let segment = activeSegments[index]
+        let utterance = makeUtterance(for: segment)
+        sentenceIndicesByUtteranceID[ObjectIdentifier(utterance)] = segment.id
+        synthesizer.speak(utterance)
+        nextEnqueueIndex = index + 1
+    }
+
+    /// Constructs a mode-aware utterance. This is the single place voice mode is applied.
+    private func makeUtterance(for segment: TextSegment) -> AVSpeechUtterance {
+        let utterance = AVSpeechUtterance(string: segment.text)
+        switch voiceMode {
+        case .bestAvailable:
             utterance.prefersAssistiveTechnologySettings = true
-            utterance.rate = speechRate
-            if let resolvedVoice = preferredVoice() {
-                utterance.voice = resolvedVoice
+            // Do NOT set utterance.rate — the system Spoken Content rate slider applies.
+        case .custom(let voiceIdentifier, let rate):
+            utterance.prefersAssistiveTechnologySettings = false
+            utterance.rate = rate
+            if let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) {
+                utterance.voice = voice
             }
-            sentenceIndicesByUtteranceID[ObjectIdentifier(utterance)] = segment.id
-            synthesizer.speak(utterance)
         }
-        state = .playing
+        return utterance
     }
 
-    private func preferredVoice() -> AVSpeechSynthesisVoice? {
-        if let voiceIdentifier,
-           let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) {
-            return voice
-        }
-
-        return nil
-    }
-
-    func pause() {
-        switch mode {
-        case .system:
-            guard synthesizer.isSpeaking else {
-                return
-            }
-
-            if synthesizer.pauseSpeaking(at: .word) {
-                state = .paused
-            }
-        case .simulated:
-            guard state == .playing else {
-                return
-            }
-            invalidateSimulatedTimer()
-            state = .paused
-        }
-    }
-
-    func stop() {
-        invalidateSimulatedTimer()
-        simulatedSegments = []
-        activeSegments = []
-
+    /// Stops the synthesizer and clears the utterance tracking map.
+    /// Does not clear activeSegments — those are preserved for re-enqueue on mode change.
+    private func stopSynthesizer() {
         if synthesizer.isSpeaking || synthesizer.isPaused {
             synthesizer.stopSpeaking(at: .immediate)
         }
@@ -154,80 +222,26 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         }
     }
 
-    private func configureAudioSessionIfNeeded() {
-        guard case .system = mode else {
-            return
-        }
+    // ========== BLOCK 04: SYSTEM PLAYBACK - END ==========
 
-        #if os(iOS)
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.interruptSpokenAudioAndMixWithOthers])
-        } catch {
-            assertionFailure("Failed to configure AVAudioSession: \(error)")
-        }
-
-        let center = NotificationCenter.default
-        audioSessionObservers.append(
-            center.addObserver(
-                forName: AVAudioSession.interruptionNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] notification in
-                let rawValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-                Task { @MainActor [weak self] in
-                    self?.handleAudioSessionInterruption(rawValue: rawValue)
-                }
-            }
-        )
-        #endif
-    }
-
-    private func activateAudioSessionIfNeeded() {
-        guard case .system = mode else {
-            return
-        }
-
-        #if os(iOS)
-        do {
-            try AVAudioSession.sharedInstance().setActive(true, options: [])
-        } catch {
-            assertionFailure("Failed to activate AVAudioSession: \(error)")
-        }
-        #endif
-    }
-
-    private func handleAudioSessionInterruption(rawValue: UInt?) {
-        guard case .system = mode,
-              let rawValue,
-              let interruptionType = AVAudioSession.InterruptionType(rawValue: rawValue) else {
-            return
-        }
-
-        switch interruptionType {
-        case .began:
-            if state == .playing {
-                pause()
-            }
-        case .ended:
-            break
-        @unknown default:
-            break
-        }
-    }
+    // ========== BLOCK 05: SIMULATED PLAYBACK - START ==========
 
     private var simulatedStepInterval: TimeInterval {
         switch mode {
-        case .system:
-            return 0.2
-        case .simulated(let stepInterval):
-            return stepInterval
+        case .system: return 0.2
+        case .simulated(let stepInterval): return stepInterval
         }
     }
 
     private var effectiveSimulatedStepInterval: TimeInterval {
-        let normalizedRate = max(Double(speechRate), 0.1)
-        return max(0.05, simulatedStepInterval * (Double(AVSpeechUtteranceDefaultSpeechRate) / normalizedRate))
+        switch voiceMode {
+        case .bestAvailable:
+            return simulatedStepInterval
+        case .custom(_, let rate):
+            let normalizedRate = max(Double(rate), 0.1)
+            let defaultRate = Double(AVSpeechUtteranceDefaultSpeechRate)
+            return max(0.05, simulatedStepInterval * (defaultRate / normalizedRate))
+        }
     }
 
     private func scheduleSimulatedPlayback(stepInterval: TimeInterval) {
@@ -245,7 +259,6 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
             state = .finished
             return
         }
-
         let nextIndex = currentSentenceIndex + 1
         if simulatedSegments.indices.contains(nextIndex) {
             self.currentSentenceIndex = nextIndex
@@ -260,15 +273,71 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         simulatedTimer = nil
     }
 
-    deinit {
-        for observer in audioSessionObservers {
-            NotificationCenter.default.removeObserver(observer)
+    // ========== BLOCK 05: SIMULATED PLAYBACK - END ==========
+
+    // ========== BLOCK 06: AUDIO SESSION - START ==========
+
+    private func configureAudioSessionIfNeeded() {
+        guard case .system = mode else { return }
+        #if os(iOS)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.interruptSpokenAudioAndMixWithOthers])
+        } catch {
+            assertionFailure("Failed to configure AVAudioSession: \(error)")
+        }
+        let center = NotificationCenter.default
+        audioSessionObservers.append(
+            center.addObserver(
+                forName: AVAudioSession.interruptionNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                let rawValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+                Task { @MainActor [weak self] in
+                    self?.handleAudioSessionInterruption(rawValue: rawValue)
+                }
+            }
+        )
+        #endif
+    }
+
+    private func activateAudioSessionIfNeeded() {
+        guard case .system = mode else { return }
+        #if os(iOS)
+        do {
+            try AVAudioSession.sharedInstance().setActive(true, options: [])
+        } catch {
+            assertionFailure("Failed to activate AVAudioSession: \(error)")
+        }
+        #endif
+    }
+
+    private func handleAudioSessionInterruption(rawValue: UInt?) {
+        guard case .system = mode,
+              let rawValue,
+              let interruptionType = AVAudioSession.InterruptionType(rawValue: rawValue)
+        else { return }
+        switch interruptionType {
+        case .began:
+            if state == .playing { pause() }
+        case .ended:
+            break
+        @unknown default:
+            break
         }
     }
+
+    // ========== BLOCK 06: AUDIO SESSION - END ==========
 }
 
+// ========== BLOCK 07: DELEGATE - START ==========
 extension SpeechPlaybackService: AVSpeechSynthesizerDelegate {
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+
+    nonisolated func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        didStart utterance: AVSpeechUtterance
+    ) {
         let utteranceID = ObjectIdentifier(utterance)
         Task { @MainActor in
             self.currentSentenceIndex = self.sentenceIndicesByUtteranceID[utteranceID]
@@ -276,26 +345,32 @@ extension SpeechPlaybackService: AVSpeechSynthesizerDelegate {
         }
     }
 
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+    nonisolated func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        didFinish utterance: AVSpeechUtterance
+    ) {
         let utteranceID = ObjectIdentifier(utterance)
-        let shouldFinish = synthesizer.isSpeaking == false && synthesizer.isPaused == false
-
         Task { @MainActor in
             self.sentenceIndicesByUtteranceID.removeValue(forKey: utteranceID)
-            if shouldFinish {
+            // Extend the sliding window: enqueue one more segment if available.
+            if self.nextEnqueueIndex < self.activeSegments.count {
+                self.enqueueOneSegment(at: self.nextEnqueueIndex)
+            } else if self.sentenceIndicesByUtteranceID.isEmpty {
+                // No more to enqueue and all tracked utterances are done.
                 self.state = .finished
             }
         }
     }
 
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+    nonisolated func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        didCancel utterance: AVSpeechUtterance
+    ) {
         let utteranceID = ObjectIdentifier(utterance)
-
         Task { @MainActor in
+            // Cleanup only. State transitions are managed by stopSynthesizer()/applyVoiceMode.
             self.sentenceIndicesByUtteranceID.removeValue(forKey: utteranceID)
-            if self.state != .finished {
-                self.state = .idle
-            }
         }
     }
 }
+// ========== BLOCK 07: DELEGATE - END ==========

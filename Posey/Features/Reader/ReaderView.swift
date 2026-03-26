@@ -286,13 +286,29 @@ struct ReaderView: View {
     }
 }
 
+// ========== BLOCK P1: READER PREFERENCES SHEET - START ==========
 private struct ReaderPreferencesSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
     @Environment(\.dismiss) private var dismiss
 
+    /// Draft rate percentage shown live while the slider is dragged.
+    /// Committed to the viewModel only on drag end to avoid rapid re-enqueue.
+    @State private var draftRatePercentage: Float = 100.0
+
+    private var isCustomMode: Bool {
+        if case .custom = viewModel.voiceMode { return true }
+        return false
+    }
+
+    private var currentVoiceIdentifier: String {
+        if case .custom(let id, _) = viewModel.voiceMode { return id }
+        return ""
+    }
+
     var body: some View {
         NavigationStack {
             Form {
+                // Reading section
                 Section("Reading") {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
@@ -301,34 +317,79 @@ private struct ReaderPreferencesSheet: View {
                             Text("\(Int(viewModel.fontSize))")
                                 .foregroundStyle(.secondary)
                         }
-
                         Slider(value: $viewModel.fontSize, in: 14...44, step: 1)
                             .accessibilityIdentifier("preferences.fontSize")
                     }
                 }
 
+                // Playback section
                 Section("Playback") {
-                    Text("Posey uses your system Spoken Content voice. To change voices or download higher-quality voices, use Settings > Accessibility > Spoken Content > Voices.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                    Picker("Voice Mode", selection: Binding(
+                        get: { isCustomMode },
+                        set: { viewModel.setVoiceMode(isCustom: $0) }
+                    )) {
+                        Text("Best Available").tag(false)
+                        Text("Custom").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("preferences.voiceMode")
 
-                #if DEBUG
-                VoiceQualityTestSection()
-                #endif
+                    if isCustomMode {
+                        NavigationLink {
+                            VoicePickerView(
+                                selectedIdentifier: Binding(
+                                    get: { currentVoiceIdentifier },
+                                    set: { viewModel.setCustomVoice(identifier: $0) }
+                                )
+                            )
+                        } label: {
+                            HStack {
+                                Text("Voice")
+                                Spacer()
+                                Text(viewModel.customVoiceDisplayName)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .accessibilityIdentifier("preferences.voicePicker")
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Speed")
+                                Spacer()
+                                Text("\(Int(draftRatePercentage))%")
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            // Rate applies on drag-end only to avoid rapid stop/re-enqueue.
+                            Slider(value: $draftRatePercentage, in: 75...200, step: 5) { editing in
+                                if !editing {
+                                    viewModel.setCustomRate(percentage: draftRatePercentage)
+                                }
+                            }
+                            .accessibilityIdentifier("preferences.rateSlider")
+                        }
+                    } else {
+                        Text("Using the highest-quality voice on your device. Adjust speed and voice in Settings > Accessibility > Spoken Content.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .navigationTitle("Reader Preferences")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        dismiss()
-                    }
+                    Button("Done") { dismiss() }
                 }
+            }
+            .onAppear {
+                draftRatePercentage = viewModel.customRatePercentage
             }
         }
     }
 }
+// ========== BLOCK P1: READER PREFERENCES SHEET - END ==========
 
 private struct NotesSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
@@ -414,6 +475,7 @@ final class ReaderViewModel: ObservableObject {
     @Published var errorMessage = ""
     @Published var noteDraft = ""
     @Published private(set) var notes: [Note] = []
+    @Published private(set) var voiceMode: SpeechPlaybackService.VoiceMode = .bestAvailable
 
     let document: Document
     let segments: [TextSegment]
@@ -441,7 +503,9 @@ final class ReaderViewModel: ObservableObject {
     ) {
         self.document = document
         self.databaseManager = databaseManager
-        self.playbackService = playbackService ?? SpeechPlaybackService()
+        let persistedMode = PlaybackPreferences.shared.voiceMode
+        self.voiceMode = persistedMode
+        self.playbackService = playbackService ?? SpeechPlaybackService(voiceMode: persistedMode)
         self.shouldAutoPlayOnAppear = shouldAutoPlayOnAppear
         self.shouldAutoCreateNoteOnAppear = shouldAutoCreateNoteOnAppear
         self.shouldAutoCreateBookmarkOnAppear = shouldAutoCreateBookmarkOnAppear
@@ -601,6 +665,73 @@ final class ReaderViewModel: ObservableObject {
     func stopPlayback() {
         playbackService.stop()
     }
+
+    // ========== BLOCK VM-VOICE: VOICE MODE CONTROLS - START ==========
+
+    /// Switch between Best Available and Custom mode.
+    ///
+    /// Switching to Custom picks the best voice available on the device as the default.
+    /// Switching back to Best Available preserves the custom settings for if the user returns.
+    func setVoiceMode(isCustom: Bool) {
+        let newMode: SpeechPlaybackService.VoiceMode
+        if isCustom {
+            // If already in custom, keep existing settings.
+            if case .custom = voiceMode {
+                return
+            }
+            // Default to best available voice from speechVoices().
+            let defaultVoice = bestAvailableVoiceIdentifier()
+            let defaultRate = AVSpeechUtteranceDefaultSpeechRate
+            newMode = .custom(voiceIdentifier: defaultVoice, rate: defaultRate)
+        } else {
+            newMode = .bestAvailable
+        }
+        applyAndPersist(newMode)
+    }
+
+    /// Update the voice identifier within Custom mode.
+    func setCustomVoice(identifier: String) {
+        guard case .custom(_, let rate) = voiceMode else { return }
+        applyAndPersist(.custom(voiceIdentifier: identifier, rate: rate))
+    }
+
+    /// Update the playback rate within Custom mode.
+    /// Accepts a percentage (75–200); converts to AVSpeech rate internally.
+    func setCustomRate(percentage: Float) {
+        guard case .custom(let identifier, _) = voiceMode else { return }
+        let avRate = (percentage / 100.0) * AVSpeechUtteranceDefaultSpeechRate
+        applyAndPersist(.custom(voiceIdentifier: identifier, rate: avRate))
+    }
+
+    /// Current rate as a percentage label for the preferences UI (returns 100 for bestAvailable).
+    var customRatePercentage: Float {
+        guard case .custom(_, let rate) = voiceMode else { return 100.0 }
+        return (rate / AVSpeechUtteranceDefaultSpeechRate) * 100.0
+    }
+
+    /// Display name for the currently selected custom voice.
+    var customVoiceDisplayName: String {
+        guard case .custom(let identifier, _) = voiceMode,
+              let voice = AVSpeechSynthesisVoice(identifier: identifier)
+        else { return "None" }
+        return voice.name
+    }
+
+    private func applyAndPersist(_ newMode: SpeechPlaybackService.VoiceMode) {
+        voiceMode = newMode
+        playbackService.applyVoiceMode(newMode)
+        PlaybackPreferences.shared.voiceMode = newMode
+    }
+
+    private func bestAvailableVoiceIdentifier() -> String {
+        let voices = AVSpeechSynthesisVoice.speechVoices()
+        let preferred = voices.first(where: { $0.quality == .premium })
+            ?? voices.first(where: { $0.quality == .enhanced })
+            ?? voices.first
+        return preferred?.identifier ?? ""
+    }
+
+    // ========== BLOCK VM-VOICE: VOICE MODE CONTROLS - END ==========
 
     func isActive(segment: TextSegment) -> Bool {
         segment.id == currentSentenceIndex

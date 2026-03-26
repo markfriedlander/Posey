@@ -4,7 +4,8 @@ import Vision
 
 // ========== BLOCK 01: MODELS AND ERRORS - START ==========
 
-struct ParsedPDFDocument {
+/// Explicit Sendable so ParsedPDFDocument can cross actor boundaries safely.
+struct ParsedPDFDocument: Sendable {
     let title: String?
     let displayText: String
     let plainText: String
@@ -13,6 +14,19 @@ struct ParsedPDFDocument {
 struct PDFDocumentImporter {
     private static let visualPageMarkerPrefix = "[[POSEY_VISUAL_PAGE:"
     private static let visualPageMarkerSuffix = "]]"
+
+    /// Progress events emitted during import. Sent only when OCR is needed.
+    /// Conforms to Sendable so the callback can cross actor boundaries.
+    enum ImportProgress: Sendable {
+        /// Emitted once per page that requires Vision OCR (PDFKit found no text).
+        case ocr(page: Int, of: Int)
+
+        var message: String {
+            switch self {
+            case .ocr(let page, let total): return "OCR: page \(page) of \(total)"
+            }
+        }
+    }
 
     enum ImportError: LocalizedError, Equatable {
         case unreadableDocument
@@ -37,18 +51,24 @@ struct PDFDocumentImporter {
 // ========== BLOCK 02: IMPORT ENTRY POINTS - START ==========
 
 extension PDFDocumentImporter {
-    func loadDocument(from url: URL) throws -> ParsedPDFDocument {
+    func loadDocument(
+        from url: URL,
+        progress: (@Sendable (ImportProgress) -> Void)? = nil
+    ) throws -> ParsedPDFDocument {
         guard let document = PDFDocument(url: url) else {
             throw ImportError.unreadableDocument
         }
-        return try parsedDocument(from: document)
+        return try parsedDocument(from: document, progress: progress)
     }
 
-    func loadDocument(fromData data: Data) throws -> ParsedPDFDocument {
+    func loadDocument(
+        fromData data: Data,
+        progress: (@Sendable (ImportProgress) -> Void)? = nil
+    ) throws -> ParsedPDFDocument {
         guard let document = PDFDocument(data: data) else {
             throw ImportError.unreadableDocument
         }
-        return try parsedDocument(from: document)
+        return try parsedDocument(from: document, progress: progress)
     }
 }
 
@@ -57,7 +77,10 @@ extension PDFDocumentImporter {
 // ========== BLOCK 03: CORE PAGE PARSING - START ==========
 
 extension PDFDocumentImporter {
-    private func parsedDocument(from document: PDFDocument) throws -> ParsedPDFDocument {
+    private func parsedDocument(
+        from document: PDFDocument,
+        progress: (@Sendable (ImportProgress) -> Void)? = nil
+    ) throws -> ParsedPDFDocument {
         let pageCount = document.pageCount
         guard pageCount > 0 else {
             throw ImportError.emptyDocument
@@ -81,7 +104,8 @@ extension PDFDocumentImporter {
                 pageContents.append(.text(pdfText))
                 readableTextPages.append(pdfText)
             } else {
-                // PDFKit found no text — try Vision OCR before marking as visual.
+                // PDFKit found no text — report progress then try Vision OCR.
+                progress?(.ocr(page: index + 1, of: pageCount))
                 let ocr = ocrText(from: page)
                 if !ocr.isEmpty {
                     pageContents.append(.text(ocr))

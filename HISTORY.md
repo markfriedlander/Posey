@@ -1,5 +1,24 @@
 # Posey History
 
+## 2026-03-25 — PDF Import Progress Reporting
+
+Added page-level progress reporting for PDF OCR imports.
+
+What changed:
+
+- `PDFDocumentImporter` gains an `ImportProgress` enum (`Sendable`) and an optional `(@Sendable (ImportProgress) -> Void)?` callback on both `loadDocument` entry points. The callback fires once per page that requires Vision OCR — "OCR: page 12 of 47".
+- `ParsedPDFDocument` is now explicitly `Sendable` so it can cross actor boundaries safely.
+- `PDFLibraryImporter` exposes `persistParsedDocument(_:from:)` — the DB-write phase as a separate callable method. LEGO-ized.
+- `LibraryViewModel.handleImport` routes PDF to a new async path (`handlePDFImport`). Phase 1 (parse + OCR) runs on `DispatchQueue.global` via `withCheckedThrowingContinuation` — never blocks the main thread. Phase 2 (DB write via `DatabaseManager`) returns to the main actor. `DatabaseManager` stays single-threaded throughout.
+- Progress messages flow back to the main actor via `Task { @MainActor in ... }` from the `@Sendable` callback.
+- `LibraryView` shows a bottom banner ("Importing PDF…" → "OCR: page X of Y") while a PDF import is in progress. Import button is disabled during import. Banner appears/disappears with a slide+fade transition. `LibraryView` LEGO-ized.
+
+Why this matters:
+
+- OCR on a long scanned PDF previously blocked the main thread. Now the UI stays fully responsive.
+- Users can see exactly what's happening ("OCR: page 12 of 47") rather than staring at a frozen screen.
+- `DatabaseManager`'s threading constraint is preserved — it never leaves the main actor.
+
 ## 2026-03-25 — OCR for Scanned PDFs
 
 Added Vision OCR fallback to the PDF import pipeline.

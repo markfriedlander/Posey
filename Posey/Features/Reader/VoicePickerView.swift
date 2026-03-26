@@ -67,12 +67,18 @@ struct VoiceList {
             .map { VoiceOption(voice: $0) }
 
         let grouped = Dictionary(grouping: allVoices, by: \.languageCode)
+        // Device's preferred locale in BCP-47 form (e.g. "en-US"). Used to sort
+        // the matching locale variant to the top within each quality tier.
+        let preferredLocale = Locale.preferredLanguages.first ?? "en-US"
 
         var built: [Group] = grouped.map { code, voices in
             let sorted = voices.sorted {
                 if $0.qualitySortIndex != $1.qualitySortIndex {
                     return $0.qualitySortIndex < $1.qualitySortIndex
                 }
+                // Within the same quality tier, device locale comes first.
+                if $0.language == preferredLocale { return true }
+                if $1.language == preferredLocale { return false }
                 return $0.language < $1.language
             }
             let displayName = sorted.first?.languageDisplayName ?? code.uppercased()
@@ -111,6 +117,12 @@ struct VoicePickerView: View {
                     }
                 }
             }
+
+            Section {
+                Text("Only voices downloaded to your device are listed. To download higher-quality voices, go to Settings → Accessibility → Spoken Content → Voices.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .navigationTitle("Voice")
         .navigationBarTitleDisplayMode(.inline)
@@ -125,9 +137,17 @@ struct VoicePickerView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(option.name)
                         .foregroundStyle(.primary)
-                    Text("\(option.qualityLabel) · \(option.language)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text(option.qualityLabel)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(qualityColor(for: option.voice.quality))
+                        Text("·")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(option.language)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 if option.id == selectedIdentifier {
@@ -135,6 +155,14 @@ struct VoicePickerView: View {
                         .foregroundStyle(Color.accentColor)
                 }
             }
+        }
+    }
+
+    private func qualityColor(for quality: AVSpeechSynthesisVoiceQuality) -> Color {
+        switch quality {
+        case .premium:  return Color.accentColor
+        case .enhanced: return Color.secondary
+        default:        return Color.secondary.opacity(0.6)
         }
     }
 }

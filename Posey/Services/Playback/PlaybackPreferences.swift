@@ -23,6 +23,17 @@ final class PlaybackPreferences {
         static let custom        = "custom"
     }
 
+    /// Returns the last persisted custom mode if one exists, regardless of whether
+    /// bestAvailable is currently active. Used to restore custom settings when
+    /// the user switches back to Custom mode after using Best Available.
+    var lastCustomVoiceMode: SpeechPlaybackService.VoiceMode? {
+        guard let identifier = UserDefaults.standard.string(forKey: Keys.customVoiceIdentifier)
+        else { return nil }
+        let stored = UserDefaults.standard.float(forKey: Keys.customRate)
+        let rate = stored > 0 ? stored : AVSpeechUtteranceDefaultSpeechRate
+        return .custom(voiceIdentifier: identifier, rate: rate)
+    }
+
     var voiceMode: SpeechPlaybackService.VoiceMode {
         get {
             let token = UserDefaults.standard.string(forKey: Keys.voiceMode)
@@ -38,9 +49,9 @@ final class PlaybackPreferences {
         set {
             switch newValue {
             case .bestAvailable:
+                // Only persist the mode token. Keep customVoiceIdentifier and customRate
+                // so they can be restored if the user switches back to Custom mode.
                 UserDefaults.standard.set(ModeToken.bestAvailable, forKey: Keys.voiceMode)
-                UserDefaults.standard.removeObject(forKey: Keys.customVoiceIdentifier)
-                UserDefaults.standard.removeObject(forKey: Keys.customRate)
             case .custom(let identifier, let rate):
                 UserDefaults.standard.set(ModeToken.custom, forKey: Keys.voiceMode)
                 UserDefaults.standard.set(identifier, forKey: Keys.customVoiceIdentifier)

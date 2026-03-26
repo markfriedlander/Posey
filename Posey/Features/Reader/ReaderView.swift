@@ -34,7 +34,8 @@ struct ReaderView: View {
                 document: document,
                 databaseManager: databaseManager,
                 playbackService: SpeechPlaybackService(
-                    mode: playbackMode == .simulated ? .simulated(stepInterval: 0.15) : .system
+                    mode: playbackMode == .simulated ? .simulated(stepInterval: 0.15) : .system,
+                    voiceMode: PlaybackPreferences.shared.voiceMode
                 ),
                 shouldAutoPlayOnAppear: shouldAutoPlayOnAppear,
                 shouldAutoCreateNoteOnAppear: shouldAutoCreateNoteOnAppear,
@@ -362,7 +363,7 @@ private struct ReaderPreferencesSheet: View {
                                     .monospacedDigit()
                             }
                             // Rate applies on drag-end only to avoid rapid stop/re-enqueue.
-                            Slider(value: $draftRatePercentage, in: 75...200, step: 5) { editing in
+                            Slider(value: $draftRatePercentage, in: 75...150, step: 5) { editing in
                                 if !editing {
                                     viewModel.setCustomRate(percentage: draftRatePercentage)
                                 }
@@ -384,6 +385,9 @@ private struct ReaderPreferencesSheet: View {
                 }
             }
             .onAppear {
+                draftRatePercentage = viewModel.customRatePercentage
+            }
+            .onChange(of: viewModel.voiceMode) { _, _ in
                 draftRatePercentage = viewModel.customRatePercentage
             }
         }
@@ -673,20 +677,20 @@ final class ReaderViewModel: ObservableObject {
     /// Switching to Custom picks the best voice available on the device as the default.
     /// Switching back to Best Available preserves the custom settings for if the user returns.
     func setVoiceMode(isCustom: Bool) {
-        let newMode: SpeechPlaybackService.VoiceMode
         if isCustom {
             // If already in custom, keep existing settings.
-            if case .custom = voiceMode {
-                return
-            }
-            // Default to best available voice from speechVoices().
-            let defaultVoice = bestAvailableVoiceIdentifier()
-            let defaultRate = AVSpeechUtteranceDefaultSpeechRate
-            newMode = .custom(voiceIdentifier: defaultVoice, rate: defaultRate)
+            if case .custom = voiceMode { return }
+            // Restore last persisted custom settings, or fall back to sensible defaults.
+            let restoredMode = PlaybackPreferences.shared.lastCustomVoiceMode
+                ?? .custom(
+                    voiceIdentifier: bestAvailableVoiceIdentifier(),
+                    rate: AVSpeechUtteranceDefaultSpeechRate
+                )
+            applyAndPersist(restoredMode)
         } else {
-            newMode = .bestAvailable
+            // Persist custom settings before leaving so they restore correctly on return.
+            applyAndPersist(.bestAvailable)
         }
-        applyAndPersist(newMode)
     }
 
     /// Update the voice identifier within Custom mode.

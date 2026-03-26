@@ -178,6 +178,35 @@ See ARCHITECTURE.md for full detail.
 
 ---
 
+## Hardware Testing
+
+Always build and test on Mark's connected iPhone (the real device). Do not use
+the simulator. The device is always available via `xcrun devicectl`. The
+standard deploy sequence is:
+
+```
+xcodebuild -scheme Posey -destination 'id=<device-id>' \
+  -derivedDataPath /tmp/PoseyDeviceDerived -quiet build
+
+xcrun devicectl device install app \
+  --device <device-id> \
+  /tmp/PoseyDeviceDerived/Build/Products/Debug-iphoneos/Posey.app
+
+xcrun devicectl device process launch \
+  --device <device-id> --terminate-existing \
+  com.MarkFriedlander.Posey
+```
+
+Current device ID: `D24FB384-9C55-5D33-9B0D-DAEBFA6528D6` (iPhone 16 Plus,
+"Marks Bigger Ass Fon 16"). Verify with `xcrun devicectl list devices` if
+it ever changes.
+
+The simulator is acceptable for running the unit test suite when the device
+is not the right target for a particular test (e.g. XCTest runs). But
+hardware validation of app behavior always uses the real device.
+
+---
+
 ## Engineering Principles
 
 - Prefer direct, readable code over clever abstractions.
@@ -185,7 +214,7 @@ See ARCHITECTURE.md for full detail.
 - Prefer deterministic local persistence over network-backed state.
 - Make failure states obvious and recoverable.
 - Keep modules small and responsibilities clear.
-- No third-party packages unless something genuinely cannot be done without 
+- No third-party packages unless something genuinely cannot be done without
   them.
 - The app must work fully offline for all core behavior.
 

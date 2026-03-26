@@ -1,5 +1,24 @@
 # Posey History
 
+## 2026-03-25 — OCR for Scanned PDFs
+
+Added Vision OCR fallback to the PDF import pipeline.
+
+What changed:
+
+- `PDFDocumentImporter` now attempts `VNRecognizeTextRequest` (accurate level, language correction on) on any page where PDFKit text extraction yields nothing.
+- Per-page behavior: PDFKit text → OCR text → visual placeholder (in that priority order). Mixed PDFs (some text pages, some scanned pages) are handled correctly page by page.
+- The `.scannedDocument` error now only fires if every page fails both PDFKit and OCR — i.e., the document is truly unreadable.
+- Rendering: each blank page is rendered to a 2× grayscale CGImage via CGContext before Vision processes it. Grayscale is sufficient for OCR and keeps memory lower than RGBA.
+- No changes to the reader, playback, or persistence layers.
+- Existing unit tests all pass. The gray-rectangle fixture still correctly rejects (OCR finds nothing on a plain colored shape, as expected).
+- LEGO-ized the file (5 blocks: models/errors, entry points, core parsing, OCR, helpers).
+
+Why this matters:
+
+- Scanned PDFs previously hit a hard rejection wall. This converts them from "cannot open" to "opens and reads" for any document where Vision can extract meaningful text.
+- Uses Apple Vision — on-device, no network, no dependencies.
+
 ## 2026-03-25 — Tier 1 In-Document Search
 
 Implemented Tier 1 string-match find bar for the reader.

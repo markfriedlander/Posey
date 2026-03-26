@@ -27,7 +27,7 @@ Keep core format and playback stable on hardware. Tier 1 in-document search is n
    - do not add OCR yet
 11. Next up (in rough priority order):
    - richer inline non-text preservation beyond visual-only page stops (figures, tables, charts in EPUB/DOCX/HTML — high priority, PDF visual-stop pattern is the proven architecture to generalize)
-   - OCR for scanned PDFs via Apple Vision framework (VNRecognizeTextRequest — on-device, no dependencies, extends the existing PDF import pipeline without touching the reader or persistence model)
+   - OCR for scanned PDFs: **Done.** Vision OCR fallback in place.
    - in-document search tier 1: **Done.** String match find bar implemented and deployed.
    - Safari/share-sheet import only after the local format blocks are stable enough to justify extension work
 12. Keep `.webarchive` on the roadmap only; do not begin it without a concrete need.
@@ -114,10 +114,10 @@ Keep core format and playback stable on hardware. Tier 1 in-document search is n
 
 ### OCR for Scanned PDFs
 
-- Planned near-term extension to the PDF import pipeline.
-- Uses Apple Vision framework (VNRecognizeTextRequest) — on-device, no dependencies.
-- Does not require changes to the reader, playback, or persistence model.
-- Current behavior (explicit rejection of scanned PDFs with a clear error) stays until this pass begins.
+- **Implemented.** Vision OCR fallback added to the PDF import pipeline.
+- PDFKit text extraction is tried first; Vision OCR runs on any page that yields no text; visual placeholder used only if OCR also finds nothing.
+- Uses Apple Vision (VNRecognizeTextRequest, accurate level) — on-device, no dependencies.
+- No changes to reader, playback, or persistence layers.
 
 ### Reader Screen
 

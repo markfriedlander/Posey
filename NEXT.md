@@ -27,8 +27,9 @@ Use the now-working real-device loop to keep `TXT`, `MD`, `RTF`, `DOCX`, `HTML`,
    - do not add OCR yet
 11. Reassess the next step after the current PDF slice settles:
    - richer inline non-text preservation beyond visual-only page stops
-   - future playback-settings investigation if Posey later regains reliable in-app voice or speed controls
+   - playback-settings investigation: voice quality tiers and rate control (see AVSpeech research note)
    - revisit the playback-engine tradeoff between high-quality Spoken Content voices and live mid-playback speech-rate changes
+   - OCR for scanned PDFs via Apple Vision framework (VNRecognizeTextRequest — on-device, no dependencies, extends the existing PDF import pipeline without touching the reader or persistence model)
    - Safari/share-sheet import only after the local format blocks are stable enough to justify extension work
 12. Keep `.webarchive` on the roadmap only; do not begin it without a concrete need.
 13. Keep Safari or share-sheet import on the future roadmap only; do not begin app-extension work until the local file-ingestion blocks are stable.
@@ -96,6 +97,30 @@ Use the now-working real-device loop to keep `TXT`, `MD`, `RTF`, `DOCX`, `HTML`,
 - richer non-text handling: preserve visual elements inline and pause playback at them by default in the richer formats
 - in-motion mode: future user setting group for walking or driving with different interruption and presentation behavior, including choices like not pausing at visual elements and larger presentation affordances
 
+### Ask Posey — On-Device AI Reading Assistance
+
+- Planned V1 feature. Uses Apple Foundation Models (on-device, offline only).
+- Three patterns: selection-scoped queries (from text selection menu), document-scoped queries (dedicated glyph, far left of bottom reader bar), annotation-scoped queries (from Notes surface).
+- Session model for pattern 3 is transient — local message array while sheet is open, save to note or discard on close.
+- Full modal sheet surface. Active sentence or selection quoted at top.
+- No network requests. No third-party AI services.
+- Not started yet. Comes after the core format and playback blocks are stable.
+
+### In-Document Search
+
+- Planned in three tiers.
+- Tier 1 (near-term): string match find bar, jumps between matches, highlights in the sentence-row reader.
+- Tier 2 (roadmap): same surface, extends scope to include note bodies.
+- Tier 3 (later): semantic search via Ask Posey — natural language queries without exact word match.
+- Only tier 1 is near-term implementation work.
+
+### OCR for Scanned PDFs
+
+- Planned near-term extension to the PDF import pipeline.
+- Uses Apple Vision framework (VNRecognizeTextRequest) — on-device, no dependencies.
+- Does not require changes to the reader, playback, or persistence model.
+- Current behavior (explicit rejection of scanned PDFs with a clear error) stays until this pass begins.
+
 ### Reader Screen
 
 - Implemented.
@@ -140,10 +165,10 @@ Use the now-working real-device loop to keep `TXT`, `MD`, `RTF`, `DOCX`, `HTML`,
 ## Guardrails For The Next Pass
 
 - Do not start Safari/share-sheet import yet.
-- Do not widen `PDF` work into OCR, search, or full document-layout reconstruction yet.
+- Do not widen `PDF` work into OCR or full document-layout reconstruction in the current pass (OCR is planned near-term as its own pass).
 - Do not widen reader chrome back into text-heavy or visually dominant controls.
 - Do not widen note-taking into arbitrary text selection, editing, deletion, or export yet.
 - Do not assume live mid-playback speech-rate changes are solved; treat that as a known follow-up investigation.
-- Do not add search, sync, export, or AI-assisted behavior.
+- Do not add sync, export, or network-dependent AI behavior. (Ask Posey via Apple Foundation Models is a planned V1 feature and is in-scope; in-document search tier 1 is near-term.)
 - Do not widen the architecture before a real runtime bug forces it.
 - Do not add broad test abstractions unless the current QA loop becomes too repetitive to maintain.

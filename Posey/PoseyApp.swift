@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+// ========== BLOCK 1: APP ENTRY POINT - START ==========
 @main
 struct PoseyApp: App {
     private let launchConfiguration = AppLaunchConfiguration.current
@@ -41,7 +42,6 @@ struct PoseyApp: App {
                 guard databaseManager == nil, databaseErrorMessage == nil else {
                     return
                 }
-
                 do {
                     let manager: DatabaseManager
                     if let databaseURL = launchConfiguration.databaseURL {
@@ -49,102 +49,9 @@ struct PoseyApp: App {
                     } else {
                         manager = try DatabaseManager(resetIfExists: launchConfiguration.shouldResetDatabase)
                     }
-
-                    if let preloadTXTURL = launchConfiguration.preloadTXTURL {
-                        _ = try TXTLibraryImporter(databaseManager: manager).importDocument(from: preloadTXTURL)
-                    } else if
-                        let inlineBase64 = launchConfiguration.preloadTXTInlineBase64,
-                        let data = Data(base64Encoded: inlineBase64),
-                        let rawText = String(data: data, encoding: .utf8)
-                    {
-                        let title = launchConfiguration.preloadTXTTitle ?? "Preloaded"
-                        let fileName = launchConfiguration.preloadTXTFileName ?? "\(title).txt"
-                        _ = try TXTLibraryImporter(databaseManager: manager).importDocument(
-                            title: title,
-                            fileName: fileName,
-                            rawText: rawText
-                        )
-                    } else if let preloadMarkdownURL = launchConfiguration.preloadMarkdownURL {
-                        _ = try MarkdownLibraryImporter(databaseManager: manager).importDocument(from: preloadMarkdownURL)
-                    } else if
-                        let inlineBase64 = launchConfiguration.preloadMarkdownInlineBase64,
-                        let data = Data(base64Encoded: inlineBase64),
-                        let rawText = String(data: data, encoding: .utf8)
-                    {
-                        let title = launchConfiguration.preloadMarkdownTitle ?? "Preloaded"
-                        let fileName = launchConfiguration.preloadMarkdownFileName ?? "\(title).md"
-                        _ = try MarkdownLibraryImporter(databaseManager: manager).importDocument(
-                            title: title,
-                            fileName: fileName,
-                            rawText: rawText
-                        )
-                    } else if let preloadRTFURL = launchConfiguration.preloadRTFURL {
-                        _ = try RTFLibraryImporter(databaseManager: manager).importDocument(from: preloadRTFURL)
-                    } else if
-                        let inlineBase64 = launchConfiguration.preloadRTFInlineBase64,
-                        let data = Data(base64Encoded: inlineBase64)
-                    {
-                        let title = launchConfiguration.preloadRTFTitle ?? "Preloaded"
-                        let fileName = launchConfiguration.preloadRTFFileName ?? "\(title).rtf"
-                        _ = try RTFLibraryImporter(databaseManager: manager).importDocument(
-                            title: title,
-                            fileName: fileName,
-                            rawData: data
-                        )
-                    } else if let preloadDOCXURL = launchConfiguration.preloadDOCXURL {
-                        _ = try DOCXLibraryImporter(databaseManager: manager).importDocument(from: preloadDOCXURL)
-                    } else if
-                        let inlineBase64 = launchConfiguration.preloadDOCXInlineBase64,
-                        let data = Data(base64Encoded: inlineBase64)
-                    {
-                        let title = launchConfiguration.preloadDOCXTitle ?? "Preloaded"
-                        let fileName = launchConfiguration.preloadDOCXFileName ?? "\(title).docx"
-                        _ = try DOCXLibraryImporter(databaseManager: manager).importDocument(
-                            title: title,
-                            fileName: fileName,
-                            rawData: data
-                        )
-                    } else if let preloadHTMLURL = launchConfiguration.preloadHTMLURL {
-                        _ = try HTMLLibraryImporter(databaseManager: manager).importDocument(from: preloadHTMLURL)
-                    } else if
-                        let inlineBase64 = launchConfiguration.preloadHTMLInlineBase64,
-                        let data = Data(base64Encoded: inlineBase64)
-                    {
-                        let title = launchConfiguration.preloadHTMLTitle ?? "Preloaded"
-                        let fileName = launchConfiguration.preloadHTMLFileName ?? "\(title).html"
-                        _ = try HTMLLibraryImporter(databaseManager: manager).importDocument(
-                            title: title,
-                            fileName: fileName,
-                            rawData: data
-                        )
-                    } else if let preloadEPUBURL = launchConfiguration.preloadEPUBURL {
-                        _ = try EPUBLibraryImporter(databaseManager: manager).importDocument(from: preloadEPUBURL)
-                    } else if
-                        let inlineBase64 = launchConfiguration.preloadEPUBInlineBase64,
-                        let data = Data(base64Encoded: inlineBase64)
-                    {
-                        let title = launchConfiguration.preloadEPUBTitle ?? "Preloaded"
-                        let fileName = launchConfiguration.preloadEPUBFileName ?? "\(title).epub"
-                        _ = try EPUBLibraryImporter(databaseManager: manager).importDocument(
-                            title: title,
-                            fileName: fileName,
-                            rawData: data
-                        )
-                    } else if let preloadPDFURL = launchConfiguration.preloadPDFURL {
-                        _ = try PDFLibraryImporter(databaseManager: manager).importDocument(from: preloadPDFURL)
-                    } else if
-                        let inlineBase64 = launchConfiguration.preloadPDFInlineBase64,
-                        let data = Data(base64Encoded: inlineBase64)
-                    {
-                        let title = launchConfiguration.preloadPDFTitle ?? "Preloaded"
-                        let fileName = launchConfiguration.preloadPDFFileName ?? "\(title).pdf"
-                        _ = try PDFLibraryImporter(databaseManager: manager).importDocument(
-                            title: title,
-                            fileName: fileName,
-                            rawData: data
-                        )
+                    if let preload = launchConfiguration.preload {
+                        try executePreload(preload, databaseManager: manager)
                     }
-
                     databaseManager = manager
                 } catch {
                     databaseErrorMessage = error.localizedDescription
@@ -153,3 +60,93 @@ struct PoseyApp: App {
         }
     }
 }
+// ========== BLOCK 1: APP ENTRY POINT - END ==========
+
+// ========== BLOCK 2: PRELOAD EXECUTION - START ==========
+private extension PoseyApp {
+    func executePreload(_ preload: PreloadRequest, databaseManager: DatabaseManager) throws {
+        let defaultTitle = "Preloaded"
+
+        switch preload.format {
+        case .txt:
+            switch preload.source {
+            case .url(let url):
+                _ = try TXTLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
+            case .inlineBase64(let b64):
+                guard let data = Data(base64Encoded: b64),
+                      let rawText = String(data: data, encoding: .utf8) else { return }
+                let title = preload.title ?? defaultTitle
+                _ = try TXTLibraryImporter(databaseManager: databaseManager).importDocument(
+                    title: title, fileName: preload.fileName ?? "\(title).txt", rawText: rawText)
+            }
+
+        case .markdown:
+            switch preload.source {
+            case .url(let url):
+                _ = try MarkdownLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
+            case .inlineBase64(let b64):
+                guard let data = Data(base64Encoded: b64),
+                      let rawText = String(data: data, encoding: .utf8) else { return }
+                let title = preload.title ?? defaultTitle
+                _ = try MarkdownLibraryImporter(databaseManager: databaseManager).importDocument(
+                    title: title, fileName: preload.fileName ?? "\(title).md", rawText: rawText)
+            }
+
+        case .rtf:
+            switch preload.source {
+            case .url(let url):
+                _ = try RTFLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
+            case .inlineBase64(let b64):
+                guard let data = Data(base64Encoded: b64) else { return }
+                let title = preload.title ?? defaultTitle
+                _ = try RTFLibraryImporter(databaseManager: databaseManager).importDocument(
+                    title: title, fileName: preload.fileName ?? "\(title).rtf", rawData: data)
+            }
+
+        case .docx:
+            switch preload.source {
+            case .url(let url):
+                _ = try DOCXLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
+            case .inlineBase64(let b64):
+                guard let data = Data(base64Encoded: b64) else { return }
+                let title = preload.title ?? defaultTitle
+                _ = try DOCXLibraryImporter(databaseManager: databaseManager).importDocument(
+                    title: title, fileName: preload.fileName ?? "\(title).docx", rawData: data)
+            }
+
+        case .html:
+            switch preload.source {
+            case .url(let url):
+                _ = try HTMLLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
+            case .inlineBase64(let b64):
+                guard let data = Data(base64Encoded: b64) else { return }
+                let title = preload.title ?? defaultTitle
+                _ = try HTMLLibraryImporter(databaseManager: databaseManager).importDocument(
+                    title: title, fileName: preload.fileName ?? "\(title).html", rawData: data)
+            }
+
+        case .epub:
+            switch preload.source {
+            case .url(let url):
+                _ = try EPUBLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
+            case .inlineBase64(let b64):
+                guard let data = Data(base64Encoded: b64) else { return }
+                let title = preload.title ?? defaultTitle
+                _ = try EPUBLibraryImporter(databaseManager: databaseManager).importDocument(
+                    title: title, fileName: preload.fileName ?? "\(title).epub", rawData: data)
+            }
+
+        case .pdf:
+            switch preload.source {
+            case .url(let url):
+                _ = try PDFLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
+            case .inlineBase64(let b64):
+                guard let data = Data(base64Encoded: b64) else { return }
+                let title = preload.title ?? defaultTitle
+                _ = try PDFLibraryImporter(databaseManager: databaseManager).importDocument(
+                    title: title, fileName: preload.fileName ?? "\(title).pdf", rawData: data)
+            }
+        }
+    }
+}
+// ========== BLOCK 2: PRELOAD EXECUTION - END ==========

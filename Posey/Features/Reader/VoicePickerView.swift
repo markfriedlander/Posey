@@ -101,16 +101,29 @@ struct VoiceList {
 // ========== BLOCK 03: VOICE PICKER VIEW - START ==========
 
 /// Full-screen voice selection list, grouped by language then quality tier.
+/// Defaults to the device's current language. "Show all languages" expands the full list.
 /// Presented as a NavigationLink destination from ReaderPreferencesSheet.
 struct VoicePickerView: View {
     @Binding var selectedIdentifier: String
     @Environment(\.dismiss) private var dismiss
+    @State private var showAllLanguages = false
 
     private let voiceList = VoiceList()
 
+    /// Language code prefix for the device's current locale (e.g. "en" from "en-US").
+    private var currentLanguageCode: String {
+        let full = AVSpeechSynthesisVoice.currentLanguageCode()
+        return String(full.split(separator: "-").first ?? "en")
+    }
+
+    private var visibleGroups: [VoiceList.Group] {
+        guard !showAllLanguages else { return voiceList.groups }
+        return voiceList.groups.filter { $0.languageCode == currentLanguageCode }
+    }
+
     var body: some View {
         List {
-            ForEach(voiceList.groups) { group in
+            ForEach(visibleGroups) { group in
                 Section(group.languageDisplayName) {
                     ForEach(group.voices) { option in
                         voiceRow(option)
@@ -119,6 +132,11 @@ struct VoicePickerView: View {
             }
 
             Section {
+                if !showAllLanguages {
+                    Button("Show all languages") {
+                        showAllLanguages = true
+                    }
+                }
                 Text("Only voices downloaded to your device are listed. To download higher-quality voices, go to Settings → Accessibility → Spoken Content → Voices.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

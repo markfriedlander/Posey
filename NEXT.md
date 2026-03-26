@@ -2,7 +2,7 @@
 
 ## Current Target
 
-Keep core format and playback stable on hardware. Tier 1 in-document search is now implemented. Next candidates: inline non-text element pause behavior (figures/tables/charts in EPUB/DOCX/HTML), OCR for scanned PDFs, and Ask Posey.
+Core format and playback stable on hardware. Tier 1 search done. Inline PDF image rendering done. Next candidates: PDF block segmentation (large highlight blocks defeating read-along), generalizing inline images to EPUB/DOCX/HTML, and Ask Posey.
 
 ## Priority Order
 
@@ -18,17 +18,22 @@ Keep core format and playback stable on hardware. Tier 1 in-document search is n
    - top-level chrome fades away to keep focus on the text
    - primary controls stay limited to previous, play or pause, next, restart, and Notes
    - preferences such as font size stay in the separate sheet
-10. Harden the current PDF slice before broadening scope:
-   - keep scanned or image-only PDFs explicit with clear unsupported messaging
-   - avoid silent empty imports
-   - preserve lightweight page structure in the reader
-   - preserve visual-only pages as explicit visual stop blocks
-   - pause playback at those visual stop boundaries by default
-   - do not add OCR yet
+10. PDF ingestion current state:
+   - text-based PDFs: working
+   - OCR for scanned PDFs: **Done.**
+   - visual-only pages: detected, rendered as PNG at 2× via `PDFPage.thumbnail`, stored as BLOBs in SQLite, displayed inline with tap-to-expand zoom sheet
+   - spaced-letter artifacts (`C O N T E N T S`): **Fixed** at normalization.
+   - line-break hyphen artifacts (`fas- cism`): **Fixed** at normalization.
+   - **Open: PDF block segmentation.** Typeset PDFs often produce large undifferentiated text chunks that NLTokenizer cannot split (no sentence-ending punctuation). Results in highlight blocks spanning a full screen, defeating read-along. Needs architectural discussion before fixing — options are smarter normalization or a length-based segmenter fallback.
 11. Next up (in rough priority order):
-   - richer inline non-text preservation beyond visual-only page stops (figures, tables, charts in EPUB/DOCX/HTML — high priority, PDF visual-stop pattern is the proven architecture to generalize)
-   - OCR for scanned PDFs: **Done.** Vision OCR fallback in place.
-   - in-document search tier 1: **Done.** String match find bar implemented and deployed.
+   - PDF block segmentation: discuss and fix (prerequisite for GEB-quality read-along experience)
+   - inline images for EPUB/DOCX/HTML: generalize the PDF visual-stop + image pattern to other formats
+   - document deletion: **Done.**
+   - font size persistence: **Done.**
+   - monochromatic palette: **Done** as standing standard.
+   - richer inline non-text preservation beyond visual-only page stops (figures, tables, charts in EPUB/DOCX/HTML)
+   - OCR for scanned PDFs: **Done.**
+   - in-document search tier 1: **Done.**
    - Safari/share-sheet import only after the local format blocks are stable enough to justify extension work
 12. Keep `.webarchive` on the roadmap only; do not begin it without a concrete need.
 13. Keep Safari or share-sheet import on the future roadmap only; do not begin app-extension work until the local file-ingestion blocks are stable.
@@ -82,12 +87,16 @@ Keep core format and playback stable on hardware. Tier 1 in-document search is n
 
 ### PDF Ingestion
 
-- Implemented for text-based PDFs.
+- Implemented for text-based and scanned PDFs.
 - Accepts `.pdf`.
-- Uses `PDFKit` to extract readable page text into the current reader flow.
+- Uses `PDFKit` to extract readable page text. Falls back to Vision OCR for pages with no extracted text. Purely visual pages (nothing from either path) are rendered as PNG images via `PDFPage.thumbnail(of:for:)` at 2× scale and stored as BLOBs in `document_images`.
 - Normalizes wrapped lines into readable sentence text for playback, notes, and restore.
-- Preserves lightweight page headers and paragraph blocks in the reader while keeping playback on normalized plain text.
-- Rejects scanned or image-only PDFs with an explicit unsupported-for-now error instead of silently importing empty content.
+- Collapses glyph-positioning artifacts (`C O N T E N T S` → `CONTENTS`) and line-break hyphens (`fas- cism` → `fascism`) at import time.
+- Preserves lightweight page headers and paragraph blocks in the reader.
+- Visual-only pages render inline as actual images with tap-to-expand full-screen zoom (ZoomableImageView, pinch-to-zoom, double-tap).
+- Playback pauses at visual page boundaries by default.
+- Rejects documents where every page fails both PDFKit and OCR with a clear error.
+- **Known open issue:** typeset PDFs often produce large text chunks that NLTokenizer cannot split, resulting in highlight blocks spanning a full screen. Needs architectural fix — see priority list.
 
 ### Planned Next Format Blocks
 

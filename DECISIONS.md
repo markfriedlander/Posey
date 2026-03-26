@@ -257,6 +257,49 @@
   - Pre-enqueue all remaining segments: rejected because memory use is unbounded for long documents and mode changes are expensive.
   - On-demand single-utterance enqueue: rejected because a queue depth of 1 risks audible gaps between sentences on slower hardware.
 
+## 2026-03-26 — Store PDF Visual Page Images As BLOBs In SQLite
+
+- Status: Accepted
+- Decision: Store rendered PDF page images as BLOBs in a `document_images` table in the existing SQLite database rather than as files on disk.
+- Rationale: One file for the whole app — backup, iCloud sync, and migration are all handled by moving a single `.sqlite` file. No orphaned image files if a document is deleted. `ON DELETE CASCADE` guarantees cleanup automatically.
+- Alternatives considered:
+  - Files on disk in the app container: rejected because it creates a separate file lifecycle to manage, risk of orphaned files, and more complexity for backup/sync.
+
+## 2026-03-26 — Use PNG At 2× Scale For Visual Page Images
+
+- Status: Accepted
+- Decision: Render visual PDF pages to PNG at 2× scale using `PDFPage.thumbnail(of:for:)`.
+- Rationale: PNG is lossless — JPEG compression artifacts are unacceptable for detailed artwork like Escher prints, which is the primary use case this feature was designed around. 2× scale provides retina-quality fidelity on device. `PDFPage.thumbnail(of:for:)` is Apple's purpose-built, thread-safe page renderer; the earlier manual CGContext + `page.draw(with:to:)` path had threading ambiguity on device.
+- Alternatives considered:
+  - JPEG: rejected because compression artifacts on detailed illustrations would degrade the reading experience.
+  - 1× scale: rejected because retina displays would render images soft.
+  - Manual CGContext rendering: replaced by `thumbnail(of:for:)` after threading concerns on device.
+
+## 2026-03-26 — Full-Screen Sheet With ZoomableImageView For Tap-To-Expand
+
+- Status: Accepted
+- Decision: Tapping an inline image opens a full-screen sheet with a `UIScrollView`-backed `ZoomableImageView` (pinch-to-zoom up to 6×, double-tap to zoom in/out).
+- Rationale: Inline gesture zoom inside a ScrollView creates gesture recognizer conflicts. A full-screen sheet sidesteps all of that, gives the image the whole screen, and is the natural iOS pattern for image viewing.
+- Alternatives considered:
+  - Inline pinch-to-zoom within the reader scroll view: rejected due to gesture recognizer conflicts.
+  - No zoom at all: rejected because detailed artwork (diagrams, Escher prints) needs to be inspectable.
+
+## 2026-03-26 — Monochromatic Palette As Standing Standard
+
+- Status: Accepted
+- Decision: All Posey UI uses a monochromatic palette (blacks, whites, grays via `Color.primary` opacity tiers and `.tint(.primary)`). No accent colors, blues, or yellows unless there is a specific, deliberate product reason.
+- Rationale: The reading environment should feel like a quiet, physical reading tool. Accent colors feel like app chrome competing with the text. `Color.primary.opacity(0.14)` for TTS highlight, `0.10`/`0.28` for search matches — these are subtle enough to guide the eye without pulling focus.
+- Alternatives considered:
+  - System accent color: replaced because it produced blue/yellow highlights that broke the calm reading surface.
+
+## 2026-03-26 — Global Font Size Persistence Via PlaybackPreferences
+
+- Status: Accepted
+- Decision: Font size is a single global preference persisted in `UserDefaults` via `PlaybackPreferences.shared`, alongside voice mode. It is not per-document.
+- Rationale: Font size is a reader comfort setting for the person, not the document. The same logic applies as for voice mode — you want the same comfortable size everywhere.
+- Alternatives considered:
+  - Per-document font size: rejected because the preference is about the reader's eyes, not the content.
+
 ## 2026-03-25 — Expand V1 Scope To Include Ask Posey, In-Document Search, And OCR
 
 - Status: Accepted

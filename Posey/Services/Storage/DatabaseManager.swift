@@ -1,6 +1,8 @@
 import Foundation
 import SQLite3
 
+// ========== BLOCK 01: DATABASE ERRORS AND LIFECYCLE - START ==========
+
 final class DatabaseManager {
     enum DatabaseError: LocalizedError {
         case openFailed
@@ -51,7 +53,13 @@ final class DatabaseManager {
     deinit {
         sqlite3_close(database)
     }
+}
 
+// ========== BLOCK 01: DATABASE ERRORS AND LIFECYCLE - END ==========
+
+// ========== BLOCK 02: DOCUMENTS - START ==========
+
+extension DatabaseManager {
     func documents() throws -> [Document] {
         let sql = """
         SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count
@@ -70,25 +78,20 @@ final class DatabaseManager {
                 let fileName = sqliteString(statement, index: 2),
                 let fileType = sqliteString(statement, index: 3),
                 let plainText = sqliteString(statement, index: 7)
-            else {
-                continue
-            }
+            else { continue }
 
-            documents.append(
-                Document(
-                    id: id,
-                    title: title,
-                    fileName: fileName,
-                    fileType: fileType,
-                    importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
-                    modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
-                    displayText: sqliteString(statement, index: 6) ?? plainText,
-                    plainText: plainText,
-                    characterCount: Int(sqlite3_column_int64(statement, 8))
-                )
-            )
+            documents.append(Document(
+                id: id,
+                title: title,
+                fileName: fileName,
+                fileType: fileType,
+                importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
+                modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
+                displayText: sqliteString(statement, index: 6) ?? plainText,
+                plainText: plainText,
+                characterCount: Int(sqlite3_column_int64(statement, 8))
+            ))
         }
-
         return documents
     }
 
@@ -122,6 +125,14 @@ final class DatabaseManager {
         try step(statement)
     }
 
+    func deleteDocument(_ document: Document) throws {
+        let sql = "DELETE FROM documents WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(document.id.uuidString, at: 1, for: statement)
+        try step(statement)
+    }
+
     func existingDocument(matchingFileName fileName: String, fileType: String, plainText: String, displayText: String? = nil) throws -> Document? {
         let sql = """
         SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count
@@ -137,9 +148,7 @@ final class DatabaseManager {
         try bind(plainText, at: 3, for: statement)
         try bind(displayText ?? plainText, at: 4, for: statement)
 
-        guard sqlite3_step(statement) == SQLITE_ROW else {
-            return nil
-        }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
 
         guard
             let idText = sqliteString(statement, index: 0),
@@ -148,9 +157,7 @@ final class DatabaseManager {
             let storedFileName = sqliteString(statement, index: 2),
             let storedFileType = sqliteString(statement, index: 3),
             let storedText = sqliteString(statement, index: 7)
-        else {
-            return nil
-        }
+        else { return nil }
 
         return Document(
             id: id,
@@ -164,7 +171,13 @@ final class DatabaseManager {
             characterCount: Int(sqlite3_column_int64(statement, 8))
         )
     }
+}
 
+// ========== BLOCK 02: DOCUMENTS - END ==========
+
+// ========== BLOCK 03: READING POSITIONS - START ==========
+
+extension DatabaseManager {
     func readingPosition(for documentID: UUID) throws -> ReadingPosition? {
         let sql = """
         SELECT document_id, updated_at, character_offset, sentence_index
@@ -176,14 +189,8 @@ final class DatabaseManager {
         defer { sqlite3_finalize(statement) }
 
         try bind(documentID.uuidString, at: 1, for: statement)
-
-        guard sqlite3_step(statement) == SQLITE_ROW else {
-            return nil
-        }
-
-        guard let idText = sqliteString(statement, index: 0), let id = UUID(uuidString: idText) else {
-            return nil
-        }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard let idText = sqliteString(statement, index: 0), let id = UUID(uuidString: idText) else { return nil }
 
         return ReadingPosition(
             documentID: id,
@@ -212,7 +219,13 @@ final class DatabaseManager {
 
         try step(statement)
     }
+}
 
+// ========== BLOCK 03: READING POSITIONS - END ==========
+
+// ========== BLOCK 04: NOTES - START ==========
+
+extension DatabaseManager {
     func notes(for documentID: UUID) throws -> [Note] {
         let sql = """
         SELECT id, document_id, created_at, updated_at, kind, start_offset, end_offset, body
@@ -234,24 +247,19 @@ final class DatabaseManager {
                 let rowDocumentID = UUID(uuidString: documentIDText),
                 let kindText = sqliteString(statement, index: 4),
                 let kind = NoteKind(rawValue: kindText)
-            else {
-                continue
-            }
+            else { continue }
 
-            notes.append(
-                Note(
-                    id: id,
-                    documentID: rowDocumentID,
-                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
-                    updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-                    kind: kind,
-                    startOffset: Int(sqlite3_column_int64(statement, 5)),
-                    endOffset: Int(sqlite3_column_int64(statement, 6)),
-                    body: sqliteString(statement, index: 7)
-                )
-            )
+            notes.append(Note(
+                id: id,
+                documentID: rowDocumentID,
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
+                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
+                kind: kind,
+                startOffset: Int(sqlite3_column_int64(statement, 5)),
+                endOffset: Int(sqlite3_column_int64(statement, 6)),
+                body: sqliteString(statement, index: 7)
+            ))
         }
-
         return notes
     }
 
@@ -279,16 +287,74 @@ final class DatabaseManager {
 
         try step(statement)
     }
+}
 
+// ========== BLOCK 04: NOTES - END ==========
+
+// ========== BLOCK 05: DOCUMENT IMAGES - START ==========
+
+extension DatabaseManager {
+    /// Insert one image record. The image ID is embedded in the document's
+    /// displayText visual-page markers and used to load the image at read time.
+    func insertImage(id: String, documentID: UUID, data: Data) throws {
+        let sql = """
+        INSERT OR REPLACE INTO document_images (id, document_id, image_data)
+        VALUES (?, ?, ?);
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+
+        try bind(id, at: 1, for: statement)
+        try bind(documentID.uuidString, at: 2, for: statement)
+
+        let bytes = [UInt8](data)
+        if sqlite3_bind_blob(statement, 3, bytes, Int32(bytes.count), SQLITE_TRANSIENT) != SQLITE_OK {
+            throw DatabaseError.bindFailed(lastErrorMessage())
+        }
+
+        try step(statement)
+    }
+
+    /// Load image data by image ID. Returns nil if the record does not exist.
+    func imageData(for imageID: String) throws -> Data? {
+        let sql = "SELECT image_data FROM document_images WHERE id = ? LIMIT 1;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+
+        try bind(imageID, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard let ptr = sqlite3_column_blob(statement, 0) else { return nil }
+        let count = Int(sqlite3_column_bytes(statement, 0))
+        return Data(bytes: ptr, count: count)
+    }
+
+    /// Delete all images for a document. Called before re-inserting on reimport
+    /// so stale image IDs (embedded in the old displayText) don't linger.
+    func deleteImages(for documentID: UUID) throws {
+        let sql = "DELETE FROM document_images WHERE document_id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        try step(statement)
+    }
+}
+
+// ========== BLOCK 05: DOCUMENT IMAGES - END ==========
+
+// ========== BLOCK 06: SCHEMA AND HELPERS - START ==========
+
+extension DatabaseManager {
     private func open() throws {
         if sqlite3_open(databaseURL.path, &database) != SQLITE_OK {
             throw DatabaseError.openFailed
         }
+        // Enable foreign key enforcement so ON DELETE CASCADE on document_images
+        // and other tables fires correctly.
+        sqlite3_exec(database, "PRAGMA foreign_keys = ON;", nil, nil, nil)
     }
 
     private func migrate() throws {
-        try execute(
-            """
+        try execute("""
             CREATE TABLE IF NOT EXISTS documents (
                 id TEXT PRIMARY KEY NOT NULL,
                 title TEXT NOT NULL,
@@ -300,17 +366,11 @@ final class DatabaseManager {
                 plain_text TEXT NOT NULL,
                 character_count INTEGER NOT NULL
             );
-            """
-        )
+            """)
 
-        try addColumnIfNeeded(
-            table: "documents",
-            column: "display_text",
-            definition: "TEXT NOT NULL DEFAULT ''"
-        )
+        try addColumnIfNeeded(table: "documents", column: "display_text", definition: "TEXT NOT NULL DEFAULT ''")
 
-        try execute(
-            """
+        try execute("""
             CREATE TABLE IF NOT EXISTS reading_positions (
                 document_id TEXT PRIMARY KEY NOT NULL,
                 updated_at REAL NOT NULL,
@@ -318,11 +378,9 @@ final class DatabaseManager {
                 sentence_index INTEGER NOT NULL,
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
-            """
-        )
+            """)
 
-        try execute(
-            """
+        try execute("""
             CREATE TABLE IF NOT EXISTS notes (
                 id TEXT PRIMARY KEY NOT NULL,
                 document_id TEXT NOT NULL,
@@ -334,8 +392,16 @@ final class DatabaseManager {
                 body TEXT,
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
-            """
-        )
+            """)
+
+        try execute("""
+            CREATE TABLE IF NOT EXISTS document_images (
+                id TEXT PRIMARY KEY NOT NULL,
+                document_id TEXT NOT NULL,
+                image_data BLOB NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            """)
     }
 
     private func execute(_ sql: String) throws {
@@ -347,13 +413,9 @@ final class DatabaseManager {
     private func addColumnIfNeeded(table: String, column: String, definition: String) throws {
         let statement = try prepareStatement(sql: "PRAGMA table_info(\(table));")
         defer { sqlite3_finalize(statement) }
-
         while sqlite3_step(statement) == SQLITE_ROW {
-            if sqliteString(statement, index: 1) == column {
-                return
-            }
+            if sqliteString(statement, index: 1) == column { return }
         }
-
         try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition);")
     }
 
@@ -378,18 +440,16 @@ final class DatabaseManager {
     }
 
     private func sqliteString(_ statement: OpaquePointer?, index: Int32) -> String? {
-        guard let cString = sqlite3_column_text(statement, index) else {
-            return nil
-        }
+        guard let cString = sqlite3_column_text(statement, index) else { return nil }
         return String(cString: cString)
     }
 
     private func lastErrorMessage() -> String {
-        guard let database else {
-            return "Unknown database error"
-        }
+        guard let database else { return "Unknown database error" }
         return String(cString: sqlite3_errmsg(database))
     }
 }
+
+// ========== BLOCK 06: SCHEMA AND HELPERS - END ==========
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

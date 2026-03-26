@@ -16,6 +16,7 @@ final class PlaybackPreferences {
         static let voiceMode            = "posey.playback.voiceMode"
         static let customVoiceIdentifier = "posey.playback.customVoiceIdentifier"
         static let customRate           = "posey.playback.customRate"
+        static let fontSize             = "posey.reader.fontSize"
     }
 
     private enum ModeToken {
@@ -32,6 +33,16 @@ final class PlaybackPreferences {
         let stored = UserDefaults.standard.float(forKey: Keys.customRate)
         let rate = stored > 0 ? stored : AVSpeechUtteranceDefaultSpeechRate
         return .custom(voiceIdentifier: identifier, rate: rate)
+    }
+
+    var fontSize: CGFloat {
+        get {
+            let stored = UserDefaults.standard.double(forKey: Keys.fontSize)
+            return stored > 0 ? CGFloat(stored) : 18
+        }
+        set {
+            UserDefaults.standard.set(Double(newValue), forKey: Keys.fontSize)
+        }
     }
 
     var voiceMode: SpeechPlaybackService.VoiceMode {

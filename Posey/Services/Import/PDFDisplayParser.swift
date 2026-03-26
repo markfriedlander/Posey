@@ -1,8 +1,14 @@
 import Foundation
 
+// ========== BLOCK 01: PARSED PDF DISPLAY - START ==========
+
 struct ParsedPDFDisplay {
     let blocks: [DisplayBlock]
 }
+
+// ========== BLOCK 01: PARSED PDF DISPLAY - END ==========
+
+// ========== BLOCK 02: PDF DISPLAY PARSER - START ==========
 
 struct PDFDisplayParser {
     private let pageSeparator = "\u{000C}"
@@ -23,7 +29,7 @@ struct PDFDisplayParser {
                 continue
             }
 
-            if let visualPageNumber = PDFDocumentImporter.visualPageNumber(from: normalizedPage) {
+            if let (visualPageNumber, imageID) = PDFDocumentImporter.parseVisualPageMarker(from: normalizedPage) {
                 blocks.append(
                     DisplayBlock(
                         id: blocks.count,
@@ -31,7 +37,8 @@ struct PDFDisplayParser {
                         text: "Visual content on page \(visualPageNumber)",
                         displayPrefix: nil,
                         startOffset: offset,
-                        endOffset: offset
+                        endOffset: offset,
+                        imageID: imageID
                     )
                 )
                 continue
@@ -93,3 +100,5 @@ struct PDFDisplayParser {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+
+// ========== BLOCK 02: PDF DISPLAY PARSER - END ==========

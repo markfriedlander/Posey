@@ -1,14 +1,26 @@
 import Foundation
+import ImageIO
 import PDFKit
+import UIKit
 import Vision
 
 // ========== BLOCK 01: MODELS AND ERRORS - START ==========
+
+/// Image data captured from a single visual page during import.
+/// Stored as PNG (lossless) for fidelity on detailed artwork.
+struct PageImageRecord: Sendable {
+    let imageID: String  // UUID string — embedded in the visual-page marker
+    let data: Data       // PNG bytes
+}
 
 /// Explicit Sendable so ParsedPDFDocument can cross actor boundaries safely.
 struct ParsedPDFDocument: Sendable {
     let title: String?
     let displayText: String
     let plainText: String
+    /// One record per visual page that was rendered to an image.
+    /// Empty for text-only PDFs.
+    let images: [PageImageRecord]
 }
 
 struct PDFDocumentImporter {
@@ -88,13 +100,14 @@ extension PDFDocumentImporter {
 
         enum PageContent {
             case text(String)
-            case visualPlaceholder(pageNumber: Int)
+            case visualPlaceholder(pageNumber: Int, imageID: String)
         }
 
         var pageContents: [PageContent] = []
         pageContents.reserveCapacity(pageCount)
         var readableTextPages: [String] = []
         readableTextPages.reserveCapacity(pageCount)
+        var imageRecords: [PageImageRecord] = []
 
         for index in 0..<pageCount {
             guard let page = document.page(at: index) else { continue }
@@ -111,7 +124,12 @@ extension PDFDocumentImporter {
                     pageContents.append(.text(ocr))
                     readableTextPages.append(ocr)
                 } else {
-                    pageContents.append(.visualPlaceholder(pageNumber: index + 1))
+                    // Purely visual page — render to PNG for inline display.
+                    let imageID = UUID().uuidString
+                    if let pngData = renderPageToPNG(page) {
+                        imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))
+                    }
+                    pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
                 }
             }
         }
@@ -123,8 +141,10 @@ extension PDFDocumentImporter {
         let displayText = pageContents
             .map { content -> String in
                 switch content {
-                case .text(let text):           return text
-                case .visualPlaceholder(let n): return Self.visualPageMarker(for: n)
+                case .text(let text):
+                    return text
+                case .visualPlaceholder(let n, let imageID):
+                    return Self.visualPageMarker(for: n, imageID: imageID)
                 }
             }
             .joined(separator: "\u{000C}")
@@ -135,7 +155,8 @@ extension PDFDocumentImporter {
         return ParsedPDFDocument(
             title: title?.trimmingCharacters(in: .whitespacesAndNewlines),
             displayText: displayText,
-            plainText: plainText
+            plainText: plainText,
+            images: imageRecords
         )
     }
 }
@@ -149,7 +170,7 @@ extension PDFDocumentImporter {
     /// Returns normalised plain text, or an empty string if nothing could be read.
     /// Runs synchronously — `VNImageRequestHandler.perform` blocks until complete.
     private func ocrText(from page: PDFPage) -> String {
-        guard let image = renderPageToCGImage(page) else { return "" }
+        guard let image = renderPageToCGImage(page, colorSpace: CGColorSpaceCreateDeviceGray()) else { return "" }
 
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
@@ -165,12 +186,25 @@ extension PDFDocumentImporter {
         return normalize(lines.joined(separator: " "))
     }
 
-    /// Renders a single PDF page into a grayscale CGImage at 2× scale.
-    /// Grayscale is sufficient for OCR and keeps memory usage lower than RGBA.
-    private func renderPageToCGImage(_ page: PDFPage, scale: CGFloat = 2.0) -> CGImage? {
+    /// Renders a page to PNG data using PDFPage.thumbnail — Apple's purpose-built,
+    /// thread-safe renderer. 2× scale for fidelity on detailed artwork.
+    private func renderPageToPNG(_ page: PDFPage, scale: CGFloat = 2.0) -> Data? {
+        let bounds = page.bounds(for: .mediaBox)
+        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        let image = page.thumbnail(of: size, for: .mediaBox)
+        return image.pngData()
+    }
+
+    /// Renders a page to CGImage for Vision OCR. Uses DeviceGray to keep the
+    /// buffer small. Not used for display — see renderPageToPNG for that.
+    private func renderPageToCGImage(_ page: PDFPage, colorSpace: CGColorSpace, scale: CGFloat = 2.0) -> CGImage? {
         let bounds = page.bounds(for: .mediaBox)
         let width  = max(1, Int(bounds.width  * scale))
         let height = max(1, Int(bounds.height * scale))
+
+        let bitmapInfo: UInt32 = colorSpace.model == .monochrome
+            ? CGImageAlphaInfo.none.rawValue
+            : CGImageAlphaInfo.noneSkipLast.rawValue
 
         guard let ctx = CGContext(
             data: nil,
@@ -178,17 +212,19 @@ extension PDFDocumentImporter {
             height: height,
             bitsPerComponent: 8,
             bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceGray(),
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
         ) else { return nil }
 
-        // White background so text renders with clear contrast.
-        ctx.setFillColor(gray: 1, alpha: 1)
+        if colorSpace.model == .monochrome {
+            ctx.setFillColor(gray: 1, alpha: 1)
+        } else {
+            ctx.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+        }
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
 
         ctx.saveGState()
         ctx.scaleBy(x: scale, y: scale)
-        // Shift for pages whose mediaBox origin is not at (0, 0).
         ctx.translateBy(x: -bounds.origin.x, y: -bounds.origin.y)
         page.draw(with: .mediaBox, to: ctx)
         ctx.restoreGState()
@@ -202,28 +238,79 @@ extension PDFDocumentImporter {
 // ========== BLOCK 05: HELPERS - START ==========
 
 extension PDFDocumentImporter {
-    static func visualPageMarker(for pageNumber: Int) -> String {
-        "\(visualPageMarkerPrefix)\(pageNumber)\(visualPageMarkerSuffix)"
+    /// Encodes a visual-page marker with the imageID embedded.
+    /// Format: `[[POSEY_VISUAL_PAGE:<pageNumber>:<imageID>]]`
+    static func visualPageMarker(for pageNumber: Int, imageID: String) -> String {
+        "\(visualPageMarkerPrefix)\(pageNumber):\(imageID)\(visualPageMarkerSuffix)"
     }
 
-    static func visualPageNumber(from marker: String) -> Int? {
+    /// Parses both old-format `[[POSEY_VISUAL_PAGE:N]]` and new-format `[[POSEY_VISUAL_PAGE:N:UUID]]`.
+    /// Returns `(pageNumber, imageID)` — imageID is nil for old-format markers.
+    static func parseVisualPageMarker(from marker: String) -> (pageNumber: Int, imageID: String?)? {
         guard marker.hasPrefix(visualPageMarkerPrefix),
               marker.hasSuffix(visualPageMarkerSuffix) else { return nil }
         let start = marker.index(marker.startIndex, offsetBy: visualPageMarkerPrefix.count)
         let end   = marker.index(marker.endIndex,   offsetBy: -visualPageMarkerSuffix.count)
-        return Int(marker[start..<end])
+        let inner = String(marker[start..<end])
+        if let colonRange = inner.range(of: ":") {
+            let pageStr = String(inner[inner.startIndex..<colonRange.lowerBound])
+            let imageID = String(inner[colonRange.upperBound...])
+            guard let pageNumber = Int(pageStr) else { return nil }
+            return (pageNumber, imageID.isEmpty ? nil : imageID)
+        } else {
+            guard let pageNumber = Int(inner) else { return nil }
+            return (pageNumber, nil)
+        }
     }
 
     private func normalize(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "\u{00A0}", with: " ")
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r",   with: "\n")
-            .replacingOccurrences(of: #"[ \t]+\n"#,  with: "\n", options: .regularExpression)
-            .replacingOccurrences(of: #"\n(?!\n)"#,  with: " ",  options: .regularExpression)
-            .replacingOccurrences(of: #"\n{3,}"#,    with: "\n\n", options: .regularExpression)
-            .replacingOccurrences(of: #"[ ]{2,}"#,   with: " ",  options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var t = text
+        t = t.replacingOccurrences(of: "\u{00A0}", with: " ")
+        t = t.replacingOccurrences(of: "\r\n", with: "\n")
+        t = t.replacingOccurrences(of: "\r",   with: "\n")
+        t = t.replacingOccurrences(of: #"[ \t]+\n"#,  with: "\n", options: .regularExpression)
+        t = collapseLineBreakHyphens(t)
+        t = collapseSpacedLetters(t)
+        t = t.replacingOccurrences(of: #"\n(?!\n)"#,  with: " ",  options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\n{3,}"#,    with: "\n\n", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"[ ]{2,}"#,   with: " ",  options: .regularExpression)
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Collapses PDF line-break hyphenation: "fas- cism" → "fascism".
+    /// Only fires when a lowercase continuation follows "- ", distinguishing
+    /// line-break hyphens from intentional compound words like "anti-fascist".
+    private func collapseLineBreakHyphens(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z]+)- ([a-z]+)"#) else { return text }
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: "$1$2"
+        )
+    }
+
+    /// Collapses PDF glyph-positioning artifacts: "C O N T E N T S" → "CONTENTS".
+    /// Only collapses runs of 3+ single letters that are all the same case,
+    /// so normal prose (e.g. a sentence starting with "I") is left untouched.
+    private func collapseSpacedLetters(_ text: String) -> String {
+        // Two passes: one for all-uppercase runs, one for all-lowercase runs.
+        let patterns = [#"(?<![A-Z])[A-Z](?: [A-Z]){2,}(?![A-Z])"#,
+                        #"(?<![a-z])[a-z](?: [a-z]){2,}(?![a-z])"#]
+        var result = text
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            var rebuilt = ""
+            var lastEnd = result.startIndex
+            regex.enumerateMatches(in: result, range: NSRange(result.startIndex..., in: result)) { match, _, _ in
+                guard let match, let matchRange = Range(match.range, in: result) else { return }
+                rebuilt += result[lastEnd..<matchRange.lowerBound]
+                rebuilt += result[matchRange].replacingOccurrences(of: " ", with: "")
+                lastEnd = matchRange.upperBound
+            }
+            rebuilt += result[lastEnd...]
+            result = rebuilt
+        }
+        return result
     }
 }
 

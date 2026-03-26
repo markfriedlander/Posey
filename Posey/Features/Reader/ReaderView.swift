@@ -15,6 +15,7 @@ struct ReaderView: View {
     @State private var isShowingPreferencesSheet = false
     @State private var isChromeVisible = true
     @State private var chromeFadeTask: Task<Void, Never>?
+    @State private var expandedImageItem: ExpandedImageItem? = nil
     private let chromeTint = Color.white.opacity(0.9)
     private let chromeSecondaryTint = Color.white.opacity(0.62)
 
@@ -190,6 +191,9 @@ struct ReaderView: View {
             .sheet(isPresented: $isShowingPreferencesSheet) {
                 ReaderPreferencesSheet(viewModel: viewModel)
             }
+            .sheet(item: $expandedImageItem) { item in
+                ExpandedImageSheet(imageID: item.id, viewModel: viewModel)
+            }
         }
     }
 
@@ -296,19 +300,37 @@ struct ReaderView: View {
     }
 
     private func visualPlaceholder(block: DisplayBlock) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Visual Element", systemImage: "photo.on.rectangle.angled")
-                .font(.headline)
-
-            Text(block.text)
-                .font(.body)
-
-            Text("Playback pauses here by default so you can inspect the visual content before continuing.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        Group {
+            if let imageID = block.imageID,
+               let data = viewModel.imageData(for: imageID),
+               let uiImage = UIImage(data: data) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .contentShape(Rectangle())
+                    .onTapGesture { expandedImageItem = ExpandedImageItem(id: imageID) }
+                    .overlay(alignment: .bottomTrailing) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption)
+                            .padding(6)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .padding(8)
+                    }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Visual Element", systemImage: "photo.on.rectangle.angled")
+                        .font(.headline)
+                    Text(block.text)
+                        .font(.body)
+                    Text("Playback pauses here so you can inspect this visual before continuing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+            }
         }
-        .padding()
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func segmentBackground(_ segment: TextSegment) -> Color {
@@ -530,7 +552,9 @@ private struct NotesSheet: View {
 
 @MainActor
 final class ReaderViewModel: ObservableObject {
-    @Published var fontSize: CGFloat = 18
+    @Published var fontSize: CGFloat = PlaybackPreferences.shared.fontSize {
+        didSet { PlaybackPreferences.shared.fontSize = fontSize }
+    }
     @Published private(set) var currentSentenceIndex: Int = 0
     @Published private(set) var playbackState: SpeechPlaybackService.PlaybackState = .idle
     @Published private(set) var focusedDisplayBlockID: Int?
@@ -1281,4 +1305,57 @@ final class ReaderViewModel: ObservableObject {
         pasteboard.setString(text, forType: .string)
         #endif
     }
+
+    // ========== BLOCK VM-IMAGE: IMAGE LOADING - START ==========
+
+    private var imageCache: [String: Data] = [:]
+
+    /// Returns PNG data for the given imageID, caching after the first load.
+    func imageData(for imageID: String) -> Data? {
+        if let cached = imageCache[imageID] { return cached }
+        let data = try? databaseManager.imageData(for: imageID)
+        if let data { imageCache[imageID] = data }
+        return data
+    }
+
+    // ========== BLOCK VM-IMAGE: IMAGE LOADING - END ==========
 }
+
+// ========== BLOCK P2: EXPANDED IMAGE SHEET - START ==========
+
+/// Token passed to `.sheet(item:)` — the imageID is both key and payload.
+struct ExpandedImageItem: Identifiable {
+    let id: String   // imageID
+}
+
+private struct ExpandedImageSheet: View {
+    let imageID: String
+    @ObservedObject var viewModel: ReaderViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let data = viewModel.imageData(for: imageID),
+                   let uiImage = UIImage(data: data) {
+                    ZoomableImageView(image: uiImage)
+                        .ignoresSafeArea(edges: .bottom)
+                } else {
+                    ContentUnavailableView(
+                        "Image Unavailable",
+                        systemImage: "photo.slash",
+                        description: Text("This image could not be loaded.")
+                    )
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// ========== BLOCK P2: EXPANDED IMAGE SHEET - END ==========

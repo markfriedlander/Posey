@@ -8,6 +8,7 @@ struct LibraryView: View {
     @StateObject private var viewModel: LibraryViewModel
     @State private var isImporting = false
     @State private var path: [Document] = []
+    @State private var documentPendingDeletion: Document? = nil
     private let playbackMode: AppLaunchConfiguration.PlaybackMode
     private let isTestMode: Bool
     private let shouldAutoOpenFirstDocument: Bool
@@ -50,6 +51,13 @@ struct LibraryView: View {
                     .padding(.vertical, 4)
                 }
                 .accessibilityIdentifier("library.document.\(document.title)")
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) {
+                        documentPendingDeletion = document
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
             }
             .overlay {
                 if viewModel.documents.isEmpty && viewModel.pdfImportStatusMessage == nil {
@@ -109,6 +117,23 @@ struct LibraryView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(viewModel.errorMessage)
+            }
+            .alert("Delete \"\(documentPendingDeletion?.title ?? "")\"?",
+                   isPresented: Binding(
+                       get: { documentPendingDeletion != nil },
+                       set: { if !$0 { documentPendingDeletion = nil } }
+                   )) {
+                Button("Delete", role: .destructive) {
+                    if let doc = documentPendingDeletion {
+                        viewModel.deleteDocument(doc)
+                    }
+                    documentPendingDeletion = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    documentPendingDeletion = nil
+                }
+            } message: {
+                Text("This will permanently remove the document and all its notes.")
             }
             .overlay(alignment: .bottomLeading) {
                 if isTestMode {
@@ -182,6 +207,15 @@ final class LibraryViewModel: ObservableObject {
     func loadDocuments() {
         do {
             documents = try databaseManager.documents()
+        } catch {
+            present(error)
+        }
+    }
+
+    func deleteDocument(_ document: Document) {
+        do {
+            try databaseManager.deleteDocument(document)
+            loadDocuments()
         } catch {
             present(error)
         }

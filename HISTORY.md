@@ -1,5 +1,91 @@
 # Posey History
 
+## 2026-03-26 — PDF Text Normalization: Spaced Letters And Line-Break Hyphens
+
+Hardened the PDF text normalization pass with two new artifact fixes.
+
+What changed:
+
+- `PDFDocumentImporter.normalize` now calls two new helpers before the whitespace-collapsing passes.
+- `collapseSpacedLetters` detects PDF glyph-positioning artifacts — sequences like `C O N T E N T S` or `I N T R O D U C T I O N` — and collapses them to `CONTENTS` / `INTRODUCTION`. Only fires on runs of 3+ single letters that are all the same case (all uppercase or all lowercase), which avoids false positives on normal prose sentence starts like "I wish…".
+- `collapseLineBreakHyphens` collapses PDF typesetting line-break hyphens: `fas- cism` → `fascism`, `Mus- lim` → `Muslim`. Only fires when a lowercase continuation follows `"- "`, which distinguishes line-break splits from intentional compound words like `anti-fascist`.
+- Both helpers use `NSRegularExpression` with replacement templates where needed.
+
+Why this matters:
+
+- Without these fixes, TTS reads section headings letter-by-letter ("C… O… N… T… E… N… T… S…") which is unlistenable.
+- Line-break hyphens produce mid-word pauses and mispronunciations that break the listening experience on typeset PDFs.
+- These are purely normalization-layer fixes — no changes to reader, playback, or persistence.
+
+## 2026-03-26 — Font Size Persistence
+
+Font size is now persisted globally across sessions.
+
+What changed:
+
+- `PlaybackPreferences` gains a `fontSize: CGFloat` property backed by `UserDefaults` (`posey.reader.fontSize`), defaulting to 18 if not yet set.
+- `ReaderViewModel.fontSize` now initializes from `PlaybackPreferences.shared.fontSize` and writes back on every change via `didSet`.
+
+Why this matters:
+
+- Font size is a reader comfort preference, not a per-document preference. Losing it on every relaunch was friction. One global setting, persisted alongside voice mode, is the right model.
+
+## 2026-03-26 — Document Deletion
+
+Users can now delete documents from the library.
+
+What changed:
+
+- `DatabaseManager` gains `deleteDocument(_:)` — a simple `DELETE FROM documents WHERE id = ?`. Foreign key cascades (enabled via `PRAGMA foreign_keys = ON`) automatically clean up reading positions, notes, and stored images.
+- `LibraryViewModel` gains `deleteDocument(_:)` which calls the DB method then reloads the document list.
+- `LibraryView` adds swipe-to-delete on each row (trailing swipe, no full-swipe to avoid accidental deletions) with a confirmation alert: "Delete 'Title'? This will permanently remove the document and all its notes."
+
+Why this matters:
+
+- There was previously no way to remove an imported document. Required for re-importing corrected files and general library hygiene. The cascade delete means no orphaned notes, positions, or images remain.
+
+## 2026-03-26 — Inline PDF Image Rendering (The GEB Feature)
+
+Visual-only PDF pages now render as actual inline images in the reader, with tap-to-expand full-screen zoom.
+
+What changed:
+
+- `PDFDocumentImporter` now renders purely visual pages (where both PDFKit and OCR yield nothing) to PNG via `PDFPage.thumbnail(of:for:)` at 2× scale. Encoding uses `UIImage.pngData()` — simpler and thread-safe versus the earlier manual CGContext draw path.
+- A new `PageImageRecord: Sendable` struct carries `(imageID: String, data: Data)` from importer to DB.
+- `ParsedPDFDocument` extended with `images: [PageImageRecord]`.
+- Visual page marker format extended: `[[POSEY_VISUAL_PAGE:N:UUID]]` — the imageID is embedded so the display layer can look it up at render time.
+- `DatabaseManager` gains a `document_images` table (BLOB storage, `ON DELETE CASCADE`), plus `insertImage`, `imageData(for:)`, and `deleteImages(for:)` methods. `PRAGMA foreign_keys = ON` enables the cascade.
+- `PDFLibraryImporter.persistParsedDocument` deletes stale image records then inserts fresh ones on every import, so reimports don't leave orphaned blobs.
+- `PDFDisplayParser` updated to parse the new marker format and pass `imageID` through to `DisplayBlock`.
+- `DisplayBlock` gains `imageID: String?` (nil for text blocks and old-format visual placeholders).
+- `ReaderViewModel` gains `imageData(for:)` with an in-memory cache (first load hits DB, subsequent calls return cached data).
+- `ReaderView.visualPlaceholder` now shows the actual image inline when available, with a small expand icon. Falls back to the text card for pages with no stored image (blank pages, pages where rendering failed, old imports).
+- New `ZoomableImageView.swift` — `UIScrollView`-backed `UIViewRepresentable` with pinch-to-zoom (up to 6×), double-tap to zoom in/out, and automatic centering during zoom.
+- New `ExpandedImageSheet` — full-screen `NavigationStack` sheet presenting `ZoomableImageView`. Opened by tapping any inline image.
+- `ExpandedImageItem: Identifiable` — minimal token used with `.sheet(item:)`.
+
+Why this matters:
+
+- This is the core "GEB feature" — the reason images matter is books like Gödel, Escher, Bach where Escher prints are inseparable from the ideas. Posey now preserves those pages visually inline, pauses playback when reaching them, and lets the reader zoom into the detail before continuing.
+- Storage as BLOBs in SQLite keeps the database self-contained: one file for backup, iCloud sync, or migration. No orphaned image files on disk.
+- PNG at 2× scale preserves fidelity on detailed artwork. JPEG compression artifacts would be unacceptable for Escher-quality material.
+
+## 2026-03-26 — Monochromatic UI Palette Established As Standing Standard
+
+All reader UI elements — search bar, highlights, buttons, cursor — now use a monochromatic (blacks/whites/grays) palette.
+
+What changed:
+
+- TTS active sentence highlight: `Color.primary.opacity(0.14)` (was `Color.accentColor`).
+- Search match highlight: `Color.primary.opacity(0.10)`; current match: `Color.primary.opacity(0.28)`.
+- `.tint(.primary)` on `SearchBarView` so buttons and text cursor follow the monochromatic palette.
+- Chevrons, Done button, and keyboard magnifier all inherit from `.tint(.primary)`.
+
+Why this matters:
+
+- Accent color (blue/yellow depending on device settings) broke the calm, text-first reading environment. Monochromatic highlights feel like a physical reading tool rather than an app UI element.
+- Established as a standing standard: all future UI additions should use `Color.primary` opacity tiers and avoid accent colors unless there is a specific product reason.
+
 ## 2026-03-25 — PDF Import Progress Reporting
 
 Added page-level progress reporting for PDF OCR imports.

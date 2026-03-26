@@ -559,3 +559,99 @@ Important implementation choices:
 - Posey now relies fully on the system Spoken Content voice path and points readers to iOS settings for voice changes or downloads
 - the reader preferences sheet is reduced back to stable controls only
 - interruption handling pauses playback, but does not auto-resume after a call or interruption ends
+
+## 2026-03-25 — Scope Expansion: Ask Posey, In-Document Search, OCR
+
+Updated CONSTITUTION.md, REQUIREMENTS.md, and ARCHITECTURE.md to add three deliberate V1 scope additions after design review.
+
+Completed in this pass:
+
+- revised CONSTITUTION.md to permit Ask Posey, in-document search, and OCR; added a "Deliberate Scope Revisions" section with rationale
+- added Section 7 (Ask Posey) and Section 8 (In-Document Search) to REQUIREMENTS.md
+- updated ARCHITECTURE.md with Ask Posey Architecture, OCR Architecture, and Search Architecture sections
+- updated the reader bottom bar layout in ARCHITECTURE.md: Ask Posey glyph now sits far left, opposite restart
+- revised NEXT.md to document all three features in the planned implementation notes
+
+Key decisions captured:
+
+- Ask Posey uses Apple Foundation Models — on-device, offline only, no third-party AI services
+- three interaction patterns: selection-scoped, document-scoped (glyph in bottom bar), annotation-scoped (from Notes)
+- session model is transient — local message array while sheet is open, save to note or discard on close
+- full modal sheet surface with quoted context at top
+- three-tier search: string match (near-term), notes-inclusive (roadmap), semantic via Ask Posey (later)
+- OCR via Apple Vision framework (VNRecognizeTextRequest) extending the existing PDF import pipeline
+
+## 2026-03-25 — AppLaunchConfiguration Preload Collapse (Approved, Not Yet Built)
+
+Design review identified 28 format-specific preload properties in AppLaunchConfiguration as a maintenance liability.
+
+Approved shape:
+
+- collapse to a single `preload: PreloadRequest?` property
+- `PreloadRequest` carries a `Format` enum (txt/markdown/rtf/docx/html/epub/pdf) and a `Source` enum (url/inlineBase64)
+- five generic environment variables replace the current 28 format-specific ones
+- PoseyApp.swift if/else preload ladder becomes a switch on `preload.format`
+- smoke scripts updated in the same pass
+
+Status: approved, not yet implemented.
+
+## 2026-03-25 — AVSpeech Voice Quality Research Pass
+
+Built an empirical test to resolve the open question about `prefersAssistiveTechnologySettings` and premium voice quality before committing to a playback architecture.
+
+Completed in this pass:
+
+- added a debug `VoiceQualityTestSection` to the reader preferences sheet (behind `#if DEBUG`)
+- test plays identical 8-sentence prose sample in two modes: (A) `prefersAssistiveTechnologySettings = true`, (B) direct query of the highest-quality en-US voice from `speechVoices()`
+- Mark downloaded Ava (Premium, en-US) and Jamie (Premium, en-GB) to give mode B its best possible showing
+- ran both modes on the connected iPhone and compared by ear
+
+Empirical findings:
+
+- mode A (Siri-tier) was dramatically better — "fantastic" vs "super inferior"
+- `prefersAssistiveTechnologySettings = true` accesses a voice tier that is not returned by `AVSpeechSynthesisVoice.speechVoices()` at all
+- the standard API on this device returned only compact voices; Ava Premium was available but still clearly inferior to the Siri-tier voice
+- the flag is doing real work and cannot be removed without a quality regression
+- `utterance.rate` being set explicitly overrides the Spoken Content rate slider — the system rate slider only applies when no explicit rate is set on the utterance
+- Ava at higher speeds was listenable up to roughly 125–150%; above that quality degraded unacceptably
+
+Architecture decision confirmed:
+
+- keep `prefersAssistiveTechnologySettings = true` as the default voice path
+- build a Best Available / Custom split rather than forcing users to choose between quality and control
+
+## 2026-03-25 — Voice Mode Split Implementation
+
+Replaced the previous "system Spoken Content only, no controls" approach with a two-mode architecture that makes the quality/control tradeoff explicit and user-controlled.
+
+Completed in this pass:
+
+- rewrote `SpeechPlaybackService` with a `VoiceMode` enum (`bestAvailable` / `custom`)
+- Best Available mode: `prefersAssistiveTechnologySettings = true`, utterance.rate deliberately not set so the system Spoken Content rate slider applies
+- Custom mode: explicit voice from `AVSpeechSynthesisVoice.speechVoices()`, in-app rate slider, `prefersAssistiveTechnologySettings = false`
+- mode or rate changes take effect at the next utterance: service stops and re-enqueues from the current sentence index
+- if paused when mode changes, service returns to idle and resumes with new settings on next play
+- replaced full pre-enqueue with a 50-segment sliding window — one utterance enqueued per utterance finished, memory usage bounded for long documents
+- added `PlaybackPreferences` (UserDefaults wrapper) persisting selected mode, voice identifier, and rate across sessions
+- added `VoicePickerView`: grouped by language then quality tier, device locale shown first by default using `AVSpeechSynthesisVoice.currentLanguageCode()`, "Show all languages" expands the full list
+- Premium voices displayed in accent color, Enhanced and Standard in secondary
+- rate slider range 75–150% (cap at 150% based on empirical quality testing)
+- added `ReaderViewModel` voice mode methods (`setVoiceMode`, `setCustomVoice`, `setCustomRate`) wired to preferences sheet
+- deleted `VoiceQualityTest.swift` — empirical test complete
+
+Verified on device:
+
+- Best Available default on first launch
+- Ava (Premium en-US) selected as default when switching to Custom
+- rate slider applies on drag-end; takes effect at next sentence boundary
+- switching back to Best Available restores Siri-tier voice
+- switching back to Custom restores previously set voice and rate
+- settings persist correctly across full app restarts
+- voice picker opens showing only current locale; "Show all languages" expands correctly
+
+Bug fixes found and resolved during hardware testing:
+
+- service was not initialized with persisted voice mode on relaunch (created in ReaderView.init without voiceMode parameter)
+- switching back to Custom created a fresh default instead of restoring persisted settings
+- draftRatePercentage in preferences sheet not synced when voiceMode changed externally
+- en-GB Jamie sorted above en-US Ava within Premium tier (alphabetical by locale code — fixed by preferring device locale first)

@@ -230,11 +230,40 @@
 
 ## 2026-03-25 — Favor Stable Spoken Content Voice Over In-App Voice And Speed Controls
 
-- Status: Accepted
+- Status: **Superseded** by "Voice Mode Split: Best Available vs Custom" (2026-03-25)
 - Decision: Restore Apple Spoken Content or assistive voice behavior for default playback and remove both in-app speech-rate and in-app voice-selection controls for now.
-- Rationale: Real-device testing showed that forcing Posey-owned speech controls caused regressions in both voice quality and control reliability. Returning fully to the system spoken-content path is more honest than exposing in-app voice or speed controls that do not behave reliably on hardware.
+- Rationale at the time: Real-device testing showed that forcing Posey-owned speech controls caused regressions in both voice quality and control reliability.
+- Why superseded: Further empirical research clarified the exact mechanism — `prefersAssistiveTechnologySettings = true` is what delivers Siri-tier voice quality, and removing the flag is what caused the regression. With that understood, it became possible to build a two-mode architecture that preserves the Siri-tier default while offering an explicit opt-in to controllable voices without deceiving the user about the quality tradeoff.
+
+## 2026-03-25 — Voice Mode Split: Best Available vs Custom
+
+- Status: Accepted
+- Decision: Replace "Spoken Content only, no controls" with two explicit modes the user chooses between: Best Available (Siri-tier voice, no in-app rate control) and Custom (user-selected voice from `speechVoices()`, in-app rate slider 75–150%).
+- Rationale: Empirical hardware testing established that `prefersAssistiveTechnologySettings = true` is the mechanism delivering Siri-tier voice quality — a quality tier not accessible through `AVSpeechSynthesisVoice.speechVoices()` at all. Hiding this behind a single system-controlled path denies users real control. Surfacing the tradeoff explicitly — Siri quality with no in-app rate control vs. lower-quality voice with full control — is more honest and more useful.
+- Key empirical findings:
+  - `prefersAssistiveTechnologySettings = true` accesses voices not returned by `speechVoices()`. The flag cannot be removed without an audible quality regression.
+  - `utterance.rate` set explicitly overrides the Spoken Content rate slider. Best Available mode must not set `utterance.rate` so the system slider remains functional.
+  - Custom voice quality degrades above roughly 125–150% speed. Rate slider capped at 150%.
 - Alternatives considered:
-  - Keep forcing live rate and voice changes by canceling and rebuilding the utterance queue: rejected because it produced unreliable rate changes and voice downgrades on real hardware.
-  - Keep the speech-rate slider but document delayed application: rejected because the real-device behavior was still inconsistent enough to be misleading.
-  - Keep a narrowed in-app voice picker while leaving speed to Apple: rejected because the picker still did not behave honestly enough on hardware.
-  - Keep app-controlled default voice selection as the fallback: rejected for now because it did not restore the original high-quality voice the user heard before this regression.
+  - Keep system-only path: rejected because it denies users rate control entirely and offers no path to improvement.
+  - Force one mode for all users: rejected because the quality/control tradeoff is genuinely subjective — dense non-fiction benefits from lower speed and maximum quality; familiar or lighter material may be fine at higher speed with a slightly different voice.
+
+## 2026-03-25 — Use 50-Segment Sliding Window For Utterance Queue
+
+- Status: Accepted
+- Decision: Pre-enqueue a window of 50 utterances at playback start, then extend by one as each utterance finishes rather than pre-enqueuing the entire remaining document.
+- Rationale: Long documents could queue thousands of utterances. The sliding window bounds memory use while keeping the queue deep enough that the synthesizer never starves. On mode or rate change, only the window needs to be rebuilt rather than the full document tail.
+- Alternatives considered:
+  - Pre-enqueue all remaining segments: rejected because memory use is unbounded for long documents and mode changes are expensive.
+  - On-demand single-utterance enqueue: rejected because a queue depth of 1 risks audible gaps between sentences on slower hardware.
+
+## 2026-03-25 — Expand V1 Scope To Include Ask Posey, In-Document Search, And OCR
+
+- Status: Accepted
+- Decision: Add Ask Posey (Apple Foundation Models, on-device), in-document search (three tiers starting with string match), and OCR for scanned PDFs (Apple Vision) to the V1 scope as deliberate additions.
+- Rationale: All three use only Apple frameworks, work fully offline, and extend the core reading loop without adding network dependencies or third-party services. Ask Posey in particular is a meaningful reading-assistance feature that fits the product's purpose and is uniquely available now through on-device models. Keeping them out of scope would mean documenting them as explicit exclusions, which felt wrong given how naturally they fit.
+- Scope boundaries held:
+  - cloud sync: still out of scope
+  - third-party AI services: still out of scope
+  - export: still out of scope
+  - share extension: still roadmap-only

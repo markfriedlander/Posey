@@ -142,9 +142,14 @@ Use the now-working real-device loop to keep `TXT`, `MD`, `RTF`, `DOCX`, `HTML`,
 - Uses one playback service per reader session.
 - Maintains `idle`, `playing`, `paused`, and `finished` states.
 - Resumes from the saved sentence index.
-- Leaves speech voice and speed to Apple Spoken Content behavior for now so default spoken voice quality stays stable on hardware.
 - Rewinds to the beginning without autoplay when restart is tapped.
 - Pauses at preserved PDF visual-stop blocks by default in the current richer-format pass.
+- Uses a 50-segment sliding window — utterances are enqueued one-for-one as each finishes rather than pre-enqueuing the full document tail.
+- Supports two voice modes, persisted in UserDefaults across sessions:
+  - **Best Available**: `prefersAssistiveTechnologySettings = true`, Siri-tier voice quality, utterance.rate not set so the system Spoken Content rate slider applies. This is the default.
+  - **Custom**: user-selected voice from `AVSpeechSynthesisVoice.speechVoices()`, in-app rate slider 75–150%, `prefersAssistiveTechnologySettings = false`. Lower voice quality than Best Available, but fully user-controlled.
+- Mode or rate changes take effect at the next sentence boundary (stop + re-enqueue from current index).
+- Voice picker groups by language then quality tier; device locale shown first by default.
 
 ### Highlighting
 
@@ -168,7 +173,7 @@ Use the now-working real-device loop to keep `TXT`, `MD`, `RTF`, `DOCX`, `HTML`,
 - Do not widen `PDF` work into OCR or full document-layout reconstruction in the current pass (OCR is planned near-term as its own pass).
 - Do not widen reader chrome back into text-heavy or visually dominant controls.
 - Do not widen note-taking into arbitrary text selection, editing, deletion, or export yet.
-- Do not assume live mid-playback speech-rate changes are solved; treat that as a known follow-up investigation.
+- Do not attempt live mid-utterance speech-rate changes; the current architecture applies rate changes at the next sentence boundary (stop + re-enqueue), which is sufficient and honest.
 - Do not add sync, export, or network-dependent AI behavior. (Ask Posey via Apple Foundation Models is a planned V1 feature and is in-scope; in-document search tier 1 is near-term.)
 - Do not widen the architecture before a real runtime bug forces it.
 - Do not add broad test abstractions unless the current QA loop becomes too repetitive to maintain.

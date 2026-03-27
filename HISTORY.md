@@ -1,5 +1,50 @@
 # Posey History
 
+## 2026-03-27 — Comprehensive Normalization Pass + Expanded Audit Tool
+
+Second quality audit pass. Findings from the first audit extended across all importers and the audit tool itself hardened to detect a wider class of artifacts.
+
+**Normalization fixes (7 files changed):**
+
+- **`CLAUDE.md`**: New Quality Standard section added as a standing law — "Do not limit analysis to known issues. Actively look for edge cases and foreseeable failure modes."
+- **`HTMLDocumentImporter`** (cascades to EPUB): Added `\u{00AD}` Unicode soft-hyphen stripping + `collapseLineBreakHyphens` — the same fix already in PDF. Result: Illuminatus EPUB line-break hyphens 41 → 0.
+- **`PDFDocumentImporter`**: Added `\u{00AD}` stripping (Antifa had 48) + new `collapseSpacedDigits` helper (collapses `1 9 4 5` → `1945` for PDF glyph-position artifacts). Result: Antifa unicode-soft-hyphens 48 → 0.
+- **`TXTDocumentImporter`**: Added `\u{00A0}` no-break-space and `\u{00AD}` soft-hyphen normalization. Both were missing; TXT files from various editors commonly have them.
+- **`RTFDocumentImporter`**: Added `\u{00A0}` and `\u{00AD}`. RTF from Word uses `\u{00A0}` heavily for non-breaking spaces.
+- **`DOCXDocumentImporter`**: Added `\u{00A0}`, `\u{00AD}`, tab→space, excess-whitespace collapse, and `\n{3+}` collapse. Normalizer was minimal; now consistent with other importers.
+
+**Audit tool hardening (`tools/posey_test.py`):**
+
+New checks added to `_audit_text`:
+- `unicodeSoftHyphens` — detects surviving `\u{00AD}`
+- `nbspChars` — detects surviving `\u{00A0}`
+- `zwspChars` — detects zero-width spaces (`\u{200B}`, `\u{200C}`)
+- `bomChars` — detects BOM/ZWNBSP (`\u{FEFF}`)
+- `tabChars` — detects tab characters that should have been normalised
+- `strayFormfeeds` — detects `\x0c` in non-PDF formats (PDFs correctly excluded; all `\x0c` in PDF displayText are intentional page separators)
+- `longBlockSamples` — first 120 chars of each long block for quick diagnosis
+- `longBlockPunctDensities` — periods+!+? per 100 chars; <0.5 flagged ⚠ LOW, indicating NLTokenizer will likely fail to split the block into sentences
+- Renamed `softHyphens` → `linebreakHyphens` for clarity (ASCII hyphen + whitespace patterns, distinct from Unicode soft hyphens)
+- Fixed `longBlocks` split: was incorrectly using `\\f` (a no-op in the old code); now correctly splits on complete `[[POSEY...]]` markers and `\n\n` only — not `\x0c`, which is the PDF page separator, not a paragraph boundary
+
+**Final audit results:**
+
+| File | LB-Hyphens | Unicode SH | Long-blocks | Visual-pages | Notes |
+|------|-----------|-----------|-------------|-------------|-------|
+| Antifa PDF | 0 ✓ | 0 ✓ | 8 | 11 | Chapter headings have residual spaced-letter artifacts with accented chars (Á) — see below |
+| AI Book PDF | 0 | 0 | 1 | 0 | |
+| Cryptography PDF | 0 | 0 | 1 | 0 | Repeated ChmMagic watermark text on every page (in source, not fixable at normalization) |
+| GEB PDF | 0 | 0 | 1 | 0 | `q q q` is intentional GEB formal-system notation, not an artifact |
+| Illuminatus EPUB | 0 ✓ | 0 | 470 | 0 | Block segmentation open issue; each block has `Seite N von 470` EPUB boilerplate prefix (not fixable at normalization) |
+| Learning_from_Enemy PDF | 0 | 0 | 1 | 0 | |
+| Measure What Matters PDF | 0 | 0 | 1 | 0 | |
+
+**Known residual issues (not fixed this pass):**
+
+- **Antifa chapter headings**: Accented letters (`Á` in `PASARÁN`) break the `collapseSpacedLetters` regex which only handles ASCII. Requires Unicode-aware letter matching (`\p{Lu}`) — higher risk, deferred.
+- **Antifa `ANTI - FASCISM`**: Space-hyphen-space artifact where the hyphen is surrounded by spaces (not a line-break hyphen). Would require a separate pattern. Rare; deferred.
+- **Block segmentation**: 470 long-blocks in Illuminatus EPUB remains the top open issue. Architectural approach discussed separately — see NEXT.md.
+
 ## 2026-03-26 — Text-Quality Audit + Three Bug Fixes
 
 First cross-format quality audit completed across test materials. Three bugs found and fixed.

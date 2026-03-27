@@ -38,9 +38,14 @@ struct DOCXDocumentImporter {
 
     private func normalize(_ text: String) -> String {
         text
+            .replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space
+            .replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen
+            .replacingOccurrences(of: "\t",       with: " ")   // tabs from <w:tab> → single space
             .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: "\r",   with: "\n")
+            .replacingOccurrences(of: #"[ ]{2,}"#,  with: " ",    options: .regularExpression)
+            .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n",   options: .regularExpression)
+            .replacingOccurrences(of: #"\n{3,}"#,   with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
     private func archive(from data: Data) throws -> ZIPArchive {

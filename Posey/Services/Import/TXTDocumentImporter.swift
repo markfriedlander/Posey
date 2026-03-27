@@ -35,6 +35,8 @@ struct TXTDocumentImporter {
 
     private func normalize(_ text: String) -> String {
         text
+            .replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space
+            .replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)

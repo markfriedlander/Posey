@@ -270,12 +270,14 @@ extension PDFDocumentImporter {
 
     private func normalize(_ text: String) -> String {
         var t = text
-        t = t.replacingOccurrences(of: "\u{00A0}", with: " ")
+        t = t.replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space
+        t = t.replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen (invisible; strip entirely)
         t = t.replacingOccurrences(of: "\r\n", with: "\n")
         t = t.replacingOccurrences(of: "\r",   with: "\n")
         t = t.replacingOccurrences(of: #"[ \t]+\n"#,  with: "\n", options: .regularExpression)
         t = collapseLineBreakHyphens(t)
         t = collapseSpacedLetters(t)
+        t = collapseSpacedDigits(t)
         t = t.replacingOccurrences(of: #"\n(?!\n)"#,  with: " ",  options: .regularExpression)
         t = t.replacingOccurrences(of: #"\n{3,}"#,    with: "\n\n", options: .regularExpression)
         t = t.replacingOccurrences(of: #"[ ]{2,}"#,   with: " ",  options: .regularExpression)
@@ -292,6 +294,23 @@ extension PDFDocumentImporter {
             range: NSRange(text.startIndex..., in: text),
             withTemplate: "$1$2"
         )
+    }
+
+    /// Collapses PDF glyph-positioning artifacts for digit sequences: "1 9 4 5" → "1945".
+    /// Only fires on runs of 4+ single digits to avoid false positives on
+    /// legitimate list items or short numeric tokens like "1 2" or "1 2 3".
+    private func collapseSpacedDigits(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"\d(?: \d){3,}"#) else { return text }
+        var rebuilt = ""
+        var lastEnd = text.startIndex
+        regex.enumerateMatches(in: text, range: NSRange(text.startIndex..., in: text)) { match, _, _ in
+            guard let match, let matchRange = Range(match.range, in: text) else { return }
+            rebuilt += text[lastEnd..<matchRange.lowerBound]
+            rebuilt += text[matchRange].replacingOccurrences(of: " ", with: "")
+            lastEnd = matchRange.upperBound
+        }
+        rebuilt += text[lastEnd...]
+        return rebuilt
     }
 
     /// Collapses PDF glyph-positioning artifacts: "C O N T E N T S" → "CONTENTS".

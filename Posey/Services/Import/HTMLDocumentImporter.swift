@@ -59,13 +59,27 @@ struct HTMLDocumentImporter {
 
 // ========== BLOCK 3: TEXT NORMALIZATION - START ==========
     private func normalize(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "\u{00A0}", with: " ")
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
-            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var t = text
+        t = t.replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space
+        t = t.replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen (invisible; strip entirely)
+        t = t.replacingOccurrences(of: "\r\n", with: "\n")
+        t = t.replacingOccurrences(of: "\r",   with: "\n")
+        t = t.replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+        t = collapseLineBreakHyphens(t)                         // "word-\nword" → "wordword" (EPUB/HTML line-break hyphens)
+        t = t.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Collapses line-break hyphenation: "fas-\ncism" or "fas- cism" → "fascism".
+    /// Only fires when a lowercase continuation follows "- " or "-\n",
+    /// distinguishing line-break splits from intentional compound words like "anti-fascist".
+    private func collapseLineBreakHyphens(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z]+)-[ \n]([a-z]+)"#) else { return text }
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: "$1$2"
+        )
     }
 }
 // ========== BLOCK 3: TEXT NORMALIZATION - END ==========

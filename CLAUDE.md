@@ -220,6 +220,16 @@ hardware validation of app behavior always uses the real device.
 
 ---
 
+## Quality Standard
+
+When evaluating text extraction, rendering, highlighting, or any feature that
+touches document content, do not limit analysis to known issues or visible
+artifacts. Actively look for edge cases, foreseeable failure modes, and quality
+problems that real-world documents at scale would surface. Fix what you see.
+Anticipate what you don't.
+
+---
+
 ## The LEGO Block System
 
 All Swift files use clearly bounded, numbered sections:

@@ -2,7 +2,7 @@
 
 ## Current Target
 
-Core format and playback stable on hardware. Tier 1 search done. Inline PDF image rendering done. Next candidates: PDF block segmentation (large highlight blocks defeating read-along), generalizing inline images to EPUB/DOCX/HTML, and Ask Posey.
+Core format and playback stable on hardware. Tier 1 search done. Inline PDF image rendering done. Local API server live on device — CC can now interact directly with Posey without relay. Next: run the full text-quality audit across test materials (`python3 tools/posey_test.py audit`), then address PDF block segmentation (large highlight blocks defeating read-along).
 
 ## Priority Order
 
@@ -26,11 +26,14 @@ Core format and playback stable on hardware. Tier 1 search done. Inline PDF imag
    - line-break hyphen artifacts (`fas- cism`): **Fixed** at normalization.
    - **Open: PDF block segmentation.** Typeset PDFs often produce large undifferentiated text chunks that NLTokenizer cannot split (no sentence-ending punctuation). Results in highlight blocks spanning a full screen, defeating read-along. Needs architectural discussion before fixing — options are smarter normalization or a length-based segmenter fallback.
 11. Next up (in rough priority order):
+   - Run `python3 tools/posey_test.py audit` across the 10 test materials — first real cross-format quality audit
    - PDF block segmentation: discuss and fix (prerequisite for GEB-quality read-along experience)
    - inline images for EPUB/DOCX/HTML: generalize the PDF visual-stop + image pattern to other formats
+   - Ask Posey: Apple Foundation Models integration (on-device, offline)
    - document deletion: **Done.**
    - font size persistence: **Done.**
    - monochromatic palette: **Done** as standing standard.
+   - local API server: **Done.** (`tools/posey_test.py`, antenna icon, NWListener on port 8765)
    - richer inline non-text preservation beyond visual-only page stops (figures, tables, charts in EPUB/DOCX/HTML)
    - OCR for scanned PDFs: **Done.**
    - in-document search tier 1: **Done.**

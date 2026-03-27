@@ -36,11 +36,18 @@ struct HTMLDocumentImporter {
         dispatchPrecondition(condition: .onQueue(.main))
         #endif
 
-        let attributedString: NSAttributedString
+        // Pre-inject paragraph markers before closing block-level tags.
+        // NSAttributedString collapses <p>…</p> boundaries to a single \n,
+        // merging consecutive paragraphs into one undifferentiated block.
+        // U+E001 (Private Use Area) survives the HTML → plain-text conversion
+        // as literal text content; after extraction it becomes \n, so each
+        // block boundary yields (our \n)(NSAttributedString's own \n) = \n\n.
+        let markedData = injectParagraphMarkers(data)
 
+        let attributedString: NSAttributedString
         do {
             attributedString = try NSAttributedString(
-                data: data,
+                data: markedData,
                 options: [.documentType: NSAttributedString.DocumentType.html],
                 documentAttributes: nil
             )
@@ -48,12 +55,33 @@ struct HTMLDocumentImporter {
             throw ImportError.unreadableDocument
         }
 
-        let normalized = normalize(attributedString.string)
+        let rawText = attributedString.string
+            .replacingOccurrences(of: "\u{E001}", with: "\n")
+        let normalized = normalize(rawText)
         guard normalized.isEmpty == false else {
             throw ImportError.emptyDocument
         }
 
         return normalized
+    }
+
+    /// Inserts U+E001 before each closing block-level tag in the raw HTML so
+    /// that paragraph boundaries produce \n\n in the final plain text rather
+    /// than the single \n that NSAttributedString emits for each <p> end.
+    private func injectParagraphMarkers(_ data: Data) -> Data {
+        guard var html = String(data: data, encoding: .utf8) ??
+                         String(data: data, encoding: .isoLatin1) else {
+            return data
+        }
+        let blockTags = ["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"]
+        for tag in blockTags {
+            html = html.replacingOccurrences(
+                of: "</\(tag)>",
+                with: "\u{E001}</\(tag)>",
+                options: .caseInsensitive
+            )
+        }
+        return html.data(using: .utf8) ?? data
     }
 // ========== BLOCK 2: IMPORT ENTRY POINTS - END ==========
 

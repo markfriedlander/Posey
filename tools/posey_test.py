@@ -208,9 +208,10 @@ def run_audit(verbose: bool = False) -> None:
         sys.exit(1)
 
     files = sorted(
-        f for f in os.listdir(_TEST_MATERIALS_DIR)
-        if not f.startswith(".") and os.path.isfile(
-            os.path.join(_TEST_MATERIALS_DIR, f))
+        (f for f in os.listdir(_TEST_MATERIALS_DIR)
+         if not f.startswith(".") and os.path.isfile(
+             os.path.join(_TEST_MATERIALS_DIR, f))),
+        key=lambda f: os.path.getsize(os.path.join(_TEST_MATERIALS_DIR, f))
     )
     if not files:
         print("No files found in Posey Test Materials/")
@@ -223,17 +224,22 @@ def run_audit(verbose: bool = False) -> None:
     print("  ⚙  RESET_ALL")
     _command("RESET_ALL")
 
-    _MAX_MB = 50
-
     for fname in files:
         fpath = os.path.join(_TEST_MATERIALS_DIR, fname)
         size_mb = os.path.getsize(fpath) / 1_048_576
         print(f"  ▶  {fname} ({size_mb:.1f} MB)")
-        if size_mb > _MAX_MB:
-            print(f"     ⚠  Skipped — {size_mb:.0f} MB exceeds {_MAX_MB} MB limit (too large for in-memory transfer)\n")
-            results.append({"file": fname, "error": f"skipped: {size_mb:.0f} MB > {_MAX_MB} MB limit"})
+        try:
+            result = _import_file(fpath)
+        except (ConnectionResetError, ConnectionError, OSError) as exc:
+            print(f"     ✗  Transfer failed: {exc}")
+            results.append({"file": fname, "error": f"transfer: {exc}"})
+            print()
             continue
-        result = _import_file(fpath)
+        except Exception as exc:
+            print(f"     ✗  Unexpected error: {exc}")
+            results.append({"file": fname, "error": f"unexpected: {exc}"})
+            print()
+            continue
         if not result.get("success"):
             print(f"     ✗  Import failed: {result.get('error', result)}")
             results.append({"file": fname, "error": result.get("error", "unknown")})

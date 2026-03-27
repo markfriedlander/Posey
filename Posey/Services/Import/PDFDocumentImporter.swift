@@ -138,7 +138,10 @@ extension PDFDocumentImporter {
             throw ImportError.scannedDocument
         }
 
-        let displayText = pageContents
+        // Join pages, then run a second collapseLineBreakHyphens pass so that
+        // hyphens spanning a page boundary (word-\x0cword) are collapsed too.
+        // Per-page normalize() can't catch these because it runs before joining.
+        let joinedDisplay = pageContents
             .map { content -> String in
                 switch content {
                 case .text(let text):
@@ -148,6 +151,7 @@ extension PDFDocumentImporter {
                 }
             }
             .joined(separator: "\u{000C}")
+        let displayText = collapseLineBreakHyphens(joinedDisplay)
 
         let plainText = readableTextPages.joined(separator: "\n\n")
         let rawTitle = (document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?
@@ -288,7 +292,8 @@ extension PDFDocumentImporter {
     /// Only fires when a lowercase continuation follows "- ", distinguishing
     /// line-break hyphens from intentional compound words like "anti-fascist".
     private func collapseLineBreakHyphens(_ text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z]+)-[ \n]([a-z]+)"#) else { return text }
+        // Also catches ¬ (U+00AC) used as a line-break marker by some PDF generators.
+        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z]+)[-\u00AC][ \n\x0c] ?([a-z]+)"#) else { return text }
         return regex.stringByReplacingMatches(
             in: text,
             range: NSRange(text.startIndex..., in: text),
@@ -318,8 +323,10 @@ extension PDFDocumentImporter {
     /// so normal prose (e.g. a sentence starting with "I") is left untouched.
     private func collapseSpacedLetters(_ text: String) -> String {
         // Two passes: one for all-uppercase runs, one for all-lowercase runs.
-        let patterns = [#"(?<![A-Z])[A-Z](?: [A-Z]){2,}(?![A-Z])"#,
-                        #"(?<![a-z])[a-z](?: [a-z]){2,}(?![a-z])"#]
+        // \p{Lu}/\p{Ll} matches Unicode upper/lowercase so accented capitals
+        // like Á in "PASAR Á N" are collapsed along with ASCII-only runs.
+        let patterns = [#"(?<!\p{Lu})\p{Lu}(?: \p{Lu}){2,}(?!\p{Lu})"#,
+                        #"(?<!\p{Ll})\p{Ll}(?: \p{Ll}){2,}(?!\p{Ll})"#]
         var result = text
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }

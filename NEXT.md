@@ -2,9 +2,9 @@
 
 ## Current Target
 
-Comprehensive normalization pass complete (2026-03-27). All importers now consistently handle `\u{00A0}` (no-break space), `\u{00AD}` (Unicode soft hyphen), and excess whitespace. EPUB/HTML normalizer now strips line-break hyphens. PDF normalizer now collapses spaced digit sequences (`1 9 4 5` → `1945`). Audit tool expanded with 6 new artifact checks, punctuation-density analysis of long blocks, and sample content for diagnostics.
+Three normalization passes complete (2026-03-27). All importers consistently handle all known Unicode artifacts. Phase A SentenceSegmenter implemented — all TTS segments capped at 600 chars. 18-file full audit complete including Feeling Good (329.8 MB). Remaining issues are structural (TOC long-blocks, scan-per-page EPUB) or irreducible OCR noise (Feeling Good exercise images).
 
-**Block segmentation is now the top open issue.** Architecture discussion in progress — see DECISIONS.md and below. Two-phase approach proposed: (A) smarter SentenceSegmenter fallback for punctuation-poor text, (B) decouple TTS utterance from highlight unit for optional paragraph-mode playback.
+**The core reading loop is now in solid shape across all supported formats.** Next focus: inline non-text element handling (images/figures pausing playback in EPUB/DOCX/HTML), then TTS voice and speed controls.
 
 ## Priority Order
 
@@ -28,7 +28,9 @@ Comprehensive normalization pass complete (2026-03-27). All importers now consis
    - spaced-digit artifacts (`1 9 4 5`): **Fixed** at normalization (`collapseSpacedDigits`).
    - line-break hyphen artifacts (`fas- cism`): **Fixed** at normalization.
    - Unicode soft-hyphen (`\u{00AD}`): **Fixed** — stripped in PDF, HTML, EPUB, TXT, RTF, DOCX.
-   - Residual: accented characters (`Á`) break `collapseSpacedLetters` (requires Unicode-aware `\p{Lu}` matching — deferred, higher risk).
+   - Accented characters (`Á`): **Fixed** — `collapseSpacedLetters` now uses `\p{Lu}`/`\p{Ll}` Unicode property escapes.
+   - `¬` (U+00AC) as line-break hyphen: **Fixed** — caught by `collapseLineBreakHyphens`.
+   - Cross-page-boundary hyphens: **Fixed** — second normalization pass after page join.
    - Residual: `WORD - WORD` (space-hyphen-space) artifact — rare, deferred.
    - **Open: PDF/EPUB block segmentation.** Long highlight blocks defeating read-along. In architectural discussion.
 11. Next up (in rough priority order):

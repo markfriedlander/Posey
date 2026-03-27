@@ -134,6 +134,15 @@ struct LibraryView: View {
             } message: {
                 Text(viewModel.errorMessage)
             }
+            .alert("API Ready — Copied to Clipboard",
+                   isPresented: Binding(
+                       get: { viewModel.apiConnectionInfo != nil },
+                       set: { if !$0 { viewModel.apiConnectionInfo = nil } }
+                   )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(viewModel.apiConnectionInfo ?? "")
+            }
             .alert("Delete \"\(documentPendingDeletion?.title ?? "")\"?",
                    isPresented: Binding(
                        get: { documentPendingDeletion != nil },
@@ -208,6 +217,8 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var pdfImportStatusMessage: String? = nil
     /// Whether the local API server is running.
     @AppStorage("localAPIEnabled") var localAPIEnabled: Bool = false
+    /// Set to the connection string when the API starts; drives the "copied" alert.
+    @Published var apiConnectionInfo: String? = nil
 
     let databaseManager: DatabaseManager
     private lazy var txtLibraryImporter    = TXTLibraryImporter(databaseManager: databaseManager)
@@ -374,7 +385,10 @@ extension LibraryViewModel {
                 }
             )
             localAPIEnabled = true
-            print("PoseyAPI: \(localAPIServer.connectionInfo)")
+            let info = localAPIServer.connectionInfo
+            UIPasteboard.general.string = info
+            apiConnectionInfo = info
+            print("PoseyAPI: \(info)")
         }
     }
 

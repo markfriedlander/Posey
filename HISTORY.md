@@ -1,5 +1,55 @@
 # Posey History
 
+## 2026-03-27 — Third Normalization Pass + Phase A Segmenter + Clipboard API
+
+**Normalization fixes (continued from earlier in same day):**
+
+- **`PDFDocumentImporter`**: Four improvements:
+  1. `collapseLineBreakHyphens` now also catches `¬` (U+00AC, NOT SIGN) used as a line-break marker by some PDF generators — `assis¬ tance` → `assistance`. Feeling Good lost ~5,876 chars of artifacts.
+  2. `collapseLineBreakHyphens` pattern extended to `[ \n\x0c] ?` — catches the case where PDF text extraction inserts a space after the line-break separator (e.g. `rr-\n word` → `rrword`), and catches hyphens across page boundaries (`Jef-\x0cxxii` → `Jefxxii`) via a second post-join pass.
+  3. Second `collapseLineBreakHyphens` pass runs on the joined `displayText` after all pages are assembled with `\x0c` — catches cross-page-boundary hyphens that the per-page normalization pass can't reach.
+  4. `collapseSpacedLetters` patterns updated from ASCII `[A-Z]`/`[a-z]` to Unicode `\p{Lu}`/`\p{Ll}` — accented capitals like `Á` in `PASARÁN` now collapse correctly. Antifa chapter heading `PASAR Á N` → `PASARÁN`.
+
+- **`HTMLDocumentImporter`** (cascades to EPUB): Added `injectParagraphMarkers()` — inserts U+E001 (Private Use Area) before each closing block-level tag (`</p>`, `</h1>`–`</h6>`, `</li>`, `</blockquote>`) in the raw HTML before `NSAttributedString` processes it. After extraction, U+E001 becomes `\n`, so each paragraph boundary yields `\n\n` instead of the single `\n` that NSAttributedString emits. This improves paragraph separation for HTML files; has no impact on Illuminatus EPUB (each EPUB "page" is one large `<p>` element — scan-per-page structure).
+
+**Phase A — SentenceSegmenter oversized block capping:**
+
+`SentenceSegmenter.swift` completely rewritten. After NLTokenizer or paragraph fallback, any segment over 600 chars is recursively split via:
+1. Line breaks (`\n`)
+2. Clause separators (em-dash, en-dash, semicolon)
+3. Word-boundary split at 600 chars (last resort)
+
+Offsets are recalculated correctly at each split so position restore and highlighting remain accurate. This caps TTS utterance length at 600 chars for all formats — including Illuminatus's 470 large EPUB blocks — preventing the `pauseSpeaking(at: .word)` unresponsiveness that long utterances caused.
+
+**API clipboard UX:**
+
+When the antenna is toggled on, `toggleLocalAPI()` now copies the full connection string (`http://IP:8765  token: …`) to `UIPasteboard.general` and shows an alert: "API Ready — Copied to Clipboard." No more hunting through Xcode console for the token.
+
+**Full audit results (18 files, sorted by size):**
+
+All 18 files imported successfully including Feeling Good (329.8 MB, 1.2M chars). Files sorted smallest-first so Feeling Good runs last and a crash there doesn't lose other results.
+
+| File | Issues remaining | Notes |
+|------|-----------------|-------|
+| Proposal DOCX | ✓ Clean | |
+| Resume PDF | 1 long-block | Wayback Machine URL block — structural, not fixable |
+| Branded Agreement PDF | 1 long-block | Dense legal prose — structural |
+| Universal Access PDF | 1 long-block | Wayback Machine URL block |
+| Clouds Copyright PDF | 1 long-block | Wayback Machine URL block |
+| 2009 New Media PDF | 3 long-blocks | Dense legal sections — structural |
+| Internet Steps PDF | 1 long-block | Wayback Machine URL block |
+| AI Book PDF | 1 long-block | Dense intro paragraph — structural |
+| Illuminatus EPUB | 470 long-blocks | Scan-per-page EPUB; Phase A caps at 600 chars for playback |
+| Antifa PDF | 8 long-blocks, 11 visual | Chapter headings have residual spaced-letter mangling (complex PDF artifact) |
+| 2005 CBA PDF | 1 long-block | TOC — structural |
+| Learning from Enemy PDF | 1 long-block | Dense header block — structural |
+| 2014 MOA PDF | 2 long-blocks, 1 visual | Dense legal sections |
+| New Media Sideletters PDF | 1 long-block | Dense legal section |
+| Cryptography PDF | 1 long-block | Watermark text repeated every page — in source |
+| Measure What Matters PDF | 1 long-block | Title page metadata |
+| GEB PDF | 1 long-block, `q q q` spaced-lower | `q q q` is GEB formal-system notation, not an artifact |
+| Feeling Good PDF | 102/106 spaced upper/lower, 13 long-blocks, 16 visual | Spaced artifacts are OCR noise from workbook exercise images — not fixable without false positives; long-blocks are structural chapters |
+
 ## 2026-03-27 — Comprehensive Normalization Pass + Expanded Audit Tool
 
 Second quality audit pass. Findings from the first audit extended across all importers and the audit tool itself hardened to detect a wider class of artifacts.

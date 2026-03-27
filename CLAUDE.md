@@ -201,9 +201,14 @@ Current device ID: `D24FB384-9C55-5D33-9B0D-DAEBFA6528D6` (iPhone 16 Plus,
 "Marks Bigger Ass Fon 16"). Verify with `xcrun devicectl list devices` if
 it ever changes.
 
-The simulator is acceptable for running the unit test suite when the device
-is not the right target for a particular test (e.g. XCTest runs). But
-hardware validation of app behavior always uses the real device.
+**Always run tests on the real device when it is connected and available.**
+The iOS Simulator is a last resort only — it crashes unpredictably under
+resource pressure and produces macOS crash dialogs that alarm the user.
+The device is always available via `xcrun devicectl`. Use it.
+
+The simulator is acceptable only when the device is genuinely unavailable
+(e.g. not connected, locked by another process). In that case, note the
+reason explicitly.
 
 ---
 

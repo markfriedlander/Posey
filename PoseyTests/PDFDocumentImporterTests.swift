@@ -30,7 +30,7 @@ final class PDFDocumentImporterTests: XCTestCase {
 
         let document = try PDFDocumentImporter().loadDocument(fromData: data)
 
-        XCTAssertTrue(document.displayText.contains(PDFDocumentImporter.visualPageMarker(for: 2)))
+        XCTAssertTrue(document.displayText.contains("[[POSEY_VISUAL_PAGE:2:"))
         XCTAssertTrue(document.plainText.contains("Page one keeps the reading flow grounded."))
         XCTAssertTrue(document.plainText.contains("Page three resumes after the visual pause."))
         XCTAssertFalse(document.plainText.contains("POSEY_VISUAL_PAGE"))

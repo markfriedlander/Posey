@@ -375,7 +375,7 @@ final class ReaderViewModelTests: XCTestCase {
         let plainText = "Page one stays readable. Page three resumes after the visual pause."
         let displayText = [
             "Page one stays readable.",
-            PDFDocumentImporter.visualPageMarker(for: 2),
+            PDFDocumentImporter.visualPageMarker(for: 2, imageID: "test-image-id"),
             "Page three resumes after the visual pause."
         ].joined(separator: "\u{000C}")
         let document = Document(

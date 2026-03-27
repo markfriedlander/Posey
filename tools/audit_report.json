@@ -1,14 +1,34 @@
 [
   {
     "title": "Antifa, The Anti-Fascist Handbook",
-    "totalChars": 519579,
+    "totalChars": 519522,
     "spacedUpperSequences": 0,
     "spacedUpperExamples": [],
     "spacedLowerSequences": 0,
     "spacedLowerExamples": [],
-    "softHyphens": 0,
-    "softHyphenExamples": [],
+    "linebreakHyphens": 0,
+    "linebreakHyphenExamples": [],
+    "unicodeSoftHyphens": 0,
+    "nbspChars": 0,
+    "zwspChars": 0,
+    "bomChars": 0,
+    "tabChars": 0,
+    "strayFormfeeds": 0,
     "longBlocks": 8,
+    "longBlockSamples": [
+      "CONTENTS Introduction . . . . . . . . . . . . . . . . . . . xi One: \u00a1No Pasar\u00e1n!: Anti-Fascism Through 1945 . . . . . 3 \u2026",
+      "INTRODUCTION I wish there were no need for this book. But someone burned down the Victoria Islamic Center in Victoria, T\u2026",
+      "ONE \u00a1 NOANTI - FASCISMPASAR \u00c1 N ! : THROUGH 1945 On the evening of April 23, 1925, a political meeting was scheduled on \u2026",
+      "TWO THE \u201c NEVERAGAIN \u201d : DEVELOPMENTOFANTIFA , 1945 \u2013 2003 MODERN The image of British MP Mavis Tate flickers onto the s\u2026",
+      "THREE ANDTHERISEOF \u201c PINSTRIPEANTI - FASCISMNAZIS \u201d TODAY \u201cScared as fuck\u201d and unsure of what awaited him, Dominic board\u2026"
+    ],
+    "longBlockPunctDensities": [
+      15.7,
+      0.6,
+      0.7,
+      0.7,
+      0.7
+    ],
     "visualPageMarkers": 11,
     "file": "Antifa, The Anti-Fascist Handbook.pdf",
     "fileType": "pdf"
@@ -20,23 +40,47 @@
     "spacedUpperExamples": [],
     "spacedLowerSequences": 0,
     "spacedLowerExamples": [],
-    "softHyphens": 0,
-    "softHyphenExamples": [],
+    "linebreakHyphens": 0,
+    "linebreakHyphenExamples": [],
+    "unicodeSoftHyphens": 0,
+    "nbspChars": 0,
+    "zwspChars": 0,
+    "bomChars": 0,
+    "tabChars": 0,
+    "strayFormfeeds": 0,
     "longBlocks": 1,
+    "longBlockSamples": [
+      "Demystifying the Machine: A Collaborative Exploration of Artificial Intelligence with Leading AI Models This groundbreak\u2026"
+    ],
+    "longBlockPunctDensities": [
+      0.8
+    ],
     "visualPageMarkers": 0,
     "file": "Copy of AI Book Collaboration Project Test.pdf",
     "fileType": "pdf"
   },
   {
     "title": "Cryptography for Dummies",
-    "totalChars": 668129,
+    "totalChars": 668102,
     "spacedUpperSequences": 0,
     "spacedUpperExamples": [],
     "spacedLowerSequences": 0,
     "spacedLowerExamples": [],
-    "softHyphens": 0,
-    "softHyphenExamples": [],
+    "linebreakHyphens": 0,
+    "linebreakHyphenExamples": [],
+    "unicodeSoftHyphens": 0,
+    "nbspChars": 0,
+    "zwspChars": 0,
+    "bomChars": 0,
+    "tabChars": 0,
+    "strayFormfeeds": 0,
     "longBlocks": 1,
+    "longBlockSamples": [
+      "This document was created by an unregistered ChmMagic, please go to http://www.bisenter.com to register it. Thanks. . .C\u2026"
+    ],
+    "longBlockPunctDensities": [
+      1.1
+    ],
     "visualPageMarkers": 0,
     "file": "Cryptography for Dummies.pdf",
     "fileType": "pdf"
@@ -47,36 +91,62 @@
   },
   {
     "title": "GEBen",
-    "totalChars": 1050561,
+    "totalChars": 1050505,
     "spacedUpperSequences": 0,
     "spacedUpperExamples": [],
     "spacedLowerSequences": 1,
     "spacedLowerExamples": [
       "q q q"
     ],
-    "softHyphens": 0,
-    "softHyphenExamples": [],
+    "linebreakHyphens": 0,
+    "linebreakHyphenExamples": [],
+    "unicodeSoftHyphens": 0,
+    "nbspChars": 0,
+    "zwspChars": 0,
+    "bomChars": 0,
+    "tabChars": 0,
+    "strayFormfeeds": 0,
     "longBlocks": 1,
+    "longBlockSamples": [
+      "DOUGLAS R.HOFSTADTER G\u00d6DEL,ESCHER,BACH: ANETERNAL GOLDEN BRAID A META FUGUE ON MINDS AND MACHINES INTHE SPIRITOF LEWIS C\u2026"
+    ],
+    "longBlockPunctDensities": [
+      1.1
+    ],
     "visualPageMarkers": 0,
     "file": "GEBen.pdf",
     "fileType": "pdf"
   },
   {
     "title": "Illuminatus TRILOGY EBOOK",
-    "totalChars": 1646997,
+    "totalChars": 1646915,
     "spacedUpperSequences": 0,
     "spacedUpperExamples": [],
     "spacedLowerSequences": 0,
     "spacedLowerExamples": [],
-    "softHyphens": 41,
-    "softHyphenExamples": [
-      "in- the",
-      "money- and",
-      "UltramicroProgrammer- was",
-      "earth- wide",
-      "Mal- like"
-    ],
+    "linebreakHyphens": 0,
+    "linebreakHyphenExamples": [],
+    "unicodeSoftHyphens": 0,
+    "nbspChars": 0,
+    "zwspChars": 0,
+    "bomChars": 0,
+    "tabChars": 0,
+    "strayFormfeeds": 0,
     "longBlocks": 470,
+    "longBlockSamples": [
+      "This book was produced in EPUB format by the Internet Archive.\nThe book pages were scanned and converted to EPUB format \u2026",
+      "Illuminatus! Trilogy Illuminatus! Trilogy Robert Shea and Robert Anton Wilson Copyright 1975 Ebook ver. 1.1 The Illumina\u2026",
+      "Illuminatus! Trilogy Seite 2 von 470 THE FIRST TRIP, OR KETHER From Dealey Plaza To Watergate ... The Purple Sage opened\u2026",
+      "Illuminatus! Trilogy Seite 3 von 470 twinge. But, wait, here is another performer in our circus, and one of the most int\u2026",
+      "Illuminatus! Trilogy Seite 4 von 470 \"Um,\" she says, satisfied, and turns over into deep sleep again. I washed my face s\u2026"
+    ],
+    "longBlockPunctDensities": [
+      0.9,
+      0.4,
+      0.8,
+      1.0,
+      1.7
+    ],
     "visualPageMarkers": 0,
     "file": "Illuminatus TRILOGY EBOOK.epub",
     "fileType": "epub"
@@ -88,9 +158,21 @@
     "spacedUpperExamples": [],
     "spacedLowerSequences": 0,
     "spacedLowerExamples": [],
-    "softHyphens": 0,
-    "softHyphenExamples": [],
-    "longBlocks": 3,
+    "linebreakHyphens": 0,
+    "linebreakHyphenExamples": [],
+    "unicodeSoftHyphens": 0,
+    "nbspChars": 0,
+    "zwspChars": 0,
+    "bomChars": 0,
+    "tabChars": 0,
+    "strayFormfeeds": 0,
+    "longBlocks": 1,
+    "longBlockSamples": [
+      "SARGE DE 1060.00000 TOP SECRET//COMINT//REL TO USA, AUS, CAN, GBR, NZL \u2022 United States Cryptologic History Series VI Vol\u2026"
+    ],
+    "longBlockPunctDensities": [
+      2.1
+    ],
     "visualPageMarkers": 0,
     "file": "Learning_from_the_Enemy.pdf",
     "fileType": "pdf"
@@ -102,9 +184,21 @@
     "spacedUpperExamples": [],
     "spacedLowerSequences": 0,
     "spacedLowerExamples": [],
-    "softHyphens": 0,
-    "softHyphenExamples": [],
+    "linebreakHyphens": 0,
+    "linebreakHyphenExamples": [],
+    "unicodeSoftHyphens": 0,
+    "nbspChars": 0,
+    "zwspChars": 0,
+    "bomChars": 0,
+    "tabChars": 0,
+    "strayFormfeeds": 0,
     "longBlocks": 1,
+    "longBlockSamples": [
+      "Measure What 2.4512 in Matters 3.8701 in How Google, Bono, and the Gates Foundation Rock the World with OKRs John Doerr \u2026"
+    ],
+    "longBlockPunctDensities": [
+      1.1
+    ],
     "visualPageMarkers": 0,
     "file": "Measure What Matters - John Doerr.pdf",
     "fileType": "pdf"

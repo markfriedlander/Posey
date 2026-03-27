@@ -2,7 +2,9 @@
 
 ## Current Target
 
-Core format and playback stable on hardware. Text-quality audit complete across 7 of 8 test materials. Soft-hyphen normalization fixed (was silently broken — regex ran before newline→space conversion). EPUB import fixed (any image-only chapter killed the whole import). PDF path-metadata title fixed. Next: discuss and fix PDF/EPUB block segmentation (long highlight blocks defeating read-along — now confirmed affecting Illuminatus EPUB with 470 long-blocks, not just typeset PDFs).
+Comprehensive normalization pass complete (2026-03-27). All importers now consistently handle `\u{00A0}` (no-break space), `\u{00AD}` (Unicode soft hyphen), and excess whitespace. EPUB/HTML normalizer now strips line-break hyphens. PDF normalizer now collapses spaced digit sequences (`1 9 4 5` → `1945`). Audit tool expanded with 6 new artifact checks, punctuation-density analysis of long blocks, and sample content for diagnostics.
+
+**Block segmentation is now the top open issue.** Architecture discussion in progress — see DECISIONS.md and below. Two-phase approach proposed: (A) smarter SentenceSegmenter fallback for punctuation-poor text, (B) decouple TTS utterance from highlight unit for optional paragraph-mode playback.
 
 ## Priority Order
 
@@ -23,11 +25,15 @@ Core format and playback stable on hardware. Text-quality audit complete across 
    - OCR for scanned PDFs: **Done.**
    - visual-only pages: detected, rendered as PNG at 2× via `PDFPage.thumbnail`, stored as BLOBs in SQLite, displayed inline with tap-to-expand zoom sheet
    - spaced-letter artifacts (`C O N T E N T S`): **Fixed** at normalization.
+   - spaced-digit artifacts (`1 9 4 5`): **Fixed** at normalization (`collapseSpacedDigits`).
    - line-break hyphen artifacts (`fas- cism`): **Fixed** at normalization.
-   - **Open: PDF block segmentation.** Typeset PDFs often produce large undifferentiated text chunks that NLTokenizer cannot split (no sentence-ending punctuation). Results in highlight blocks spanning a full screen, defeating read-along. Needs architectural discussion before fixing — options are smarter normalization or a length-based segmenter fallback.
+   - Unicode soft-hyphen (`\u{00AD}`): **Fixed** — stripped in PDF, HTML, EPUB, TXT, RTF, DOCX.
+   - Residual: accented characters (`Á`) break `collapseSpacedLetters` (requires Unicode-aware `\p{Lu}` matching — deferred, higher risk).
+   - Residual: `WORD - WORD` (space-hyphen-space) artifact — rare, deferred.
+   - **Open: PDF/EPUB block segmentation.** Long highlight blocks defeating read-along. In architectural discussion.
 11. Next up (in rough priority order):
-   - Text-quality audit: **Done.** Soft-hyphen normalization fixed, EPUB import fixed, PDF path-title fallback added. See `tools/audit_report.json`.
-   - Block segmentation: discuss and fix — now confirmed as the top quality issue across PDFs and EPUBs. Illuminatus EPUB has 470 long-blocks (>800 chars each). Needs architectural approach: smarter normalization, length-based sentence splitter fallback, or a hybrid.
+   - Text-quality audit: **Pass 2 complete.** Normalization consistent across all 6 importers. Audit tool expanded. See `tools/audit_report.json`.
+   - Block segmentation: **In architectural discussion.** Two-phase approach: (A) SentenceSegmenter fallback for punctuation-poor text; (B) optional utterance grouping to decouple TTS unit from highlight unit. Motion mode requires sentence-level highlighting as a hard constraint. Per-document policy override planned.
    - inline images for EPUB/DOCX/HTML: generalize the PDF visual-stop + image pattern to other formats
    - Ask Posey: Apple Foundation Models integration (on-device, offline)
    - document deletion: **Done.**

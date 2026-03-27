@@ -126,23 +126,55 @@ def _state() -> dict:
 
 _TEST_MATERIALS_DIR = os.path.join(os.path.dirname(_SCRIPT_DIR), "Posey Test Materials")
 
-def _audit_text(display_text: str, title: str) -> dict:
+def _audit_text(display_text: str, title: str, file_type: str = "") -> dict:
     """Run heuristic checks on extracted display text and return a report dict."""
     import re
 
-    lines = display_text.splitlines()
     total_chars = len(display_text)
 
     # Spaced-letter sequences: "I N T R O D U C T I O N"
     spaced_upper = re.findall(r'(?<![A-Z])[A-Z](?: [A-Z]){2,}(?![A-Z])', display_text)
     spaced_lower = re.findall(r'(?<![a-z])[a-z](?: [a-z]){2,}(?![a-z])', display_text)
 
-    # Line-break hyphens: "fas- cism"
-    soft_hyphens = re.findall(r'[A-Za-z]+-\s[a-z]+', display_text)
+    # Line-break hyphens: "fas- cism" (ASCII hyphen + whitespace + lowercase word)
+    linebreak_hyphens = re.findall(r'[A-Za-z]+-\s[a-z]+', display_text)
 
-    # Long blocks (segments > 800 chars between page markers or double-newlines)
-    long_blocks = [b for b in re.split(r'\[\[POSEY|\\f|\n\n', display_text)
-                   if len(b.strip()) > 800]
+    # Unicode soft hyphens (U+00AD) — should be stripped at normalization
+    unicode_soft_hyphens = re.findall('\u00ad', display_text)
+
+    # Non-breaking spaces (U+00A0) — should be converted to regular spaces
+    nbsp_chars = re.findall('\u00a0', display_text)
+
+    # Zero-width spaces (U+200B) and zero-width non-joiners (U+200C)
+    zwsp_chars = re.findall('[\u200b\u200c]', display_text)
+
+    # BOM / zero-width no-break space (U+FEFF)
+    bom_chars = re.findall('\ufeff', display_text)
+
+    # Tab characters (should be normalised to spaces)
+    tab_count = display_text.count('\t')
+
+    # Form-feed characters outside POSEY visual-page markers.
+    # PDFs legitimately use \x0c as the page separator in displayText — don't flag those.
+    # For all other formats a form-feed is noise (e.g. old Unix files, man pages).
+    if file_type.lower() == "pdf":
+        stray_formfeeds = 0   # all \x0c in PDF displayText are intentional page separators
+    else:
+        text_sans_markers = re.sub(r'\[\[POSEY[^\]]*\]\]', '', display_text)
+        stray_formfeeds = text_sans_markers.count('\x0c')
+
+    # Long blocks: paragraphs > 800 chars between visual-page markers or double-newlines.
+    # Split on complete [[POSEY...]] markers and \n\n only — NOT on \x0c (PDF page separator).
+    # A long block signals that SentenceSegmenter will have to work hard; whether NLTokenizer
+    # succeeds depends on punctuation density (see longBlockPunctDensity below).
+    raw_blocks = re.split(r'\[\[POSEY[^\]]*\]\]|\n\n', display_text)
+    long_block_items = [b.strip() for b in raw_blocks if len(b.strip()) > 800]
+    long_block_samples = [b[:120] + "…" if len(b) > 120 else b for b in long_block_items[:5]]
+    # Punctuation density for long blocks: periods + ! + ? per 100 chars.
+    # > 2.0 → NLTokenizer will likely split fine. < 0.5 → likely produces one giant segment.
+    def punct_density(s: str) -> float:
+        return round(100.0 * sum(s.count(c) for c in ".!?") / max(len(s), 1), 1)
+    long_block_punct_densities = [punct_density(b) for b in long_block_items[:5]]
 
     # Visual page markers
     visual_pages = re.findall(r'\[\[POSEY_VISUAL_PAGE:\d+:[^\]]+\]\]', display_text)
@@ -154,9 +186,17 @@ def _audit_text(display_text: str, title: str) -> dict:
         "spacedUpperExamples": spaced_upper[:5],
         "spacedLowerSequences": len(spaced_lower),
         "spacedLowerExamples": spaced_lower[:5],
-        "softHyphens": len(soft_hyphens),
-        "softHyphenExamples": soft_hyphens[:5],
-        "longBlocks": len(long_blocks),
+        "linebreakHyphens": len(linebreak_hyphens),
+        "linebreakHyphenExamples": linebreak_hyphens[:5],
+        "unicodeSoftHyphens": len(unicode_soft_hyphens),
+        "nbspChars": len(nbsp_chars),
+        "zwspChars": len(zwsp_chars),
+        "bomChars": len(bom_chars),
+        "tabChars": tab_count,
+        "strayFormfeeds": stray_formfeeds,
+        "longBlocks": len(long_block_items),
+        "longBlockSamples": long_block_samples,
+        "longBlockPunctDensities": long_block_punct_densities,
         "visualPageMarkers": len(visual_pages),
     }
 
@@ -203,7 +243,7 @@ def run_audit(verbose: bool = False) -> None:
 
         text_result = _command(f"GET_TEXT:{doc_id}")
         display_text = text_result.get("displayText", "")
-        audit = _audit_text(display_text, result["title"])
+        audit = _audit_text(display_text, result["title"], file_type=result.get("fileType", ""))
         audit["file"] = fname
         audit["fileType"] = result.get("fileType", "?")
         results.append(audit)
@@ -212,18 +252,31 @@ def run_audit(verbose: bool = False) -> None:
         issues = []
         if audit["spacedUpperSequences"]: issues.append(f"{audit['spacedUpperSequences']} spaced-upper")
         if audit["spacedLowerSequences"]: issues.append(f"{audit['spacedLowerSequences']} spaced-lower")
-        if audit["softHyphens"]:         issues.append(f"{audit['softHyphens']} soft-hyphens")
-        if audit["longBlocks"]:          issues.append(f"{audit['longBlocks']} long-blocks")
-        if audit["visualPageMarkers"]:   issues.append(f"{audit['visualPageMarkers']} visual-pages")
+        if audit["linebreakHyphens"]:     issues.append(f"{audit['linebreakHyphens']} linebreak-hyphens")
+        if audit["unicodeSoftHyphens"]:   issues.append(f"{audit['unicodeSoftHyphens']} unicode-soft-hyphens")
+        if audit["nbspChars"]:            issues.append(f"{audit['nbspChars']} nbsp")
+        if audit["zwspChars"]:            issues.append(f"{audit['zwspChars']} zwsp")
+        if audit["bomChars"]:             issues.append(f"{audit['bomChars']} bom")
+        if audit["tabChars"]:             issues.append(f"{audit['tabChars']} tabs")
+        if audit["strayFormfeeds"]:       issues.append(f"{audit['strayFormfeeds']} stray-formfeeds")
+        if audit["longBlocks"]:           issues.append(f"{audit['longBlocks']} long-blocks")
+        if audit["visualPageMarkers"]:    issues.append(f"{audit['visualPageMarkers']} visual-pages")
         print(f"     {'⚠  ' + ', '.join(issues) if issues else '✓  Clean'}")
 
         if verbose and issues:
             if audit["spacedUpperExamples"]:
-                print(f"        Spaced upper: {audit['spacedUpperExamples']}")
+                print(f"        Spaced upper:    {audit['spacedUpperExamples']}")
             if audit["spacedLowerExamples"]:
-                print(f"        Spaced lower: {audit['spacedLowerExamples']}")
-            if audit["softHyphenExamples"]:
-                print(f"        Soft hyphens: {audit['softHyphenExamples']}")
+                print(f"        Spaced lower:    {audit['spacedLowerExamples']}")
+            if audit["linebreakHyphenExamples"]:
+                print(f"        LB hyphens:      {audit['linebreakHyphenExamples']}")
+            if audit["longBlockSamples"]:
+                densities = audit.get("longBlockPunctDensities", [])
+                print(f"        Long-block samples (punct/100chars):")
+                for i, s in enumerate(audit["longBlockSamples"]):
+                    d = densities[i] if i < len(densities) else "?"
+                    flag = " ⚠ LOW" if isinstance(d, float) and d < 0.5 else ""
+                    print(f"          · [{d}]{flag} {repr(s)}")
         print()
 
     # Write report

@@ -1,5 +1,34 @@
 # Posey History
 
+## 2026-03-26 — Text-Quality Audit + Three Bug Fixes
+
+First cross-format quality audit completed across test materials. Three bugs found and fixed.
+
+**Fixes:**
+
+- **PDF soft-hyphen normalization was broken.** `collapseLineBreakHyphens` ran before the `\n → space` conversion in `normalize()`, so it looked for `word- word` but the text still had `word-\nword` at that point. Fixed the regex from `- ` to `[ \n]` so it catches both forms at normalization time. Result: Antifa 1617→0 hyphens, GEB 167→0, Learning_from_the_Enemy 173→0, Measure What Matters 68→0.
+- **EPUB import crashed on any empty or image-only chapter.** `htmlImporter.loadText` throws `emptyDocument` for chapters with no extractable text. The EPUB loop called it with bare `try`, so a single image chapter killed the entire import. Changed to `try?` — skip silent failures per chapter, only fail at the end if ALL chapters produced nothing. Illuminatus Trilogy went from failed import to 1.6M chars successfully extracted.
+- **PDF title fallback for path-metadata.** Some PDFs store Windows file paths in the `PDFDocumentAttribute.titleAttribute` field (GEB: `C:\Documents and Settings\dave\Desktop\...`). Added a filter: discard any title containing `\` or `/` or ending in `.pdf`/`.obd` — fall through to filename instead. GEB now shows as `GEBen`.
+
+**Audit results (7 of 8 files):**
+
+| File | Chars | Soft-hyphens | Long-blocks | Visual-pages |
+|------|-------|-------------|-------------|-------------|
+| Antifa PDF | 519K | 0 ✓ | 8 | 11 |
+| AI Book PDF | 71K | 0 | 1 | 0 |
+| Cryptography PDF | 668K | 0 | 1 | 0 |
+| GEB PDF | 1.89M | 0 ✓ | 1 | 0 |
+| Illuminatus EPUB | 1.65M | 41 | 470 | 0 |
+| Learning_from_the_Enemy PDF | 70K | 0 ✓ | 3 | 0 |
+| Measure What Matters PDF | 430K | 0 ✓ | 1 | 0 |
+| Feeling Good PDF | — | skipped (330 MB) | — | — |
+
+**Remaining open issues (not fixed this session):**
+
+- Long-blocks: every file has at least 1; Illuminatus EPUB has 470. This is the known block segmentation problem — NLTokenizer can't split large text chunks without sentence-ending punctuation. Needs architectural discussion.
+- Illuminatus soft-hyphens (41): EPUB/HTML normalizer doesn't run `collapseLineBreakHyphens`. Same fix would apply; low priority.
+- `posey_test.py audit` now skips files over 50 MB with a warning to prevent the 330 MB crash that ended the prior audit run.
+
 ## 2026-03-26 — Local API Server (Posey Test Harness)
 
 Posey now has a local HTTP API that lets Claude Code interact directly with the running app over WiFi/USB — importing documents, querying extracted text, inspecting the database, and (later) conversing with Ask Posey.

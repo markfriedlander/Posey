@@ -49,8 +49,9 @@ struct EPUBDocumentImporter {
                 continue
             }
 
-            let chapterText = try htmlImporter.loadText(fromData: chapterData)
-            chapterTexts.append(chapterText)
+            if let chapterText = try? htmlImporter.loadText(fromData: chapterData) {
+                chapterTexts.append(chapterText)
+            }
         }
 
         let normalized = normalize(chapterTexts.joined(separator: "\n\n"))

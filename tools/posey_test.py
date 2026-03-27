@@ -183,10 +183,16 @@ def run_audit(verbose: bool = False) -> None:
     print("  ⚙  RESET_ALL")
     _command("RESET_ALL")
 
+    _MAX_MB = 50
+
     for fname in files:
         fpath = os.path.join(_TEST_MATERIALS_DIR, fname)
         size_mb = os.path.getsize(fpath) / 1_048_576
         print(f"  ▶  {fname} ({size_mb:.1f} MB)")
+        if size_mb > _MAX_MB:
+            print(f"     ⚠  Skipped — {size_mb:.0f} MB exceeds {_MAX_MB} MB limit (too large for in-memory transfer)\n")
+            results.append({"file": fname, "error": f"skipped: {size_mb:.0f} MB > {_MAX_MB} MB limit"})
+            continue
         result = _import_file(fpath)
         if not result.get("success"):
             print(f"     ✗  Import failed: {result.get('error', result)}")

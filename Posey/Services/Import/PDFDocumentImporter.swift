@@ -150,10 +150,15 @@ extension PDFDocumentImporter {
             .joined(separator: "\u{000C}")
 
         let plainText = readableTextPages.joined(separator: "\n\n")
-        let title = document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String
+        let rawTitle = (document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Discard titles that look like file paths (Windows or Unix) — use filename fallback instead.
+        let title: String? = rawTitle.flatMap { t in
+            (t.contains("\\") || t.contains("/") || t.hasSuffix(".pdf") || t.hasSuffix(".obd")) ? nil : t
+        }
 
         return ParsedPDFDocument(
-            title: title?.trimmingCharacters(in: .whitespacesAndNewlines),
+            title: title,
             displayText: displayText,
             plainText: plainText,
             images: imageRecords
@@ -281,7 +286,7 @@ extension PDFDocumentImporter {
     /// Only fires when a lowercase continuation follows "- ", distinguishing
     /// line-break hyphens from intentional compound words like "anti-fascist".
     private func collapseLineBreakHyphens(_ text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z]+)- ([a-z]+)"#) else { return text }
+        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z]+)-[ \n]([a-z]+)"#) else { return text }
         return regex.stringByReplacingMatches(
             in: text,
             range: NSRange(text.startIndex..., in: text),

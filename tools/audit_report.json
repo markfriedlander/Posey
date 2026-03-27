@@ -1,0 +1,112 @@
+[
+  {
+    "title": "Antifa, The Anti-Fascist Handbook",
+    "totalChars": 519579,
+    "spacedUpperSequences": 0,
+    "spacedUpperExamples": [],
+    "spacedLowerSequences": 0,
+    "spacedLowerExamples": [],
+    "softHyphens": 0,
+    "softHyphenExamples": [],
+    "longBlocks": 8,
+    "visualPageMarkers": 11,
+    "file": "Antifa, The Anti-Fascist Handbook.pdf",
+    "fileType": "pdf"
+  },
+  {
+    "title": "Copy of AI Book Collaboration Project Test",
+    "totalChars": 71321,
+    "spacedUpperSequences": 0,
+    "spacedUpperExamples": [],
+    "spacedLowerSequences": 0,
+    "spacedLowerExamples": [],
+    "softHyphens": 0,
+    "softHyphenExamples": [],
+    "longBlocks": 1,
+    "visualPageMarkers": 0,
+    "file": "Copy of AI Book Collaboration Project Test.pdf",
+    "fileType": "pdf"
+  },
+  {
+    "title": "Cryptography for Dummies",
+    "totalChars": 668129,
+    "spacedUpperSequences": 0,
+    "spacedUpperExamples": [],
+    "spacedLowerSequences": 0,
+    "spacedLowerExamples": [],
+    "softHyphens": 0,
+    "softHyphenExamples": [],
+    "longBlocks": 1,
+    "visualPageMarkers": 0,
+    "file": "Cryptography for Dummies.pdf",
+    "fileType": "pdf"
+  },
+  {
+    "file": "David Burns - Feeling Good_text.pdf",
+    "error": "skipped: 330 MB > 50 MB limit"
+  },
+  {
+    "title": "GEBen",
+    "totalChars": 1050561,
+    "spacedUpperSequences": 0,
+    "spacedUpperExamples": [],
+    "spacedLowerSequences": 1,
+    "spacedLowerExamples": [
+      "q q q"
+    ],
+    "softHyphens": 0,
+    "softHyphenExamples": [],
+    "longBlocks": 1,
+    "visualPageMarkers": 0,
+    "file": "GEBen.pdf",
+    "fileType": "pdf"
+  },
+  {
+    "title": "Illuminatus TRILOGY EBOOK",
+    "totalChars": 1646997,
+    "spacedUpperSequences": 0,
+    "spacedUpperExamples": [],
+    "spacedLowerSequences": 0,
+    "spacedLowerExamples": [],
+    "softHyphens": 41,
+    "softHyphenExamples": [
+      "in- the",
+      "money- and",
+      "UltramicroProgrammer- was",
+      "earth- wide",
+      "Mal- like"
+    ],
+    "longBlocks": 470,
+    "visualPageMarkers": 0,
+    "file": "Illuminatus TRILOGY EBOOK.epub",
+    "fileType": "epub"
+  },
+  {
+    "title": "Learning_from_the_Enemy",
+    "totalChars": 70342,
+    "spacedUpperSequences": 0,
+    "spacedUpperExamples": [],
+    "spacedLowerSequences": 0,
+    "spacedLowerExamples": [],
+    "softHyphens": 0,
+    "softHyphenExamples": [],
+    "longBlocks": 3,
+    "visualPageMarkers": 0,
+    "file": "Learning_from_the_Enemy.pdf",
+    "fileType": "pdf"
+  },
+  {
+    "title": "Measure What Matters",
+    "totalChars": 430039,
+    "spacedUpperSequences": 0,
+    "spacedUpperExamples": [],
+    "spacedLowerSequences": 0,
+    "spacedLowerExamples": [],
+    "softHyphens": 0,
+    "softHyphenExamples": [],
+    "longBlocks": 1,
+    "visualPageMarkers": 0,
+    "file": "Measure What Matters - John Doerr.pdf",
+    "fileType": "pdf"
+  }
+]

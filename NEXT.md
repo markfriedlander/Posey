@@ -2,7 +2,7 @@
 
 ## Current Target
 
-Core format and playback stable on hardware. Tier 1 search done. Inline PDF image rendering done. Local API server live on device — CC can now interact directly with Posey without relay. Next: run the full text-quality audit across test materials (`python3 tools/posey_test.py audit`), then address PDF block segmentation (large highlight blocks defeating read-along).
+Core format and playback stable on hardware. Text-quality audit complete across 7 of 8 test materials. Soft-hyphen normalization fixed (was silently broken — regex ran before newline→space conversion). EPUB import fixed (any image-only chapter killed the whole import). PDF path-metadata title fixed. Next: discuss and fix PDF/EPUB block segmentation (long highlight blocks defeating read-along — now confirmed affecting Illuminatus EPUB with 470 long-blocks, not just typeset PDFs).
 
 ## Priority Order
 
@@ -26,8 +26,8 @@ Core format and playback stable on hardware. Tier 1 search done. Inline PDF imag
    - line-break hyphen artifacts (`fas- cism`): **Fixed** at normalization.
    - **Open: PDF block segmentation.** Typeset PDFs often produce large undifferentiated text chunks that NLTokenizer cannot split (no sentence-ending punctuation). Results in highlight blocks spanning a full screen, defeating read-along. Needs architectural discussion before fixing — options are smarter normalization or a length-based segmenter fallback.
 11. Next up (in rough priority order):
-   - Run `python3 tools/posey_test.py audit` across the 10 test materials — first real cross-format quality audit
-   - PDF block segmentation: discuss and fix (prerequisite for GEB-quality read-along experience)
+   - Text-quality audit: **Done.** Soft-hyphen normalization fixed, EPUB import fixed, PDF path-title fallback added. See `tools/audit_report.json`.
+   - Block segmentation: discuss and fix — now confirmed as the top quality issue across PDFs and EPUBs. Illuminatus EPUB has 470 long-blocks (>800 chars each). Needs architectural approach: smarter normalization, length-based sentence splitter fallback, or a hybrid.
    - inline images for EPUB/DOCX/HTML: generalize the PDF visual-stop + image pattern to other formats
    - Ask Posey: Apple Foundation Models integration (on-device, offline)
    - document deletion: **Done.**

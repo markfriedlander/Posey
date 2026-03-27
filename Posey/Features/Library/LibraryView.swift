@@ -70,6 +70,18 @@ struct LibraryView: View {
             }
             .navigationTitle("Posey")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        viewModel.toggleLocalAPI()
+                    } label: {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .foregroundStyle(viewModel.localAPIEnabled
+                                             ? Color.primary
+                                             : Color.primary.opacity(0.25))
+                    }
+                    .accessibilityIdentifier("library.apiToggle")
+                    .accessibilityLabel(viewModel.localAPIEnabled ? "API On" : "API Off")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Import File") {
                         isImporting = true
@@ -105,6 +117,10 @@ struct LibraryView: View {
             .task {
                 viewModel.loadDocuments()
                 maybeOpenFirstDocument()
+                // Auto-restart API server if it was enabled before app was killed.
+                if viewModel.localAPIEnabled && !viewModel.localAPIServer.isRunning {
+                    viewModel.toggleLocalAPI()
+                }
             }
             .onAppear {
                 viewModel.loadDocuments()
@@ -190,6 +206,8 @@ final class LibraryViewModel: ObservableObject {
     @Published var errorMessage = ""
     /// Non-nil while a PDF import is in progress. Drives the progress banner.
     @Published private(set) var pdfImportStatusMessage: String? = nil
+    /// Whether the local API server is running.
+    @AppStorage("localAPIEnabled") var localAPIEnabled: Bool = false
 
     let databaseManager: DatabaseManager
     private lazy var txtLibraryImporter    = TXTLibraryImporter(databaseManager: databaseManager)
@@ -199,6 +217,7 @@ final class LibraryViewModel: ObservableObject {
     private lazy var htmlLibraryImporter   = HTMLLibraryImporter(databaseManager: databaseManager)
     private lazy var epubLibraryImporter   = EPUBLibraryImporter(databaseManager: databaseManager)
     private lazy var pdfLibraryImporter    = PDFLibraryImporter(databaseManager: databaseManager)
+    let localAPIServer = LocalAPIServer()
 
     init(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
@@ -332,3 +351,165 @@ private enum LibraryImportError: LocalizedError {
 }
 
 // ========== BLOCK 04: LIBRARY IMPORT ERROR - END ==========
+
+// ========== BLOCK 05: LOCAL API SERVER - START ==========
+
+extension LibraryViewModel {
+
+    /// Toggle the local API server on or off. Prints connection info to console on start.
+    func toggleLocalAPI() {
+        if localAPIServer.isRunning {
+            localAPIServer.stop()
+            localAPIEnabled = false
+        } else {
+            localAPIServer.start(
+                commandHandler: { [weak self] cmd in
+                    await self?.executeAPICommand(cmd) ?? #"{"error":"unavailable"}"#
+                },
+                importHandler: { [weak self] filename, data in
+                    await self?.apiImport(filename: filename, data: data) ?? #"{"error":"unavailable"}"#
+                },
+                stateHandler: { [weak self] in
+                    await self?.apiState() ?? #"{"error":"unavailable"}"#
+                }
+            )
+            localAPIEnabled = true
+            print("PoseyAPI: \(localAPIServer.connectionInfo)")
+        }
+    }
+
+    // MARK: — Command handler
+
+    func executeAPICommand(_ command: String) async -> String {
+        let colonIdx = command.firstIndex(of: ":")
+        let verb = (colonIdx.map { String(command[..<$0]) } ?? command).uppercased()
+        let arg  = colonIdx.map { String(command[command.index(after: $0)...]) }
+
+        do {
+            switch verb {
+
+            case "LIST_DOCUMENTS":
+                let docs = try databaseManager.documents()
+                let arr: [[String: Any]] = docs.map {
+                    ["id": $0.id.uuidString, "title": $0.title,
+                     "fileType": $0.fileType, "characterCount": $0.characterCount,
+                     "importedAt": ISO8601DateFormatter().string(from: $0.importedAt)]
+                }
+                return json(arr)
+
+            case "GET_TEXT":
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Missing or invalid document ID"}"#
+                }
+                let docs = try databaseManager.documents()
+                guard let doc = docs.first(where: { $0.id == id }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                return json(["id": doc.id.uuidString, "title": doc.title,
+                             "fileType": doc.fileType, "displayText": doc.displayText])
+
+            case "GET_PLAIN_TEXT":
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Missing or invalid document ID"}"#
+                }
+                let docs = try databaseManager.documents()
+                guard let doc = docs.first(where: { $0.id == id }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                return json(["id": doc.id.uuidString, "title": doc.title,
+                             "fileType": doc.fileType, "plainText": doc.plainText])
+
+            case "DELETE_DOCUMENT":
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Missing or invalid document ID"}"#
+                }
+                let docs = try databaseManager.documents()
+                guard let doc = docs.first(where: { $0.id == id }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                try databaseManager.deleteDocument(doc)
+                loadDocuments()
+                return json(["deleted": true, "id": id.uuidString])
+
+            case "RESET_ALL":
+                let docs = try databaseManager.documents()
+                for doc in docs { try databaseManager.deleteDocument(doc) }
+                loadDocuments()
+                return json(["deleted": docs.count])
+
+            case "DB_STATS":
+                let docs = try databaseManager.documents()
+                var byType: [String: Int] = [:]
+                for doc in docs { byType[doc.fileType, default: 0] += 1 }
+                return json(["documentCount": docs.count, "byFileType": byType])
+
+            default:
+                return #"{"error":"Unknown command: \#(verb)"}"#
+            }
+        } catch {
+            return json(["error": error.localizedDescription])
+        }
+    }
+
+    // MARK: — Import handler
+
+    func apiImport(filename: String, data: Data) async -> String {
+        let ext = (filename as NSString).pathExtension.lowercased()
+        do {
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(filename)
+            try data.write(to: tempURL)
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            let doc: Document
+            if ext == "pdf" {
+                pdfImportStatusMessage = "API: Importing \(filename)\u{2026}"
+                defer { pdfImportStatusMessage = nil }
+                let parsed = try await parsePDFOffMainThread(url: tempURL) { [weak self] msg in
+                    Task { @MainActor [weak self] in self?.pdfImportStatusMessage = msg }
+                }
+                doc = try pdfLibraryImporter.persistParsedDocument(parsed, from: tempURL)
+            } else {
+                switch ext {
+                case "txt":             doc = try txtLibraryImporter.importDocument(from: tempURL)
+                case "md", "markdown":  doc = try markdownLibraryImporter.importDocument(from: tempURL)
+                case "rtf":             doc = try rtfLibraryImporter.importDocument(from: tempURL)
+                case "docx":            doc = try docxLibraryImporter.importDocument(from: tempURL)
+                case "html", "htm":     doc = try htmlLibraryImporter.importDocument(from: tempURL)
+                case "epub":            doc = try epubLibraryImporter.importDocument(from: tempURL)
+                default:                throw LibraryImportError.unsupportedFileType
+                }
+            }
+            loadDocuments()
+            return json(["success": true, "id": doc.id.uuidString,
+                         "title": doc.title, "fileType": doc.fileType,
+                         "characterCount": doc.characterCount])
+        } catch {
+            return json(["success": false, "error": error.localizedDescription])
+        }
+    }
+
+    // MARK: — State handler
+
+    func apiState() async -> String {
+        let docs = (try? databaseManager.documents()) ?? []
+        return json([
+            "apiEnabled": true,
+            "documentCount": docs.count,
+            "connectionInfo": localAPIServer.connectionInfo
+        ])
+    }
+
+    // MARK: — JSON helper
+
+    private func json(_ value: Any) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value,
+                                                     options: [.prettyPrinted, .sortedKeys]),
+              let str = String(data: data, encoding: .utf8) else {
+            return #"{"error":"JSON encoding failed"}"#
+        }
+        return str
+    }
+}
+
+// ========== BLOCK 05: LOCAL API SERVER - END ==========

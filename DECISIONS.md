@@ -300,6 +300,24 @@
 - Alternatives considered:
   - Per-document font size: rejected because the preference is about the reader's eyes, not the content.
 
+## 2026-03-26 — Build A Local HTTP API For Direct CC Interaction With The Running App
+
+- Status: Accepted
+- Decision: Build a local HTTP API server inside Posey (NWListener, port 8765, bearer-token auth) so Claude Code can interact directly with the running app on device — importing documents, reading extracted text, querying the DB, and eventually conversing with Ask Posey.
+- Rationale: Eliminates the human-relay loop for testing and tuning. CC can now run a full text-quality audit across 10 test files without Mark relaying a single screenshot. The same API will be the interface for tuning Ask Posey responses interactively. Pattern taken directly from Hal Universal where it proved out the architecture.
+- Alternatives considered:
+  - Mac-side script using PDFKit: adequate for text quality but can't test real device behavior, can't measure performance, and can't interact with the LLM.
+  - File-polling harness (Hal's legacy fallback): works but adds latency per turn and can't handle binary import.
+
+## 2026-03-26 — Store API Token In Keychain, Default Server Off
+
+- Status: Accepted
+- Decision: The API token is generated once, stored in the iOS Keychain, and persists across app launches. The server is off by default and must be explicitly enabled via the antenna toggle.
+- Rationale: Security (token never hardcoded, never regenerated), trust (no port opens unless user enables it), and consistency with Hal's proven approach. Default-off matters for App Store review and user trust.
+- Alternatives considered:
+  - Hardcoded token: rejected — unacceptable security practice.
+  - Regenerate token each launch: rejected — breaks the one-time setup workflow.
+
 ## 2026-03-25 — Expand V1 Scope To Include Ask Posey, In-Document Search, And OCR
 
 - Status: Accepted

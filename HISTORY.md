@@ -1,5 +1,38 @@
 # Posey History
 
+## 2026-03-26 — Local API Server (Posey Test Harness)
+
+Posey now has a local HTTP API that lets Claude Code interact directly with the running app over WiFi/USB — importing documents, querying extracted text, inspecting the database, and (later) conversing with Ask Posey.
+
+What changed:
+
+- `LocalAPIServer.swift` — new file under `Services/LocalAPI/`. NWListener-based HTTP server on port 8765. `@MainActor` class, no third-party dependencies. Keychain-backed bearer token (generated once, persists across launches). `getifaddrs` for LAN address discovery. Three endpoints: `POST /command`, `POST /import` (raw bytes + `X-Filename` header), `GET /state`.
+- `LibraryViewModel` gains `localAPIServer`, `localAPIEnabled` (`@AppStorage`), `toggleLocalAPI()`, `executeAPICommand()`, `apiImport()`, `apiState()`. Toggle uses `isRunning` (not `localAPIEnabled`) as the gate so auto-start on relaunch works correctly.
+- `LibraryView` toolbar: antenna icon (`antenna.radiowaves.left.and.right`) at top-left. Full opacity when server is running, 25% opacity when off. Tap to toggle.
+- `.task` modifier auto-restarts the server on app relaunch if it was enabled when the app was last killed.
+- `NSLocalNetworkUsageDescription` added to the app's Info.plist build settings — required for iOS to permit incoming TCP connections.
+- `.gitignore` created — excludes `Posey Test Materials/` (large test files) and standard Xcode detritus.
+- `tools/posey_test.py` — single durable Python test runner. Commands: `setup`, `state`, `cmd`, `ls`, `import`, `audit`. `audit` imports all files from `Posey Test Materials/`, runs text-quality heuristics (spaced letters, soft hyphens, long blocks, visual page markers), and writes `tools/audit_report.json`.
+
+Why this matters:
+
+- Eliminates the relay loop: CC can now import files, read extracted text, run quality checks, and inspect DB state directly from the Mac without Mark relaying screenshots. This is the foundation for tuning Ask Posey responses without a human in the middle of every test turn.
+- Pattern adapted from Hal Universal's `LocalAPIServer` (Block 32) — same NWListener / Keychain / bearer-token architecture, proven in production.
+
+Setup (one time per device, already done):
+
+```
+python3 tools/posey_test.py setup 169.254.82.33 8765 <token>
+```
+
+Then:
+
+```
+python3 tools/posey_test.py state        # verify connection
+python3 tools/posey_test.py ls           # list documents
+python3 tools/posey_test.py audit        # full text-quality audit of test materials
+```
+
 ## 2026-03-26 — PDF Text Normalization: Spaced Letters And Line-Break Hyphens
 
 Hardened the PDF text normalization pass with two new artifact fixes.

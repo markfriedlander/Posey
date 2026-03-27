@@ -1,0 +1,20 @@
+# Test materials — large files, not for version control
+Posey Test Materials/
+
+# API config — contains token, machine-local
+tools/.posey_api_config.json
+
+# Xcode
+*.xcuserstate
+xcuserdata/
+DerivedData/
+*.moved-aside
+*.pbxuser
+*.perspectivev3
+
+# Build output
+/tmp/PoseyDeviceDerived/
+*.ipa
+
+# macOS
+.DS_Store

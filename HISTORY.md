@@ -1,15 +1,23 @@
 # Posey History
 
-## 2026-03-27 — Image verification, mixed-content PDF pages, filename sanitization, EPUB TOC navigation surface
+## 2026-03-27 — Verification of image storage, mixed-content PDF, filename sanitization, EPUB TOC navigation
 
-**Image verification tooling (`tools/verify_images.py`):**
-New standalone script renders PDF pages on macOS using the same `PDFPage.thumbnail(of:for:)` call Posey uses, fetches stored PNG data from the device via `GET_IMAGE:<id>`, and compares: PNG header, non-trivial size, not all-white, dimensions match reference, byte-count ratio reasonable. Also added `GET_IMAGE`, `LIST_IMAGES`, `LIST_TOC` API commands and `imageIDs(for:)`, `tocEntries(for:)`, `insertTOCEntries(_:for:)` DB methods. All 11 Antifa visual-page images verified as correct and non-blank.
+**Image verification (confirmed with vision and pixel comparison):**
+Added `GET_IMAGE`, `LIST_IMAGES`, `LIST_TOC` API commands and `imageIDs(for:)`, `tocEntries(for:)`, `insertTOCEntries(_:for:)` DB methods. `tools/verify_images.py` added: renders PDF pages on macOS via Swift/PDFKit, fetches stored PNG from device via `GET_IMAGE`, and compares using a Swift pixel comparator (CoreGraphics RGBA bitmaps, MAE < 15.0/255 threshold).
 
-**Mixed-content PDF pages (text + image both preserved):**
+Direct visual verification result: All 11 Antifa visual-stop pages are genuinely blank pages (intentionally blank section-divider/verso pages in the physical book). Both stored images (17,246 B each, identical MD5) and macOS reference renders (20,265 B each, identical MD5) are blank white — they match. Byte-size difference is expected iOS vs macOS CoreGraphics rendering. GEB page 14 (mixed-content test) stored image confirmed correct: music staff figure plus full page text visible, matching reference render at 387,873 B.
+
+Note for future: Antifa's 11 visual stops are all blank — Posey will pause playback 11 times to show an empty white page. Blank pages are probably not worth presenting as visual stops; a minimum-content threshold for visual stops (similar to the OCR minimum-text threshold) could suppress these.
+
+**Mixed-content PDF pages (text + image both preserved — verified):**
 `PDFDocumentImporter` previously dropped inline images on pages where PDFKit found text. Pages with both text and embedded images (figures, charts) now preserve both: text flows into the reading stream, and the page is also rendered as a visual stop inline immediately after. Detection uses `CGPDFDictionaryApplyFunction` on the page's XObject resource dictionary to check for Image-type streams — fast, no rendering required.
 
-**General filename sanitization:**
+Verified with GEB (Gödel, Escher, Bach), which has pages containing both musical notation figures and prose text. Page 14 displayText was confirmed to contain text on both sides of `[[POSEY_VISUAL_PAGE:14:...]]`, and the stored image for that page shows the full page (music staff "Figure 3: The Royal Theme" plus Bach letter text) correctly.
+
+**General filename sanitization (verified with live API tests):**
 Replaced the narrow duplicate-extension check with `LibraryViewModel.sanitizeFilename(_:)`: strips null bytes, control characters, path separators (`/`, `\`), macOS-reserved characters (`:`, `|`, `?`, `*`, `<`, `>`, `"`), path traversal sequences (`..`), leading/trailing whitespace and dots, duplicate extensions, and truncates to 200 chars. Applied at the API import boundary and the PDF importer.
+
+Verified by sending bad filenames through the live API: `report/2024:final*.txt` → `report_2024_final_`; `../../../etc/passwd.txt` → `_._._etc_passwd`; `file\0name.txt` → `filename`; `  leading spaces.txt  ` → `leading spaces`; `...dotleader.txt` → `dotleader`; `The Clouds Of High-tech Copyright Law.pdf.pdf` imported successfully as type `pdf` (duplicate extension stripped before importer selection).
 
 **EPUB TOC as navigation surface (not silently skipped):**
 Previous session silently dropped EPUB TOC/nav documents. This session reverses that direction:
@@ -25,7 +33,8 @@ Previous session silently dropped EPUB TOC/nav documents. This session reverses 
 - `ReaderViewModel.jumpToTOCEntry(_:)` stops playback and jumps to the target sentence.
 - `TOCSheet` (BLOCK P3): list of chapter titles, tap to jump to section and dismiss.
 - Contents button (`list.bullet.indent`) in top chrome — only shown when `tocEntries` is non-empty.
-- Verified: Data Smog imports 38 unique TOC entries (42 raw minus 4 NCX duplicates) with correct increasing offsets from Cover (0) through About the Publisher (389 566).
+- Verified: Data Smog fresh import produces 38 unique TOC entries (0 duplicates — deduplication on `(title, offset)` confirmed working). Offsets verified against plainText: Chapter 1 (5,979) → "Chapter 1 Spammed! I opened the front door…"; Chapter 5 (110,119) → "Chapter 5 The Thunderbird Problem…"; Acknowledgments (317,342) → "Acknowledgments This book is a quilt…". All correct.
+- Potential fragility noted: `TOCSheet` uses `id: \.playOrder` in its List. If two entries ever share a playOrder value, the list will behave incorrectly. A composite id or a proper `Identifiable` conformance on `StoredTOCEntry` would be safer.
 
 ## 2026-03-27 — EPUB directory/image support, PDF image fix, highlight/scroll unification, OCR confidence gating, EPUB TOC filtering
 

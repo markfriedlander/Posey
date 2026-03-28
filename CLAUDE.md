@@ -210,6 +210,28 @@ The simulator is acceptable only when the device is genuinely unavailable
 (e.g. not connected, locked by another process). In that case, note the
 reason explicitly.
 
+**Autonomous verification via the local API — standing practice:**
+
+Before asking Mark to relay what the screen shows, use the available tools
+to verify correctness yourself:
+
+- **Text content**: `GET_TEXT:<doc_id>` returns displayText. Check for
+  visual page markers, correct structure, absence of artifacts.
+- **Import results**: `LIST_DOCUMENTS` or `GET_TEXT` confirm what was
+  stored — character count, title, file type, markers present.
+- **Image storage**: Visual page markers in displayText (`[[POSEY_VISUAL_PAGE:N:uuid]]`)
+  confirm the import path ran. The presence of a UUID (not just N) confirms
+  `renderPageToPNG` succeeded and `saveImages` was called. If the marker
+  has a UUID, the image is in `document_images`.
+- **Rendering**: macOS has PDFKit too. To verify a PDF page renders
+  correctly (not blank/white), render it locally using the same
+  `PDFPage.thumbnail` call and inspect the output image.
+
+Only escalate to Mark for things that genuinely require eyes on the
+physical screen: subjective feel, motion behavior, layout at actual device
+scale, accessibility, or anything that requires physically interacting with
+the running app.
+
 ---
 
 ## Engineering Principles

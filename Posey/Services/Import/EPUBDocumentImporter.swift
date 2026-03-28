@@ -261,6 +261,10 @@ private struct EPUBPackageDocument {
 
 private struct EPUBManifestItem {
     let href: String
+    /// MIME type from the manifest `media-type` attribute.
+    let mediaType: String
+    /// Space-separated properties string (e.g. "nav", "cover-image").
+    let properties: String
 }
 
 private final class EPUBContainerParser: NSObject, XMLParserDelegate {
@@ -296,6 +300,12 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
     private var collectingTitle = false
     private var currentTitle    = ""
 
+    /// Media types that are navigation/TOC documents rather than readable content.
+    private static let tocMediaTypes: Set<String> = [
+        "application/x-dtbncx+xml",       // EPUB 2 NCX table of contents
+        "application/oebps-package+xml",   // OPF package document itself
+    ]
+
     static func parse(_ data: Data) throws -> EPUBPackageDocument {
         let delegate = EPUBPackageParser()
         let parser   = XMLParser(data: data)
@@ -319,10 +329,19 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
         if matches(elementName, suffix: "item"),
            let id   = attributeDict["id"],
            let href = attributeDict["href"] {
-            manifestItems[id] = EPUBManifestItem(href: href); return
+            let mediaType  = attributeDict["media-type"] ?? ""
+            let properties = attributeDict["properties"] ?? ""
+            // Skip navigation/TOC documents — not readable content.
+            guard !Self.tocMediaTypes.contains(mediaType.lowercased()),
+                  !properties.lowercased().split(separator: " ").contains("nav") else { return }
+            manifestItems[id] = EPUBManifestItem(href: href, mediaType: mediaType, properties: properties)
+            return
         }
         if matches(elementName, suffix: "itemref"),
            let idref = attributeDict["idref"] {
+            // linear="no" items are out of the reading flow (cover pages, nav docs).
+            let linear = attributeDict["linear"] ?? "yes"
+            guard linear.lowercased() != "no" else { return }
             spineItemReferences.append(idref)
         }
     }

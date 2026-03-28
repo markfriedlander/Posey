@@ -178,8 +178,14 @@ extension PDFDocumentImporter {
 // ========== BLOCK 04: OCR - START ==========
 
 extension PDFDocumentImporter {
+    /// Minimum average Vision confidence to treat OCR output as readable text.
+    /// Pages below this threshold are garbled scan content — better shown as
+    /// a visual stop than read as potentially meaningless character soup.
+    private static let ocrConfidenceThreshold: Float = 0.75
+
     /// Renders the PDF page to a CGImage and runs Vision text recognition on it.
-    /// Returns normalised plain text, or an empty string if nothing could be read.
+    /// Returns normalised plain text, or an empty string if nothing could be read
+    /// or if the average recognition confidence is below `ocrConfidenceThreshold`.
     /// Runs synchronously — `VNImageRequestHandler.perform` blocks until complete.
     private func ocrText(from page: PDFPage) -> String {
         guard let image = renderPageToCGImage(page, colorSpace: CGColorSpaceCreateDeviceGray()) else { return "" }
@@ -191,8 +197,16 @@ extension PDFDocumentImporter {
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         guard (try? handler.perform([request])) != nil else { return "" }
 
-        let lines = (request.results ?? [])
-            .compactMap { $0.topCandidates(1).first?.string }
+        let observations = request.results ?? []
+        let candidates = observations.compactMap { $0.topCandidates(1).first }
+        guard !candidates.isEmpty else { return "" }
+
+        // Gate on average confidence. Low confidence = garbled scan or form
+        // page — surface as a visual block instead of reading garbage aloud.
+        let avgConfidence = candidates.map(\.confidence).reduce(0, +) / Float(candidates.count)
+        guard avgConfidence >= Self.ocrConfidenceThreshold else { return "" }
+
+        let lines = candidates.map(\.string)
         guard !lines.isEmpty else { return "" }
 
         return normalize(lines.joined(separator: " "))

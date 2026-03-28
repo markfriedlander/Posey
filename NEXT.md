@@ -2,9 +2,11 @@
 
 ## Current Target
 
-Three normalization passes complete (2026-03-27). All importers consistently handle all known Unicode artifacts. Phase A SentenceSegmenter implemented — all TTS segments capped at 600 chars. 18-file full audit complete including Feeling Good (329.8 MB). Remaining issues are structural (TOC long-blocks, scan-per-page EPUB) or irreducible OCR noise (Feeling Good exercise images).
+2026-03-27: EPUB directory support, EPUB inline images, PDF image persistence fix, OCR confidence gating, EPUB TOC filtering, highlight/scroll unification (Phase B), duplicate extension normalization. 20-file audit complete (added Data Smog, 4-Hour Body as directory EPUBs).
 
-**The core reading loop is now in solid shape across all supported formats.** Next focus: inline non-text element handling (images/figures pausing playback in EPUB/DOCX/HTML), then TTS voice and speed controls.
+**The read-along experience is now correct across all formats.** Highlight and scroll target exactly the sentence being spoken, not an entire paragraph. Inline images in EPUBs pause playback correctly. Visual PDF pages are stored and displayed.
+
+**Next focus:** PDF TOC detection/navigation (the one approved item remaining in the agreed sequence), then TTS voice and speed controls.
 
 ## Priority Order
 
@@ -32,11 +34,13 @@ Three normalization passes complete (2026-03-27). All importers consistently han
    - `¬` (U+00AC) as line-break hyphen: **Fixed** — caught by `collapseLineBreakHyphens`.
    - Cross-page-boundary hyphens: **Fixed** — second normalization pass after page join.
    - Residual: `WORD - WORD` (space-hyphen-space) artifact — rare, deferred.
-   - **Open: PDF/EPUB block segmentation.** Long highlight blocks defeating read-along. In architectural discussion.
+   - PDF/EPUB block segmentation (Phase B): **Done.** `splitParagraphBlocks()` in `ReaderViewModel` splits each paragraph DisplayBlock into per-TTS-segment rows — highlight and scroll target exactly what is being spoken.
+   - OCR confidence gating: **Done.** Pages with average Vision confidence < 0.75 become visual stops rather than text.
+   - OCR minimum text threshold: **Done.** Pages with < 10 OCR chars become visual stops.
 11. Next up (in rough priority order):
-   - Text-quality audit: **Pass 2 complete.** Normalization consistent across all 6 importers. Audit tool expanded. See `tools/audit_report.json`.
-   - Block segmentation: **In architectural discussion.** Two-phase approach: (A) SentenceSegmenter fallback for punctuation-poor text; (B) optional utterance grouping to decouple TTS unit from highlight unit. Motion mode requires sentence-level highlighting as a hard constraint. Per-document policy override planned.
-   - inline images for EPUB/DOCX/HTML: generalize the PDF visual-stop + image pattern to other formats
+   - Text-quality audit: **Pass 3 complete.** 20-file corpus. See `tools/audit_report.json`.
+   - PDF TOC detection/navigation: detect TOC pages at import, offer skip/navigate surface.
+   - inline images for DOCX/HTML: EPUB and PDF done; DOCX and HTML remain
    - Ask Posey: Apple Foundation Models integration (on-device, offline)
    - document deletion: **Done.**
    - font size persistence: **Done.**

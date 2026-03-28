@@ -1,5 +1,37 @@
 # Posey History
 
+## 2026-03-27 — EPUB directory/image support, PDF image fix, highlight/scroll unification, OCR confidence gating, EPUB TOC filtering
+
+**EPUB directory-format support:**
+`EPUBDocumentImporter` now detects directory-format EPUBs (common on macOS where `.epub` bundles appear as folders) via `isDirectory` resource key, routing them to a filesystem-based loading path. Data Smog (757 KB) and 4-Hour Body (6.5 MB) now import correctly. Audit tool updated to zip directory EPUBs in memory before API transfer.
+
+**EPUB inline image extraction:**
+`EPUBDocumentImporter` pre-processes chapter HTML to extract `<img>` tags, load image data via the entry loader, and replace each tag with a `\x0c[[POSEY_VISUAL_PAGE:0:uuid]]\x0c` marker before `NSAttributedString` processes it. `EPUBDisplayParser` (new file) splits EPUB displayText on form-feed, creating `.visualPlaceholder` blocks for markers and per-sentence `.paragraph` blocks for text. `EPUBLibraryImporter` updated to pass `displayText` separately from `plainText` and call `saveImages()`.
+
+**PDF visual page image persistence fix:**
+`PDFLibraryImporter.persistParsedDocument()` and `importDocument(title:fileName:rawData:)` were never calling `saveImages()`. All visual page images (Antifa: 11, Feeling Good: 16, etc.) were parsed but never stored in `document_images`. Fixed — `saveImages()` now called from both import paths.
+
+**OCR minimum text threshold:**
+Pages where Vision OCR returns fewer than 10 characters after normalization are now treated as visual stops rather than text content. This catches near-blank pages where OCR picks up a lone page number or roman numeral, which previously appeared as invisible text blocks (the "page 3 skipped" issue in Antifa).
+
+**OCR confidence gating:**
+Vision returns per-word confidence scores on `VNRecognizedText`. Pages where average confidence is below 0.75 now return empty string from `ocrText()` and become visual stops. This catches garbled scan content (form pages, low-quality scans) that would otherwise be read aloud as meaningless character soup.
+
+**EPUB TOC filtering:**
+`EPUBPackageParser` now captures `media-type` and `properties` on manifest items. Items with `media-type: application/x-dtbncx+xml` (NCX TOC) or `properties: nav` (EPUB 3 navigation document) are excluded from the manifest and cannot be referenced by the spine. `<itemref linear="no">` spine entries are also skipped — these are out-of-reading-flow items (cover pages, nav documents) per the EPUB spec.
+
+**Duplicate file extension normalization:**
+`apiImport()` and `PDFLibraryImporter.persistParsedDocument()` now strip doubled extensions (`report.pdf.pdf` → `report.pdf`) before storing filename and deriving the title fallback.
+
+**Highlight/scroll unification (Phase B):**
+`ReaderViewModel.splitParagraphBlocks()` replaces each `.paragraph` DisplayBlock with one sub-block per TTS segment that starts within it. Non-paragraph blocks (headings, images, bullets, quotes) pass through unchanged. After splitting, `isActive(block:)` returns true only for the block containing the active utterance — highlight and auto-scroll now target exactly what is being spoken rather than an entire paragraph. This fixes the core read-along experience across all PDF and EPUB documents.
+
+**CLAUDE.md:**
+Added "Autonomous verification via the local API" as a standing practice. Before asking Mark to relay screen state, use the API (`GET_TEXT`, `LIST_DOCUMENTS`), visual page marker inspection, or macOS-side PDF rendering to verify correctness. Only escalate to Mark for things that genuinely require eyes on the physical screen.
+
+**Audit result (20 files):**
+Data Smog: 392,686 chars, 4 visual-pages ✓. 4-Hour Body: 994,821 chars, 453 visual-pages ✓. All existing files unchanged.
+
 ## 2026-03-27 — Third Normalization Pass + Phase A Segmenter + Clipboard API
 
 **Normalization fixes (continued from earlier in same day):**

@@ -6,7 +6,7 @@
 
 **The read-along experience is now correct across all formats.** Highlight and scroll target exactly the sentence being spoken. Inline images in EPUBs pause playback correctly. Visual PDF pages are stored, displayed, and verified against macOS reference renders. EPUB TOC is now a live navigation surface, not a hole.
 
-**Next focus:** PDF TOC detection/navigation, then TTS voice and speed controls.
+**Next focus:** PDF TOC detection/navigation. TTS voice and speed controls are already complete (see HISTORY.md, 2026-03-25).
 
 ## Priority Order
 

@@ -2,11 +2,11 @@
 
 ## Current Target
 
-2026-03-27: EPUB directory support, EPUB inline images, PDF image persistence fix, OCR confidence gating, EPUB TOC filtering, highlight/scroll unification (Phase B), duplicate extension normalization. 20-file audit complete (added Data Smog, 4-Hour Body as directory EPUBs).
+2026-03-27: Image verification tooling, mixed-content PDF pages, general filename sanitization, EPUB TOC as navigation surface (NCX + EPUB 3 nav, Contents sheet with jump-to-chapter).
 
-**The read-along experience is now correct across all formats.** Highlight and scroll target exactly the sentence being spoken, not an entire paragraph. Inline images in EPUBs pause playback correctly. Visual PDF pages are stored and displayed.
+**The read-along experience is now correct across all formats.** Highlight and scroll target exactly the sentence being spoken. Inline images in EPUBs pause playback correctly. Visual PDF pages are stored, displayed, and verified against macOS reference renders. EPUB TOC is now a live navigation surface, not a hole.
 
-**Next focus:** PDF TOC detection/navigation (the one approved item remaining in the agreed sequence), then TTS voice and speed controls.
+**Next focus:** PDF TOC detection/navigation, then TTS voice and speed controls.
 
 ## Priority Order
 
@@ -37,9 +37,13 @@
    - PDF/EPUB block segmentation (Phase B): **Done.** `splitParagraphBlocks()` in `ReaderViewModel` splits each paragraph DisplayBlock into per-TTS-segment rows — highlight and scroll target exactly what is being spoken.
    - OCR confidence gating: **Done.** Pages with average Vision confidence < 0.75 become visual stops rather than text.
    - OCR minimum text threshold: **Done.** Pages with < 10 OCR chars become visual stops.
+   - Mixed-content PDF pages (text + inline image): **Done.** `pageHasImageXObjects()` checks CGPDFPage resource dictionary; pages with both text and image XObjects now emit both a text block and a visual stop.
+   - General filename sanitization: **Done.** `LibraryViewModel.sanitizeFilename()` handles null bytes, control chars, path separators, macOS-reserved chars, path traversal, duplicate extensions, length limit.
+   - Image verification tooling: **Done.** `tools/verify_images.py` renders reference pages via macOS PDFKit and compares against stored PNG data. All 11 Antifa visual pages verified correct.
 11. Next up (in rough priority order):
    - Text-quality audit: **Pass 3 complete.** 20-file corpus. See `tools/audit_report.json`.
    - PDF TOC detection/navigation: detect TOC pages at import, offer skip/navigate surface.
+   - EPUB TOC navigation surface: **Done.** NCX (EPUB 2) and nav document (EPUB 3) both parsed; Contents sheet with jump-to-chapter; 38 unique entries verified for Data Smog.
    - inline images for DOCX/HTML: EPUB and PDF done; DOCX and HTML remain
    - Ask Posey: Apple Foundation Models integration (on-device, offline)
    - document deletion: **Done.**

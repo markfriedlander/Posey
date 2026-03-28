@@ -457,6 +457,34 @@ extension LibraryViewModel {
                 for doc in docs { byType[doc.fileType, default: 0] += 1 }
                 return json(["documentCount": docs.count, "byFileType": byType])
 
+            case "GET_IMAGE":
+                guard let imageID = arg, !imageID.isEmpty else {
+                    return #"{"error":"Missing image ID"}"#
+                }
+                guard let data = try databaseManager.imageData(for: imageID) else {
+                    return #"{"error":"Image not found"}"#
+                }
+                return json(["imageID": imageID, "base64": data.base64EncodedString(),
+                             "byteCount": data.count])
+
+            case "LIST_IMAGES":
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Missing or invalid document ID"}"#
+                }
+                let imageIDs = try databaseManager.imageIDs(for: id)
+                return json(["documentID": idStr, "imageIDs": imageIDs, "count": imageIDs.count])
+
+            case "LIST_TOC":
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Missing or invalid document ID"}"#
+                }
+                let toc = try databaseManager.tocEntries(for: id)
+                let arr: [[String: Any]] = toc.map {
+                    ["title": $0.title, "plainTextOffset": $0.plainTextOffset,
+                     "playOrder": $0.playOrder]
+                }
+                return json(["documentID": idStr, "count": toc.count, "entries": arr])
+
             default:
                 return #"{"error":"Unknown command: \#(verb)"}"#
             }
@@ -468,12 +496,7 @@ extension LibraryViewModel {
     // MARK: — Import handler
 
     func apiImport(filename: String, data: Data) async -> String {
-        // Normalize duplicate file extensions (e.g. "report.pdf.pdf" → "report.pdf").
-        let nsFilename = filename as NSString
-        let rawExt = nsFilename.pathExtension.lowercased()
-        let withoutExt = nsFilename.deletingPathExtension
-        let cleanFilename = (withoutExt as NSString).pathExtension.lowercased() == rawExt
-            ? withoutExt : filename
+        let cleanFilename = LibraryViewModel.sanitizeFilename(filename)
         let ext = (cleanFilename as NSString).pathExtension.lowercased()
         do {
             let tempURL = FileManager.default.temporaryDirectory
@@ -533,3 +556,71 @@ extension LibraryViewModel {
 }
 
 // ========== BLOCK 05: LOCAL API SERVER - END ==========
+
+// ========== BLOCK 06: FILENAME SANITIZATION - START ==========
+
+extension LibraryViewModel {
+
+    /// Sanitizes a filename received from the API or file picker before it is
+    /// written to the temporary directory or used as a document title.
+    ///
+    /// Handles:
+    ///   - Null bytes and control characters
+    ///   - Path separators (/ and \) that would escape the temp directory
+    ///   - macOS reserved characters (: ? * < > | " and ASCII NUL)
+    ///   - Leading / trailing whitespace and dots
+    ///   - Path traversal sequences (..)
+    ///   - Duplicate file extensions (report.pdf.pdf → report.pdf)
+    ///   - Names that are empty after sanitization
+    static func sanitizeFilename(_ raw: String) -> String {
+        var name = raw
+
+        // Strip null bytes first — they can cause subtle downstream bugs.
+        name = name.replacingOccurrences(of: "\0", with: "")
+
+        // Replace characters that are illegal on iOS/macOS filesystems or that
+        // cause import failures / ugly titles. Colon is the macOS metadata
+        // separator; slashes would escape the directory.
+        let illegal = CharacterSet(charactersIn: "/\\:|?*<>\"")
+        name = name.components(separatedBy: illegal).joined(separator: "_")
+
+        // Collapse any control characters (U+0000–U+001F, U+007F).
+        name = name.unicodeScalars.filter { $0.value > 0x1F && $0.value != 0x7F }
+            .reduce("") { $0 + String($1) }
+
+        // Remove path-traversal sequences.
+        name = name.replacingOccurrences(of: "..", with: ".")
+
+        // Trim leading/trailing whitespace and dots (dots alone are invisible in Finder).
+        name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        while name.hasPrefix(".") { name = String(name.dropFirst()) }
+
+        // Deduplicate file extension (e.g. "book.pdf.pdf" → "book.pdf").
+        let ext = (name as NSString).pathExtension.lowercased()
+        if !ext.isEmpty {
+            let withoutExt = (name as NSString).deletingPathExtension
+            if (withoutExt as NSString).pathExtension.lowercased() == ext {
+                name = withoutExt
+            }
+        }
+
+        // Re-trim after extension fixup.
+        name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Truncate to 200 chars, preserving the extension.
+        if name.count > 200 {
+            let extPart = ext.isEmpty ? "" : ".\(ext)"
+            let basePart = (name as NSString).deletingPathExtension
+            let truncBase = String(basePart.prefix(200 - extPart.count))
+            name = truncBase + extPart
+        }
+
+        // Final fallback for pathological inputs.
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            name = "imported_document"
+        }
+        return name
+    }
+}
+
+// ========== BLOCK 06: FILENAME SANITIZATION - END ==========

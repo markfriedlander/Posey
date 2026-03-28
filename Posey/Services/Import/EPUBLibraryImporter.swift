@@ -16,6 +16,7 @@ struct EPUBLibraryImporter {
             plainText: parsed.plainText
         )
         try saveImages(parsed.images, for: doc.id)
+        try saveTOC(parsed.tocEntries, for: doc.id)
         return doc
     }
 
@@ -29,6 +30,7 @@ struct EPUBLibraryImporter {
             plainText: parsed.plainText
         )
         try saveImages(parsed.images, for: doc.id)
+        try saveTOC(parsed.tocEntries, for: doc.id)
         return doc
     }
 }
@@ -82,6 +84,15 @@ extension EPUBLibraryImporter {
         for image in images {
             try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
         }
+    }
+
+    /// Persist TOC entries from a freshly parsed EPUB. Replaces any existing
+    /// entries so reimports stay current.
+    private func saveTOC(_ entries: [EPUBTOCEntry], for documentID: UUID) throws {
+        let stored = entries.map {
+            StoredTOCEntry(title: $0.title, plainTextOffset: $0.plainTextOffset, playOrder: $0.playOrder)
+        }
+        try databaseManager.insertTOCEntries(stored, for: documentID)
     }
 }
 

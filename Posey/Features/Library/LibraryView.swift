@@ -468,16 +468,22 @@ extension LibraryViewModel {
     // MARK: — Import handler
 
     func apiImport(filename: String, data: Data) async -> String {
-        let ext = (filename as NSString).pathExtension.lowercased()
+        // Normalize duplicate file extensions (e.g. "report.pdf.pdf" → "report.pdf").
+        let nsFilename = filename as NSString
+        let rawExt = nsFilename.pathExtension.lowercased()
+        let withoutExt = nsFilename.deletingPathExtension
+        let cleanFilename = (withoutExt as NSString).pathExtension.lowercased() == rawExt
+            ? withoutExt : filename
+        let ext = (cleanFilename as NSString).pathExtension.lowercased()
         do {
             let tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent(filename)
+                .appendingPathComponent(cleanFilename)
             try data.write(to: tempURL)
             defer { try? FileManager.default.removeItem(at: tempURL) }
 
             let doc: Document
             if ext == "pdf" {
-                pdfImportStatusMessage = "API: Importing \(filename)\u{2026}"
+                pdfImportStatusMessage = "API: Importing \(cleanFilename)\u{2026}"
                 defer { pdfImportStatusMessage = nil }
                 let parsed = try await parsePDFOffMainThread(url: tempURL) { [weak self] msg in
                     Task { @MainActor [weak self] in self?.pdfImportStatusMessage = msg }

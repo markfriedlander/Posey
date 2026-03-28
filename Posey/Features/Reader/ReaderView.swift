@@ -616,13 +616,19 @@ final class ReaderViewModel: ObservableObject {
         self.shouldAutoCreateBookmarkOnAppear = shouldAutoCreateBookmarkOnAppear
         self.automationNoteBody = automationNoteBody
         self.segments = SentenceSegmenter().segments(for: document.plainText)
+        let rawBlocks: [DisplayBlock]
         if document.fileType == "md" || document.fileType == "markdown" {
-            self.displayBlocks = MarkdownParser().parse(markdown: document.displayText).blocks
+            rawBlocks = MarkdownParser().parse(markdown: document.displayText).blocks
         } else if document.fileType == "pdf" {
-            self.displayBlocks = PDFDisplayParser().parse(displayText: document.displayText).blocks
+            rawBlocks = PDFDisplayParser().parse(displayText: document.displayText).blocks
+        } else if document.fileType == "epub" {
+            rawBlocks = EPUBDisplayParser().parse(displayText: document.displayText)
         } else {
-            self.displayBlocks = []
+            rawBlocks = []
         }
+        // Split each paragraph block into per-TTS-segment rows so that
+        // highlight and scroll always target exactly the utterance being spoken.
+        self.displayBlocks = Self.splitParagraphBlocks(rawBlocks, segments: self.segments)
         self.visualPauseBlockIDsBySentenceIndex = ReaderViewModel.buildVisualPauseIndexMap(
             displayBlocks: self.displayBlocks,
             segments: self.segments
@@ -1240,6 +1246,70 @@ final class ReaderViewModel: ObservableObject {
             offset >= segment.startOffset
         })
     }
+
+    // ========== BLOCK VM-SPLIT: PARAGRAPH BLOCK SPLITTING - START ==========
+
+    /// Replaces each `.paragraph` DisplayBlock with one sub-block per TTS segment
+    /// that starts within it.  Non-paragraph blocks (headings, images, bullets,
+    /// quotes) pass through unchanged with reassigned sequential IDs.
+    ///
+    /// After splitting, `isActive(block:)` returns true only for the one block
+    /// containing the active utterance — so highlight and auto-scroll target
+    /// exactly what is being spoken rather than an entire paragraph.
+    private static func splitParagraphBlocks(
+        _ blocks: [DisplayBlock],
+        segments: [TextSegment]
+    ) -> [DisplayBlock] {
+        var result: [DisplayBlock] = []
+        for block in blocks {
+            guard block.kind == .paragraph else {
+                result.append(DisplayBlock(
+                    id: result.count,
+                    kind: block.kind,
+                    text: block.text,
+                    displayPrefix: block.displayPrefix,
+                    startOffset: block.startOffset,
+                    endOffset: block.endOffset,
+                    imageID: block.imageID
+                ))
+                continue
+            }
+
+            // Segments that START within this paragraph's offset range.
+            // Using startOffset (not overlap) ensures each segment maps to
+            // exactly one block — no duplicates across paragraph boundaries.
+            let inBlock = segments.filter { seg in
+                seg.startOffset >= block.startOffset && seg.startOffset < block.endOffset
+            }
+
+            if inBlock.isEmpty {
+                // Rare: paragraph too short to own a segment start (content is
+                // absorbed into an adjacent segment by the tokenizer). Keep as-is.
+                result.append(DisplayBlock(
+                    id: result.count,
+                    kind: .paragraph,
+                    text: block.text,
+                    displayPrefix: nil,
+                    startOffset: block.startOffset,
+                    endOffset: block.endOffset
+                ))
+            } else {
+                for seg in inBlock {
+                    result.append(DisplayBlock(
+                        id: result.count,
+                        kind: .paragraph,
+                        text: seg.text,
+                        displayPrefix: nil,
+                        startOffset: seg.startOffset,
+                        endOffset: seg.endOffset
+                    ))
+                }
+            }
+        }
+        return result
+    }
+
+    // ========== BLOCK VM-SPLIT: PARAGRAPH BLOCK SPLITTING - END ==========
 
     private func loadNotes() {
         do {

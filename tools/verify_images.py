@@ -3,8 +3,16 @@
 verify_images.py — Posey image-storage verification tool
 =========================================================
 Fetches stored images from the device via GET_IMAGE, renders the same
-PDF pages on macOS using PDFKit via a tiny Swift helper, and compares
-both to confirm stored images are correct, non-blank, and right-sized.
+PDF pages on macOS using PDFKit via a tiny Swift helper, then does a
+real pixel-level comparison to confirm stored images contain the correct
+visual content — not just that they are the right size or non-blank.
+
+Pixel comparison:
+  A second Swift helper draws both PNGs into identical RGBA bitmaps and
+  computes mean absolute error (MAE) per channel across all pixels.
+  MAE < 15.0 (out of 255) passes — this allows for minor rendering
+  differences between iOS and macOS CoreGraphics while catching images
+  that are wrong, corrupted, or from the wrong page.
 
 USAGE
 -----
@@ -20,8 +28,8 @@ REQUIRES
 
 EXIT CODES
 ----------
-  0  — all images pass
-  1  — one or more images failed verification or could not be fetched
+  0  — all images pass pixel comparison
+  1  — one or more images failed or could not be compared
 """
 
 import os
@@ -78,208 +86,152 @@ def _command(cmd: str) -> dict:
     return data if isinstance(data, dict) else {"raw": data}
 
 # ─── Swift PDF renderer ────────────────────────────────────────────────────
+# Renders one PDF page to PNG using the same PDFPage.thumbnail call Posey uses.
 
 _SWIFT_RENDERER = r"""
 import Foundation
 import PDFKit
 import AppKit
 
-// Usage: swift render_page.swift <pdf_path> <page_number_1based> <output_png_path>
-// Renders the page at 2x scale (matching Posey's renderPageToPNG).
-
 let args = CommandLine.arguments
-guard args.count == 4,
-      let pageNum = Int(args[2]), pageNum >= 1 else {
-    fputs("Usage: render_page.swift <pdf> <page> <out.png>\n", stderr)
-    exit(1)
+guard args.count == 4, let pageNum = Int(args[2]), pageNum >= 1 else {
+    fputs("Usage: render_page.swift <pdf> <page> <out.png>\n", stderr); exit(1)
 }
-
-let pdfURL  = URL(fileURLWithPath: args[1])
-let outPath = args[3]
-
-guard let doc = PDFDocument(url: pdfURL) else {
-    fputs("ERROR: Could not open PDF\n", stderr)
-    exit(2)
+guard let doc = PDFDocument(url: URL(fileURLWithPath: args[1])) else {
+    fputs("ERROR: Could not open PDF\n", stderr); exit(2)
 }
-
 guard let page = doc.page(at: pageNum - 1) else {
-    fputs("ERROR: Page \(pageNum) not found (doc has \(doc.pageCount) pages)\n", stderr)
-    exit(3)
+    fputs("ERROR: Page \(pageNum) not found (doc has \(doc.pageCount) pages)\n", stderr); exit(3)
 }
-
 let scale: CGFloat = 2.0
 let bounds = page.bounds(for: .mediaBox)
 let size   = CGSize(width: bounds.width * scale, height: bounds.height * scale)
 let image  = page.thumbnail(of: size, for: .mediaBox)
-
 guard let tiff = image.tiffRepresentation,
       let bitmapRep = NSBitmapImageRep(data: tiff),
       let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
-    fputs("ERROR: Could not encode PNG\n", stderr)
-    exit(4)
+    fputs("ERROR: Could not encode PNG\n", stderr); exit(4)
 }
-
 do {
-    try pngData.write(to: URL(fileURLWithPath: outPath))
+    try pngData.write(to: URL(fileURLWithPath: args[3]))
     print("OK \(Int(size.width))x\(Int(size.height)) \(pngData.count)")
-} catch {
-    fputs("ERROR: \(error)\n", stderr)
-    exit(5)
-}
+} catch { fputs("ERROR: \(error)\n", stderr); exit(5) }
 """
 
+# ─── Swift pixel comparator ────────────────────────────────────────────────
+# Loads two PNG files into identical-sized RGBA bitmaps via CoreGraphics and
+# computes mean absolute error per channel. Output: "MAE <value> <w>x<h>"
+# MAE is averaged across all pixels and all 4 RGBA channels (0.0 – 255.0).
+
+_SWIFT_PIXEL_COMPARE = r"""
+import Foundation
+import AppKit
+import CoreGraphics
+
+func loadRGBA(path: String, targetW: Int, targetH: Int) -> [UInt8]? {
+    guard let img = NSImage(contentsOfFile: path),
+          let cgImg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        return nil
+    }
+    var pixels = [UInt8](repeating: 0, count: targetW * targetH * 4)
+    let cs = CGColorSpaceCreateDeviceRGB()
+    let ctx = CGContext(data: &pixels,
+                        width: targetW, height: targetH,
+                        bitsPerComponent: 8, bytesPerRow: targetW * 4,
+                        space: cs,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    ctx?.draw(cgImg, in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+    return pixels
+}
+
+let args = CommandLine.arguments
+guard args.count == 3 else {
+    fputs("Usage: pixel_compare.swift <img_a.png> <img_b.png>\n", stderr); exit(1)
+}
+
+// Determine target size from image A.
+guard let imgA = NSImage(contentsOfFile: args[1]) else {
+    fputs("ERROR: Cannot open \(args[1])\n", stderr); exit(2)
+}
+guard let imgB = NSImage(contentsOfFile: args[2]) else {
+    fputs("ERROR: Cannot open \(args[2])\n", stderr); exit(3)
+}
+
+// Use image A's pixel dimensions as the canonical size; scale B to match.
+let wA = Int(imgA.size.width)
+let hA = Int(imgA.size.height)
+guard wA > 0 && hA > 0 else {
+    fputs("ERROR: Zero-size image A\n", stderr); exit(4)
+}
+
+guard let pixA = loadRGBA(path: args[1], targetW: wA, targetH: hA),
+      let pixB = loadRGBA(path: args[2], targetW: wA, targetH: hA) else {
+    fputs("ERROR: Could not decode pixel data\n", stderr); exit(5)
+}
+
+var totalDiff: Int64 = 0
+for i in 0 ..< pixA.count {
+    totalDiff += Int64(abs(Int(pixA[i]) - Int(pixB[i])))
+}
+let mae = Double(totalDiff) / Double(pixA.count)
+print(String(format: "MAE %.4f %dx%d", mae, wA, hA))
+"""
+
+# ─── Runner helpers ────────────────────────────────────────────────────────
+
+def _write_swift(src: str, name: str) -> str:
+    path = os.path.join(tempfile.gettempdir(), name)
+    with open(path, "w") as f:
+        f.write(src)
+    return path
+
 def render_pdf_page(pdf_path: str, page_number: int, out_path: str) -> dict | None:
-    """
-    Render `page_number` (1-based) of `pdf_path` to PNG at 2× scale using
-    the same PDFPage.thumbnail call Posey uses. Returns dict with keys
-    `width`, `height`, `byte_count`, or None on failure.
-    """
-    swift_src = os.path.join(tempfile.gettempdir(), "posey_render_page.swift")
-    with open(swift_src, "w") as f:
-        f.write(_SWIFT_RENDERER)
-
+    script = _write_swift(_SWIFT_RENDERER, "posey_render_page.swift")
     try:
-        result = subprocess.run(
-            ["swift", swift_src, pdf_path, str(page_number), out_path],
-            capture_output=True, text=True, timeout=30
-        )
+        r = subprocess.run(["swift", script, pdf_path, str(page_number), out_path],
+                           capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
-        print(f"  TIMEOUT rendering page {page_number}")
+        print(f"    TIMEOUT rendering page {page_number}")
         return None
-
-    if result.returncode != 0:
-        print(f"  Swift renderer failed (exit {result.returncode}): {result.stderr.strip()}")
+    if r.returncode != 0:
+        print(f"    Swift renderer error (exit {r.returncode}): {r.stderr.strip()}")
         return None
-
-    # Output line: "OK <width>x<height> <byte_count>"
-    m = re.match(r"OK (\d+)x(\d+) (\d+)", result.stdout.strip())
+    m = re.match(r"OK (\d+)x(\d+) (\d+)", r.stdout.strip())
     if not m:
-        print(f"  Unexpected renderer output: {result.stdout.strip()}")
+        print(f"    Unexpected renderer output: {r.stdout.strip()}")
         return None
-
     return {"width": int(m.group(1)), "height": int(m.group(2)), "byte_count": int(m.group(3))}
 
-# ─── Image comparison ──────────────────────────────────────────────────────
+# MAE threshold: allow minor rendering differences between iOS and macOS
+# CoreGraphics (sub-pixel anti-aliasing, colour profile, gamma). A threshold
+# of 15.0/255 ≈ 6% is generous enough for those but tight enough to catch
+# a wrong page, a solid colour fill, or corrupted data.
+_MAE_PASS_THRESHOLD = 15.0
 
-def _is_blank_png(png_bytes: bytes, threshold: float = 0.98) -> bool:
+def pixel_compare(stored_png_path: str, ref_png_path: str) -> dict | None:
     """
-    Returns True if >threshold fraction of pixels are white (or near-white).
-    Only checks the first 4096 bytes of pixel data for speed.
-    Works on raw PNG bytes — parses IDAT via a tiny uncompressed heuristic:
-    uses zlib to decompress the first IDAT chunk.
-    Falls back to False (assume non-blank) if parsing fails.
+    Runs the Swift pixel comparator on two PNG files.
+    Returns {"mae": float, "width": int, "height": int} or None on failure.
     """
-    import struct, zlib
-
-    if len(png_bytes) < 8:
-        return False
-
-    # Locate and decompress first IDAT chunk.
-    pos = 8  # skip PNG signature
-    idat_data = b""
-    while pos + 12 <= len(png_bytes):
-        length = struct.unpack(">I", png_bytes[pos:pos+4])[0]
-        chunk_type = png_bytes[pos+4:pos+8]
-        data = png_bytes[pos+8:pos+8+length]
-        pos += 12 + length
-        if chunk_type == b"IDAT":
-            idat_data += data
-            break  # first chunk is enough
-
-    if not idat_data:
-        return False
-
+    script = _write_swift(_SWIFT_PIXEL_COMPARE, "posey_pixel_compare.swift")
     try:
-        raw = zlib.decompress(idat_data)
-    except Exception:
-        return False
-
-    # Count bytes close to 255 (white). PNG pixel data has a filter byte per row.
-    sample = raw[:4096]
-    white  = sum(1 for b in sample if b >= 240)
-    return white / max(len(sample), 1) >= threshold
-
-def compare_images(stored_png: bytes, ref_png_path: str) -> dict:
-    """
-    Compare stored PNG against reference. Returns a report dict:
-      passed    — bool
-      checks    — list of {name, result, detail}
-    """
-    checks = []
-
-    # 1. Non-trivial size
-    size_ok = len(stored_png) > 5_000
-    checks.append({"name": "stored_non_trivial_size",
-                   "result": "PASS" if size_ok else "FAIL",
-                   "detail": f"{len(stored_png)} bytes"})
-
-    # 2. Valid PNG header
-    png_sig = b"\x89PNG\r\n\x1a\n"
-    sig_ok = stored_png[:8] == png_sig
-    checks.append({"name": "stored_valid_png_header",
-                   "result": "PASS" if sig_ok else "FAIL",
-                   "detail": stored_png[:8].hex()})
-
-    # 3. Not blank
-    blank = _is_blank_png(stored_png)
-    checks.append({"name": "stored_not_blank",
-                   "result": "FAIL" if blank else "PASS",
-                   "detail": "all-white" if blank else "has content"})
-
-    # 4. Reference rendered successfully
-    if not os.path.exists(ref_png_path):
-        checks.append({"name": "reference_render", "result": "FAIL",
-                       "detail": "reference file missing"})
-        return {"passed": False, "checks": checks}
-
-    with open(ref_png_path, "rb") as f:
-        ref_png = f.read()
-
-    ref_ok = len(ref_png) > 5_000
-    checks.append({"name": "reference_non_trivial_size",
-                   "result": "PASS" if ref_ok else "FAIL",
-                   "detail": f"{len(ref_png)} bytes"})
-
-    ref_blank = _is_blank_png(ref_png)
-    checks.append({"name": "reference_not_blank",
-                   "result": "FAIL" if ref_blank else "PASS",
-                   "detail": "all-white" if ref_blank else "has content"})
-
-    # 5. Dimension match via PNG IHDR (bytes 16-24)
-    import struct
-    def _png_dims(data: bytes) -> tuple[int, int] | None:
-        if len(data) < 24: return None
-        try:
-            w = struct.unpack(">I", data[16:20])[0]
-            h = struct.unpack(">I", data[20:24])[0]
-            return w, h
-        except Exception:
-            return None
-
-    stored_dims = _png_dims(stored_png)
-    ref_dims    = _png_dims(ref_png)
-    dim_ok = stored_dims is not None and stored_dims == ref_dims
-    checks.append({"name": "dimensions_match",
-                   "result": "PASS" if dim_ok else "FAIL",
-                   "detail": f"stored={stored_dims} ref={ref_dims}"})
-
-    # 6. Size ratio within 2× (same content at same scale should be close)
-    if len(ref_png) > 0:
-        ratio = len(stored_png) / len(ref_png)
-        ratio_ok = 0.5 <= ratio <= 2.0
-        checks.append({"name": "size_ratio_reasonable",
-                       "result": "PASS" if ratio_ok else "WARN",
-                       "detail": f"ratio={ratio:.2f}"})
-
-    passed = all(c["result"] == "PASS" for c in checks)
-    return {"passed": passed, "checks": checks}
+        r = subprocess.run(["swift", script, stored_png_path, ref_png_path],
+                           capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print("    TIMEOUT running pixel comparator")
+        return None
+    if r.returncode != 0:
+        print(f"    Pixel comparator error (exit {r.returncode}): {r.stderr.strip()}")
+        return None
+    m = re.match(r"MAE ([\d.]+) (\d+)x(\d+)", r.stdout.strip())
+    if not m:
+        print(f"    Unexpected comparator output: {r.stdout.strip()}")
+        return None
+    return {"mae": float(m.group(1)), "width": int(m.group(2)), "height": int(m.group(3))}
 
 # ─── Main verification flow ────────────────────────────────────────────────
 
 def verify(pdf_path: str, doc_id: str | None = None) -> int:
-    """
-    Returns 0 if all images pass, 1 if any fail.
-    """
     if not os.path.exists(pdf_path):
         print(f"ERROR: PDF not found: {pdf_path}")
         return 1
@@ -291,36 +243,32 @@ def verify(pdf_path: str, doc_id: str | None = None) -> int:
     # Find document
     if doc_id is None:
         docs_result = _command("LIST_DOCUMENTS")
-        docs = docs_result if isinstance(docs_result, list) else docs_result.get("documents", [])
-        # Attempt fuzzy match on title or filename
+        raw = docs_result if isinstance(docs_result, list) else docs_result.get("raw", [])
+        docs = raw if isinstance(raw, list) else []
         base = os.path.splitext(pdf_name)[0].lower()
         matched = [d for d in docs if base in d.get("title", "").lower()]
         if not matched:
-            print(f"ERROR: No document matching '{base}'. Import it first, then pass its ID.")
-            print("Imported documents:")
+            print(f"ERROR: No document matching '{base}'.")
             for d in docs:
                 print(f"  {d['id']}  {d['title']}  [{d['fileType']}]")
             return 1
         doc_id = matched[0]["id"]
         print(f"  Found document: {matched[0]['title']} ({doc_id})")
 
-    # Get displayText to extract visual-page markers
+    # Extract visual-page markers from displayText
     text_result = _command(f"GET_TEXT:{doc_id}")
     if "error" in text_result:
         print(f"ERROR: {text_result}")
         return 1
-
     display_text = text_result.get("displayText", "")
-    # Extract markers: [[POSEY_VISUAL_PAGE:<page>:<uuid>]]
-    marker_re = re.compile(r'\[\[POSEY_VISUAL_PAGE:(\d+):([^\]]+)\]\]')
-    markers = marker_re.findall(display_text)
+    markers = re.findall(r'\[\[POSEY_VISUAL_PAGE:(\d+):([^\]]+)\]\]', display_text)
 
     if not markers:
-        print("  No visual-page markers found in this document.")
+        print("  No visual-page markers found.")
         return 0
 
     print(f"  Found {len(markers)} visual-page marker(s).")
-    print()
+    print(f"  Pass threshold: MAE < {_MAE_PASS_THRESHOLD:.1f}/255\n")
 
     all_passed = True
     tmpdir = tempfile.mkdtemp(prefix="posey_verify_")
@@ -330,51 +278,60 @@ def verify(pdf_path: str, doc_id: str | None = None) -> int:
             page_num = int(page_str)
             print(f"  Page {page_num}  imageID={image_id[:8]}...")
 
-            # Fetch stored image
+            # 1. Fetch stored image from device
             img_result = _command(f"GET_IMAGE:{image_id}")
             if "error" in img_result:
-                print(f"    FAIL — GET_IMAGE error: {img_result['error']}")
+                print(f"    FAIL — GET_IMAGE: {img_result['error']}")
                 all_passed = False
                 continue
 
             b64 = img_result.get("base64", "")
             if not b64:
-                print(f"    FAIL — empty base64 in response")
+                print(f"    FAIL — empty base64")
                 all_passed = False
                 continue
 
             stored_png = base64.b64decode(b64)
-            stored_byte_count = img_result.get("byteCount", len(stored_png))
 
-            # Render reference PNG from the local PDF
-            ref_path = os.path.join(tmpdir, f"ref_page_{page_num}.png")
-            render_info = render_pdf_page(pdf_path, page_num, ref_path)
-            if render_info is None:
-                print(f"    WARN — Could not render reference page {page_num}; skipping comparison")
-                # Still check the stored image on its own
-                size_ok = stored_byte_count > 5_000
-                sig_ok  = stored_png[:8] == b"\x89PNG\r\n\x1a\n"
-                blank   = _is_blank_png(stored_png)
-                status  = "PASS" if (size_ok and sig_ok and not blank) else "FAIL"
-                all_passed = all_passed and (status == "PASS")
-                print(f"    {status}  (standalone)  size={stored_byte_count}  sig={'ok' if sig_ok else 'BAD'}  blank={'yes' if blank else 'no'}")
+            # Validate PNG signature before writing
+            if stored_png[:8] != b"\x89PNG\r\n\x1a\n":
+                print(f"    FAIL — not a valid PNG (header: {stored_png[:8].hex()})")
+                all_passed = False
                 continue
 
-            report = compare_images(stored_png, ref_path)
-            status_str = "PASS" if report["passed"] else "FAIL"
-            if not report["passed"]:
+            stored_path = os.path.join(tmpdir, f"stored_{page_num}.png")
+            with open(stored_path, "wb") as f:
+                f.write(stored_png)
+
+            # 2. Render reference from the local PDF
+            ref_path = os.path.join(tmpdir, f"ref_{page_num}.png")
+            render_info = render_pdf_page(pdf_path, page_num, ref_path)
+            if render_info is None:
+                print(f"    FAIL — reference render failed; cannot compare")
+                all_passed = False
+                continue
+
+            # 3. Pixel-level comparison
+            cmp = pixel_compare(stored_path, ref_path)
+            if cmp is None:
+                print(f"    FAIL — pixel comparison did not complete")
+                all_passed = False
+                continue
+
+            mae   = cmp["mae"]
+            passed = mae < _MAE_PASS_THRESHOLD
+            label  = "PASS" if passed else "FAIL"
+            if not passed:
                 all_passed = False
 
-            print(f"    {status_str}  stored={stored_byte_count}B  ref={render_info['byte_count']}B  {render_info['width']}x{render_info['height']}")
-            for chk in report["checks"]:
-                icon = "✓" if chk["result"] == "PASS" else ("⚠" if chk["result"] == "WARN" else "✗")
-                print(f"      {icon}  {chk['name']}: {chk['detail']}")
-            print()
+            print(f"    {label}  MAE={mae:.2f}/255  {cmp['width']}x{cmp['height']}  "
+                  f"stored={len(stored_png)}B  ref={render_info['byte_count']}B")
+
     finally:
-        # Clean up temp renders
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+    print()
     print("=" * 60)
     print(f"Result: {'ALL PASS' if all_passed else 'SOME FAILED'}")
     return 0 if all_passed else 1
@@ -385,7 +342,6 @@ def main():
     if not args or args[0] in ("-h", "--help"):
         print(__doc__)
         sys.exit(0)
-
     pdf_path = args[0]
     doc_id   = args[1] if len(args) > 1 else None
     sys.exit(verify(pdf_path, doc_id))

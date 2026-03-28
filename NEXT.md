@@ -37,13 +37,13 @@
    - PDF/EPUB block segmentation (Phase B): **Done.** `splitParagraphBlocks()` in `ReaderViewModel` splits each paragraph DisplayBlock into per-TTS-segment rows — highlight and scroll target exactly what is being spoken.
    - OCR confidence gating: **Done.** Pages with average Vision confidence < 0.75 become visual stops rather than text.
    - OCR minimum text threshold: **Done.** Pages with < 10 OCR chars become visual stops.
-   - Mixed-content PDF pages (text + inline image): **Done.** `pageHasImageXObjects()` checks CGPDFPage resource dictionary; pages with both text and image XObjects now emit both a text block and a visual stop.
-   - General filename sanitization: **Done.** `LibraryViewModel.sanitizeFilename()` handles null bytes, control chars, path separators, macOS-reserved chars, path traversal, duplicate extensions, length limit.
-   - Image verification tooling: **Done.** `tools/verify_images.py` renders reference pages via macOS PDFKit and compares against stored PNG data. All 11 Antifa visual pages verified correct.
+   - Mixed-content PDF pages (text + inline image): **Done and verified.** `pageHasImageXObjects()` checks CGPDFPage resource dictionary; pages with both text and image XObjects now emit both a text block and a visual stop. Verified with GEB page 14: text preserved in displayText on both sides of the visual stop marker; stored image shows full page with figure and text.
+   - General filename sanitization: **Done and verified.** `LibraryViewModel.sanitizeFilename()` handles null bytes, control chars, path separators, macOS-reserved chars, path traversal, duplicate extensions, length limit. Verified via live API tests with 7 bad-filename cases — all sanitized correctly.
+   - Image verification tooling: **Done and verified.** `tools/verify_images.py` renders reference pages via macOS PDFKit, fetches stored PNG from device, and compares with Swift pixel comparator (CoreGraphics RGBA MAE). All 11 Antifa visual stops are genuinely blank pages (section dividers) — stored images correctly represent them. **Open UX issue:** blank pages are not worth pausing playback for. A minimum visual-content threshold for visual stops (analogous to the OCR 10-char threshold) should be added to suppress these.
 11. Next up (in rough priority order):
    - Text-quality audit: **Pass 3 complete.** 20-file corpus. See `tools/audit_report.json`.
    - PDF TOC detection/navigation: detect TOC pages at import, offer skip/navigate surface.
-   - EPUB TOC navigation surface: **Done.** NCX (EPUB 2) and nav document (EPUB 3) both parsed; Contents sheet with jump-to-chapter; 38 unique entries verified for Data Smog.
+   - EPUB TOC navigation surface: **Done and verified.** NCX (EPUB 2) and nav document (EPUB 3) both parsed; Contents sheet with jump-to-chapter. 38 unique entries verified for Data Smog on fresh import (0 duplicates). Chapter offsets verified against plainText content — all correct. **Minor: TOCSheet uses `id: \.playOrder` which could be non-unique; a composite id would be safer.**
    - inline images for DOCX/HTML: EPUB and PDF done; DOCX and HTML remain
    - Ask Posey: Apple Foundation Models integration (on-device, offline)
    - document deletion: **Done.**

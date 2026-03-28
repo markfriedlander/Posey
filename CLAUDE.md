@@ -113,28 +113,12 @@ formats are shallow. EPUB and PDF in particular have known gaps. Treat the
 current multi-format support as "first pass ingestion works" not "fully 
 supported." Deeper format fidelity is a real next step.
 
-**Known open issue — TTS voice and speed controls:**
-This is a priority area requiring fresh investigation.
+**TTS voice and speed controls: Complete** (2026-03-25).
+Two persisted modes (UserDefaults via `PlaybackPreferences`):
+- **Best Available**: `prefersAssistiveTechnologySettings = true`, Siri-tier voice, system Spoken Content rate applies.
+- **Custom**: user-selected voice from `AVSpeechSynthesisVoice.speechVoices()`, in-app rate slider 75–150%.
 
-The previous implementation disabled in-app voice selection and speed control 
-because a stable implementation was not found. The stated reason was Apple API 
-limitations, but that explanation should be treated skeptically.
-
-`AVSpeechSynthesizer` does support rate and voice control. The question is 
-implementation approach — specifically around changing rate mid-playback and 
-the tradeoff between voice quality and available speed range.
-
-The goal is:
-- Offer the highest quality voices available on the device
-- Give the user real choices: better voice at lower speed, faster speed with 
-  slightly different voice, etc.
-- Make tradeoffs explicit and user-informed rather than hidden
-- Do not sacrifice voice quality silently
-
-This needs research into the current Apple AVSpeechSynthesizer and AVSpeech 
-APIs, what is actually possible, and what the real constraints are before 
-proposing a solution. Do not assume the previous implementation's conclusions 
-are correct.
+Mode and rate changes take effect at the next sentence boundary. Voice picker groups by language and quality tier. See HISTORY.md for full implementation history.
 
 ---
 

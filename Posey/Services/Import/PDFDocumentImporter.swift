@@ -116,6 +116,15 @@ extension PDFDocumentImporter {
             if !pdfText.isEmpty {
                 pageContents.append(.text(pdfText))
                 readableTextPages.append(pdfText)
+                // If the page also contains PDF image XObjects (figures, photos, charts),
+                // preserve them as a visual stop immediately after the text. Neither is dropped.
+                if pageHasImageXObjects(page) {
+                    let imageID = UUID().uuidString
+                    if let pngData = renderPageToPNG(page) {
+                        imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))
+                    }
+                    pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
+                }
             } else {
                 // PDFKit found no text — report progress then try Vision OCR.
                 progress?(.ocr(page: index + 1, of: pageCount))
@@ -359,6 +368,45 @@ extension PDFDocumentImporter {
             result = rebuilt
         }
         return result
+    }
+
+    /// Returns true if the page's PDF resource dictionary contains at least one
+    /// Image-type XObject — indicating the page has embedded figures, photos, or
+    /// charts in addition to any extractable text.
+    ///
+    /// Uses the CGPDFPage resource dictionary directly so the check is fast (no
+    /// rendering needed). False negatives are possible for unusual PDF constructs
+    /// (images in Form XObjects or pattern streams) but those are rare.
+    private func pageHasImageXObjects(_ page: PDFPage) -> Bool {
+        guard let cgPage = page.pageRef,
+              let pageDict = cgPage.dictionary else { return false }
+
+        var resourcesDict: CGPDFDictionaryRef?
+        guard CGPDFDictionaryGetDictionary(pageDict, "Resources", &resourcesDict),
+              let res = resourcesDict else { return false }
+
+        var xObjDict: CGPDFDictionaryRef?
+        guard CGPDFDictionaryGetDictionary(res, "XObject", &xObjDict),
+              let xObj = xObjDict else { return false }
+
+        var found = false
+        // CGPDFDictionaryApplyFunction uses a C function pointer; pass &found as
+        // context. The closure is non-capturing so it satisfies @convention(c).
+        withUnsafeMutablePointer(to: &found) { ptr in
+            CGPDFDictionaryApplyFunction(xObj, { _, obj, ctx in
+                var stream: CGPDFStreamRef?
+                guard CGPDFObjectGetValue(obj, .stream, &stream),
+                      let st = stream,
+                      let stDict = CGPDFStreamGetDictionary(st) else { return }
+                var subtype: UnsafePointer<Int8>?
+                guard CGPDFDictionaryGetName(stDict, "Subtype", &subtype),
+                      let st = subtype else { return }
+                if strcmp(st, "Image") == 0 {
+                    ctx?.assumingMemoryBound(to: Bool.self).pointee = true
+                }
+            }, ptr)
+        }
+        return found
     }
 }
 

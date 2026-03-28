@@ -13,6 +13,7 @@ struct ReaderView: View {
     private let isTestMode: Bool
     @State private var isShowingNotesSheet = false
     @State private var isShowingPreferencesSheet = false
+    @State private var isShowingTOCSheet = false
     @State private var isChromeVisible = true
     @State private var chromeFadeTask: Task<Void, Never>?
     @State private var expandedImageItem: ExpandedImageItem? = nil
@@ -191,6 +192,9 @@ struct ReaderView: View {
             .sheet(isPresented: $isShowingPreferencesSheet) {
                 ReaderPreferencesSheet(viewModel: viewModel)
             }
+            .sheet(isPresented: $isShowingTOCSheet) {
+                TOCSheet(viewModel: viewModel)
+            }
             .sheet(item: $expandedImageItem) { item in
                 ExpandedImageSheet(imageID: item.id, viewModel: viewModel)
             }
@@ -210,6 +214,19 @@ struct ReaderView: View {
                     .frame(width: 44, height: 44)
             }
             .accessibilityIdentifier("reader.search")
+
+            if !viewModel.tocEntries.isEmpty {
+                Button {
+                    revealChrome()
+                    isShowingTOCSheet = true
+                } label: {
+                    Image(systemName: "list.bullet.indent")
+                        .font(.headline)
+                        .foregroundStyle(chromeTint)
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityIdentifier("reader.toc")
+            }
 
             Button {
                 revealChrome()
@@ -585,6 +602,8 @@ final class ReaderViewModel: ObservableObject {
     let document: Document
     let segments: [TextSegment]
     let displayBlocks: [DisplayBlock]
+    /// Table of contents entries for this document. Empty if not available.
+    private(set) var tocEntries: [StoredTOCEntry] = []
 
     private let databaseManager: DatabaseManager
     private let playbackService: SpeechPlaybackService
@@ -633,6 +652,7 @@ final class ReaderViewModel: ObservableObject {
             displayBlocks: self.displayBlocks,
             segments: self.segments
         )
+        self.tocEntries = (try? databaseManager.tocEntries(for: document.id)) ?? []
     }
 
     var usesDisplayBlocks: Bool {
@@ -1389,6 +1409,21 @@ final class ReaderViewModel: ObservableObject {
     }
 
     // ========== BLOCK VM-IMAGE: IMAGE LOADING - END ==========
+
+    // ========== BLOCK VM-TOC: TABLE OF CONTENTS NAVIGATION - START ==========
+
+    /// Jumps playback and scroll position to the sentence nearest to a TOC entry's
+    /// plainTextOffset. Stops any active playback before jumping.
+    func jumpToTOCEntry(_ entry: StoredTOCEntry) {
+        guard entry.plainTextOffset >= 0 else { return }
+        stopPlayback()
+        let targetIndex = segments.lastIndex(where: { $0.startOffset <= entry.plainTextOffset })
+            ?? 0
+        currentSentenceIndex = targetIndex
+        persistPosition()
+    }
+
+    // ========== BLOCK VM-TOC: TABLE OF CONTENTS NAVIGATION - END ==========
 }
 
 // ========== BLOCK P2: EXPANDED IMAGE SHEET - START ==========
@@ -1429,3 +1464,38 @@ private struct ExpandedImageSheet: View {
 }
 
 // ========== BLOCK P2: EXPANDED IMAGE SHEET - END ==========
+
+// ========== BLOCK P3: TABLE OF CONTENTS SHEET - START ==========
+
+/// Sheet that lists a document's TOC entries. Tapping an entry jumps the reader
+/// to that section and dismisses the sheet. Only shown when TOC data is available.
+private struct TOCSheet: View {
+    @ObservedObject var viewModel: ReaderViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(viewModel.tocEntries, id: \.playOrder) { entry in
+                Button {
+                    viewModel.jumpToTOCEntry(entry)
+                    dismiss()
+                } label: {
+                    Text(entry.title)
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .navigationTitle("Contents")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// ========== BLOCK P3: TABLE OF CONTENTS SHEET - END ==========

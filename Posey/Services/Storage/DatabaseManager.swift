@@ -337,9 +337,79 @@ extension DatabaseManager {
         try bind(documentID.uuidString, at: 1, for: statement)
         try step(statement)
     }
+
+    /// Returns all image IDs stored for a document, in insertion order.
+    func imageIDs(for documentID: UUID) throws -> [String] {
+        let sql = "SELECT id FROM document_images WHERE document_id = ? ORDER BY rowid;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var ids: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let cStr = sqlite3_column_text(statement, 0) {
+                ids.append(String(cString: cStr))
+            }
+        }
+        return ids
+    }
 }
 
 // ========== BLOCK 05: DOCUMENT IMAGES - END ==========
+
+// ========== BLOCK 05B: DOCUMENT TOC - START ==========
+
+/// One entry in a document's table of contents, as stored in the database.
+struct StoredTOCEntry {
+    let title: String
+    let plainTextOffset: Int
+    let playOrder: Int
+}
+
+extension DatabaseManager {
+    func insertTOCEntries(_ entries: [StoredTOCEntry], for documentID: UUID) throws {
+        try execute("DELETE FROM document_toc WHERE document_id = '\(documentID.uuidString)';")
+        let sql = """
+        INSERT INTO document_toc (document_id, play_order, title, plain_text_offset)
+        VALUES (?, ?, ?, ?);
+        """
+        // Deduplicate on (title, plainTextOffset) so NCX sub-navPoints that reference
+        // the same position don't insert redundant rows.
+        var seen = Set<String>()
+        for entry in entries {
+            let key = "\(entry.title)|\(entry.plainTextOffset)"
+            guard seen.insert(key).inserted else { continue }
+            let statement = try prepareStatement(sql: sql)
+            defer { sqlite3_finalize(statement) }
+            try bind(documentID.uuidString, at: 1, for: statement)
+            sqlite3_bind_int(statement, 2, Int32(entry.playOrder))
+            try bind(entry.title, at: 3, for: statement)
+            sqlite3_bind_int(statement, 4, Int32(entry.plainTextOffset))
+            try step(statement)
+        }
+    }
+
+    func tocEntries(for documentID: UUID) throws -> [StoredTOCEntry] {
+        let sql = """
+        SELECT title, plain_text_offset, play_order
+        FROM document_toc
+        WHERE document_id = ?
+        ORDER BY play_order;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var entries: [StoredTOCEntry] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let title = sqliteString(statement, index: 0) else { continue }
+            let offset = Int(sqlite3_column_int(statement, 1))
+            let order  = Int(sqlite3_column_int(statement, 2))
+            entries.append(StoredTOCEntry(title: title, plainTextOffset: offset, playOrder: order))
+        }
+        return entries
+    }
+}
+
+// ========== BLOCK 05B: DOCUMENT TOC - END ==========
 
 // ========== BLOCK 06: SCHEMA AND HELPERS - START ==========
 
@@ -399,6 +469,17 @@ extension DatabaseManager {
                 id TEXT PRIMARY KEY NOT NULL,
                 document_id TEXT NOT NULL,
                 image_data BLOB NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            """)
+
+        try execute("""
+            CREATE TABLE IF NOT EXISTS document_toc (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                play_order INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                plain_text_offset INTEGER NOT NULL,
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
             """)

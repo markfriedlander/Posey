@@ -2,6 +2,17 @@ import Foundation
 
 // ========== BLOCK 01: MODELS AND ERRORS - START ==========
 
+/// One entry in the EPUB table of contents. Character offsets are into the
+/// document's plainText and are used to jump to the right position in the reader.
+struct EPUBTOCEntry {
+    let title: String
+    /// 0-based character offset into the combined plainText at which this
+    /// section starts. -1 means the offset could not be determined.
+    let plainTextOffset: Int
+    /// Original play order from the nav/NCX document (1-based).
+    let playOrder: Int
+}
+
 struct ParsedEPUBDocument {
     let title: String?
     /// Normalized text with inline \x0c-delimited visual-image markers
@@ -11,6 +22,8 @@ struct ParsedEPUBDocument {
     let plainText: String
     /// One record per inline image extracted from the EPUB content.
     let images: [PageImageRecord]
+    /// Table of contents entries in reading order. Empty if no nav/NCX was found.
+    let tocEntries: [EPUBTOCEntry]
 }
 
 struct EPUBDocumentImporter {
@@ -104,18 +117,35 @@ extension EPUBDocumentImporter {
         let packageDoc    = try EPUBPackageParser.parse(packageXML)
 
         let baseDirectory = (packagePath as NSString).deletingLastPathComponent
-        let spinePaths    = packageDoc.spineItemReferences.compactMap { idref in
-            packageDoc.manifestItems[idref].map { item in
-                resolveArchivePath(baseDirectory: baseDirectory, relativePath: item.href)
-            }
+
+        // Build list of (archivePath, originalHref) pairs for the spine.
+        // originalHref is stored so we can match it against TOC entry hrefs later.
+        let spineItems: [(path: String, href: String)] = packageDoc.spineItemReferences.compactMap { idref in
+            guard let item = packageDoc.manifestItems[idref] else { return nil }
+            let path = resolveArchivePath(baseDirectory: baseDirectory, relativePath: item.href)
+            return (path, item.href)
         }
 
         var chapterTexts: [String] = []  // displayText per chapter (may contain markers)
+        var chapterPlainLengths: [Int] = []  // plain-text char count per chapter (for TOC offsets)
         var imageRecords: [PageImageRecord] = []
+        // Map from (normalized spine file path without fragment) → cumulative offset at start
+        var pathToPlainOffset: [String: Int] = [:]
 
-        for path in spinePaths {
+        for (path, href) in spineItems {
             guard let chapterData = entryLoader(path) else { continue }
             let chapterDir = (path as NSString).deletingLastPathComponent
+
+            // Record the plain-text offset at the START of this chapter.
+            // Offset = sum of all previous chapters' plain chars + separators (2 per join).
+            let cumulativeOffset = chapterPlainLengths.reduce(0, +)
+                + max(0, chapterPlainLengths.count - 1) * 2  // "\n\n" between chapters
+            // Key by the bare href (path component without fragment).
+            let bareHref = (href as NSString).lastPathComponent
+                .components(separatedBy: "#").first ?? ""
+            if !bareHref.isEmpty && pathToPlainOffset[bareHref] == nil {
+                pathToPlainOffset[bareHref] = cumulativeOffset
+            }
 
             // Extract inline images, replacing <img> tags with \x0c-delimited markers.
             let (processedData, chapterImages) = extractInlineImages(
@@ -126,7 +156,9 @@ extension EPUBDocumentImporter {
             imageRecords.append(contentsOf: chapterImages)
 
             if let chapterText = try? htmlImporter.loadText(fromData: processedData) {
+                let plainChapter = buildPlainText(from: chapterText)
                 chapterTexts.append(chapterText)
+                chapterPlainLengths.append(plainChapter.count)
             }
         }
 
@@ -135,11 +167,20 @@ extension EPUBDocumentImporter {
         let displayText = normalizeDisplay(chapterTexts.joined(separator: "\n\n"))
         let plainText   = buildPlainText(from: displayText)
 
+        // Build TOC entries from nav (EPUB 3) or skip if neither is available.
+        let tocEntries = buildTOCEntries(
+            packageDoc: packageDoc,
+            baseDirectory: baseDirectory,
+            entryLoader: entryLoader,
+            pathToPlainOffset: pathToPlainOffset
+        )
+
         return ParsedEPUBDocument(
             title: packageDoc.title,
             displayText: displayText,
             plainText: plainText,
-            images: imageRecords
+            images: imageRecords,
+            tocEntries: tocEntries
         )
     }
 }
@@ -247,6 +288,43 @@ extension EPUBDocumentImporter {
         if path.hasPrefix("/") { path.removeFirst() }
         return path
     }
+
+    /// Parses the EPUB nav (EPUB 3) or NCX (EPUB 2) document to build structured
+    /// TOC entries with resolved plainText character offsets. Returns empty array
+    /// if neither is present or parsing fails.
+    private func buildTOCEntries(
+        packageDoc: EPUBPackageDocument,
+        baseDirectory: String,
+        entryLoader: (String) -> Data?,
+        pathToPlainOffset: [String: Int]
+    ) -> [EPUBTOCEntry] {
+        let rawEntries: [RawTOCEntry]
+
+        if let navID = packageDoc.navItemID,
+           let navHref = packageDoc.allItemHrefs[navID],
+           let navData = entryLoader(resolveArchivePath(baseDirectory: baseDirectory, relativePath: navHref)) {
+            // EPUB 3: nav document (XHTML with epub:type="toc").
+            rawEntries = EPUBNavTOCParser.parse(navData)
+        } else if let ncxID = packageDoc.ncxItemID,
+                  let ncxHref = packageDoc.allItemHrefs[ncxID],
+                  let ncxData = entryLoader(resolveArchivePath(baseDirectory: baseDirectory, relativePath: ncxHref)) {
+            // EPUB 2: NCX document.
+            rawEntries = EPUBNCXParser.parse(ncxData)
+        } else {
+            return []
+        }
+
+        guard !rawEntries.isEmpty else { return [] }
+
+        return rawEntries.map { raw in
+            // Strip fragment and normalize href to match pathToPlainOffset keys.
+            let bareHref = raw.href
+                .components(separatedBy: "#").first
+                .map { ($0 as NSString).lastPathComponent } ?? ""
+            let offset = pathToPlainOffset[bareHref] ?? -1
+            return EPUBTOCEntry(title: raw.title, plainTextOffset: offset, playOrder: raw.playOrder)
+        }
+    }
 }
 
 // ========== BLOCK 05: NORMALIZATION AND PATH HELPERS - END ==========
@@ -257,6 +335,14 @@ private struct EPUBPackageDocument {
     let title: String?
     let manifestItems: [String: EPUBManifestItem]
     let spineItemReferences: [String]
+    /// Manifest item ID of the EPUB 3 nav document (properties="nav"), if present.
+    let navItemID: String?
+    /// Manifest item ID of the EPUB 2 NCX document, if present. NCX items are not
+    /// added to manifestItems (they are not readable XHTML) but their href is needed
+    /// to parse TOC data.
+    let ncxItemID: String?
+    /// href values keyed by manifest item ID — includes NCX items not in manifestItems.
+    let allItemHrefs: [String: String]
 }
 
 private struct EPUBManifestItem {
@@ -296,13 +382,18 @@ private final class EPUBContainerParser: NSObject, XMLParserDelegate {
 private final class EPUBPackageParser: NSObject, XMLParserDelegate {
     private var title: String?
     private var manifestItems: [String: EPUBManifestItem] = [:]
+    private var allItemHrefs: [String: String] = [:]
+    private var navItemID: String?
+    private var ncxItemID: String?
     private var spineItemReferences: [String] = []
     private var collectingTitle = false
     private var currentTitle    = ""
 
-    /// Media types that are navigation/TOC documents rather than readable content.
-    private static let tocMediaTypes: Set<String> = [
-        "application/x-dtbncx+xml",       // EPUB 2 NCX table of contents
+    /// Media types and file suffixes that indicate a pure XML navigation structure
+    /// (not readable XHTML content). The NCX is sometimes mislabelled as "text/xml"
+    /// so we also detect by href extension.
+    private static let nonReadableMediaTypes: Set<String> = [
+        "application/x-dtbncx+xml",       // EPUB 2 NCX — standard media type
         "application/oebps-package+xml",   // OPF package document itself
     ]
 
@@ -316,7 +407,10 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
         return EPUBPackageDocument(
             title: delegate.title?.trimmingCharacters(in: .whitespacesAndNewlines),
             manifestItems: delegate.manifestItems,
-            spineItemReferences: delegate.spineItemReferences
+            spineItemReferences: delegate.spineItemReferences,
+            navItemID: delegate.navItemID,
+            ncxItemID: delegate.ncxItemID,
+            allItemHrefs: delegate.allItemHrefs
         )
     }
 
@@ -331,17 +425,36 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
            let href = attributeDict["href"] {
             let mediaType  = attributeDict["media-type"] ?? ""
             let properties = attributeDict["properties"] ?? ""
-            // Skip navigation/TOC documents — not readable content.
-            guard !Self.tocMediaTypes.contains(mediaType.lowercased()),
-                  !properties.lowercased().split(separator: " ").contains("nav") else { return }
+            // Always record href for all items so TOC parsers can find NCX/nav paths.
+            allItemHrefs[id] = href
+            // NCX files are sometimes mislabelled as "text/xml" — also detect by extension.
+            let hrefLower = href.lowercased()
+            let isNCX = Self.nonReadableMediaTypes.contains(mediaType.lowercased())
+                     || (mediaType.lowercased() == "text/xml" && hrefLower.hasSuffix(".ncx"))
+            // Non-readable types (NCX, OPF) are tracked for TOC purposes only.
+            if isNCX || mediaType.lowercased() == "application/oebps-package+xml" {
+                if isNCX { ncxItemID = id }
+                return
+            }
+            // Nav documents (properties="nav") are readable XHTML — include them
+            // so TOC text appears inline instead of being silently dropped.
+            if properties.lowercased().split(separator: " ").contains("nav") { navItemID = id }
             manifestItems[id] = EPUBManifestItem(href: href, mediaType: mediaType, properties: properties)
+            return
+        }
+        if matches(elementName, suffix: "spine") {
+            // EPUB 2: <spine toc="ncxId"> — fallback to identify NCX when media type
+            // didn't already catch it (e.g. NCX mislabelled as text/xml without .ncx ext).
+            if let tocID = attributeDict["toc"], ncxItemID == nil {
+                ncxItemID = tocID
+            }
             return
         }
         if matches(elementName, suffix: "itemref"),
            let idref = attributeDict["idref"] {
-            // linear="no" items are out of the reading flow (cover pages, nav docs).
-            let linear = attributeDict["linear"] ?? "yes"
-            guard linear.lowercased() != "no" else { return }
+            // Include linear="no" items — they are supplemental (cover pages, nav
+            // documents) but suppressing them silently drops TOC and cover content.
+            // Cover images become visual stops; nav XHTML becomes readable TOC text.
             spineItemReferences.append(idref)
         }
     }
@@ -363,3 +476,138 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
 }
 
 // ========== BLOCK 06: XML PARSERS - END ==========
+
+// ========== BLOCK 07: TOC PARSERS - START ==========
+
+/// One raw entry from an EPUB nav or NCX document before offset resolution.
+private struct RawTOCEntry {
+    let title: String
+    /// href from the nav/NCX (may include a fragment, e.g. "ch01.xhtml#s1").
+    let href: String
+    let playOrder: Int
+}
+
+/// Parses an EPUB 3 nav document (XHTML) for its `<nav epub:type="toc">` entries.
+/// Returns entries in document order with synthetic 1-based playOrder values.
+private final class EPUBNavTOCParser: NSObject, XMLParserDelegate {
+    private var entries: [RawTOCEntry] = []
+    private var insideTOCNav = false
+    private var navDepth = 0
+    private var collectingAnchor = false
+    private var currentHref = ""
+    private var currentTitle = ""
+    private var playOrder = 0
+
+    static func parse(_ data: Data) -> [RawTOCEntry] {
+        let delegate = EPUBNavTOCParser()
+        let parser   = XMLParser(data: data)
+        parser.shouldProcessNamespaces = true
+        parser.delegate = delegate
+        _ = parser.parse()
+        return delegate.entries
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String,
+                namespaceURI: String?, qualifiedName _: String?,
+                attributes attributeDict: [String: String] = [:]) {
+        let localName = elementName.components(separatedBy: ":").last ?? elementName
+        // Detect <nav epub:type="toc"> by the epub:type attribute.
+        if localName == "nav" {
+            let epubType = attributeDict["epub:type"] ?? attributeDict["type"] ?? ""
+            if epubType.lowercased().contains("toc") {
+                insideTOCNav = true
+                navDepth = 0
+            }
+            if insideTOCNav { navDepth += 1 }
+            return
+        }
+        if insideTOCNav && localName == "a", let href = attributeDict["href"] {
+            collectingAnchor = true
+            currentHref  = href
+            currentTitle = ""
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if collectingAnchor { currentTitle.append(string) }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String,
+                namespaceURI _: String?, qualifiedName _: String?) {
+        let localName = elementName.components(separatedBy: ":").last ?? elementName
+        if localName == "nav" && insideTOCNav {
+            navDepth -= 1
+            if navDepth <= 0 { insideTOCNav = false }
+            return
+        }
+        if insideTOCNav && localName == "a" && collectingAnchor {
+            collectingAnchor = false
+            let t = currentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty && !currentHref.isEmpty {
+                playOrder += 1
+                entries.append(RawTOCEntry(title: t, href: currentHref, playOrder: playOrder))
+            }
+        }
+    }
+}
+
+/// Parses an EPUB 2 NCX document for its navPoint entries.
+/// Handles both standard `application/x-dtbncx+xml` and mislabelled `text/xml` NCX files.
+private final class EPUBNCXParser: NSObject, XMLParserDelegate {
+    private var entries: [RawTOCEntry] = []
+    private var collectingLabel = false
+    private var currentLabel = ""
+    private var currentSrc   = ""
+    private var currentOrder = 0
+    private var pendingOrder = 0
+
+    static func parse(_ data: Data) -> [RawTOCEntry] {
+        let delegate = EPUBNCXParser()
+        let parser   = XMLParser(data: data)
+        parser.shouldProcessNamespaces = true
+        parser.delegate = delegate
+        _ = parser.parse()
+        return delegate.entries
+    }
+
+    private func localName(_ elementName: String) -> String {
+        elementName.components(separatedBy: ":").last ?? elementName
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String,
+                namespaceURI _: String?, qualifiedName _: String?,
+                attributes attributeDict: [String: String] = [:]) {
+        switch localName(elementName) {
+        case "navPoint":
+            let orderStr = attributeDict["playOrder"] ?? ""
+            pendingOrder = Int(orderStr) ?? (entries.count + 1)
+            currentLabel = ""
+            currentSrc   = ""
+        case "text":
+            collectingLabel = true
+        case "content":
+            currentSrc = attributeDict["src"] ?? ""
+        default: break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if collectingLabel { currentLabel.append(string) }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String,
+                namespaceURI _: String?, qualifiedName _: String?) {
+        switch localName(elementName) {
+        case "text":
+            collectingLabel = false
+        case "navPoint":
+            let t = currentLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty && !currentSrc.isEmpty {
+                entries.append(RawTOCEntry(title: t, href: currentSrc, playOrder: pendingOrder))
+            }
+        default: break
+        }
+    }
+}
+
+// ========== BLOCK 07: TOC PARSERS - END ==========

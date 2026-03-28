@@ -1,5 +1,32 @@
 # Posey History
 
+## 2026-03-27 — Image verification, mixed-content PDF pages, filename sanitization, EPUB TOC navigation surface
+
+**Image verification tooling (`tools/verify_images.py`):**
+New standalone script renders PDF pages on macOS using the same `PDFPage.thumbnail(of:for:)` call Posey uses, fetches stored PNG data from the device via `GET_IMAGE:<id>`, and compares: PNG header, non-trivial size, not all-white, dimensions match reference, byte-count ratio reasonable. Also added `GET_IMAGE`, `LIST_IMAGES`, `LIST_TOC` API commands and `imageIDs(for:)`, `tocEntries(for:)`, `insertTOCEntries(_:for:)` DB methods. All 11 Antifa visual-page images verified as correct and non-blank.
+
+**Mixed-content PDF pages (text + image both preserved):**
+`PDFDocumentImporter` previously dropped inline images on pages where PDFKit found text. Pages with both text and embedded images (figures, charts) now preserve both: text flows into the reading stream, and the page is also rendered as a visual stop inline immediately after. Detection uses `CGPDFDictionaryApplyFunction` on the page's XObject resource dictionary to check for Image-type streams — fast, no rendering required.
+
+**General filename sanitization:**
+Replaced the narrow duplicate-extension check with `LibraryViewModel.sanitizeFilename(_:)`: strips null bytes, control characters, path separators (`/`, `\`), macOS-reserved characters (`:`, `|`, `?`, `*`, `<`, `>`, `"`), path traversal sequences (`..`), leading/trailing whitespace and dots, duplicate extensions, and truncates to 200 chars. Applied at the API import boundary and the PDF importer.
+
+**EPUB TOC as navigation surface (not silently skipped):**
+Previous session silently dropped EPUB TOC/nav documents. This session reverses that direction:
+
+- Nav documents (`properties="nav"` in manifest) are now included as readable XHTML spine content — TOC text appears inline in the document.
+- `linear="no"` spine entries are now included (cover pages become visual stops; nav docs become readable TOC text).
+- NCX files (EPUB 2) are still excluded as readable content (pure XML, not XHTML) but are now parsed for structured TOC data. Handles mislabelled NCX (`media-type="text/xml"`) via extension check and `<spine toc="...">` attribute fallback.
+- New `EPUBNavTOCParser` (EPUB 3 nav) and `EPUBNCXParser` (EPUB 2 NCX) extract title/href pairs with play order.
+- `buildTOCEntries()` resolves each TOC href to a plainText character offset by tracking cumulative chapter length during spine processing.
+- `ParsedEPUBDocument.tocEntries: [EPUBTOCEntry]` carries structured TOC to the library importer.
+- New `document_toc` SQLite table stores (title, plainTextOffset, playOrder) per document. Deduplication on `(title, offset)` prevents duplicate NCX sub-navPoints.
+- `ReaderViewModel.tocEntries: [StoredTOCEntry]` loaded at init.
+- `ReaderViewModel.jumpToTOCEntry(_:)` stops playback and jumps to the target sentence.
+- `TOCSheet` (BLOCK P3): list of chapter titles, tap to jump to section and dismiss.
+- Contents button (`list.bullet.indent`) in top chrome — only shown when `tocEntries` is non-empty.
+- Verified: Data Smog imports 38 unique TOC entries (42 raw minus 4 NCX duplicates) with correct increasing offsets from Cover (0) through About the Publisher (389 566).
+
 ## 2026-03-27 — EPUB directory/image support, PDF image fix, highlight/scroll unification, OCR confidence gating, EPUB TOC filtering
 
 **EPUB directory-format support:**

@@ -15,25 +15,37 @@ struct PDFLibraryImporter {
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "pdf") throws -> Document {
         let parsed = try importer.loadDocument(fromData: rawData)
-        return try persistDocument(
+        let doc = try persistDocument(
             title: parsed.title ?? title,
             fileName: fileName,
             fileType: fileType,
             displayText: parsed.displayText,
             plainText: parsed.plainText
         )
+        try saveImages(parsed.images, for: doc.id)
+        return doc
     }
 
     /// Persist an already-parsed document. Called on the main thread after
     /// async PDF parsing completes. DatabaseManager must stay on main thread.
     func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL) throws -> Document {
-        try persistDocument(
-            title: parsed.title ?? url.deletingPathExtension().lastPathComponent,
-            fileName: url.lastPathComponent,
-            fileType: url.pathExtension.lowercased(),
+        // Strip duplicate file extensions (e.g. "report.pdf.pdf" → "report.pdf")
+        // so the title fallback and stored fileName are clean.
+        let rawFilename = url.lastPathComponent
+        let ext = url.pathExtension.lowercased()
+        let withoutExt = (rawFilename as NSString).deletingPathExtension
+        let fileName = (withoutExt as NSString).pathExtension.lowercased() == ext ? withoutExt : rawFilename
+        let titleFallback = (fileName as NSString).deletingPathExtension
+
+        let doc = try persistDocument(
+            title: parsed.title ?? titleFallback,
+            fileName: fileName,
+            fileType: ext,
             displayText: parsed.displayText,
             plainText: parsed.plainText
         )
+        try saveImages(parsed.images, for: doc.id)
+        return doc
     }
 }
 
@@ -76,6 +88,15 @@ extension PDFLibraryImporter {
         }
 
         return document
+    }
+
+    /// Delete stale image records then insert the new set. Called after every
+    /// import so reimports don't leave orphaned blobs under old image IDs.
+    private func saveImages(_ images: [PageImageRecord], for documentID: UUID) throws {
+        try databaseManager.deleteImages(for: documentID)
+        for image in images {
+            try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
+        }
     }
 }
 

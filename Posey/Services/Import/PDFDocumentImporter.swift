@@ -120,11 +120,14 @@ extension PDFDocumentImporter {
                 // PDFKit found no text — report progress then try Vision OCR.
                 progress?(.ocr(page: index + 1, of: pageCount))
                 let ocr = ocrText(from: page)
-                if !ocr.isEmpty {
+                // Require at least 10 chars of OCR text before treating a page as readable.
+                // Fewer than that (page numbers, "iii", lone captions) means the page is
+                // effectively visual — render it as an image stop instead.
+                if ocr.count >= 10 {
                     pageContents.append(.text(ocr))
                     readableTextPages.append(ocr)
                 } else {
-                    // Purely visual page — render to PNG for inline display.
+                    // Purely visual page (or near-blank) — render to PNG for inline display.
                     let imageID = UUID().uuidString
                     if let pngData = renderPageToPNG(page) {
                         imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))

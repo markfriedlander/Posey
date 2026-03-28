@@ -208,6 +208,40 @@
     "fileType": "pdf"
   },
   {
+    "title": "Data Smog",
+    "totalChars": 392686,
+    "spacedUpperSequences": 0,
+    "spacedUpperExamples": [],
+    "spacedLowerSequences": 0,
+    "spacedLowerExamples": [],
+    "linebreakHyphens": 0,
+    "linebreakHyphenExamples": [],
+    "unicodeSoftHyphens": 0,
+    "nbspChars": 0,
+    "zwspChars": 0,
+    "bomChars": 0,
+    "tabChars": 0,
+    "strayFormfeeds": 0,
+    "longBlocks": 100,
+    "longBlockSamples": [
+      "This is not the first time we have been confronted by the unpleasant side effects of abundance. We who live in the most \u2026",
+      "When the definitive history of the information revolution is written years from now, one of the milestones will be urban\u2026",
+      "On April 12, 1994, Laurence Canter and Martha Siegel, a married team of Arizona lawyers, took spamming to an entirely ne\u2026",
+      "Up until then, more information was almost always a good thing. For nearly 100,000 years leading up to this century, inf\u2026",
+      "In this way, in a very short span of natural history, we have vaulted from a state of information scarcity to one of inf\u2026"
+    ],
+    "longBlockPunctDensities": [
+      0.9,
+      0.6,
+      0.5,
+      1.1,
+      1.3
+    ],
+    "visualPageMarkers": 4,
+    "file": "Data Smog.epub",
+    "fileType": "epub"
+  },
+  {
     "title": "Illuminatus TRILOGY EBOOK",
     "totalChars": 1646918,
     "spacedUpperSequences": 0,
@@ -380,6 +414,46 @@
     "visualPageMarkers": 0,
     "file": "New Media Sideletters.pdf",
     "fileType": "pdf"
+  },
+  {
+    "title": "The 4-Hour Body: An Uncommon Guide to Rapid Fat-Loss, Incredible Sex, and Becoming Superhuman",
+    "totalChars": 994821,
+    "spacedUpperSequences": 0,
+    "spacedUpperExamples": [],
+    "spacedLowerSequences": 0,
+    "spacedLowerExamples": [],
+    "linebreakHyphens": 5,
+    "linebreakHyphenExamples": [
+      "onesize- fits",
+      "setto- failure",
+      "setto- failure",
+      "pullto- apush",
+      "overthe- counter"
+    ],
+    "unicodeSoftHyphens": 0,
+    "nbspChars": 0,
+    "zwspChars": 0,
+    "bomChars": 0,
+    "tabChars": 0,
+    "strayFormfeeds": 0,
+    "longBlocks": 18,
+    "longBlockSamples": [
+      "That is, if you\u2019re a critical intervention patient, such as a morbidly obese type 1 diabetic. The options for such peopl\u2026",
+      "\u201cI got a heart rate monitor (HRM) and started using it for EVERYTHING. I used it while pedaling to make sure that even w\u2026",
+      "The Rutgers University researchers responsible for the principal study emphasize, almost as a deterrent, that one would \u2026",
+      "2. Do not just drop the weight when you hit failure. Attempt to move it, millimeter by millimeter, and then hold it at t\u2026",
+      "First things first: the claim that it\u2019s \u201cnothing more than water\u201d doesn\u2019t square with the science. Dehydration of even 4\u2026"
+    ],
+    "longBlockPunctDensities": [
+      1.2,
+      1.1,
+      1.0,
+      1.3,
+      0.7
+    ],
+    "visualPageMarkers": 453,
+    "file": "The 4-Hour Body An Uncommon Guide to Rapid Fat-Loss Incredible Sex and Becoming Superhuman 1.epub",
+    "fileType": "epub"
   },
   {
     "title": "Cryptography for Dummies",

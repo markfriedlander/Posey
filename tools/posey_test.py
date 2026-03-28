@@ -48,6 +48,8 @@ import os
 import sys
 import json
 import http.client
+import io
+import zipfile
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -101,9 +103,25 @@ def _command(cmd: str) -> dict:
     return data if isinstance(data, dict) else {"raw": data}
 
 
+def _zip_epub_directory(dir_path: str) -> bytes:
+    """Zip a directory-format EPUB into an in-memory zip, preserving relative paths."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(dir_path):
+            for fname in files:
+                full = os.path.join(root, fname)
+                arcname = os.path.relpath(full, dir_path)
+                zf.write(full, arcname)
+    return buf.getvalue()
+
+
 def _import_file(path: str) -> dict:
-    with open(path, "rb") as f:
-        data = f.read()
+    if os.path.isdir(path):
+        # Directory-format EPUB — zip in memory before sending.
+        data = _zip_epub_directory(path)
+    else:
+        with open(path, "rb") as f:
+            data = f.read()
     filename = os.path.basename(path)
     status, result = _http(
         "POST", "/import", body=data,
@@ -207,11 +225,25 @@ def run_audit(verbose: bool = False) -> None:
         print(f"Test materials directory not found: {_TEST_MATERIALS_DIR}")
         sys.exit(1)
 
+    def _entry_size(fname: str) -> int:
+        fpath = os.path.join(_TEST_MATERIALS_DIR, fname)
+        if os.path.isdir(fpath):
+            # Directory EPUB — sum all file sizes inside
+            return sum(
+                os.path.getsize(os.path.join(root, f))
+                for root, _dirs, files in os.walk(fpath)
+                for f in files
+            )
+        return os.path.getsize(fpath)
+
     files = sorted(
         (f for f in os.listdir(_TEST_MATERIALS_DIR)
-         if not f.startswith(".") and os.path.isfile(
-             os.path.join(_TEST_MATERIALS_DIR, f))),
-        key=lambda f: os.path.getsize(os.path.join(_TEST_MATERIALS_DIR, f))
+         if not f.startswith(".") and (
+             os.path.isfile(os.path.join(_TEST_MATERIALS_DIR, f)) or
+             (os.path.isdir(os.path.join(_TEST_MATERIALS_DIR, f)) and
+              f.lower().endswith(".epub"))
+         )),
+        key=_entry_size
     )
     if not files:
         print("No files found in Posey Test Materials/")
@@ -226,7 +258,7 @@ def run_audit(verbose: bool = False) -> None:
 
     for fname in files:
         fpath = os.path.join(_TEST_MATERIALS_DIR, fname)
-        size_mb = os.path.getsize(fpath) / 1_048_576
+        size_mb = _entry_size(fname) / 1_048_576
         print(f"  ▶  {fname} ({size_mb:.1f} MB)")
         try:
             result = _import_file(fpath)

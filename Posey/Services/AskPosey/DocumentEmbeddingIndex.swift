@@ -145,6 +145,130 @@ nonisolated final class DocumentEmbeddingIndex {
         }
     }
 
+    /// Enqueue indexing on a background dispatch queue and post
+    /// notifications around the work so any view that wants to display
+    /// "Indexing this document…" can pick up the state.
+    ///
+    /// This is the variant the library importers call after
+    /// `upsertDocument`. It returns immediately so import never blocks
+    /// the main thread on the multi-second embedding pass — Mark's
+    /// "Illuminatus load time" complaint was rooted in the previous
+    /// synchronous call (≈3,300 chunks × ~5-10ms each = 16-33s on a
+    /// 1.6M-char EPUB). The synchronous form is retained for tests
+    /// and any caller that needs a deterministic completion point.
+    ///
+    /// **Threading:** the CPU-bound work (language detection,
+    /// chunking, NLEmbedding calls) runs on a background dispatch
+    /// queue. The SQLite write hops back to the main queue because
+    /// `DatabaseManager` uses a single sqlite3 handle without internal
+    /// synchronisation — production code must always touch it from a
+    /// single thread. The main queue is the one we already use across
+    /// the rest of the app, so we keep it as the canonical SQLite
+    /// thread.
+    func enqueueIndexing(_ document: Document) {
+        // Skip work entirely when the document already has chunks —
+        // this matches `indexIfNeeded`'s contract and avoids posting
+        // a misleading "Indexing…" notification for documents that
+        // need no work. The COUNT(*) is sub-millisecond and runs
+        // wherever the caller is — typically the main thread (library
+        // importers).
+        let alreadyIndexed: Bool
+        do {
+            alreadyIndexed = try database.chunkCount(for: document.id) > 0
+        } catch {
+            alreadyIndexed = false
+        }
+        guard !alreadyIndexed else { return }
+
+        let documentID = document.id
+        let documentTitle = document.title
+        let plainText = document.plainText
+        // Capture only Sendable values into the @Sendable
+        // dispatch closures — capturing `self` (a non-Sendable class
+        // reference) would surface a Sendable warning in Swift 5
+        // and an error in Swift 6. The chunk-building helpers we
+        // need are all `static` so we don't need an instance to call
+        // them; the database write is dispatched back to main with
+        // an explicit weak self capture, where the access is safe.
+        let database = self.database
+        let configuration = self.configuration
+
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .documentIndexingDidStart,
+                object: nil,
+                userInfo: [
+                    DocumentEmbeddingIndex.notificationDocumentIDKey: documentID,
+                    DocumentEmbeddingIndex.notificationDocumentTitleKey: documentTitle
+                ]
+            )
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Pure-CPU phase: language detection + chunking + NLEmbedding
+            // calls. No SQLite touched here — database writes happen on
+            // main below.
+            let language = Self.detectLanguage(in: plainText)
+            let kind = Self.embeddingKind(for: language)
+            let embedder = Self.embedder(for: language)
+            let chunks = Self.chunk(plainText, configuration: configuration)
+            var stored: [StoredDocumentChunk] = []
+            stored.reserveCapacity(chunks.count)
+            for chunk in chunks {
+                let vector = Self.embed(chunk.text, with: embedder)
+                stored.append(StoredDocumentChunk(
+                    chunkIndex: chunk.chunkIndex,
+                    startOffset: chunk.startOffset,
+                    endOffset: chunk.endOffset,
+                    text: chunk.text,
+                    embedding: vector,
+                    embeddingKind: kind
+                ))
+            }
+
+            // Persist + notify on main. SQLite handle is single-threaded
+            // so all writes route through the canonical main thread.
+            DispatchQueue.main.async {
+                do {
+                    try database.replaceChunks(stored, for: documentID)
+                    NotificationCenter.default.post(
+                        name: .documentIndexingDidComplete,
+                        object: nil,
+                        userInfo: [
+                            DocumentEmbeddingIndex.notificationDocumentIDKey: documentID,
+                            DocumentEmbeddingIndex.notificationChunkCountKey: stored.count
+                        ]
+                    )
+                } catch {
+                    NSLog(
+                        "[POSEY_ASK_POSEY] embedding index failed for %@ (%@): %@",
+                        documentTitle,
+                        documentID.uuidString,
+                        "\(error)"
+                    )
+                    NotificationCenter.default.post(
+                        name: .documentIndexingDidFail,
+                        object: nil,
+                        userInfo: [
+                            DocumentEmbeddingIndex.notificationDocumentIDKey: documentID,
+                            DocumentEmbeddingIndex.notificationErrorKey: error
+                        ]
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: Notification keys
+
+    /// Notification userInfo key for the affected document's UUID. Always present.
+    static let notificationDocumentIDKey = "posey.askposey.indexing.documentID"
+    /// Notification userInfo key for the document title (humans). Optional.
+    static let notificationDocumentTitleKey = "posey.askposey.indexing.documentTitle"
+    /// Notification userInfo key for the indexed chunk count. Present on .didComplete.
+    static let notificationChunkCountKey = "posey.askposey.indexing.chunkCount"
+    /// Notification userInfo key for the failure error. Present on .didFail.
+    static let notificationErrorKey = "posey.askposey.indexing.error"
+
     /// Force a rebuild of the chunk index for a document. Used by
     /// re-import paths where the underlying text may have changed.
     @discardableResult
@@ -204,9 +328,25 @@ nonisolated final class DocumentEmbeddingIndex {
 
     // MARK: Chunking (visible for testing)
 
-    /// Slice `text` into overlapping chunks per the configuration.
-    /// Visibility-internal so unit tests can assert exact boundaries.
+    /// Slice `text` into overlapping chunks per the instance's
+    /// configuration. Convenience wrapper over the static form so
+    /// tests can call `index.chunk(...)` without re-passing the
+    /// configuration; production code paths that already have a
+    /// detached configuration (e.g. the background closure inside
+    /// `enqueueIndexing`) call the static form directly.
     func chunk(_ text: String) -> [DocumentEmbeddingChunk] {
+        Self.chunk(text, configuration: configuration)
+    }
+
+    /// Static chunking pass. Called from the background closure in
+    /// `enqueueIndexing` so the operation doesn't need a non-Sendable
+    /// `self` capture. Visibility-internal so unit tests can pass a
+    /// custom configuration if they ever need to assert boundaries
+    /// against a non-default chunk size.
+    static func chunk(
+        _ text: String,
+        configuration: DocumentEmbeddingIndexConfiguration
+    ) -> [DocumentEmbeddingChunk] {
         let chunkSize = configuration.chunkSize
         let overlap   = configuration.chunkOverlap
         precondition(chunkSize > 0, "chunkSize must be positive")
@@ -242,7 +382,13 @@ nonisolated final class DocumentEmbeddingIndex {
 
 
 // ========== BLOCK 04: LANGUAGE + EMBEDDING - START ==========
-extension DocumentEmbeddingIndex {
+// `nonisolated extension` so language helpers and the `cosine`
+// utility are callable from `search`/`indexIfNeeded`/`tryIndex`/
+// `enqueueIndexing` (all nonisolated by class declaration). Without
+// this annotation the project's default MainActor isolation would
+// promote these helpers, and Swift 5 with approachable concurrency
+// emits a warning when nonisolated callers reach into them.
+nonisolated extension DocumentEmbeddingIndex {
 
     /// Best-effort language detection. NLLanguageRecognizer needs a
     /// reasonable sample to be confident — we hand it the first 1000
@@ -367,3 +513,23 @@ extension DocumentEmbeddingIndex {
     }
 }
 // ========== BLOCK 04: LANGUAGE + EMBEDDING - END ==========
+
+
+// ========== BLOCK 05: NOTIFICATION NAMES - START ==========
+extension Notification.Name {
+    /// Posted on the main queue immediately before background indexing
+    /// begins for a document. Observe this to show "Indexing…" UI.
+    static let documentIndexingDidStart    = Notification.Name("posey.askposey.indexingDidStart")
+    /// Posted on the main queue when background indexing finishes
+    /// successfully. UserInfo carries the chunk count under
+    /// `DocumentEmbeddingIndex.notificationChunkCountKey`.
+    static let documentIndexingDidComplete = Notification.Name("posey.askposey.indexingDidComplete")
+    /// Posted on the main queue when background indexing throws.
+    /// UserInfo carries the error under
+    /// `DocumentEmbeddingIndex.notificationErrorKey`. The document
+    /// remains readable; callers should treat this as "RAG
+    /// temporarily unavailable for this document," not a hard import
+    /// failure.
+    static let documentIndexingDidFail     = Notification.Name("posey.askposey.indexingDidFail")
+}
+// ========== BLOCK 05: NOTIFICATION NAMES - END ==========

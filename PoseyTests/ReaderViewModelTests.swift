@@ -414,4 +414,73 @@ final class ReaderViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.currentSentenceIndex, 1)
         XCTAssertEqual(viewModel.displayBlocks.first(where: { $0.id == viewModel.focusedDisplayBlockID })?.kind, .visualPlaceholder)
     }
+
+    /// `playbackSkipUntilOffset` is set by the PDF importer (and any future
+    /// importer that detects a TOC). It must completely hide the skipped
+    /// region from the reader: not in segments, not in displayBlocks, not
+    /// reachable by playback or scroll, not searchable, and rewind/restart
+    /// must land on the first body sentence — never inside the skipped
+    /// region.
+    func testPlaybackSkipRegionIsHiddenFromReader() throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("posey.sqlite")
+        let manager = try DatabaseManager(databaseURL: databaseURL)
+
+        // Synthetic doc: a TOC-shaped block followed by body prose.
+        let toc = "Table of Contents I. Intro 1 II. Body 5 III. End 9"
+        let body = "The first body sentence. The second body sentence. The third body sentence."
+        let plain = toc + "\n\n" + body
+        let skipUntil = (toc + "\n\n").count
+
+        let document = Document(
+            id: UUID(),
+            title: "TOCDoc",
+            fileName: "TOCDoc.pdf",
+            fileType: "pdf",
+            importedAt: .now,
+            modifiedAt: .now,
+            displayText: plain,
+            plainText: plain,
+            characterCount: plain.count,
+            playbackSkipUntilOffset: skipUntil
+        )
+        try manager.upsertDocument(document)
+
+        let viewModel = ReaderViewModel(document: document, databaseManager: manager)
+
+        // No segment may begin inside the TOC region.
+        for segment in viewModel.segments {
+            XCTAssertGreaterThanOrEqual(segment.startOffset, skipUntil,
+                                        "segment \(segment.id) at offset \(segment.startOffset) is inside the skip region")
+        }
+
+        // First segment is the first BODY sentence.
+        let firstSegmentText = viewModel.segments.first?.text ?? ""
+        XCTAssertTrue(firstSegmentText.contains("first body sentence"),
+                      "first segment should be the first body sentence; got \(firstSegmentText)")
+
+        // Restart-from-beginning lands on the first body sentence (index 0
+        // after the filter), not inside the TOC.
+        viewModel.handleAppear()
+        viewModel.restartFromBeginning()
+        XCTAssertEqual(viewModel.currentSentenceIndex, 0)
+        XCTAssertTrue(viewModel.segments[viewModel.currentSentenceIndex].text.contains("first body sentence"))
+
+        // A saved position INSIDE the skip region is migrated to the first
+        // body sentence rather than restored verbatim.
+        try manager.upsertReadingPosition(
+            ReadingPosition(documentID: document.id, updatedAt: .now,
+                            characterOffset: 5, sentenceIndex: 0)
+        )
+        let migrated = ReaderViewModel(document: document, databaseManager: manager)
+        migrated.handleAppear()
+        XCTAssertEqual(migrated.currentSentenceIndex, 0)
+        XCTAssertTrue(migrated.segments[migrated.currentSentenceIndex].text.contains("first body sentence"))
+
+        // Search cannot match TOC text.
+        viewModel.updateSearchQuery("Intro")
+        XCTAssertTrue(viewModel.searchMatchIndices.isEmpty,
+                      "search should not find 'Intro' inside the hidden TOC region")
+    }
 }

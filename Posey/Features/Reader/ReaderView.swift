@@ -162,8 +162,22 @@ struct ReaderView: View {
             }
             .onAppear {
                 viewModel.handleAppear()
-                viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                 revealChrome()
+                // Defer the initial scroll past the first layout pass so the
+                // LazyVStack has time to realize rows up to the saved sentence
+                // position. Calling scrollTo before that happens silently
+                // no-ops because the target row doesn't yet exist in layout —
+                // which is why pressing Play after open used to "fix" the
+                // scroll: the on-change handler triggered realization.
+                // Two nudges: one for the typical case, a second after a
+                // longer pause for documents where the first scroll only
+                // partially advanced the lazy realization.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(60))
+                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                    try? await Task.sleep(for: .milliseconds(180))
+                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                }
             }
             .onDisappear {
                 chromeFadeTask?.cancel()

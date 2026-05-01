@@ -1,5 +1,15 @@
 # Posey History
 
+## 2026-04-30 — Restore scroll position on document open; tighten pause latency
+
+Two acceptance issues from the Step 4 sign-off:
+
+**Scroll position not restored on document open.** `ReaderView.onAppear` did call `scrollToCurrentSentence(with: proxy, animated: false)` immediately after `handleAppear` set the saved sentence index, but the LazyVStack hadn't yet realized rows up to the saved position when the call ran. `proxy.scrollTo(47, anchor: .center)` silently no-ops when row 47 doesn't exist in the layout — which is why pressing Play after open used to "fix" the scroll: the on-change handler re-fired the same call once the view had updated. Fix: defer the initial scroll to two short async ticks (60 ms then 180 ms) inside a `Task @MainActor`, giving the LazyVStack time to advance its lazy realization to the target row. The first nudge handles the typical case; the second covers documents long enough that the first scroll only partially advanced realization.
+
+**Pause latency.** `pauseSpeaking(at: .word)` waits for the next word boundary before the audio actually halts; on the Best Available (Siri-tier) audio path that delay can be hundreds of milliseconds — long enough to feel broken in real use. Switched to `.immediate` so the synthesizer cuts mid-word the moment the user taps pause. Reading apps resume from the saved sentence anyway, so a clean cut beats a polished-sounding lag. Belt-and-suspenders: also tightened `SentenceSegmenter.maxSegmentLength` from 600 to 250 chars (~15 s of speech). Each pre-buffered utterance is now short enough that AVSpeech state transitions feel instant, and read-along highlighting picks up tighter granularity as a bonus.
+
+Tests: full PoseyTests suite passes on device (101 case lines logged, 0 failures, `** TEST SUCCEEDED **`).
+
 ## 2026-04-30 — Remember the last-opened document across cold launches
 
 **Problem:** Per-document position memory was robust (saves on every sentence change, pause, scenePhase background, and onDisappear; restores from character offset with sentence-index fallback) — but at *cold launch* there was no "remember which document I was reading" persistence. Every kill→relaunch dumped the user back at the library list, even though the document's reading position was perfectly preserved. From the user's perspective, "Posey forgot where I was" — even though technically only the navigation state was lost.

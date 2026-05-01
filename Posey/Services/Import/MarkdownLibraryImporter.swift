@@ -59,7 +59,7 @@ struct MarkdownLibraryImporter {
         }
 
         // Ask Posey embedding index — best-effort (logs on failure).
-        embeddingIndex?.tryIndex(document)
+        embeddingIndex?.enqueueIndexing(document)
 
         return document
     }

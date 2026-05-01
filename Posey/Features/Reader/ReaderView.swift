@@ -9,6 +9,12 @@ import AppKit
 
 struct ReaderView: View {
     @StateObject private var viewModel: ReaderViewModel
+    /// Mirrors the embedding-index notifications so we can show an
+    /// "Indexing this document…" banner without blocking import.
+    /// Owned by ReaderView so the banner survives across renders;
+    /// LibraryView creates its own instance for the eventual library
+    /// row indicator (not in v1).
+    @StateObject private var indexingTracker = IndexingTracker()
     @Environment(\.scenePhase) private var scenePhase
     /// Honors the system "Reduce Motion" accessibility setting. When true,
     /// chrome fade and scroll animations skip their easing — visible state
@@ -182,6 +188,17 @@ struct ReaderView: View {
                     .background(.thinMaterial)
                 }
             }
+            // Ask Posey indexing banner. Visible at the top center
+            // while this document's embedding index is being built in
+            // the background. Hidden entirely when AFM is unavailable
+            // on this device — per spec, no degraded affordance, no
+            // upsell. This is the user-visible signal that "Posey is
+            // doing something" during the multi-second embedding
+            // pass that previously made big imports (Illuminatus,
+            // 1.6M chars / ~3,300 chunks) look frozen.
+            .overlay(alignment: .top) {
+                indexingBannerView
+            }
             .onAppear {
                 viewModel.handleAppear()
                 revealChrome()
@@ -234,6 +251,39 @@ struct ReaderView: View {
             .sheet(item: $expandedImageItem) { item in
                 ExpandedImageSheet(imageID: item.id, viewModel: viewModel)
             }
+        }
+    }
+
+    /// "Indexing this document…" pill at the top of the reader.
+    /// Visible while the document's embedding index is being built in
+    /// the background. Per `ask_posey_spec.md` resolved decision 5,
+    /// the banner is hidden ENTIRELY when AFM is unavailable on this
+    /// device — no greyed-out state, no informational text. The
+    /// embedding index work itself still happens (it's useful for
+    /// future semantic search regardless of AFM), but the user-facing
+    /// surface is silent.
+    @ViewBuilder
+    private var indexingBannerView: some View {
+        if AskPoseyAvailability.isAvailable,
+           indexingTracker.isIndexing(viewModel.document.id) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(0.7)
+                Text("Indexing this document…")
+                    .font(.footnote)
+                    .foregroundStyle(.primary.opacity(0.85))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.thinMaterial, in: Capsule())
+            .padding(.top, 12)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Indexing this document for Ask Posey")
+            .accessibilityIdentifier("reader.indexingBanner")
+            .transition(.opacity.combined(with: .move(edge: .top)))
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25),
+                       value: indexingTracker.indexingDocumentIDs)
         }
     }
 

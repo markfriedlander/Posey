@@ -105,7 +105,7 @@ extension PDFLibraryImporter {
         // if it ever becomes a perceptible UI freeze on the largest
         // documents we'll move it to a background Task. Tracked in
         // NEXT.md.
-        embeddingIndex?.tryIndex(document)
+        embeddingIndex?.enqueueIndexing(document)
 
         return document
     }

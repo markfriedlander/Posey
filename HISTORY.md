@@ -1,5 +1,17 @@
 # Posey History
 
+## 2026-05-01 — Step 3 Project Gutenberg corpus downloader
+
+`tools/fetch_gutenberg.py` — downloads 28 deliberately curated public-domain books from Project Gutenberg via the Gutendex API for stress-testing Posey against real prose. Categories cover the kinds of writing Posey is likely to encounter: simple prose (Twain, Brontë, Dickens, Austen, Hemingway), structured non-fiction (Darwin, Smith, Mill, Thoreau, James), poetry (Whitman, Shakespeare, Dickinson, Eliot), drama (Shakespeare, Shaw), technical (Euclid, Plato, Kant), illustrated (Carroll, Barrie, Grahame), short stories (Poe, Chekhov), other-language samples (Hugo in French, Goethe in German), and longform stress tests (Tolstoy, Melville).
+
+Each entry is fetched by Project Gutenberg ID where possible (deterministic across runs) or by Gutendex search query as fallback. EPUB is preferred; plain TXT is the fallback when EPUB isn't available. The script writes a `manifest.json` recording id, title, author, language, subjects, source URL, and download count for each fetched book — making the corpus self-describing for later analysis.
+
+Dependency-free (Python stdlib only). Caches by default — re-running skips already-downloaded books unless `--refresh` is passed. `--list` previews the curated selection without fetching, `--categories` restricts the fetch to one or more categories, `--output-dir` overrides the default `~/.posey-gutenberg-corpus`.
+
+Verified end-to-end with the `poetry` category (4 EPUBs, 1.8 MB total, manifest written correctly).
+
+Pair with `verify_synthetic_corpus.py`-style auditing to drive the books through Posey's import pipeline and capture any normalization, segmentation, or display failures on real content.
+
 ## 2026-05-01 — Step 2 synthetic test corpus generator + verification harness
 
 Two new tools that turn "did the normalization pipeline regress?" into a runnable assertion.

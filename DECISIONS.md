@@ -1,5 +1,12 @@
 # Posey Decisions
 
+## 2026-05-01 — Why Centering The Active Sentence Is Non-Negotiable
+
+- Status: Accepted (product principle)
+- Decision: The active sentence is always centered in the visible reading area, regardless of font size, sentence length, screen orientation, or chrome state. Centering is treated as an inviolable acceptance criterion for any reader work — never a "nice to have," never something to compromise for layout convenience.
+- Rationale: The eye learns a fixed position. Like the upper-left corner of a page, or a teleprompter line. When the active sentence is always in the same place, the eye stops hunting — it just looks. That repetition is what lets the reader sustain attention on difficult material without fatigue. If the position drifts even a little — top one moment, middle the next, slightly off-center after that — the eye has to actively track, and the reading flow breaks. So "always centered" is not aesthetics; it's a load-bearing piece of the reading experience.
+- Implication: Any future reader work (custom layouts, slot-machine scroll mode, dim-surrounding mode, in-motion mode, font scaling, orientation handling, chrome restyling) must preserve the fixed-center invariant. If a feature would compromise it, the feature loses, not the centering.
+
 ## 2026-05-01 — Top Chrome Claims Permanent Layout Space; Trade Reading Area For Centering Stability
 
 - Status: Accepted

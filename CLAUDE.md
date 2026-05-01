@@ -212,15 +212,44 @@ anything verified only in the simulator is not yet verified for Mark.
 Simulator findings should be confirmed on device before a task is
 considered complete, and TTS quality must always be judged on device.
 
-The simulator MCP server is set up via:
+**Simulator MCP — installed 2026-04-30, global config.**
+
+The `ios-simulator` MCP server is installed and registered globally in
+`/Users/markfriedlander/.claude.json` — it's available in any Claude Code
+session, not just Posey. Components installed:
+
+- `idb-companion` (Facebook iOS Development Bridge) via Homebrew →
+  `/opt/homebrew/Cellar/idb-companion/1.1.8`
+- `fb-idb` Python client v1.1.7 via `pip3`
+- `ios-simulator` MCP server via:
+  ```
+  "/Users/markfriedlander/Library/Application Support/Claude/claude-code/2.1.121/claude.app/Contents/MacOS/claude" \
+    mcp add ios-simulator npx ios-simulator-mcp
+  ```
+
+A Claude Code session restart is required after installing the MCP for
+the `mcp__ios_simulator__*` tools to become callable in-session. New MCP
+tools do not hot-reload into a running session.
+
+When the MCP is loaded:
+
+- Prefer the **accessibility tree** over screenshots whenever the question
+  is structural (which buttons exist, where, what state, what label).
+  The tree returns precise element coordinates and state at a fraction of
+  the token cost of an image.
+- Use **screenshots** only when the question is genuinely visual ("does
+  this look right at the device size", "is the highlight visible").
+- The simulator is a verification tool — it does not replace the device
+  for TTS quality, real-world performance, or final acceptance.
+
+To remove later if ever needed:
 ```
-claude mcp add ios-simulator npx ios-simulator-mcp
+"/Users/markfriedlander/Library/Application Support/Claude/claude-code/2.1.121/claude.app/Contents/MacOS/claude" \
+  mcp remove ios-simulator
+brew uninstall idb-companion
+brew untap facebook/fb     # only if no other formulae use the tap
+pip3 uninstall fb-idb
 ```
-plus IDB companion (`brew install facebook/fb/idb-companion` and
-`pip3 install fb-idb`). When the MCP is installed, prefer the
-accessibility tree over screenshots whenever the question is structural,
-because the tree is dramatically cheaper in tokens and gives precise
-element coordinates and state.
 
 **Autonomous verification via the local API — standing practice:**
 

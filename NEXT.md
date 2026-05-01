@@ -5,10 +5,13 @@
 2026-04-30: Multi-step session reorienting after a context wipe and tackling Mark's autonomous task queue. Step 6 (remove "Page N" chrome from PDF reader display) is done and live on device. Coming up next: Steps 4+5 (position persistence + active-sentence centering), then Step 8 (UI widget audit via simulator + accessibility tree), then Step 7 (research scanned-PDF visual significance detection), then Steps 2+3 (synthetic test corpus + Gutendex downloader).
 
 **Open user-reported issues to verify or fix:**
-- ~~Position persistence~~ — **Done** (2026-04-30). `PlaybackPreferences.lastOpenedDocumentID` restores the navigation state at cold launch; per-document position was already correct.
-- ~~Scroll-restore on appear~~ — **Done** (2026-04-30). Initial scroll deferred past the first layout pass so the LazyVStack has time to realize rows up to the saved sentence index. Pending acceptance.
-- ~~Pause latency~~ — **Done** (2026-04-30). Switched `pauseSpeaking` from `.word` to `.immediate`, and tightened the segmenter cap from 600 to 250 chars so each pre-buffered utterance is short enough that AVSpeech transitions feel instant. Pending acceptance.
-- Highlight + scroll centering — active sentence drifts off-screen instead of staying centered in the visible reading area regardless of font size, sentence length, orientation, or chrome state. Needs simulator MCP for visual iteration; planned next.
+- ~~Position persistence~~ — **Done** (2026-04-30). `PlaybackPreferences.lastOpenedDocumentID` restores the navigation state at cold launch.
+- ~~Scroll-restore on appear~~ — **Done** (2026-04-30, accepted). Initial scroll deferred past the first layout pass.
+- ~~Pause latency~~ — **Done** (2026-04-30, accepted). `.word` → `.immediate`; segmenter cap 600 → 250.
+- ~~Highlight + scroll centering~~ — **Done** (2026-05-01). Top chrome converted from `.overlay` to `.safeAreaInset(.top)` so layout claims its space; centering is now invariant across chrome state. Off by 1 px when chrome hidden, ~20 px when chrome visible (residual is the home-indicator strip in the bottom safe area). Pending Mark's acceptance, including landscape orientation.
+
+**Open UI bugs found during Step 5 work (queue for Step 8):**
+- Tap-to-reveal-chrome doesn't fire reliably from inside the ScrollView. `.contentShape(Rectangle()).onTapGesture` on the ScrollView is consumed by the children's `.textSelection(.enabled)` gesture recognizers. Need either: a clearer tap target outside text rows, a different gesture priority, or an alternate reveal trigger (long-press, two-finger tap).
 
 **Open architecture decision (deferred until research lands):**
 - Scanned-PDF visual significance detection — character count and bounding-box coverage have already been ruled out for the Antifa cover case. Step 7 is research-first; report findings and align before any code.

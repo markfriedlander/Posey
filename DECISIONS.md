@@ -1,5 +1,16 @@
 # Posey Decisions
 
+## 2026-05-01 — Top Chrome Claims Permanent Layout Space; Trade Reading Area For Centering Stability
+
+- Status: Accepted
+- Decision: The top chrome controls (search/TOC/preferences/notes buttons) move from a floating `.overlay` to a top `.safeAreaInset` that always claims its content's vertical space. The chrome still fades visually via opacity, but its layout footprint is permanent — matching the bottom transport's existing pattern.
+- Rationale: The active sentence is always centered in the visible reading area, regardless of chrome state. With the floating overlay, `proxy.scrollTo(_, anchor: .center)` centered within a viewport that included the chrome's overlapped region — putting the highlight ~37–62 px above visual center depending on chrome visibility. The safeAreaInset approach makes the scroll viewport equal the actual visible reading area, so `.center` is genuinely centered.
+- Tradeoff: ~60 px of permanent vertical space is now reserved at the top (matching ~80 px already reserved at bottom for transport). The previous "extra reading space when chrome fades" benefit is gone; the gain is invariant centering.
+- Alternatives considered:
+  - Custom UnitPoint anchor that compensates for chrome height: rejected — fragile across iPhone sizes/orientations and font sizes; gives correct geometry only at one chrome state, wrong at the other.
+  - Dynamic `contentMargins(_:_:for:)` that toggles with chrome visibility: rejected — changing scroll content area mid-scroll causes visible jumps as content reflows.
+  - Keep floating chrome and accept the 37–62 px off-center: rejected — Mark's spec explicitly required centering "regardless of chrome state."
+
 ## 2026-04-30 — Cold Launch Reopens The Last-Read Document
 
 - Status: Accepted

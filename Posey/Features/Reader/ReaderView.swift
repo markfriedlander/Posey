@@ -107,39 +107,47 @@ struct ReaderView: View {
                     .allowsHitTesting(isChromeVisible)
                     .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
             }
+            // Top safe-area inset: always claims layout space so the active
+            // sentence centers within the *visible reading area* whether or
+            // not chrome is currently faded. Search bar and chrome controls
+            // are mutually exclusive — they share this inset slot. The
+            // chrome fades visually but its inset is permanent, matching
+            // the bottom-transport pattern; this is the price of
+            // centering correctness across chrome state.
             .safeAreaInset(edge: .top) {
-                if viewModel.isSearchActive {
-                    SearchBarView(
-                        query: Binding(
-                            get: { viewModel.searchQuery },
-                            set: { viewModel.updateSearchQuery($0) }
-                        ),
-                        matchCount: viewModel.searchMatchCount,
-                        currentMatchPosition: viewModel.currentSearchMatchPosition,
-                        onPrevious: { viewModel.goToPreviousSearchMatch() },
-                        onNext: { viewModel.goToNextSearchMatch() },
-                        onDismiss: {
-                            viewModel.deactivateSearch()
-                            revealChrome()
+                Group {
+                    if viewModel.isSearchActive {
+                        SearchBarView(
+                            query: Binding(
+                                get: { viewModel.searchQuery },
+                                set: { viewModel.updateSearchQuery($0) }
+                            ),
+                            matchCount: viewModel.searchMatchCount,
+                            currentMatchPosition: viewModel.currentSearchMatchPosition,
+                            onPrevious: { viewModel.goToPreviousSearchMatch() },
+                            onNext: { viewModel.goToNextSearchMatch() },
+                            onDismiss: {
+                                viewModel.deactivateSearch()
+                                revealChrome()
+                            }
+                        )
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    } else {
+                        HStack {
+                            Spacer()
+                            topControls
                         }
-                    )
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                        .padding(.top, 12)
+                        .padding(.trailing, 12)
+                        .opacity(isChromeVisible ? 1 : 0)
+                        .allowsHitTesting(isChromeVisible)
+                        .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+                    }
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: viewModel.isSearchActive)
             .onChange(of: viewModel.searchScrollSignal) { _, _ in
                 viewModel.scrollToSearchMatch(with: proxy)
-            }
-            .overlay(alignment: .topTrailing) {
-                if !viewModel.isSearchActive {
-                    topControls
-                        .padding(.top, 12)
-                        .padding(.trailing, 12)
-                        .opacity(isChromeVisible ? 1 : 0)
-                        .offset(y: isChromeVisible ? 0 : -12)
-                        .allowsHitTesting(isChromeVisible)
-                        .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
-                }
             }
             .overlay(alignment: .topLeading) {
                 if isTestMode {

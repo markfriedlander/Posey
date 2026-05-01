@@ -34,11 +34,11 @@ struct TXTDocumentImporter {
     }
 
     private func normalize(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space
-            .replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Delegates to the shared TextNormalizer. Brings TXT to parity with
+        // the PDF importer so artifacts that came up via the synthetic-corpus
+        // verifier (line-break hyphens, ZWSP, tabs, multi-blank collapse,
+        // per-line trailing whitespace, spaced letters/digits, ¬ as wrap
+        // marker) are handled consistently.
+        TextNormalizer.normalize(text)
     }
 }

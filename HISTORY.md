@@ -1,5 +1,30 @@
 # Posey History
 
+## 2026-05-01 — Shared TextNormalizer: TXT/MD imports reach parity with PDF; verifier green at 47/47
+
+The synthetic-corpus verifier's first device run flagged 12 normalization specs failing. Diagnosis: every fix that had landed in `PDFDocumentImporter.normalize()` over time (line-break hyphens, ¬ as line-break marker, ZWSP / ZWNJ / ZWJ stripping, tabs → space, multi-space collapse, multi-blank-line collapse, per-line trailing whitespace strip, spaced-letter / spaced-digit collapse) had never been ported to the other importers. Real bug — TXT files in the wild (Word exports, clipboard pastes, web extracts) routinely carry these artifacts.
+
+**`TextNormalizer`** — new file. Centralizes the normalization passes as `static` methods. `normalize(_:)` is the canonical full pass for plain-text input; the individual passes are also exposed so importers can compose them as needed (e.g. PDF runs `stripLineBreakHyphens` twice — once per page, again across page boundaries).
+
+**Scope of this pass:**
+- `TXTDocumentImporter.normalize` now delegates to `TextNormalizer.normalize`. All 11 previously-failing TXT specs now pass.
+- `MarkdownParser.normalizeSource` now applies `TextNormalizer.stripBOM`, `stripInvisibleCharacters`, `normalizeLineEndings` before parsing. The MD path's soft-hyphen failure now passes.
+- `PDFDocumentImporter` is unchanged in this pass — its proven `normalize()` keeps running. Migrating it to delegate to the shared utility is a future cleanup that risks behavior drift; deferred until tests against the real-world PDF corpus catch any divergence.
+
+**Bug found and fixed during the change:** my first cut used Swift's `\u{00AC}` escape syntax inside a raw regex string (`#"...[-\u{00AC}]..."#`), which the ICU regex engine doesn't understand — it sees the literal characters `\u{00AC}`. The PDF importer correctly uses `¬` (no braces, ICU syntax). Fixed by switching to literal `¬` and `\x0c` inside the raw string.
+
+**Verifier results:**
+
+| Run | Pass | Fail |
+|-----|------|------|
+| Baseline (no fix) | 35 | 12 |
+| TextNormalizer integrated | 45 | 2 (regex bug) |
+| Regex bug fixed | **47** | **0** |
+
+Full PoseyTests suite passes on device (113 cases, 0 failures). The verifier and corpus generator now form a runnable regression check — run `python3 tools/verify_synthetic_corpus.py` after any normalization change.
+
+Also fixed a verifier-side false negative: the `txt/01_soft_hyphens.txt` assertion looked for lowercase `'footnotes'` while `PROSE_LINES` has the word at the start of a sentence (`'Footnotes'`). Now case-insensitive.
+
 ## 2026-05-01 — PDF TOC detection: skip-on-playback + auto-populated navigation
 
 Mark imported "The Internet Steps to the Beat.pdf" — a scholarly paper whose first page is a Table of Contents — and noticed it would read the TOC aloud sentence by sentence ("Table of Contents I. Introduction. Three. Two. Technology. Six…"), a uniformly poor listening experience. Building TOC detection at PDF import time so the user gets useful behavior instead.

@@ -25,25 +25,7 @@
 - Color contrast audit (the monochromatic palette already helps; verify the `Color.primary.opacity(0.14)` highlight tier is sufficient).
 - Step 8 UI audit is the natural starting point — extend it to cover accessibility alongside widget behavior.
 
-**TXT/MD normalization gaps surfaced by the verifier (2026-05-01):**
-
-The synthetic-corpus verifier's first run against the device passed 35/47 specs and surfaced 12 real normalization gaps. All the normalization fixes that landed in `PDFDocumentImporter` (line-break hyphens, ¬ markers, ZWSP, tabs, multi-blank collapse, per-line trailing whitespace, spaced-letter / spaced-digit collapsers) were never applied to `TXTDocumentImporter`. Failing specs:
-
-- `txt/02_line_break_hyphens.txt` — `word- continuation` not collapsed
-- `txt/03_logical_not_hyphens.txt` — U+00AC ¬ survives
-- `txt/05_zwsp.txt` — U+200B zero-width space survives
-- `txt/07_tabs.txt` — tabs not normalized
-- `txt/09_trailing_whitespace.txt` — per-line trailing whitespace survives
-- `txt/10_excessive_blank_lines.txt` — runs of 3+ newlines survive
-- `txt/11_spaced_uppercase.txt` — `C O N T E N T S` not collapsed
-- `txt/12_spaced_lowercase.txt` — lowercase spaced letters not collapsed
-- `txt/13_spaced_accented.txt` — `P A S A R Á N` not collapsed
-- `txt/14_spaced_digits.txt` — `1 9 4 5` not collapsed
-- `md/06_md_with_artifacts.md` — U+00AD survives in markdown path
-
-**Recommended fix:** extract PDF's normalization passes into a shared `TextNormalizer` utility and apply it from TXTDocumentImporter (and conditionally from MarkdownDocumentImporter). Verifier baseline log: `/tmp/verifier_run1.log`.
-
-Also: `txt/01_soft_hyphens.txt` failed for an unrelated reason — the verifier's assertion was case-sensitive (looked for `footnotes`, source has `Footnotes`). Fix the assertion when re-running.
+**TXT/MD normalization gaps — DONE (2026-05-01):** TextNormalizer extracted, TXT and Markdown both delegate to it, verifier 47/47 green. PDFDocumentImporter still has its own proven `normalize()` — migrating it to the shared utility is a future cleanup deferred until corpus tests can catch any divergence.
 
 **Future polish — landscape rotation re-centering:**
 - After rotating between portrait and landscape, the highlighted sentence is briefly off-center until the next sentence advance, when it re-centers correctly. Mark accepted "good enough for now" — fix is to listen for orientation changes (or geometry changes) and re-fire `scrollToCurrentSentence` once layout has settled. Likely a small `.onChange(of: geometry.size)` or `UIDevice.orientationDidChangeNotification` hook in ReaderView. Low priority compared to other reader polish items.

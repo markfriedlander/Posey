@@ -16,6 +16,15 @@
 **Open architecture decision (deferred until research lands):**
 - Scanned-PDF visual significance detection — character count and bounding-box coverage have already been ruled out for the Antifa cover case. Step 7 is research-first; report findings and align before any code.
 
+**Accessibility compliance (target: complete before App Store submission):**
+- VoiceOver labels on all custom controls (play, pause, antenna, restart, search, notes, preferences, TOC, etc.).
+- Navigation order audit so VoiceOver follows the natural reading and interaction flow.
+- Touch target verification — all interactive elements meet Apple's 44×44 pt minimum.
+- Dynamic Type support — text scales with system accessibility settings.
+- Reduce Motion support — chrome fade and scroll animations suppressed when the system setting is on.
+- Color contrast audit (the monochromatic palette already helps; verify the `Color.primary.opacity(0.14)` highlight tier is sufficient).
+- Step 8 UI audit is the natural starting point — extend it to cover accessibility alongside widget behavior.
+
 **Future reader UX modes (not active work, captured before they get lost):**
 - **Dim surrounding text.** Instead of only highlighting the active sentence, reduce the opacity of every non-active sentence to ~40–50% so the eye is naturally drawn to the brightest element. Functionally additive — keep the existing highlight tier — and likely belongs as a user-selectable reading mode rather than the default.
 - **Slot machine / drum roll scroll.** Active sentence centered at full size and brightness; sentences above and below fade out and scale down slightly as they move away from center, creating a smooth rolling transition as playback advances. Higher implementation cost (custom layout + per-row transform driven by distance-from-center), so worth prototyping after the basic centering fix lands and proves stable. Also a user-selectable reading mode, not the default.

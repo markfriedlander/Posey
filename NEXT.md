@@ -2,7 +2,9 @@
 
 ## Current Target
 
-2026-04-30: Multi-step session reorienting after a context wipe and tackling Mark's autonomous task queue. Step 6 (remove "Page N" chrome from PDF reader display) is done and live on device. Coming up next: Steps 4+5 (position persistence + active-sentence centering), then Step 8 (UI widget audit via simulator + accessibility tree), then Step 7 (research scanned-PDF visual significance detection), then Steps 2+3 (synthetic test corpus + Gutendex downloader).
+**2026-05-01:** All of Mark's earlier autonomous queue is done and on device. Today's session also shipped: NavigationStack double-push fix (alert collision + `.task` re-fire guard), TOC hide-from-reader (segments + displayBlocks filtered at view-model init so the skip region is invisible by construction), shared `TextNormalizer` bringing TXT/MD parity with PDF, format-parity standing policy in CLAUDE.md, antenna default ON for dev, PDF TOC detection at import + auto-skip + entry parsing, simulator MCP setup with idb patch for Python 3.14.
+
+**Next major feature is Ask Posey** — fully designed (see "Next major feature — Ask Posey" section below). Open questions are now resolved (2026-05-01): hardcoded 60/25/15 context budget, size thresholds tuned empirically, threaded chat history visible (passage links in a follow-up pass), notes have no special-case edit/delete, AFM-unsupported devices hide the interface entirely. **Next concrete steps before any code:** (a) confirm Apple Foundation Models works on device + simulator, (b) read `Hal.swift` Blocks 02-07 (MemoryStore) and 17-22 (ChatViewModel), (c) write up an implementation plan and discuss with Mark and Claude. Plan-first is mandatory.
 
 **Open user-reported issues to verify or fix:**
 - ~~Position persistence~~ — **Done** (2026-04-30). `PlaybackPreferences.lastOpenedDocumentID` restores the navigation state at cold launch.
@@ -26,6 +28,12 @@
 - Step 8 UI audit is the natural starting point — extend it to cover accessibility alongside widget behavior.
 
 **TXT/MD normalization gaps — DONE (2026-05-01):** TextNormalizer extracted, TXT and Markdown both delegate to it, verifier 47/47 green. PDFDocumentImporter still has its own proven `normalize()` — migrating it to the shared utility is a future cleanup deferred until corpus tests can catch any divergence.
+
+**Format-parity follow-ups (per the standing policy in CLAUDE.md):**
+
+- **PDF TOC hide-and-skip works for PDFs only.** EPUB has TOCs but they live in NCX or nav-document XHTML — not in dot-leader form. The current `PDFTOCDetector` heuristic (anchor + dot-leader density) won't fire on EPUB. EPUB TOCs are already parsed into `document_toc` for navigation; what's missing is `playback_skip_until_offset` derived from the EPUB's TOC structure (likely: skip everything before the first chapter's offset). Worth doing as a deliberate pass — the principle is "no format reads its TOC aloud."
+- **DOCX may also have a TOC.** Word files typically use a TOC field (`{ TOC \\o }`) which produces a styled TOC region with hyperlinks and page numbers. We don't parse Word TOC fields today. Lower priority; treat as discovery work when a real DOCX with this surfaces.
+- **`PDFDocumentImporter` still has its own `normalize()` separate from the shared `TextNormalizer`.** Migrating it to delegate is a future cleanup that risks behavior drift; deferred until corpus tests can catch divergence.
 
 **Future polish — landscape rotation re-centering:**
 - After rotating between portrait and landscape, the highlighted sentence is briefly off-center until the next sentence advance, when it re-centers correctly. Mark accepted "good enough for now" — fix is to listen for orientation changes (or geometry changes) and re-fire `scrollToCurrentSentence` once layout has settled. Likely a small `.onChange(of: geometry.size)` or `UIDevice.orientationDidChangeNotification` hook in ReaderView. Low priority compared to other reader polish items.

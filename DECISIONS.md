@@ -1,5 +1,20 @@
 # Posey Decisions
 
+## 2026-05-01 — Commit to Full Accessibility Compliance
+
+- Status: Accepted
+- Decision: Posey will target full iOS accessibility compliance before App Store submission.
+- Rationale: Posey's core loop — import a document, listen while text is highlighted, never lose your place — is genuinely valuable for people with visual impairments, dyslexia, and other reading difficulties. Building compliance in from the start rather than retrofitting it later is both easier and more honest. If this app can help someone who struggles to read, that matters.
+- What this means in practice:
+  - All custom controls have descriptive VoiceOver accessibility labels (play, pause, antenna, restart, etc.)
+  - VoiceOver navigation order follows the natural reading and interaction flow
+  - All touch targets meet Apple's 44×44pt minimum guideline
+  - Dynamic Type is respected — font sizes scale with system accessibility settings
+  - Reduce Motion system setting is respected — chrome fade and scroll animations suppressed when enabled
+  - Sufficient color contrast maintained throughout (monochromatic palette already helps here)
+- Alternatives considered:
+  - Defer accessibility until after launch: rejected — retrofitting is harder and the people who need this most shouldn't have to wait
+
 ## 2026-05-01 — Why Centering The Active Sentence Is Non-Negotiable
 
 - Status: Accepted (product principle)

@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // ========== BLOCK 1: APP ENTRY POINT - START ==========
 @main
@@ -56,8 +59,34 @@ struct PoseyApp: App {
                 } catch {
                     databaseErrorMessage = error.localizedDescription
                 }
+                // Test-only orientation override. Useful for the simulator MCP
+                // (which has no rotation API) and for future automated UI tests.
+                // Pass POSEY_FORCE_ORIENTATION = portrait | landscape | landscapeLeft
+                // | landscapeRight on launch. Silently no-ops on platforms
+                // without UIKit window scenes.
+                applyForcedOrientationIfNeeded()
             }
         }
+    }
+
+    @MainActor
+    private func applyForcedOrientationIfNeeded() {
+        #if canImport(UIKit) && os(iOS)
+        guard let raw = launchConfiguration.forceOrientation else { return }
+        let mask: UIInterfaceOrientationMask
+        switch raw.lowercased() {
+        case "portrait":         mask = .portrait
+        case "landscape":        mask = .landscapeRight
+        case "landscapeleft":    mask = .landscapeLeft
+        case "landscaperight":   mask = .landscapeRight
+        default: return
+        }
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+        for scene in scenes {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
+        }
+        #endif
     }
 }
 // ========== BLOCK 1: APP ENTRY POINT - END ==========

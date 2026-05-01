@@ -7,16 +7,23 @@
 - Rationale: The eye learns a fixed position. Like the upper-left corner of a page, or a teleprompter line. When the active sentence is always in the same place, the eye stops hunting — it just looks. That repetition is what lets the reader sustain attention on difficult material without fatigue. If the position drifts even a little — top one moment, middle the next, slightly off-center after that — the eye has to actively track, and the reading flow breaks. So "always centered" is not aesthetics; it's a load-bearing piece of the reading experience.
 - Implication: Any future reader work (custom layouts, slot-machine scroll mode, dim-surrounding mode, in-motion mode, font scaling, orientation handling, chrome restyling) must preserve the fixed-center invariant. If a feature would compromise it, the feature loses, not the centering.
 
-## 2026-05-01 — Top Chrome Claims Permanent Layout Space; Trade Reading Area For Centering Stability
+## 2026-05-01 — Center Within The Persistent Reading Area, Not The Conservative Scroll Envelope
 
-- Status: Accepted
-- Decision: The top chrome controls (search/TOC/preferences/notes buttons) move from a floating `.overlay` to a top `.safeAreaInset` that always claims its content's vertical space. The chrome still fades visually via opacity, but its layout footprint is permanent — matching the bottom transport's existing pattern.
-- Rationale: The active sentence is always centered in the visible reading area, regardless of chrome state. With the floating overlay, `proxy.scrollTo(_, anchor: .center)` centered within a viewport that included the chrome's overlapped region — putting the highlight ~37–62 px above visual center depending on chrome visibility. The safeAreaInset approach makes the scroll viewport equal the actual visible reading area, so `.center` is genuinely centered.
-- Tradeoff: ~60 px of permanent vertical space is now reserved at the top (matching ~80 px already reserved at bottom for transport). The previous "extra reading space when chrome fades" benefit is gone; the gain is invariant centering.
+- Status: Accepted (supersedes the same-day decision below)
+- Decision: Both top chrome and bottom transport are floating overlays. Only the search bar uses `safeAreaInset(.top)`, and only while it's active. The scroll content area thus equals the *persistent* perceived reading area — nav-bar bottom to home-indicator top — and `anchor: .center` lands the active sentence at the true visual center in both orientations and across all chrome states.
+- Rationale: The previous fix (top chrome in `safeAreaInset(.top)`) made the scroll viewport equal `(viewport − chrome insets)`, which centered cleanly within the chrome-visible state. But that scroll envelope also excluded the home-indicator strip (claimed by the bottom safeAreaInset). In portrait the strip is ~3.5 % of screen height — invisible offset. In landscape the same strip is a much larger fraction of a much shorter screen, and the perceived center shifts visibly off. Mark caught it in landscape acceptance: "loses centering — gets disorienting." The right anchor is the always-visible reading area, defined by the chrome elements that *don't* fade (nav bar, home indicator). Chrome capsules briefly overlay the top/bottom edges when visible, but the active sentence is well clear of those edges in both orientations, so it stays fully visible.
+- Tradeoff: Surrounding sentences (one or two above/below the highlight) get partially overlaid by chrome when chrome is briefly visible. Acceptable since chrome auto-fades within 3 seconds and the active sentence itself stays clear.
 - Alternatives considered:
-  - Custom UnitPoint anchor that compensates for chrome height: rejected — fragile across iPhone sizes/orientations and font sizes; gives correct geometry only at one chrome state, wrong at the other.
+  - Keep `safeAreaInset(.top)` for chrome (the previous fix): rejected — works in portrait but fails in landscape because the bottom safeAreaInset's home-indicator claim is a much larger fraction of landscape's vertical extent.
   - Dynamic `contentMargins(_:_:for:)` that toggles with chrome visibility: rejected — changing scroll content area mid-scroll causes visible jumps as content reflows.
-  - Keep floating chrome and accept the 37–62 px off-center: rejected — Mark's spec explicitly required centering "regardless of chrome state."
+  - Custom UnitPoint anchor compensated per-orientation/per-chrome-state: rejected — too many variables, fragile to font size and screen size changes.
+
+## 2026-05-01 — Top Chrome Claims Permanent Layout Space; Trade Reading Area For Centering Stability (Superseded)
+
+- Status: **Superseded** by "Center Within The Persistent Reading Area" (2026-05-01) after landscape regression
+- Decision: The top chrome controls (search/TOC/preferences/notes buttons) move from a floating `.overlay` to a top `.safeAreaInset` that always claims its content's vertical space. The chrome still fades visually via opacity, but its layout footprint is permanent — matching the bottom transport's existing pattern.
+- Rationale at the time: The active sentence is always centered in the visible reading area, regardless of chrome state. With the floating overlay, `proxy.scrollTo(_, anchor: .center)` centered within a viewport that included the chrome's overlapped region — putting the highlight ~37–62 px above visual center depending on chrome visibility. The safeAreaInset approach made the scroll viewport equal the actual visible reading area when chrome was visible, so `.center` was genuinely centered.
+- Why superseded: Worked in portrait, failed in landscape. The bottom safeAreaInset's claim included the home-indicator strip (invisible to user but counted as not-reading-area by the centering math). In portrait that strip is unnoticeable; in landscape the same strip is a much larger fraction of the screen and the visible-center shift was perceptible. Reverted to overlay-based chrome anchored on the always-visible reading area (nav bar + home indicator).
 
 ## 2026-04-30 — Cold Launch Reopens The Last-Read Document
 

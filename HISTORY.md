@@ -1,5 +1,26 @@
 # Posey History
 
+## 2026-05-01 — Center the active sentence in landscape too (and re-improve portrait)
+
+Mark's portrait acceptance held but landscape "lost centering — disorienting." Investigation in the simulator at S050 with a forced-orientation env var confirmed the bug.
+
+**What was actually wrong with the previous fix.** The earlier fix moved the top chrome from `.overlay` to `.safeAreaInset(.top)`, matching the bottom transport's existing `.safeAreaInset(.bottom)`. That made the scroll content area equal `(viewport − chrome insets)` and centered cleanly within it. But the bottom inset's claim included the home indicator strip — invisible to the user but counted as "not reading area" by the centering math. In portrait that strip is ~3.5 % of screen height and the offset was unnoticeable; in landscape the same strip is ~5 % of a much shorter screen, and the perceived center shifts visibly. Mark caught it.
+
+**The actual centering anchor that matters.** What the user perceives as the reading area is bounded by the things that are *always* visible: the navigation bar at the top and the home-indicator strip at the bottom. The chrome capsules and the bottom transport fade in and out — they are not part of the persistent reading area. The centering math should target the persistent area, not the conservative scroll-content envelope.
+
+**New fix.** Both chromes are now overlays again, only the search bar uses `safeAreaInset(.top)`, and only while it's active (interactive input must not get scrolled under). Result: the scroll content area equals (nav bar bottom → home indicator top), which IS the persistent perceived reading area. `anchor: .center` puts the active sentence at the true visual center in both orientations and across all chrome states.
+
+**Measurements at S050 mid-document:**
+
+| Orientation | State | Highlight center | Visual center | Off by |
+|-------------|-------|------------------|---------------|--------|
+| Portrait | chrome hidden | y=519 | y=516 | +3 |
+| Landscape | chrome hidden | y=249 | y=243.5 | +5.5 |
+
+When chrome is visible, the chrome capsules briefly float over the top/bottom edges of the reading area. The active sentence is well clear of those edges in both orientations, so it stays fully visible behind the still-translucent chrome. The cost vs the previous fix is that surrounding sentences (one or two above/below the highlight) get partially overlaid by chrome when chrome is visible — acceptable since chrome auto-fades within 3 seconds.
+
+**Test-only orientation override.** `POSEY_FORCE_ORIENTATION=portrait | landscape | landscapeLeft | landscapeRight` env var added to `AppLaunchConfiguration` and acted on by `PoseyApp` via `UIWindowScene.requestGeometryUpdate`. Lets the simulator MCP (which has no rotation API) drive both orientations, and gives future automated UI tests a clean way to verify orientation behavior. Silently no-ops on platforms without UIKit window scenes.
+
 ## 2026-05-01 — Center the active sentence in the visible reading area
 
 **Problem:** The active sentence drifted off the visible reading area's center. With chrome hidden it was ~37 px above visual center; with chrome visible it was ~62 px above. Mark called out "active sentence is always centered in the visible reading area regardless of font size, sentence length, screen orientation, or chrome state" as the non-negotiable acceptance criterion.

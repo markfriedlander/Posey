@@ -168,12 +168,26 @@ extension EPUBDocumentImporter {
         let plainText   = buildPlainText(from: displayText)
 
         // Build TOC entries from nav (EPUB 3) or skip if neither is available.
-        let tocEntries = buildTOCEntries(
+        var tocEntries = buildTOCEntries(
             packageDoc: packageDoc,
             baseDirectory: baseDirectory,
             entryLoader: entryLoader,
             pathToPlainOffset: pathToPlainOffset
         )
+        // Fallback: many auto-generated EPUBs (Internet Archive's
+        // hocr-to-epub, some Calibre exports) ship without a usable
+        // nav/NCX document. When that happens we synthesize entries
+        // from the spine + chapter HTML headings so the user still
+        // sees a TOC button. Better than nothing — the eye learns the
+        // visible button position regardless of how rich the entries
+        // turn out to be.
+        if tocEntries.isEmpty {
+            tocEntries = synthesizeTOCFromSpine(
+                spineItems: spineItems,
+                entryLoader: entryLoader,
+                pathToPlainOffset: pathToPlainOffset
+            )
+        }
 
         return ParsedEPUBDocument(
             title: packageDoc.title,
@@ -324,6 +338,120 @@ extension EPUBDocumentImporter {
             let offset = pathToPlainOffset[bareHref] ?? -1
             return EPUBTOCEntry(title: raw.title, plainTextOffset: offset, playOrder: raw.playOrder)
         }
+    }
+
+    /// Build a TOC by walking the spine and pulling chapter titles from
+    /// each spine item's HTML. Used as a fallback when the EPUB has no
+    /// nav (EPUB 3) or NCX (EPUB 2) document, or has one that yields
+    /// zero usable entries — common for auto-generated EPUBs from
+    /// scanner pipelines like the Internet Archive's hocr-to-epub. The
+    /// resulting TOC is intentionally lossy (one entry per spine file,
+    /// not per heading-within-chapter) but it ensures the TOC button
+    /// appears so the user can navigate by chapter.
+    fileprivate func synthesizeTOCFromSpine(
+        spineItems: [(path: String, href: String)],
+        entryLoader: (String) -> Data?,
+        pathToPlainOffset: [String: Int]
+    ) -> [EPUBTOCEntry] {
+        var entries: [EPUBTOCEntry] = []
+        var playOrder = 0
+        for (index, spine) in spineItems.enumerated() {
+            let bareHref = (spine.href as NSString).lastPathComponent
+                .components(separatedBy: "#").first ?? ""
+            let offset = pathToPlainOffset[bareHref] ?? -1
+            // Title preference: first <h1>/<h2>/<h3> in the chapter's HTML
+            // → <title> element → file name without extension → "Chapter N".
+            var title: String? = nil
+            if let data = entryLoader(spine.path) {
+                title = Self.extractFirstHeadingTitle(from: data)
+            }
+            if title == nil || title?.isEmpty == true {
+                let stem = ((spine.href as NSString).lastPathComponent as NSString)
+                    .deletingPathExtension
+                if !stem.isEmpty && stem != "ch" && stem != "index" && !stem.allSatisfy({ $0.isNumber }) {
+                    title = stem.replacingOccurrences(of: "_", with: " ")
+                                 .replacingOccurrences(of: "-", with: " ")
+                }
+            }
+            if title == nil || title?.isEmpty == true {
+                title = "Chapter \(index + 1)"
+            }
+            playOrder += 1
+            entries.append(EPUBTOCEntry(
+                title: title!.trimmingCharacters(in: .whitespacesAndNewlines),
+                plainTextOffset: offset,
+                playOrder: playOrder
+            ))
+        }
+        return entries
+    }
+
+    /// Lightweight, parser-free heading extractor. Tries, in order:
+    /// the first opening `<h1>`/`<h2>`/`<h3>` tag, then the document's
+    /// `<title>` element. Returns the first non-empty match's text
+    /// stripped of nested tags. Falls back to nil if nothing matches.
+    /// The deliberate non-XMLParser approach keeps this resilient
+    /// against the malformed HTML that hocr-to-epub-style scanned
+    /// EPUBs commonly produce — and crucially, those pipelines
+    /// typically populate `<title>` (e.g. "Page 1") even when no
+    /// `<h*>` headings are present, so the title fallback is what
+    /// makes the synthesized TOC useful for scanned books.
+    fileprivate static func extractFirstHeadingTitle(from data: Data) -> String? {
+        guard let html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) else {
+            return nil
+        }
+        // Try heading tags first — most informative when the chapter
+        // file has them. h1/h2/h3 in priority order.
+        if let title = firstTagInnerText(in: html, pattern: #"(?si)<h[1-3][^>]*>(.*?)</h[1-3]>"#),
+           !title.isEmpty {
+            return title
+        }
+        // Fall back to the <title> element. hocr-to-epub-style EPUBs
+        // populate this with "Page N" or similar, which is at least
+        // navigable.
+        if let title = firstTagInnerText(in: html, pattern: #"(?si)<title[^>]*>(.*?)</title>"#),
+           !title.isEmpty {
+            return title
+        }
+        return nil
+    }
+
+    /// Inner-text helper for `extractFirstHeadingTitle`. Returns the
+    /// trimmed, entity-decoded text inside the first match group of
+    /// `pattern`, with nested tags stripped. Returns nil on no match.
+    fileprivate static func firstTagInnerText(in html: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
+              let match = regex.firstMatch(
+                in: html,
+                options: [],
+                range: NSRange(html.startIndex..<html.endIndex, in: html)
+              ),
+              match.numberOfRanges >= 2,
+              let inner = Range(match.range(at: 1), in: html) else {
+            return nil
+        }
+        let raw = String(html[inner])
+        // Strip nested HTML tags from the heading content.
+        let stripped = raw.replacingOccurrences(
+            of: "<[^>]+>", with: "", options: .regularExpression
+        )
+        // Decode the most common HTML entities — full HTMLDocumentImporter
+        // decoding lives elsewhere; the headings we care about here only
+        // contain a small set in practice.
+        let decoded = stripped
+            .replacingOccurrences(of: "&amp;",  with: "&")
+            .replacingOccurrences(of: "&lt;",   with: "<")
+            .replacingOccurrences(of: "&gt;",   with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;",  with: "'")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+        let collapsed = decoded.replacingOccurrences(
+            of: "\\s+", with: " ", options: .regularExpression
+        )
+        let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

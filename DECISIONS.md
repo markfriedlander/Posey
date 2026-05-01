@@ -1,5 +1,15 @@
 # Posey Decisions
 
+## 2026-05-01 — TOC Region Is Completely Hidden From The Reading View
+
+- Status: Accepted
+- Decision: Any region marked by `playbackSkipUntilOffset` (today: PDF Tables of Contents) is completely invisible in the reader's data model — not in `segments`, not in `displayBlocks`, not reachable by playback, scroll, search, or restart-from-beginning. The region is not "skipped past on first open"; it's never present in the reading flow at all. The TOC remains accessible only via the navigation sheet (chrome TOC button), which surfaces parsed entries.
+- Rationale: Mark's spec was unambiguous: "completely invisible … never scrollable, never read aloud, never reachable via navigation including rewind." A first-open-only skip was half a fix — rewind, search, scroll, and any other path back into the region kept producing the same poor listening experience the skip was meant to prevent. Filtering at the data-model boundary makes the invariant impossible to violate by construction.
+- Implementation: filter `segments` and `displayBlocks` in `ReaderViewModel.init` based on `document.playbackSkipUntilOffset`. Segment IDs are re-numbered 0-based to preserve the rest of the view-model's "segment.id is an array index" assumption. Character offsets on remaining segments/blocks are kept in the original plainText coordinate space so position persistence is unchanged. `restoreSentenceIndex` migrates saved offsets that land inside the hidden region to segment 0 (first body sentence).
+- Alternatives considered:
+  - Keep TOC visible but mark it as a "skip-on-playback" region only: rejected — half-fix per Mark's spec.
+  - Render TOC as a collapsed/hidden expandable section in the reader: rejected — adds UI complexity for a region whose purpose is navigation, not reading.
+
 ## 2026-05-01 — Detect PDF Tables of Contents at Import; Skip on Playback, Surface as Navigation
 
 - Status: Accepted

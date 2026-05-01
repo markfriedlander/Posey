@@ -678,7 +678,31 @@ final class ReaderViewModel: ObservableObject {
         self.shouldAutoCreateNoteOnAppear = shouldAutoCreateNoteOnAppear
         self.shouldAutoCreateBookmarkOnAppear = shouldAutoCreateBookmarkOnAppear
         self.automationNoteBody = automationNoteBody
-        self.segments = SentenceSegmenter().segments(for: document.plainText)
+        // Build the segments + display blocks, then drop anything that
+        // falls within the document's playback-skip region (e.g. a PDF
+        // Table of Contents). After this filter:
+        //   • TOC sentences are not in `segments` → playback can't reach
+        //     them, restart-from-zero starts at the first BODY sentence,
+        //     search can't match TOC text, scroll can't position there.
+        //   • TOC blocks are not in `displayBlocks` → they're not rendered
+        //     in the reader, not scrollable, not visible.
+        //   • Character offsets are preserved on remaining segments/blocks
+        //     so position persistence continues to work in plainText
+        //     coordinate space.
+        // The TOC is still visible in the navigation surface (the TOC
+        // sheet / chrome button) — it's preserved as `document_toc`
+        // entries, just not as a region of the reading view.
+        let skipUntil = max(0, document.playbackSkipUntilOffset)
+        let allSegments = SentenceSegmenter().segments(for: document.plainText)
+        let bodySegments = (skipUntil > 0)
+            ? allSegments.filter { $0.startOffset >= skipUntil }
+            : allSegments
+        // Re-number IDs to be 0-based contiguous (the rest of the view
+        // model treats segment.id as an array index — see currentSegment,
+        // playPauseImageName, marker navigation, etc.).
+        self.segments = bodySegments.enumerated().map { index, seg in
+            TextSegment(id: index, text: seg.text, startOffset: seg.startOffset, endOffset: seg.endOffset)
+        }
         let rawBlocks: [DisplayBlock]
         if document.fileType == "md" || document.fileType == "markdown" {
             rawBlocks = MarkdownParser().parse(markdown: document.displayText).blocks
@@ -689,9 +713,12 @@ final class ReaderViewModel: ObservableObject {
         } else {
             rawBlocks = []
         }
+        let bodyBlocks: [DisplayBlock] = (skipUntil > 0)
+            ? rawBlocks.filter { $0.startOffset >= skipUntil }
+            : rawBlocks
         // Split each paragraph block into per-TTS-segment rows so that
         // highlight and scroll always target exactly the utterance being spoken.
-        self.displayBlocks = Self.splitParagraphBlocks(rawBlocks, segments: self.segments)
+        self.displayBlocks = Self.splitParagraphBlocks(bodyBlocks, segments: self.segments)
         self.visualPauseBlockIDsBySentenceIndex = ReaderViewModel.buildVisualPauseIndexMap(
             displayBlocks: self.displayBlocks,
             segments: self.segments
@@ -1172,31 +1199,24 @@ final class ReaderViewModel: ObservableObject {
             return 0
         }
 
-        let raw: Int
+        // The saved character offset may fall inside a region that has been
+        // FILTERED OUT of segments (e.g. a PDF Table of Contents). In that
+        // case there's no segment to match — we land on the first body
+        // sentence (segment 0), which is now the natural start of the
+        // reading flow. This also handles the first-open case where the
+        // saved position is the default zero offset.
+        let skipUntil = document.playbackSkipUntilOffset
+        if skipUntil > 0, position.characterOffset < skipUntil {
+            return 0
+        }
+
         if let offsetMatch = segments.firstIndex(where: { segment in
             position.characterOffset >= segment.startOffset && position.characterOffset < segment.endOffset
         }) {
-            raw = offsetMatch
-        } else {
-            raw = boundedSentenceIndex(position.sentenceIndex)
+            return offsetMatch
         }
 
-        // If the restored sentence falls inside a "playback-skip" region
-        // (e.g. a PDF Table of Contents detected at import time), advance
-        // past it. Reading a TOC aloud is a uniformly poor TTS experience;
-        // the importer flags the skip range, and we honor it whenever the
-        // saved position would land inside it. The TOC is still visible
-        // in the reader — it's just not the first thing the user hears.
-        let skipUntil = document.playbackSkipUntilOffset
-        guard skipUntil > 0,
-              segments.indices.contains(raw),
-              segments[raw].startOffset < skipUntil else {
-            return raw
-        }
-        if let firstAfter = segments.firstIndex(where: { $0.startOffset >= skipUntil }) {
-            return firstAfter
-        }
-        return raw
+        return boundedSentenceIndex(position.sentenceIndex)
     }
 
     private func jumpToMarker(direction: Int) {

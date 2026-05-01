@@ -1,5 +1,27 @@
 # Posey History
 
+## 2026-05-01 — TOC region completely hidden from the reader (PDFs)
+
+Mark's spec: "The TOC should be completely invisible in the reading view — never scrollable, never read aloud, never reachable via navigation including rewind. Rewind should go to the first body sentence, same as first open. The TOC lives only in the navigation sheet."
+
+Earlier behavior: only the *first-open scroll* skipped past the TOC. The TOC was still rendered as display blocks, still segmented for TTS, still reachable via rewind, still searchable. Half-implemented.
+
+**New behavior, implemented at `ReaderViewModel.init`:** the document's `playbackSkipUntilOffset` is consulted up front and used to filter both `segments` and `displayBlocks` so the skipped region doesn't enter the data model at all.
+
+  - `segments` is rebuilt from `SentenceSegmenter.segments(for:)` then filtered to only those whose `startOffset >= skipUntil`. IDs are re-numbered 0-based contiguous (the rest of the view-model treats `segment.id` as an array index — currentSegment, marker navigation, search row IDs, etc.).
+  - `displayBlocks` is filtered the same way before going through `splitParagraphBlocks`.
+  - Character offsets are preserved on the remaining segments/blocks so position persistence continues to work in the existing plainText coordinate space.
+  - `restoreSentenceIndex` now treats a saved offset that lands inside the (now-hidden) TOC region as a migration case → returns segment 0 (first body sentence). Documents saved by older builds with a position inside the TOC come back to the first body sentence on next open instead of getting stuck.
+
+**Net effect on listening experience:**
+- Rewind / restart from beginning lands on the first body sentence.
+- Sequential playback never reads the TOC.
+- Scroll never reveals TOC content; the reader's data model literally doesn't contain it.
+- Search cannot match inside the hidden region.
+- The TOC sheet (chrome button) still surfaces parsed entries for navigation — that's the only way to access the TOC, and it's a navigation surface, not a reading surface.
+
+Tests: new `testPlaybackSkipRegionIsHiddenFromReader` in `ReaderViewModelTests` builds a synthetic doc with a TOC-shaped block + body, sets `playbackSkipUntilOffset` past the TOC, and asserts every constraint above (no segment starts inside the skip region, first segment is the first body sentence, restart lands at the first body sentence, a saved position inside the TOC migrates to the first body sentence, search can't find TOC text). Full PoseyTests passes on device.
+
 ## 2026-05-01 — NavigationStack double-push fixed; auto-restore of last document now reliable
 
 Mark reported: tapping a document showed two slide-in animations and Back required two presses to return to the library. Diagnosed via simulator console capture (NSLog) plus the Posey unified log. Root cause was a two-bug interaction:

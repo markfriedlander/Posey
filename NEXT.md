@@ -25,6 +25,29 @@
 - Color contrast audit (the monochromatic palette already helps; verify the `Color.primary.opacity(0.14)` highlight tier is sufficient).
 - Step 8 UI audit is the natural starting point — extend it to cover accessibility alongside widget behavior.
 
+**Future polish — landscape rotation re-centering:**
+- After rotating between portrait and landscape, the highlighted sentence is briefly off-center until the next sentence advance, when it re-centers correctly. Mark accepted "good enough for now" — fix is to listen for orientation changes (or geometry changes) and re-fire `scrollToCurrentSentence` once layout has settled. Likely a small `.onChange(of: geometry.size)` or `UIDevice.orientationDidChangeNotification` hook in ReaderView. Low priority compared to other reader polish items.
+
+**Next major feature — Ask Posey (designed; not started):**
+
+The most significant remaining V1 feature. **Fully designed and documented** — the Ask Posey sections in `ARCHITECTURE.md`, `CONSTITUTION.md`, and earlier in this file specify the contract; nothing here needs reinvention. Before writing code:
+
+1. Re-read those three sections.
+2. Confirm Apple Foundation Models is available and working in the simulator and on device.
+3. Read Hal's context-management / RAG code for handling documents that exceed the model's context window — proven architecture exists; do not invent it from scratch. Mark can point to the right files when starting.
+4. **Discuss the implementation plan with Mark before writing any code.** This is consequential — three interaction patterns, Apple Foundation Models on-device, transient session model, full modal sheet, AI-generated content always clearly labeled. Plan first.
+
+Three interaction patterns:
+- **Selection-scoped** — user selects text, contextual menu offers "Ask Posey", modal sheet opens with the selection quoted at top.
+- **Document-scoped** — dedicated glyph far-left of the bottom transport bar, modal sheet opens with the current sentence quoted at top, full document used as context.
+- **Annotation-scoped** — accessible from the Notes surface.
+
+Constraints (from CONSTITUTION.md / ARCHITECTURE.md):
+- Apple Foundation Models only. Fully on-device. Offline. **No network requests, ever.**
+- Full modal sheet for all three patterns.
+- Transient session: conversation lives while the sheet is open; user saves to notes or discards on close.
+- AI-generated content is always clearly labeled. Never presented as if it were the source document.
+
 **Future reader UX modes (not active work, captured before they get lost):**
 - **Dim surrounding text.** Instead of only highlighting the active sentence, reduce the opacity of every non-active sentence to ~40–50% so the eye is naturally drawn to the brightest element. Functionally additive — keep the existing highlight tier — and likely belongs as a user-selectable reading mode rather than the default.
 - **Slot machine / drum roll scroll.** Active sentence centered at full size and brightness; sentences above and below fade out and scale down slightly as they move away from center, creating a smooth rolling transition as playback advances. Higher implementation cost (custom layout + per-row transform driven by distance-from-center), so worth prototyping after the basic centering fix lands and proves stable. Also a user-selectable reading mode, not the default.

@@ -10,10 +10,12 @@
 - ~~Pause latency~~ — **Done** (2026-04-30). Switched `pauseSpeaking` from `.word` to `.immediate`, and tightened the segmenter cap from 600 to 250 chars so each pre-buffered utterance is short enough that AVSpeech transitions feel instant. Pending acceptance.
 - Highlight + scroll centering — active sentence drifts off-screen instead of staying centered in the visible reading area regardless of font size, sentence length, orientation, or chrome state. Needs simulator MCP for visual iteration; planned next.
 
-**Environment note:** The `ios-simulator` MCP server is registered correctly at user scope, but Node.js is not installed on the dev machine, so the MCP server fails to spawn (`npx` not found). Run `brew install node` and restart Claude Code to make the simulator tools reachable.
-
 **Open architecture decision (deferred until research lands):**
 - Scanned-PDF visual significance detection — character count and bounding-box coverage have already been ruled out for the Antifa cover case. Step 7 is research-first; report findings and align before any code.
+
+**Future reader UX modes (not active work, captured before they get lost):**
+- **Dim surrounding text.** Instead of only highlighting the active sentence, reduce the opacity of every non-active sentence to ~40–50% so the eye is naturally drawn to the brightest element. Functionally additive — keep the existing highlight tier — and likely belongs as a user-selectable reading mode rather than the default.
+- **Slot machine / drum roll scroll.** Active sentence centered at full size and brightness; sentences above and below fade out and scale down slightly as they move away from center, creating a smooth rolling transition as playback advances. Higher implementation cost (custom layout + per-row transform driven by distance-from-center), so worth prototyping after the basic centering fix lands and proves stable. Also a user-selectable reading mode, not the default.
 
 ## Priority Order
 

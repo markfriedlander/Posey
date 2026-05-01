@@ -62,7 +62,7 @@ final class DatabaseManager {
 extension DatabaseManager {
     func documents() throws -> [Document] {
         let sql = """
-        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count
+        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset
         FROM documents
         ORDER BY imported_at DESC;
         """
@@ -89,7 +89,8 @@ extension DatabaseManager {
                 modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
                 displayText: sqliteString(statement, index: 6) ?? plainText,
                 plainText: plainText,
-                characterCount: Int(sqlite3_column_int64(statement, 8))
+                characterCount: Int(sqlite3_column_int64(statement, 8)),
+                playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 9))
             ))
         }
         return documents
@@ -97,8 +98,8 @@ extension DatabaseManager {
 
     func upsertDocument(_ document: Document) throws {
         let sql = """
-        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             file_name = excluded.file_name,
@@ -107,7 +108,8 @@ extension DatabaseManager {
             modified_at = excluded.modified_at,
             display_text = excluded.display_text,
             plain_text = excluded.plain_text,
-            character_count = excluded.character_count;
+            character_count = excluded.character_count,
+            playback_skip_until_offset = excluded.playback_skip_until_offset;
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -121,6 +123,7 @@ extension DatabaseManager {
         try bind(document.displayText, at: 7, for: statement)
         try bind(document.plainText, at: 8, for: statement)
         sqlite3_bind_int64(statement, 9, sqlite3_int64(document.characterCount))
+        sqlite3_bind_int64(statement, 10, sqlite3_int64(document.playbackSkipUntilOffset))
 
         try step(statement)
     }
@@ -135,7 +138,7 @@ extension DatabaseManager {
 
     func existingDocument(matchingFileName fileName: String, fileType: String, plainText: String, displayText: String? = nil) throws -> Document? {
         let sql = """
-        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count
+        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset
         FROM documents
         WHERE file_name = ? AND file_type = ? AND plain_text = ? AND display_text = ?
         LIMIT 1;
@@ -168,7 +171,8 @@ extension DatabaseManager {
             modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
             displayText: sqliteString(statement, index: 6) ?? storedText,
             plainText: storedText,
-            characterCount: Int(sqlite3_column_int64(statement, 8))
+            characterCount: Int(sqlite3_column_int64(statement, 8)),
+            playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 9))
         )
     }
 }
@@ -439,6 +443,10 @@ extension DatabaseManager {
             """)
 
         try addColumnIfNeeded(table: "documents", column: "display_text", definition: "TEXT NOT NULL DEFAULT ''")
+        // playback_skip_until_offset = character offset in plainText past which
+        // the reader should auto-jump on first open. Used by the PDF TOC
+        // detector to suppress reading the TOC aloud. 0 = no skip.
+        try addColumnIfNeeded(table: "documents", column: "playback_skip_until_offset", definition: "INTEGER NOT NULL DEFAULT 0")
 
         try execute("""
             CREATE TABLE IF NOT EXISTS reading_positions (

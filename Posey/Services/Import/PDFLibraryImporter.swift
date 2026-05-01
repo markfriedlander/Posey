@@ -20,9 +20,11 @@ struct PDFLibraryImporter {
             fileName: fileName,
             fileType: fileType,
             displayText: parsed.displayText,
-            plainText: parsed.plainText
+            plainText: parsed.plainText,
+            playbackSkipUntilOffset: parsed.tocSkipUntilOffset
         )
         try saveImages(parsed.images, for: doc.id)
+        try saveTOCEntries(parsed.tocEntries, for: doc.id)
         return doc
     }
 
@@ -42,9 +44,11 @@ struct PDFLibraryImporter {
             fileName: fileName,
             fileType: ext,
             displayText: parsed.displayText,
-            plainText: parsed.plainText
+            plainText: parsed.plainText,
+            playbackSkipUntilOffset: parsed.tocSkipUntilOffset
         )
         try saveImages(parsed.images, for: doc.id)
+        try saveTOCEntries(parsed.tocEntries, for: doc.id)
         return doc
     }
 }
@@ -59,7 +63,8 @@ extension PDFLibraryImporter {
         fileName: String,
         fileType: String,
         displayText: String,
-        plainText: String
+        plainText: String,
+        playbackSkipUntilOffset: Int = 0
     ) throws -> Document {
         let now = Date()
         let existing = try databaseManager.existingDocument(
@@ -78,7 +83,8 @@ extension PDFLibraryImporter {
             modifiedAt: now,
             displayText: displayText,
             plainText: plainText,
-            characterCount: plainText.count
+            characterCount: plainText.count,
+            playbackSkipUntilOffset: playbackSkipUntilOffset
         )
 
         try databaseManager.upsertDocument(document)
@@ -97,6 +103,15 @@ extension PDFLibraryImporter {
         for image in images {
             try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
         }
+    }
+
+    /// Persist TOC entries via the existing `document_toc` table. The
+    /// shared insert path deduplicates and rewrites on every import.
+    private func saveTOCEntries(_ entries: [PDFTOCEntry], for documentID: UUID) throws {
+        let stored = entries.map {
+            StoredTOCEntry(title: $0.title, plainTextOffset: $0.plainTextOffset, playOrder: $0.playOrder)
+        }
+        try databaseManager.insertTOCEntries(stored, for: documentID)
     }
 }
 

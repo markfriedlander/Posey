@@ -1,5 +1,25 @@
 # Posey History
 
+## 2026-05-01 — PDF TOC detection: skip-on-playback + auto-populated navigation
+
+Mark imported "The Internet Steps to the Beat.pdf" — a scholarly paper whose first page is a Table of Contents — and noticed it would read the TOC aloud sentence by sentence ("Table of Contents I. Introduction. Three. Two. Technology. Six…"), a uniformly poor listening experience. Building TOC detection at PDF import time so the user gets useful behavior instead.
+
+**`PDFTOCDetector`** — new file. Operates on per-page plaintext (the `readableTextPages` array the importer already builds). Two-stage heuristics:
+
+1. **Anchor detection.** Find a TOC anchor — `"Table of Contents"` (case-insensitive) or a standalone `Contents` token. Limited to the first 5 pages so a TOC-looking section in the middle of a document doesn't accidentally mask real content.
+2. **Density confirmation.** A page is a TOC page only when it ALSO has at least 5 dot-leader entries (`[.…]{2,}\s*\d+`). The combination is precise — false-positives on ordinary prose require both an anchor phrase AND a high dot-leader rate.
+3. **Continuation walk.** Pages immediately after a confirmed TOC page that have ≥5 dot-leaders and a high density (chars/entries < 200) are treated as TOC continuations. Multi-page TOCs work.
+4. **Best-effort entry parsing.** Forgiving regex extracts `(label.) (title) (dot-leaders) (page-number)` triples. Roman numerals, capital letters, digits, and lowercase letters all recognized as labels. Embedded dots in titles (`v.` in `RIAA v. mp3.com`) tolerated. Misses rare/exotic formats; that's an acceptable tradeoff because the playback-skip region is the primary value, entries are a navigation aid.
+5. **Title-to-offset mapping.** Each parsed entry's body offset is computed by searching plainText for the title text after the TOC region. The TOC sheet (already wired for EPUB) just works for PDFs now too.
+
+**Persistence.** `documents.playback_skip_until_offset` (new INTEGER column, default 0, migration via the existing `addColumnIfNeeded` helper). `Document.playbackSkipUntilOffset` round-trips through DatabaseManager. Entries persist via the existing `document_toc` table.
+
+**Reader behavior.** `ReaderViewModel.restoreSentenceIndex` checks the document's `playbackSkipUntilOffset` after computing the saved-position match. If the resolved sentence falls inside the skip region, it advances to the first sentence at or after `playbackSkipUntilOffset`. Result: the user opens a PDF with a TOC and the active sentence is the first body sentence. The TOC is still visible in the reader (you can scroll up to see it); it just isn't the first thing TTS reads. The TOC button in the chrome surfaces parsed entries for navigation when present.
+
+**Tests:** Six new unit tests in `PDFTOCDetectorTests` against verbatim text from Mark's actual PDF and against synthetic positive/negative cases (multi-page continuations, late-document TOC anchors that should be ignored, prose containing the phrase "Table of Contents" without dot leaders that should NOT trigger). All pass on device (113 cases total in the full suite, 0 failures).
+
+End-to-end on-device verification still requires re-importing the source PDF; the code path is exercised entirely by unit tests with Mark's real data.
+
 ## 2026-05-01 — Step 3 Project Gutenberg corpus downloader
 
 `tools/fetch_gutenberg.py` — downloads 28 deliberately curated public-domain books from Project Gutenberg via the Gutendex API for stress-testing Posey against real prose. Categories cover the kinds of writing Posey is likely to encounter: simple prose (Twain, Brontë, Dickens, Austen, Hemingway), structured non-fiction (Darwin, Smith, Mill, Thoreau, James), poetry (Whitman, Shakespeare, Dickinson, Eliot), drama (Shakespeare, Shaw), technical (Euclid, Plato, Kant), illustrated (Carroll, Barrie, Grahame), short stories (Poe, Chekhov), other-language samples (Hugo in French, Goethe in German), and longform stress tests (Tolstoy, Melville).

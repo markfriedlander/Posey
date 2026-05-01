@@ -1,5 +1,17 @@
 # Posey Decisions
 
+## 2026-05-01 — Detect PDF Tables of Contents at Import; Skip on Playback, Surface as Navigation
+
+- Status: Accepted
+- Decision: PDFs that contain a Table of Contents on an early page (anchor phrase + high dot-leader density) are detected at import time. The TOC region's character offset range is persisted on the document, and the reader auto-skips past it on first open so TTS doesn't read the TOC aloud. Detected entries populate the existing TOC sheet for navigation.
+- Rationale: Reading a TOC aloud is a uniformly poor listening experience — "Table of Contents I. Introduction. Three. Two. Technology. Six…" is just noise. The TOC has a clear structural purpose (navigation surface) but no value as audio. Detecting it at import lets us deliver something useful: open a PDF, hear the body content, navigate the chapter list visually when needed.
+- Heuristics chosen for precision over recall: a page is only a TOC page if it has BOTH the anchor phrase ("Table of Contents" or standalone `Contents`) AND at least 5 dot-leader entries. False-positives — silently skipping real content — are far worse than missing an unusual TOC, so the detector errs toward leaving content alone when in doubt. Limit search to the first 5 pages for the same reason.
+- Entry parsing is best-effort. The regex tolerates roman numerals, capital letters, digits, and lowercase letters as outline labels; embedded dots in titles ("RIAA v. mp3.com") are accepted. Exotic formats may produce partial titles or be skipped; that's acceptable because the skip-on-playback behavior is the primary value and entries are a secondary navigation aid.
+- Alternatives considered:
+  - Skip the TOC without parsing entries: rejected — leaves the user with a non-functional TOC button when entries are present.
+  - Mark TOC as a "visual stop" so playback pauses and the user manually advances: rejected — that just reverses the problem (now playback always halts at the TOC instead of always reading it).
+  - Detect TOC only by header text and skip the entire first page unconditionally: rejected — many PDFs have title pages, copyright pages, or front-matter that's not a TOC; we'd silently drop real content.
+
 ## 2026-05-01 — Commit to Full Accessibility Compliance
 
 - Status: Accepted

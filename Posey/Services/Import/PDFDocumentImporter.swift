@@ -21,6 +21,24 @@ struct ParsedPDFDocument: Sendable {
     /// One record per visual page that was rendered to an image.
     /// Empty for text-only PDFs.
     let images: [PageImageRecord]
+    /// Detected TOC region in plainText. When non-zero, the reader auto-skips
+    /// the active sentence past `tocSkipUntilOffset` on first open so the
+    /// listener doesn't have to hear the TOC read aloud (a uniformly poor
+    /// TTS experience). Zero means no TOC was detected.
+    let tocSkipUntilOffset: Int
+    /// Detected TOC entries (best-effort). Persisted via the existing
+    /// `document_toc` table so the existing TOC sheet shows them.
+    let tocEntries: [PDFTOCEntry]
+}
+
+/// Carries a parsed TOC entry from importer to library to DB.
+struct PDFTOCEntry: Sendable {
+    let title: String
+    /// Character offset in plainText where the chapter actually begins. The
+    /// importer searches for the entry's title text after the TOC region to
+    /// compute this.
+    let plainTextOffset: Int
+    let playOrder: Int
 }
 
 struct PDFDocumentImporter {
@@ -173,12 +191,59 @@ extension PDFDocumentImporter {
             (t.contains("\\") || t.contains("/") || t.hasSuffix(".pdf") || t.hasSuffix(".obd")) ? nil : t
         }
 
+        // Detect a Table of Contents region. When found, the reader auto-skips
+        // past it on first open so the TOC isn't read aloud (uniformly poor
+        // listening experience). Entries (best-effort) are persisted so the
+        // existing TOC sheet can navigate the document.
+        let tocResult = PDFTOCDetector.detect(pageTexts: readableTextPages)
+        let tocSkipUntilOffset = tocResult?.regionEndOffset ?? 0
+        let tocEntries: [PDFTOCEntry] = tocResult.map { result in
+            buildEntries(for: result.entries,
+                         in: plainText,
+                         postTOCOffset: result.regionEndOffset)
+        } ?? []
+
         return ParsedPDFDocument(
             title: title,
             displayText: displayText,
             plainText: plainText,
-            images: imageRecords
+            images: imageRecords,
+            tocSkipUntilOffset: tocSkipUntilOffset,
+            tocEntries: tocEntries
         )
+    }
+
+    /// For each detector entry, find the title's first occurrence in plainText
+    /// AFTER the TOC region. That offset is where the chapter actually begins
+    /// and is what the TOC sheet will jump to.
+    private func buildEntries(for entries: [PDFTOCDetector.Entry],
+                              in plainText: String,
+                              postTOCOffset: Int) -> [PDFTOCEntry] {
+        guard postTOCOffset >= 0, postTOCOffset <= plainText.count else { return [] }
+        let startIndex = plainText.index(plainText.startIndex, offsetBy: postTOCOffset)
+        let body = plainText[startIndex...]
+        var built: [PDFTOCEntry] = []
+        for (index, entry) in entries.enumerated() {
+            // Try the title with its label ("I. Introduction") first, then
+            // fall back to the bare title ("Introduction") since the body
+            // header may not include the outline label.
+            let bareTitle = entry.title.split(separator: " ", maxSplits: 1).last.map(String.init) ?? entry.title
+            let needles = [entry.title, bareTitle]
+            var found: Int? = nil
+            for needle in needles {
+                guard !needle.isEmpty else { continue }
+                if let r = body.range(of: needle, options: .caseInsensitive) {
+                    found = postTOCOffset + body.distance(from: body.startIndex, to: r.lowerBound)
+                    break
+                }
+            }
+            // Fall back to the post-TOC offset if we can't locate the title
+            // — better than dropping the entry entirely.
+            built.append(PDFTOCEntry(title: entry.title,
+                                     plainTextOffset: found ?? postTOCOffset,
+                                     playOrder: index))
+        }
+        return built
     }
 }
 

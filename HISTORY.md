@@ -1,5 +1,25 @@
 # Posey History
 
+## 2026-05-01 — NavigationStack double-push fixed; auto-restore of last document now reliable
+
+Mark reported: tapping a document showed two slide-in animations and Back required two presses to return to the library. Diagnosed via simulator console capture (NSLog) plus the Posey unified log. Root cause was a two-bug interaction:
+
+**Bug 1 — alert collision.** The "API Ready — Copied to Clipboard" alert is fired from `LibraryViewModel.toggleLocalAPI()`. With the antenna defaulting to ON, `.task` calls `toggleLocalAPI()` at launch, which fires the alert. At the SAME instant, `.task` also calls `maybeRestoreLastOpenedDocument()`, which sets `path = [doc]`. SwiftUI's `UIKitNavigationController` logs `_applyViewControllers... while an existing transition or presentation is occurring; the navigation stack will not be updated.` and the auto-restore push is silently dropped. The user's last document doesn't reopen and they see the library list instead.
+
+Fix: `toggleLocalAPI(showConnectionInfo:)` parameter. Manual user toggles still surface the alert + clipboard copy. The launch-time auto-restart passes `false` and stays silent. The auto-restore push lands cleanly, no UIKit conflict.
+
+**Bug 2 — `.task` re-fires on view re-appear.** `.task` runs whenever the LibraryView appears, including when popping back from the reader. The race: user taps Back → `path` mutates `[doc] → []` → library re-appears → `.task` re-fires `maybeRestoreLastOpenedDocument` → reads `lastOpenedDocumentID` (still set to `doc` because `.onChange(of: path)` hasn't yet propagated the clear) → re-pushes `[doc]`. Net effect: Back tap appears to do nothing; user has to tap Back twice. The same race causes Mark's "two slide-in animations" — when a user-tap and a queued auto-restore both land on the same path mutation cycle.
+
+Fix: `@State private var didAttemptInitialRestore = false`. `maybeRestoreLastOpenedDocument` is now gated on this flag, set true on first run. Auto-restore happens exactly once per app launch — on the first time the library appears — never on subsequent appearances.
+
+**Verified in the simulator** with the iPhone 17 Pro Max + iOS 26.3:
+- Cold launch with `lastOpenedDocumentID` set: app auto-restores to the reader, no library flash.
+- Tap Back: single tap returns to library, no bounce-back.
+- Tap a doc: single push, single back to return.
+- Repeat: same behavior across multiple cycles.
+
+Full PoseyTests passes on device (`** TEST SUCCEEDED **`).
+
 ## 2026-05-01 — Shared TextNormalizer: TXT/MD imports reach parity with PDF; verifier green at 47/47
 
 The synthetic-corpus verifier's first device run flagged 12 normalization specs failing. Diagnosis: every fix that had landed in `PDFDocumentImporter.normalize()` over time (line-break hyphens, ¬ as line-break marker, ZWSP / ZWNJ / ZWJ stripping, tabs → space, multi-space collapse, multi-blank-line collapse, per-line trailing whitespace strip, spaced-letter / spaced-digit collapse) had never been ported to the other importers. Real bug — TXT files in the wild (Word exports, clipboard pastes, web extracts) routinely carry these artifacts.

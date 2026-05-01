@@ -1,5 +1,30 @@
 # Posey History
 
+## 2026-05-01 — Center the active sentence in the visible reading area
+
+**Problem:** The active sentence drifted off the visible reading area's center. With chrome hidden it was ~37 px above visual center; with chrome visible it was ~62 px above. Mark called out "active sentence is always centered in the visible reading area regardless of font size, sentence length, screen orientation, or chrome state" as the non-negotiable acceptance criterion.
+
+**Root cause:** The bottom transport controls used `.safeAreaInset(.bottom)` (correctly claiming layout space), but the top chrome buttons used `.overlay(alignment: .topTrailing)` (floating; no layout claim). `proxy.scrollTo(_, anchor: .center)` centers within the safe-area-adjusted scroll content area — which only included the bottom inset, not the top chrome. The geometric center of the scroll content sat above the visual center of the actually-visible reading region.
+
+**Fix:** Convert the top chrome from `.overlay` to a top `.safeAreaInset` that always claims layout space, matching the bottom transport pattern. Search bar and chrome controls share the same inset slot (mutually exclusive). Chrome still fades visually via opacity, but its space is permanently reserved — so layout (and therefore centering math) is invariant across chrome state.
+
+**Measurements (iPhone 17 Pro Max, 956 px tall, restored to S050 mid-document):**
+
+| State | Highlight center | Visual reading-area center | Off by |
+|-------|------------------|----------------------------|--------|
+| Before fix, chrome hidden | y=478 | y=515 | −37 px |
+| Before fix, chrome visible | y=478 | y=540 | −62 px |
+| After fix, chrome hidden | y=514 | y=515 | **−1 px** |
+| After fix, chrome visible | y=514 | y=534 | **−20 px** |
+
+The remaining ~20 px when chrome is visible is the home-indicator strip below the bottom transport: `safeAreaInset(.bottom)` claims it as part of its inset, but visually the user can't perceive that strip as reading area. Chrome auto-fades within 3 s of any interaction, so this is the rarer state. Mark to confirm acceptability on device, including landscape orientation (the simulator MCP doesn't expose rotation; needs Mark's eyes for landscape acceptance).
+
+**Verification:** Measured via the `ios-simulator` MCP accessibility tree at multiple sentence indices. Full PoseyTests suite passes on device (101 case lines, `** TEST SUCCEEDED **`).
+
+**Tradeoff documented:** Reading area is now ~60 px shorter at the top permanently (matching the ~80 px already reserved at the bottom for transport). The "extra reading space when chrome fades" benefit is gone; the gain is invariant centering. Mark's spec explicitly required centering "regardless of chrome state," which favored the symmetric layout.
+
+**Tooling:** Patched `/opt/homebrew/lib/python3.14/site-packages/idb/cli/main.py` to use `asyncio.new_event_loop()` instead of the removed-in-3.14 `asyncio.get_event_loop()`. fb-idb 1.1.7 doesn't yet support 3.14; this one-line workaround unblocks the simulator MCP. Worth noting in case fb-idb is reinstalled.
+
 ## 2026-04-30 — Restore scroll position on document open; tighten pause latency
 
 Two acceptance issues from the Step 4 sign-off:

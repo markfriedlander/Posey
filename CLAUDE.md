@@ -164,19 +164,26 @@ See ARCHITECTURE.md for full detail.
 
 ## Hardware Testing
 
-Always build and test on Mark's connected iPhone (the real device). Do not use
-the simulator. The device is always available via `xcrun devicectl`. The
-standard deploy sequence is:
+Build and test on Mark's connected iPhone (the real device). The device is
+always available via `xcrun devicectl`. Note that `xcode-select` points at
+`/Library/Developer/CommandLineTools` on this Mac, which has no device
+support — every build/test/install/launch command must export
+`DEVELOPER_DIR="/Applications/Xcode Release.app/Contents/Developer"`
+(the Xcode bundle is named "Xcode Release.app", not "Xcode.app").
+
+Standard deploy sequence:
 
 ```
-xcodebuild -scheme Posey -destination 'id=<device-id>' \
+DEVELOPER_DIR="/Applications/Xcode Release.app/Contents/Developer" \
+  xcodebuild -scheme Posey -destination 'id=<device-id>' \
   -derivedDataPath /tmp/PoseyDeviceDerived -quiet build
 
-xcrun devicectl device install app \
-  --device <device-id> \
+DEVELOPER_DIR="/Applications/Xcode Release.app/Contents/Developer" \
+  xcrun devicectl device install app --device <device-id> \
   /tmp/PoseyDeviceDerived/Build/Products/Debug-iphoneos/Posey.app
 
-xcrun devicectl device process launch \
+DEVELOPER_DIR="/Applications/Xcode Release.app/Contents/Developer" \
+  xcrun devicectl device process launch \
   --device <device-id> --terminate-existing \
   com.MarkFriedlander.Posey
 ```
@@ -185,14 +192,35 @@ Current device ID: `D24FB384-9C55-5D33-9B0D-DAEBFA6528D6` (iPhone 16 Plus,
 "Marks Bigger Ass Fon 16"). Verify with `xcrun devicectl list devices` if
 it ever changes.
 
-**Always run tests on the real device when it is connected and available.**
-The iOS Simulator is a last resort only — it crashes unpredictably under
-resource pressure and produces macOS crash dialogs that alarm the user.
-The device is always available via `xcrun devicectl`. Use it.
+**The connected iPhone is the default for all deployment, TTS verification,
+and final acceptance testing.** Build, install, and exercise the app on
+device for any change that touches playback, position memory, or anything
+the user will feel in real reading.
 
-The simulator is acceptable only when the device is genuinely unavailable
-(e.g. not connected, locked by another process). In that case, note the
-reason explicitly.
+**The iOS Simulator is approved as a verification tool — not as a
+deployment target.** It is the right tool for:
+
+- Inspecting the SwiftUI accessibility tree (structured element data,
+  positions, labels, states) — the cheapest way to confirm what the UI
+  is actually presenting.
+- Capturing screenshots when the question is "what does this look like."
+- Driving UI automation (taps, scrolls) that the device can't easily
+  expose to Claude Code.
+
+This is a deliberate exception. Device remains the acceptance standard:
+anything verified only in the simulator is not yet verified for Mark.
+Simulator findings should be confirmed on device before a task is
+considered complete, and TTS quality must always be judged on device.
+
+The simulator MCP server is set up via:
+```
+claude mcp add ios-simulator npx ios-simulator-mcp
+```
+plus IDB companion (`brew install facebook/fb/idb-companion` and
+`pip3 install fb-idb`). When the MCP is installed, prefer the
+accessibility tree over screenshots whenever the question is structural,
+because the tree is dramatically cheaper in tokens and gives precise
+element coordinates and state.
 
 **Autonomous verification via the local API — standing practice:**
 

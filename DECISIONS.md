@@ -1,5 +1,23 @@
 # Posey Decisions
 
+## 2026-04-30 — Reader Display Is A Continuous Stream; Page Numbers Are Metadata Only
+
+- Status: Accepted
+- Decision: The PDF reader display does not emit "Page N" headings or any other page-boundary chrome. Page boundaries continue to be preserved as metadata (form-feed separators in `displayText` and per-block `startOffset` values), but they never appear as visible elements that interrupt the reading flow. Chapter and section headings from structured documents (Markdown H1–H6, EPUB nav) are still preserved because they aid orientation and come from the source document, not from Posey's pagination.
+- Rationale: The reader is a quiet, continuous reading environment. Page numbers belong in document metadata for any future feature that needs them, not in the reading flow that the user is trying to focus on.
+- Alternatives considered:
+  - Keep page headings but make them visually subtle: rejected — even a subtle heading is a chrome interruption every time the eye reaches a page break, and it has no purpose for a reflowable reader where the page boundary is an artifact of the source layout.
+  - Drop page boundaries from `displayText` entirely: rejected — losing the metadata would foreclose future features (e.g., "jump to page 47", "show page number in chrome on demand") for no gain.
+
+## 2026-04-30 — iOS Simulator Approved As A Verification Tool, Not A Deployment Target
+
+- Status: Accepted
+- Decision: The connected iPhone is the default for all deployment, TTS verification, and final acceptance testing. The iOS Simulator is approved for accessibility tree inspection, screenshot verification, and UI automation work — the things the device cannot easily provide to Claude Code. Anything verified only in the simulator is not yet verified for Mark, and TTS quality must always be judged on device.
+- Rationale: The previous policy (simulator is a last resort) was correct for *deployment* but cut Claude Code off from cheap structural verification. The accessibility tree gives precise element coordinates and state at a fraction of the token cost of screenshots, and UI automation needs an addressable surface the device doesn't expose to Claude. Treating the simulator as a verification tool — not as a substitute for the device — captures both benefits without lowering the acceptance bar.
+- Alternatives considered:
+  - Keep simulator as last resort only: rejected — Claude Code loses the cheapest tool for structural UI verification and is forced to ask Mark for visual confirmation on questions Mark shouldn't have to answer.
+  - Switch to simulator-as-primary: rejected — TTS quality, real-world performance, and the user's actual reading environment can only be evaluated on the device.
+
 ## 2026-03-22 — Establish Documentation As Source Of Truth
 
 - Status: Accepted

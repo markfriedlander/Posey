@@ -50,18 +50,12 @@ struct PDFDisplayParser {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { $0.isEmpty == false }
 
-            if let firstParagraph = paragraphs.first {
-                blocks.append(
-                    DisplayBlock(
-                        id: blocks.count,
-                        kind: .heading(level: 2),
-                        text: "Page \(pageIndex + 1)",
-                        displayPrefix: nil,
-                        startOffset: pageStartOffset,
-                        endOffset: pageStartOffset + max(firstParagraph.count, 1)
-                    )
-                )
-            }
+            // Page boundaries are preserved as metadata in displayText (form-feed
+            // separators) and as block start offsets, but we deliberately do not
+            // emit a visible "Page N" heading. The reader is a continuous
+            // reflowable stream; page numbers belong in document metadata, not in
+            // the reading flow. (pageIndex is intentionally unused here.)
+            _ = pageIndex
 
             var paragraphOffset = pageStartOffset
             for paragraph in paragraphs {

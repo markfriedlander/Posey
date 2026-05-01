@@ -306,7 +306,7 @@ final class ReaderViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.playbackStateText, "idle")
     }
 
-    func testPDFDocumentUsesDisplayBlocksAndPreservesPageHeaders() throws {
+    func testPDFDocumentUsesDisplayBlocksWithoutPageHeadings() throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -331,8 +331,13 @@ final class ReaderViewModelTests: XCTestCase {
         viewModel.handleAppear()
 
         XCTAssertTrue(viewModel.usesDisplayBlocks)
-        XCTAssertEqual(viewModel.displayBlocks.first?.kind, .heading(level: 2))
-        XCTAssertEqual(viewModel.displayBlocks.first?.text, "Page 1")
+        // No "Page N" chrome should appear in the display flow.
+        XCTAssertFalse(viewModel.displayBlocks.contains(where: { block in
+            if case .heading = block.kind, block.text.hasPrefix("Page ") { return true }
+            return false
+        }))
+        XCTAssertFalse(viewModel.displayBlocks.contains(where: { $0.text == "Page 1" }))
+        // Body text from later pages is still preserved.
         XCTAssertTrue(viewModel.displayBlocks.contains(where: { $0.text.contains("Second page reminder: preserve context across page breaks.") }))
     }
 

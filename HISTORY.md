@@ -1,5 +1,18 @@
 # Posey History
 
+## 2026-04-30 — Remove "Page N" chrome from PDF reader display; CLAUDE.md simulator policy
+
+**Problem:** `PDFDisplayParser` injected a `Page N` heading at the top of every page in the rendered display blocks, breaking the rule that the reader should be a continuous reflowable stream. Page boundaries are useful as metadata but should never appear as visible chrome that interrupts reading.
+
+**Change:** `PDFDisplayParser` no longer emits a `.heading(level: 2)` block for each page. Form-feed page separators in `displayText` and per-block `startOffset` values still preserve page boundary positions for any future feature that needs them; nothing was lost from the data model. TTS was not affected — `plainText` is built from page text without "Page N" prefixes, so playback never spoke the heading anyway. Marker navigation still works: each per-sentence sub-block produced by `splitParagraphBlocks()` already serves as its own next/previous target, and the page-heading block was effectively redundant.
+
+**Test:** `testPDFDocumentUsesDisplayBlocksAndPreservesPageHeaders` renamed to `testPDFDocumentUsesDisplayBlocksWithoutPageHeadings` and now asserts no `Page N` heading is present. Full PoseyTests suite passes on device (45 tests, 482 s).
+
+**CLAUDE.md updates:**
+- Hardware Testing rewritten so the iOS Simulator is approved as a verification tool (accessibility tree, screenshots, UI automation) while the device remains the deployment + acceptance target. Anything verified only in the simulator is not yet verified for Mark; TTS quality must always be judged on device.
+- Deploy commands now show the explicit `DEVELOPER_DIR="/Applications/Xcode Release.app/Contents/Developer"` prefix required because `xcode-select` points at CommandLineTools on this Mac and the Xcode bundle is named `Xcode Release.app`.
+- Documented the simulator MCP install path (`claude mcp add ios-simulator npx ios-simulator-mcp` plus IDB companion) so the capability survives across sessions.
+
 ## 2026-03-27 — Verification of image storage, mixed-content PDF, filename sanitization, EPUB TOC navigation
 
 **Image verification (confirmed with vision and pixel comparison):**

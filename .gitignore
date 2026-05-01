@@ -23,3 +23,6 @@ __pycache__/
 # Reference / read-only sibling-project sources dropped here for inspection
 # (e.g. Hal.swift for RAG/context-management patterns).
 /Hal.swift
+
+# Claude Code session state (per-machine, scheduled tasks, local prefs)
+.claude/

@@ -1,5 +1,27 @@
 # Posey History
 
+## 2026-05-01 — Ask Posey kickoff: AFM verified end-to-end on device; implementation plan drafted
+
+Step 1 of the Ask Posey implementation order (per `ask_posey_spec.md`) is complete: Apple Foundation Models is confirmed working on Mark's iPhone 16 Plus and partially working on the iOS 26.3 simulator.
+
+**The probe** — `PoseyTests/FoundationModelsAvailabilityProbe.swift`, three diagnostic XCTests:
+1. `testReportsSystemLanguageModelAvailability` — reads `SystemLanguageModel.default.availability` and logs the state.
+2. `testCanInstantiateLanguageModelSession` — confirms `LanguageModelSession(model:instructions:)` constructs without throwing.
+3. `testTinyPromptRoundTrip` — issues `try await session.respond(to:)` against a one-line prompt and asserts the response is non-empty.
+
+**Results:**
+
+| Surface | Framework loads | Availability OK | Session instantiates | Inference round-trip |
+|---|---|---|---|---|
+| **iPhone 16 Plus** (device, iOS 26.x) | ✅ | ✅ | ✅ (0.015s) | ✅ (1.541s) |
+| **iPhone 17 Pro Max sim** (iOS 26.3) | ✅ | ✅ | ✅ (0.20s) | ❌ (timeout — model assets not installed in this simulator image) |
+
+**Net:** AFM is fully usable on device. The simulator runs everything up to but not including actual inference, which is fine because device is the acceptance standard. The `availability != .available` gate that's already part of the Ask Posey design (per Mark's resolved decision "AFM unavailable: hide the Ask Posey interface entirely") will silently handle simulators with broken assets the same way it handles unsupported devices in the wild.
+
+**`ask_posey_implementation_plan.md`** — drafted. Covers AFM API surface, module breakdown (`Features/AskPosey/`, `Services/AskPosey/`), schema migrations (`ask_posey_conversations`, `document_chunks`), the two-call intent + response flow, prompt builder (Hal Block 20.1 analog with the spec's 60/25/15 split), embedding-index lifecycle (build at import for ALL formats per format-parity), modal sheet UI, threading model, persistence semantics, test plan, and a 7-commit milestone sequence. Includes 8 open questions raised explicitly per the no-assumptions rule — most importantly **a documented discrepancy** between the spec (which persists conversations and auto-saves) and `ARCHITECTURE.md` / `CONSTITUTION.md` (which currently describe a transient session model with explicit save). The spec is dated 2026-05-01 and resolves Mark's earlier open questions, so my read is the spec supersedes; the older docs need updating to match before code lands.
+
+**Status:** plan-first per CLAUDE.md. No feature code written. Awaiting Mark + Claude (claude.ai) review of the plan and resolutions to the open questions before Milestone 1.
+
 ## 2026-05-01 — TOC region completely hidden from the reader (PDFs)
 
 Mark's spec: "The TOC should be completely invisible in the reading view — never scrollable, never read aloud, never reachable via navigation including rewind. Rewind should go to the first body sentence, same as first open. The TOC lives only in the navigation sheet."

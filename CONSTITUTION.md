@@ -49,13 +49,23 @@ The following items were previously listed as non-goals and have been intentiona
 
 **Ask Posey — on-device AI reading assistance via Apple Foundation Models**
 
-Ask Posey is a planned V1 feature. It provides three interaction patterns:
+Ask Posey is a planned V1 feature. The authoritative product specification is `ask_posey_spec.md`; this section captures the constitutional commitments. The detailed architecture is in `ARCHITECTURE.md` "Ask Posey Architecture."
 
-1. Selection-scoped queries — "Simplify this paragraph," "What does this term mean." Triggered from the text selection contextual menu. The selection is the context input.
-2. Document-scoped queries — "Summarize this book," "What are the three main arguments." Accessible from a dedicated entry point in the primary reader chrome (far left of the bottom bar, opposite restart). Uses the full document as context with a relevant-chunk selection strategy for long documents.
-3. Annotation-scoped queries — Ongoing questions about a document over time, accessed through the Notes surface.
+There is **one Ask Posey surface** with intelligent intent routing. Two entry points in v1 (a third deferred):
 
-All three patterns use Apple Foundation Models for on-device, offline inference. Ask Posey is never a network feature. The Ask Posey sheet is a full modal surface. The active sentence or selection is quoted at the top of the sheet so the reader has context without needing to see the full document simultaneously. Pattern 3 uses a transient session model: a local message array is maintained while the Ask Posey sheet is open, providing natural followup support within a session without requiring a new data model or persistence layer. When the sheet closes, the exchange either gets saved as a note or disappears. Persistent conversation history is deliberately deferred — if it proves genuinely valuable in practice, it will be added as an explicit scope revision at that time.
+1. Passage-scoped — the user selects text or relies on the currently highlighted sentence, then chooses "Ask Posey" from the contextual menu. The selected passage plus 2–3 sentences of surrounding context becomes the anchor.
+2. Document-scoped — a dedicated glyph far left of the bottom reader bar opens Ask Posey with the active sentence as anchor and the full document available via the embedding index.
+3. Annotation-scoped — deferred to a later pass. Persistent conversations make this pattern less urgent than it appeared in earlier drafts.
+
+All entry points use Apple Foundation Models for on-device, offline inference. Ask Posey is never a network feature. (Apple's Private Cloud Compute may be used for complex requests; this is end-to-end encrypted and Apple cannot read prompts or responses. The user-facing description is "private by design" rather than "100% on-device" because the latter is imprecise.)
+
+The Ask Posey surface is a half-sheet: the document remains visible behind it so the reader always knows where they are. (The half-sheet vs. full-modal decision is a design risk to validate on device with real documents during implementation; if the half-sheet feels cramped during real reading, the fallback is a full modal sheet.) The active sentence or selection is quoted at the top of the sheet.
+
+**Conversations are persisted per document** in a new SQLite table, `ask_posey_conversations`. Opening Ask Posey on a document later restores recent turns and exposes prior exchanges as a threaded chat history. Conversations never cross documents. Every exchange is auto-saved — passage-scoped exchanges are also surfaced as notes anchored to the invocation offset; document-scoped exchanges are surfaced as document-level notes. Notes use the existing edit/delete behavior; no special cases for AI-authored content.
+
+Older turns are summarized via a rolling-summary tier (Hal MemoryStore pattern) so long-running conversations remain in budget without losing earlier context. Document content beyond the model's context window is selected via a multilingual semantic embedding index built at import time for every supported format (`NLLanguageRecognizer` for detection, `NLEmbedding.sentenceEmbedding(for: <lang>)` for the index, English fallback when a language has no shipped sentence-embedding model).
+
+When AFM is unavailable on a device, the Ask Posey entry points are hidden entirely — no degraded experience, no error messages, no upsell.
 
 **In-document search — planned in three tiers**
 

@@ -125,6 +125,26 @@ nonisolated final class DocumentEmbeddingIndex {
         return try rebuildIndex(for: document.id, plainText: document.plainText)
     }
 
+    /// Best-effort wrapper around `indexIfNeeded`. Catches and logs any
+    /// failure via NSLog, never throws, never returns a value caller has
+    /// to dispose of. This is the variant importers should call after
+    /// `upsertDocument` — if indexing fails, the document is still
+    /// fully readable; the index will be retro-built on first Ask Posey
+    /// invocation. The NSLog gives us a breadcrumb so consistent
+    /// failures (a real bug) don't go silent.
+    func tryIndex(_ document: Document) {
+        do {
+            try indexIfNeeded(document)
+        } catch {
+            NSLog(
+                "[POSEY_ASK_POSEY] embedding index failed for %@ (%@): %@",
+                document.title,
+                document.id.uuidString,
+                "\(error)"
+            )
+        }
+    }
+
     /// Force a rebuild of the chunk index for a document. Used by
     /// re-import paths where the underlying text may have changed.
     @discardableResult

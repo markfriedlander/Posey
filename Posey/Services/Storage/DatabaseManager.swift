@@ -420,7 +420,16 @@ extension DatabaseManager {
 /// One row of `document_chunks`: a slice of plainText with its
 /// pre-computed embedding. Used by Ask Posey for RAG retrieval.
 /// Created at import time for every supported format.
-struct StoredDocumentChunk: Equatable {
+///
+/// `nonisolated` because the project default is `MainActor` and this
+/// value is consumed from `DocumentEmbeddingIndex` (nonisolated) and
+/// from XCTest runners off the main actor. Without this annotation,
+/// Swift 5 mode emits a forward-compat warning ("main actor-isolated
+/// conformance of 'StoredDocumentChunk' to 'Equatable' cannot be used
+/// in nonisolated context; this is an error in the Swift 6 language
+/// mode"). The type has only `let` properties of `Sendable` types so
+/// `nonisolated` is correct and safe.
+nonisolated struct StoredDocumentChunk: Equatable, Sendable {
     let chunkIndex: Int
     let startOffset: Int
     let endOffset: Int

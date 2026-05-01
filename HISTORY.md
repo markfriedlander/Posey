@@ -28,9 +28,15 @@ Built the per-document chunk index used by Ask Posey for RAG retrieval. Hooked i
 
 **Sanity build green on simulator** before commit; full simulator test pass after the one Equatable fix below.
 
-**One mid-flight fix:** my first cut declared `DocumentEmbeddingSearchResult: Equatable` but the type contains a `StoredDocumentChunk` which didn't conform. Auto-synthesis only fires when the conforming type explicitly declares the protocol. Added `: Equatable` to `StoredDocumentChunk`.
+**Three mid-flight fixes** spread across two commits (the second landed after a token-limit reset and a Claude Code crash):
 
-**Pushed to `origin/main` immediately** per the push policy. Committed at the checkpoint per Mark's 5-hour-limit guidance so nothing is lost mid-milestone.
+1. `DocumentEmbeddingSearchResult: Equatable` failed to synthesize because `StoredDocumentChunk` didn't conform. Auto-synthesis only fires when the type explicitly declares the protocol. Added `: Equatable` to `StoredDocumentChunk`.
+
+2. **MainActor deinit crash on simulator.** Initial test run died with a malloc abort (`POINTER_BEING_FREED_WAS_NOT_ALLOCATED`) inside `swift::TaskLocal::StopLookupScope::~StopLookupScope`. Stack trace pointed at `DocumentEmbeddingIndex.__deallocating_deinit` calling into `swift_task_deinitOnExecutorImpl`. Root cause: Posey's project setting `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` makes every undecorated class implicitly `@MainActor`; XCTest runs test methods off the main thread; when the test method returns, the synthesised deinit tries to hop to MainActor to dealloc safely, and that hop trips a known Swift Concurrency runtime issue around TaskLocal scope teardown. Fix: mark `DocumentEmbeddingIndex`, its public types, and `DocumentEmbeddingIndexConfiguration` as `nonisolated` so deinit runs in-place with no executor hop. Verified post-fix: `nonisolated struct`/`enum`/`final class` all compile in Swift 5 mode + approachable concurrency, full M2 test suite green on simulator with no dealloc crash.
+
+3. **Unused-`try?` warnings.** The `try? embeddingIndex?.indexIfNeeded(document)` pattern in each of the 7 importers warned because `try?` returns `Optional<Int>` (the `@discardableResult` only suppresses the inner method's warning, not the optional from `try?`). Added `tryIndex(_:)` to `DocumentEmbeddingIndex` — internally `do/catch` with NSLog on failure, never throws, returns Void — so importer call sites become `embeddingIndex?.tryIndex(document)`. Net wins: zero warnings, plus a breadcrumb for consistent indexing failures (a real bug we'd want to know about). The 7-importer call-site cleanup keeps format-parity by construction.
+
+**Pushed to `origin/main` immediately** per the push policy. Committed across multiple checkpoints per Mark's 5-hour-limit guidance so nothing was lost when the limit hit mid-milestone.
 
 **Next:** Milestone 3 — two-call intent classifier with `@Generable` enum.
 

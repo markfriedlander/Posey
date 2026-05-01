@@ -149,10 +149,16 @@ struct MarkdownParser {
     }
 
     private func normalizeSource(_ source: String) -> String {
-        source
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strip BOM, soft hyphens, ZWSP, and convert NBSP to space before
+        // parsing. The Markdown structure is preserved (newlines, headings,
+        // lists) but invisible characters that have no place in spoken
+        // text are removed up front. CRLF / CR normalization runs after
+        // so the parser's line-based logic still works.
+        var t = source
+        t = TextNormalizer.stripBOM(t)
+        t = TextNormalizer.stripInvisibleCharacters(t)
+        t = TextNormalizer.normalizeLineEndings(t)
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func cleanInlineMarkdown(_ text: String) -> String {

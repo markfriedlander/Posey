@@ -74,8 +74,12 @@ def _txt_soft_hyphens(p: str, _d: str, _src: bytes) -> List[str]:
     fails: List[str] = []
     # U+00AD must be stripped.
     fails += _no_chars(p, "­")
-    # Words must reassemble.
-    fails += _expect_substring(p, "settled", "patience", "footnotes")
+    # Words must reassemble. Case-insensitive — PROSE_LINES has 'Footnotes'
+    # with a capital F at the start of one sentence.
+    lower = p.lower()
+    for word in ["settled", "patience", "footnotes"]:
+        if word not in lower:
+            fails.append(f"missing {word!r} (case-insensitive)")
     return fails
 
 

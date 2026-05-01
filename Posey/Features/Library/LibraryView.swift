@@ -117,6 +117,7 @@ struct LibraryView: View {
             .task {
                 viewModel.loadDocuments()
                 maybeOpenFirstDocument()
+                maybeRestoreLastOpenedDocument()
                 // Auto-restart API server if it was enabled before app was killed.
                 if viewModel.localAPIEnabled && !viewModel.localAPIServer.isRunning {
                     viewModel.toggleLocalAPI()
@@ -128,6 +129,12 @@ struct LibraryView: View {
             }
             .onChange(of: viewModel.documents.count) { _, _ in
                 maybeOpenFirstDocument()
+            }
+            .onChange(of: path) { _, newPath in
+                // Track the last-opened document so cold launches reopen it
+                // instead of dumping the user back at the library list.
+                // Empty path = user backed out → forget the last document.
+                PlaybackPreferences.shared.lastOpenedDocumentID = newPath.last?.id
             }
             .alert("Import Failed", isPresented: $viewModel.isShowingError) {
                 Button("OK", role: .cancel) {}
@@ -193,6 +200,23 @@ struct LibraryView: View {
         guard shouldAutoOpenFirstDocument else { return }
         guard path.isEmpty, let first = viewModel.documents.first else { return }
         path = [first]
+    }
+
+    /// Restore the document the user was last reading. Skipped when the
+    /// auto-open-first-document automation hook is active (test mode), or
+    /// when something is already on the navigation path (e.g. user just
+    /// imported a file mid-launch).
+    private func maybeRestoreLastOpenedDocument() {
+        guard !shouldAutoOpenFirstDocument else { return }
+        guard path.isEmpty else { return }
+        guard let lastID = PlaybackPreferences.shared.lastOpenedDocumentID else { return }
+        guard let document = viewModel.documents.first(where: { $0.id == lastID }) else {
+            // The remembered document was deleted out from under us — forget it
+            // so we don't keep trying to restore something that no longer exists.
+            PlaybackPreferences.shared.lastOpenedDocumentID = nil
+            return
+        }
+        path = [document]
     }
 
     private var markdownContentTypes: [UTType] {

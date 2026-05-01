@@ -5,8 +5,8 @@
 2026-04-30: Multi-step session reorienting after a context wipe and tackling Mark's autonomous task queue. Step 6 (remove "Page N" chrome from PDF reader display) is done and live on device. Coming up next: Steps 4+5 (position persistence + active-sentence centering), then Step 8 (UI widget audit via simulator + accessibility tree), then Step 7 (research scanned-PDF visual significance detection), then Steps 2+3 (synthetic test corpus + Gutendex downloader).
 
 **Open user-reported issues to verify or fix:**
-- Position persistence — Mark wasn't sure whether pause→resume or kill→relaunch was the failing case. Test both, fix what's broken.
-- Highlight + scroll — active sentence drifts off-screen instead of staying centered in the visible reading area regardless of font size, sentence length, orientation, or chrome state.
+- ~~Position persistence~~ — **Done** (2026-04-30). Per-document persistence was already robust in code; the real gap was that cold launch dropped the user back at the library list even when their reading position was preserved. `PlaybackPreferences.lastOpenedDocumentID` now drives auto-restoration of the previously-open document. Pending Mark's acceptance test.
+- Highlight + scroll — active sentence drifts off-screen instead of staying centered in the visible reading area regardless of font size, sentence length, orientation, or chrome state. Needs simulator MCP for visual iteration; planned next.
 
 **Open architecture decision (deferred until research lands):**
 - Scanned-PDF visual significance detection — character count and bounding-box coverage have already been ruled out for the Antifa cover case. Step 7 is research-first; report findings and align before any code.

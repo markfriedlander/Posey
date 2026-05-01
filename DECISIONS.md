@@ -1,5 +1,15 @@
 # Posey Decisions
 
+## 2026-04-30 — Cold Launch Reopens The Last-Read Document
+
+- Status: Accepted
+- Decision: At cold launch, Posey automatically reopens the document the user was last reading, restoring both the navigation state and the in-document reading position. The preference (`PlaybackPreferences.lastOpenedDocumentID`) is set whenever the user navigates into a reader and cleared whenever they back out to the library — so explicit "back to library" is honored as "I'm done with this one for now."
+- Rationale: Per-document position memory was already correct, but losing the navigation state at every cold launch made it feel as if Posey forgot where the user was. This closes that gap without changing the underlying position-restore semantics. The product brief explicitly promises "come back later and resume exactly where you left off"; that should mean reopening to the same screen the user left, not just the same offset within a document they have to manually re-find.
+- Alternatives considered:
+  - Always reopen the last document, even after the user explicitly backs out: rejected — backing out is a clear "give me the library" signal and overriding it would feel pushy.
+  - Only restore navigation when playback was active at last close: rejected — the user often pauses for a moment then closes the app; that shouldn't drop them back at the library.
+  - Persist last-document at the database layer instead of UserDefaults: rejected — the preference is per-installation/per-user, not per-document, so UserDefaults alongside `voiceMode` and `fontSize` is the right home.
+
 ## 2026-04-30 — Reader Display Is A Continuous Stream; Page Numbers Are Metadata Only
 
 - Status: Accepted

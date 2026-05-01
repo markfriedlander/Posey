@@ -118,7 +118,16 @@ struct LibraryView: View {
                 viewModel.loadDocuments()
                 maybeOpenFirstDocument()
                 maybeRestoreLastOpenedDocument()
-                // Auto-restart API server if it was enabled before app was killed.
+                // Debug builds always force the antenna ON at launch so dev
+                // sessions never need a manual toggle. Release builds respect
+                // whatever the user has set in UserDefaults.
+                #if DEBUG
+                if !viewModel.localAPIEnabled {
+                    viewModel.localAPIEnabled = true
+                }
+                #endif
+                // Auto-restart API server if it was enabled before app was killed
+                // (or just force-enabled by the DEBUG block above).
                 if viewModel.localAPIEnabled && !viewModel.localAPIServer.isRunning {
                     viewModel.toggleLocalAPI()
                 }
@@ -240,7 +249,16 @@ final class LibraryViewModel: ObservableObject {
     /// Non-nil while a PDF import is in progress. Drives the progress banner.
     @Published private(set) var pdfImportStatusMessage: String? = nil
     /// Whether the local API server is running.
-    @AppStorage("localAPIEnabled") var localAPIEnabled: Bool = false
+    ///
+    /// Defaults to **true** for the duration of development so dev sessions
+    /// don't require manually toggling the antenna icon every fresh install
+    /// or DB reset. The auto-restart logic in `LibraryView.task` brings the
+    /// server up automatically on launch when this is true.
+    ///
+    /// Before App Store submission this default must flip back to `false`
+    /// — public users should opt into the API explicitly. Tracked in
+    /// NEXT.md under the App-Store-readiness checklist.
+    @AppStorage("localAPIEnabled") var localAPIEnabled: Bool = true
     /// Set to the connection string when the API starts; drives the "copied" alert.
     @Published var apiConnectionInfo: String? = nil
 

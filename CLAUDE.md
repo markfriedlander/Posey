@@ -289,6 +289,11 @@ A few Python scripts in `tools/` exist to keep the test loop fast:
   server inside the running app. Configure once with
   `python3 tools/posey_test.py setup <ip> 8765 <token>`; the IP and
   token are printed to the device console when the antenna is enabled.
+  As of 2026-05-01 the antenna defaults to ON during development —
+  fresh installs auto-enable it, and DEBUG builds force it on at
+  launch even if a previous session toggled it off. This default
+  must flip back to OFF before App Store submission so end users opt
+  in explicitly.
 - `tools/generate_test_docs.py` — produces 47 synthetic edge-case
   documents (TXT, MD, HTML, RTF) covering soft hyphens, NBSP, ZWSP,
   BOM, spaced letters/digits, ligatures, mixed scripts, RTL, empty,

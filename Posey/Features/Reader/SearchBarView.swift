@@ -45,24 +45,30 @@ struct SearchBarView: View {
                 Button(action: onPrevious) {
                     Image(systemName: "chevron.up")
                         .font(.footnote.weight(.semibold))
+                        .frame(width: 44, height: 44)
                 }
                 .disabled(matchCount == 0)
                 .accessibilityIdentifier("search.previous")
+                .accessibilityLabel("Previous match")
 
                 Button(action: onNext) {
                     Image(systemName: "chevron.down")
                         .font(.footnote.weight(.semibold))
+                        .frame(width: 44, height: 44)
                 }
                 .disabled(matchCount == 0)
                 .accessibilityIdentifier("search.next")
+                .accessibilityLabel("Next match")
 
                 Button {
                     query = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
+                        .frame(width: 44, height: 44)
                 }
                 .accessibilityIdentifier("search.clearQuery")
+                .accessibilityLabel("Clear search")
             }
 
             Button("Done") { onDismiss() }

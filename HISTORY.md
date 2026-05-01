@@ -1,5 +1,33 @@
 # Posey History
 
+## 2026-05-01 — Step 2 synthetic test corpus generator + verification harness
+
+Two new tools that turn "did the normalization pipeline regress?" into a runnable assertion.
+
+**`tools/generate_test_docs.py`** — produces 47 deterministic edge-case documents across TXT (31), MD (7), HTML (7), and RTF (2). Each document targets ONE class of artifact so a regression can be located precisely. TXT coverage spans soft hyphens, line-break hyphens, ¬ markers, NBSP, ZWSP, BOM, tabs, mixed line endings, trailing whitespace, excessive blank lines, spaced uppercase / lowercase / accented / digits, ligatures, mixed scripts (Latin/Cyrillic/Greek/Arabic/CJK), emoji, combining diacritics, RTL, empty, only-whitespace, single character, only punctuation, very long no-punctuation runs, dot-leader TOC, only page numbers, repeated boilerplate, ~100 KB documents, unbalanced quotes, very long URLs. MD covers all heading levels, nested lists, code blocks, nested blockquotes, inline HTML, and artifacts inside markdown. HTML covers no-paragraph, inline styles, tables, `<script>`/`<style>` removal, entity decoding, and 20-level deep nesting. RTF covers baseline + styled.
+
+The generator is dependency-free (Python stdlib only) and deterministic — repeated runs produce byte-identical output. PDF/EPUB/DOCX edge-case generators are deferred to a sibling Swift script (planned).
+
+**`tools/verify_synthetic_corpus.py`** — drives Posey through the corpus end to end:
+1. Optionally regenerates the corpus
+2. `RESET_ALL` the device to start clean
+3. Imports every synthetic doc via the local API
+4. For each doc, fetches `GET_PLAIN_TEXT` and `GET_TEXT` and runs a per-doc assertion that encodes the expected normalization (e.g. "no U+00AD chars survived", "`C O N T E N T S` → `CONTENTS`", "BOM stripped")
+5. Prints a PASS / FAIL summary and exits non-zero on any failure
+
+Two documents (`txt/20_empty.txt` and `txt/21_only_whitespace.txt`) are configured to expect REJECTION — the importer correctly throws `.emptyDocument` for them, and the verifier checks the rejection happened.
+
+**Usage:**
+```
+python3 tools/generate_test_docs.py            # writes corpus to ~/.posey-corpus
+python3 tools/generate_test_docs.py --list     # preview what would be generated
+python3 tools/verify_synthetic_corpus.py       # generate + verify against the live device
+python3 tools/verify_synthetic_corpus.py --no-reset  # don't wipe the device library
+python3 tools/verify_synthetic_corpus.py --limit 5   # quick smoke
+```
+
+The verifier requires the local API to be configured (`tools/posey_test.py setup <ip> 8765 <token>`) and the antenna toggled on in the app. It deliberately reuses `posey_test.py`'s HTTP transport via `importlib`, so there's no second copy of the connection logic.
+
 ## 2026-05-01 — Step 8 accessibility pass: VoiceOver labels, Reduce Motion, search-bar touch targets
 
 First wave of the accessibility commitment. Audit performed via the simulator MCP accessibility tree on both Library and Reader views; findings implemented in a single batch.

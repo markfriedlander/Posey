@@ -17,6 +17,7 @@ final class PlaybackPreferences {
         static let customVoiceIdentifier = "posey.playback.customVoiceIdentifier"
         static let customRate           = "posey.playback.customRate"
         static let fontSize             = "posey.reader.fontSize"
+        static let lastOpenedDocumentID = "posey.library.lastOpenedDocumentID"
     }
 
     private enum ModeToken {
@@ -42,6 +43,25 @@ final class PlaybackPreferences {
         }
         set {
             UserDefaults.standard.set(Double(newValue), forKey: Keys.fontSize)
+        }
+    }
+
+    /// The document the user was last reading. Restored at cold launch so the
+    /// app reopens to the reader instead of the library list.
+    /// Cleared when the user explicitly navigates back to the library.
+    var lastOpenedDocumentID: UUID? {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: Keys.lastOpenedDocumentID) else {
+                return nil
+            }
+            return UUID(uuidString: raw)
+        }
+        set {
+            if let id = newValue {
+                UserDefaults.standard.set(id.uuidString, forKey: Keys.lastOpenedDocumentID)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Keys.lastOpenedDocumentID)
+            }
         }
     }
 

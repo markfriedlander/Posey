@@ -1,5 +1,19 @@
 # Posey History
 
+## 2026-04-30 — Remember the last-opened document across cold launches
+
+**Problem:** Per-document position memory was robust (saves on every sentence change, pause, scenePhase background, and onDisappear; restores from character offset with sentence-index fallback) — but at *cold launch* there was no "remember which document I was reading" persistence. Every kill→relaunch dumped the user back at the library list, even though the document's reading position was perfectly preserved. From the user's perspective, "Posey forgot where I was" — even though technically only the navigation state was lost.
+
+**Change:**
+- `PlaybackPreferences.lastOpenedDocumentID` (UUID, optional, UserDefaults-backed) added.
+- `LibraryView.onChange(of: path)` writes `path.last?.id` to the preference whenever the navigation stack changes — pushing into a reader sets it; backing out to the library clears it.
+- `LibraryView.maybeRestoreLastOpenedDocument()` runs from `.task` after `loadDocuments`. If a `lastOpenedDocumentID` exists and matches an existing document, it pushes that document onto the navigation path; ReaderView then restores the per-document reading position via the existing path. If the remembered document was deleted, the preference is cleared.
+- `shouldAutoOpenFirstDocument` (the test-mode automation hook) takes precedence so that automated smoke runs aren't perturbed by previous-session state.
+
+**Per-document position persistence (separately verified):** Code trace confirms `didStart` updates `currentSentenceIndex` and the ReaderViewModel sink persists every change. `synthesizer.continueSpeaking()` resumes from where pause was hit, preserving in-utterance position. No bug found in pause→resume; the kill→relaunch case was actually the document-reopening gap, not the position-saving gap.
+
+**Tests:** Full PoseyTests suite passes on device (45 tests, 482 s).
+
 ## 2026-04-30 — Remove "Page N" chrome from PDF reader display; CLAUDE.md simulator policy
 
 **Problem:** `PDFDisplayParser` injected a `Page N` heading at the top of every page in the rendered display blocks, breaking the rule that the reader should be a continuous reflowable stream. Page boundaries are useful as metadata but should never appear as visible chrome that interrupts reading.

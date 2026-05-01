@@ -409,7 +409,12 @@ editing existing ones.
    guesses and proceed. This applies to technical state, user intent, what the
    user has or hasn't done, and anything else that is not directly observable.
 4. Read the relevant code before proposing changes to it.
-5. Commit to GitHub regularly so Claude (claude.ai) can stay in sync.
+5. Commit and push to GitHub. Every commit gets pushed to `origin/main`
+   immediately — "commit and push" is one action, not two. Local-only commits
+   are invisible to Claude (claude.ai), invisible to anyone else who picks up
+   the repo, and one bad day away from being lost. There are no exceptions:
+   if you committed it, you push it. If a push fails, fix the cause now and
+   push before moving on.
 
 **Starting a session:**
 1. Read this file
@@ -426,6 +431,8 @@ editing existing ones.
 - Update NEXT.md if the status of any planned item changed
 - These updates are part of the commit, not optional housekeeping afterward
 - A commit without corresponding doc updates is an incomplete commit
+- **Push to `origin/main` immediately.** Commit and push are one action.
+  Don't queue commits locally and "push later" — push every time.
 
 **Ending a session:**
 - Confirm HISTORY.md, DECISIONS.md, and NEXT.md are current before closing

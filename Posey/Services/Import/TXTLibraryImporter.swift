@@ -2,7 +2,17 @@ import Foundation
 
 struct TXTLibraryImporter {
     let databaseManager: DatabaseManager
+    let embeddingIndex: DocumentEmbeddingIndex?
     private let textLoader = TXTDocumentImporter()
+
+    /// Memberwise init with a default for `embeddingIndex` so existing
+    /// call sites (and tests) compile unchanged. New callers pass the
+    /// index in to enable Ask Posey RAG retrieval at import time.
+    init(databaseManager: DatabaseManager,
+         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+        self.databaseManager = databaseManager
+        self.embeddingIndex = embeddingIndex
+    }
 
     func importDocument(from url: URL) throws -> Document {
         let plainText = try textLoader.loadText(from: url)
@@ -49,6 +59,12 @@ struct TXTLibraryImporter {
         if existingDocument == nil {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
+
+        // Best-effort: build the Ask Posey embedding index. Failure
+        // here must NOT fail the import — the document is still
+        // perfectly readable without RAG; the index will be retro-built
+        // on first Ask Posey invocation if it's missing.
+        try? embeddingIndex?.indexIfNeeded(document)
 
         return document
     }

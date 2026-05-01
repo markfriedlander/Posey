@@ -4,7 +4,14 @@ import Foundation
 
 struct PDFLibraryImporter {
     let databaseManager: DatabaseManager
+    let embeddingIndex: DocumentEmbeddingIndex?
     private let importer = PDFDocumentImporter()
+
+    init(databaseManager: DatabaseManager,
+         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+        self.databaseManager = databaseManager
+        self.embeddingIndex = embeddingIndex
+    }
 
     /// Full synchronous import — parse and persist in one call.
     /// Used for formats where OCR is not needed (fast path).
@@ -92,6 +99,12 @@ extension PDFLibraryImporter {
         if existing == nil {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
+
+        // Ask Posey embedding index — best-effort. PDFs can be very long
+        // and the embedding step is synchronous; if it ever becomes a
+        // perceptible UI freeze on the largest documents we'll move it
+        // to a background Task. Tracked in NEXT.md.
+        try? embeddingIndex?.indexIfNeeded(document)
 
         return document
     }

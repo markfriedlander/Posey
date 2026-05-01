@@ -4,7 +4,14 @@ import Foundation
 
 struct EPUBLibraryImporter {
     let databaseManager: DatabaseManager
+    let embeddingIndex: DocumentEmbeddingIndex?
     private let importer = EPUBDocumentImporter()
+
+    init(databaseManager: DatabaseManager,
+         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+        self.databaseManager = databaseManager
+        self.embeddingIndex = embeddingIndex
+    }
 
     func importDocument(from url: URL) throws -> Document {
         let parsed = try importer.loadDocument(from: url)
@@ -73,6 +80,9 @@ extension EPUBLibraryImporter {
         if existing == nil {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
+
+        // Ask Posey embedding index — best-effort.
+        try? embeddingIndex?.indexIfNeeded(document)
 
         return document
     }

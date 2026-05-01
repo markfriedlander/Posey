@@ -420,7 +420,7 @@ extension DatabaseManager {
 /// One row of `document_chunks`: a slice of plainText with its
 /// pre-computed embedding. Used by Ask Posey for RAG retrieval.
 /// Created at import time for every supported format.
-struct StoredDocumentChunk {
+struct StoredDocumentChunk: Equatable {
     let chunkIndex: Int
     let startOffset: Int
     let endOffset: Int

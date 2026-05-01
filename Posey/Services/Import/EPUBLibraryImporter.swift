@@ -20,7 +20,8 @@ struct EPUBLibraryImporter {
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
             displayText: parsed.displayText,
-            plainText: parsed.plainText
+            plainText: parsed.plainText,
+            playbackSkipUntilOffset: parsed.playbackSkipUntilOffset
         )
         try saveImages(parsed.images, for: doc.id)
         try saveTOC(parsed.tocEntries, for: doc.id)
@@ -34,7 +35,8 @@ struct EPUBLibraryImporter {
             fileName: fileName,
             fileType: fileType,
             displayText: parsed.displayText,
-            plainText: parsed.plainText
+            plainText: parsed.plainText,
+            playbackSkipUntilOffset: parsed.playbackSkipUntilOffset
         )
         try saveImages(parsed.images, for: doc.id)
         try saveTOC(parsed.tocEntries, for: doc.id)
@@ -53,7 +55,8 @@ extension EPUBLibraryImporter {
         fileName: String,
         fileType: String,
         displayText: String,
-        plainText: String
+        plainText: String,
+        playbackSkipUntilOffset: Int = 0
     ) throws -> Document {
         let now = Date()
         let existing = try databaseManager.existingDocument(
@@ -72,7 +75,8 @@ extension EPUBLibraryImporter {
             modifiedAt: now,
             displayText: displayText,
             plainText: plainText,
-            characterCount: plainText.count
+            characterCount: plainText.count,
+            playbackSkipUntilOffset: playbackSkipUntilOffset
         )
 
         try databaseManager.upsertDocument(document)

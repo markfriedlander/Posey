@@ -24,6 +24,12 @@ struct ParsedEPUBDocument {
     let images: [PageImageRecord]
     /// Table of contents entries in reading order. Empty if no nav/NCX was found.
     let tocEntries: [EPUBTOCEntry]
+    /// Character offset in plainText past which the reader should
+    /// auto-jump on first open. Set non-zero by `EPUBFrontMatterDetector`
+    /// when the spine starts with auto-generator boilerplate (the
+    /// Internet Archive `hocr-to-epub` pipeline being the canonical
+    /// case). 0 means "no skip" — the document opens at offset 0.
+    let playbackSkipUntilOffset: Int
 }
 
 struct EPUBDocumentImporter {
@@ -131,6 +137,14 @@ extension EPUBDocumentImporter {
         var imageRecords: [PageImageRecord] = []
         // Map from (normalized spine file path without fragment) → cumulative offset at start
         var pathToPlainOffset: [String: Int] = [:]
+        // Front-matter detector input: one entry per spine item we
+        // actually loaded HTML for. We keep the raw HTML string here
+        // (rather than reading it again later) because the spine can
+        // be hundreds of items long for scanned EPUBs and a re-read
+        // is wasteful. Memory cost is bounded by the front-matter
+        // window — we only retain HTML for the first few candidates;
+        // see the populate loop below.
+        var frontMatterCandidates: [EPUBFrontMatterDetector.SpineCandidate] = []
 
         for (path, href) in spineItems {
             guard let chapterData = entryLoader(path) else { continue }
@@ -145,6 +159,19 @@ extension EPUBDocumentImporter {
                 .components(separatedBy: "#").first ?? ""
             if !bareHref.isEmpty && pathToPlainOffset[bareHref] == nil {
                 pathToPlainOffset[bareHref] = cumulativeOffset
+            }
+
+            // Front-matter detection only inspects the first few spine
+            // items. Anything later is by definition not "front" matter
+            // — keep memory bounded by capping the candidate window.
+            if frontMatterCandidates.count < 5,
+               let html = String(data: chapterData, encoding: .utf8)
+                       ?? String(data: chapterData, encoding: .isoLatin1) {
+                frontMatterCandidates.append(EPUBFrontMatterDetector.SpineCandidate(
+                    href: href,
+                    plainTextStartOffset: cumulativeOffset,
+                    html: html
+                ))
             }
 
             // Extract inline images, replacing <img> tags with \x0c-delimited markers.
@@ -167,6 +194,18 @@ extension EPUBDocumentImporter {
         let displayText = normalizeDisplay(chapterTexts.joined(separator: "\n\n"))
         let plainText   = buildPlainText(from: displayText)
 
+        // Detect auto-generator front matter (Internet Archive
+        // hocr-to-epub `<title>Notice</title>` paragraphs and the
+        // like) and compute the playback-skip offset the same way the
+        // PDF importer does for TOC regions. Reader's existing
+        // `playbackSkipUntilOffset` plumbing handles the rest:
+        // segments and display blocks past this offset are filtered
+        // out of the data model so the user never lands on, scrolls
+        // to, or has TTS read the disclaimer.
+        let frontMatterResult = EPUBFrontMatterDetector.detect(
+            spineItems: frontMatterCandidates
+        )
+
         // Build TOC entries from nav (EPUB 3) or skip if neither is available.
         var tocEntries = buildTOCEntries(
             packageDoc: packageDoc,
@@ -188,13 +227,32 @@ extension EPUBDocumentImporter {
                 pathToPlainOffset: pathToPlainOffset
             )
         }
+        // Filter out entries that point at front-matter spine items
+        // — there's no value in surfacing "Notice" in a navigation
+        // surface the reader can't reach by playback. This applies
+        // equally to populated nav/NCX entries that happen to point
+        // at a front-matter spine item (rare but possible) and to
+        // synthesized entries.
+        if !frontMatterResult.frontMatterHrefs.isEmpty {
+            tocEntries = tocEntries.filter { entry in
+                // Synthesized entries set offsets from pathToPlainOffset;
+                // their offset matches the front-matter offset only when
+                // we want to drop them. For populated nav entries with
+                // an offset of -1 (unmatched href) we keep the entry —
+                // we have no way to know whether it's front matter.
+                let offset = entry.plainTextOffset
+                if offset < 0 { return true }
+                return offset >= frontMatterResult.skipUntilOffset
+            }
+        }
 
         return ParsedEPUBDocument(
             title: packageDoc.title,
             displayText: displayText,
             plainText: plainText,
             images: imageRecords,
-            tocEntries: tocEntries
+            tocEntries: tocEntries,
+            playbackSkipUntilOffset: frontMatterResult.skipUntilOffset
         )
     }
 }

@@ -2,12 +2,24 @@ import Foundation
 import NaturalLanguage
 
 // ========== BLOCK 01: TYPES - START ==========
+// Posey's project-wide setting `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
+// means every type in this file would otherwise be implicitly MainActor.
+// The Ask Posey embedding index does CPU-bound work (chunking, embedding,
+// SQLite I/O) and is read both from MainActor (the library importers) and
+// — crucially — *deallocated* from XCTest's runner threads, which are not
+// MainActor. With MainActor isolation, deinit is dispatched via
+// `swift_task_deinitOnExecutorImpl`, and a Swift Concurrency runtime
+// issue around TaskLocal scope teardown crashes the test bundle on
+// dealloc. Marking everything in this file `nonisolated` keeps deinit
+// in-place, eliminates the executor hop, and preserves correctness because
+// the index has no mutable state of its own.
+
 /// One chunk produced by `DocumentEmbeddingIndex.chunk(_:)`. Holds the
 /// `plainText` slice and its character-offset range so retrieval can map
 /// back into the document's original coordinate space (used by Ask Posey
 /// to render "jump to passage" links and to dedup against verbatim
 /// content already in the prompt).
-struct DocumentEmbeddingChunk: Equatable {
+nonisolated struct DocumentEmbeddingChunk: Equatable, Sendable {
     let chunkIndex: Int
     let startOffset: Int
     let endOffset: Int
@@ -17,7 +29,7 @@ struct DocumentEmbeddingChunk: Equatable {
 /// One result from `DocumentEmbeddingIndex.search`. The chunk plus its
 /// cosine similarity to the query embedding. Score is in [-1, 1] but in
 /// practice for sentence embeddings on related text it's [0, 1].
-struct DocumentEmbeddingSearchResult: Equatable {
+nonisolated struct DocumentEmbeddingSearchResult: Equatable, Sendable {
     let chunk: StoredDocumentChunk
     let similarity: Double
 }
@@ -25,7 +37,7 @@ struct DocumentEmbeddingSearchResult: Equatable {
 /// Errors the embedding index can throw at the public surface. Caller
 /// code should treat all of these as "couldn't index right now" — the
 /// document is still importable, the index is just absent or stale.
-enum DocumentEmbeddingError: LocalizedError {
+nonisolated enum DocumentEmbeddingError: LocalizedError, Sendable {
     case emptyText
     case databaseUnavailable
 
@@ -44,7 +56,7 @@ enum DocumentEmbeddingError: LocalizedError {
 /// 500-char windows with 50-char overlap. Exposed as a struct so tests
 /// can build deterministic chunkings without monkey-patching the static
 /// surface. Production callers always use `.default`.
-struct DocumentEmbeddingIndexConfiguration {
+nonisolated struct DocumentEmbeddingIndexConfiguration: Sendable {
     /// Target chunk size in characters. Most chunks land at exactly this
     /// size; the final chunk is whatever remains.
     let chunkSize: Int
@@ -82,7 +94,13 @@ struct DocumentEmbeddingIndexConfiguration {
 /// available; English is the fallback when no matching model ships;
 /// hash-based embeddings are the final fallback so import never fails
 /// on a model gap.
-final class DocumentEmbeddingIndex {
+///
+/// `nonisolated` because the project default is `MainActor` and the
+/// service is allocated/released from non-MainActor contexts (XCTest
+/// runner threads, eventually a background `Task` for retro-indexing).
+/// MainActor-isolated deinit hopping triggers a Swift Concurrency
+/// runtime crash on dealloc; nonisolated avoids the hop entirely.
+nonisolated final class DocumentEmbeddingIndex {
 
     // MARK: Wiring
 

@@ -1,5 +1,39 @@
 # Posey History
 
+## 2026-05-01 — Ask Posey Milestone 2: multilingual document embedding index
+
+Built the per-document chunk index used by Ask Posey for RAG retrieval. Hooked into all 7 library importers (TXT/MD/RTF/DOCX/HTML/EPUB/PDF) so chunks land at import time across every supported format per the format-parity standing policy.
+
+**`DocumentEmbeddingIndex`** (`Posey/Services/AskPosey/`) is the canonical surface:
+
+- Chunking: 500-char windows with 50-char overlap, configurable via `DocumentEmbeddingIndexConfiguration` so tests can build deterministic chunkings without monkey-patching the static surface.
+- Language detection via `NLLanguageRecognizer.dominantLanguage` (samples first 1000 chars).
+- Embedder selection: `NLEmbedding.sentenceEmbedding(for: detectedLanguage)`. English fallback when no per-language model ships. Hash embedding (Hal Block 05 shape, 64-dim, normalised to unit vector) as final fallback so import never fails on a model gap.
+- `embedding_kind` per row records exactly which model produced each embedding (`"en-sentence"`, `"fr-sentence"`, `"english-fallback"`, `"hash-fallback"`). Search queries the right embedding model per kind so query and chunk vectors live in the same space, even when a document was indexed with a different model than the simulator/device currently has available.
+- Public surface: `indexIfNeeded(_:)` (idempotent), `rebuildIndex(for:plainText:)` (force rebuild), `search(documentID:query:limit:)` (returns top-K results sorted by cosine).
+
+**`DatabaseManager`** got chunk-table helpers in a new Block 05C: `replaceChunks` (transactional — wraps the delete + N inserts in `BEGIN/COMMIT` so a failure rolls back), `chunkCount`, `chunks`, `deleteChunks`. Embeddings packed as little-endian Double BLOBs.
+
+**Library importers** all gained an optional `embeddingIndex: DocumentEmbeddingIndex?` initialiser parameter (default nil so existing tests and call sites compile unchanged). After `upsertDocument`, every importer calls `try? embeddingIndex?.indexIfNeeded(document)` — the `try?` is deliberate: indexing failures must NOT fail the import. The document is fully readable without RAG; the index will be retro-built on first Ask Posey invocation if it's missing.
+
+**`LibraryViewModel`** holds a single shared `DocumentEmbeddingIndex` and hands it to all 7 importers — one instance per ViewModel lifetime, no global state.
+
+**Multilingual from day one** per Mark's revised 12.3 answer: "Posey already supports multilingual documents, AFM is multilingual, and the fix is not complicated. English-only is a shortcut that creates unnecessary technical debt." The Gutenberg corpus has French (Hugo) and German (Goethe) samples and the synthetic corpus has Latin/Cyrillic/Greek/Arabic/CJK fixtures — those all exercise the language-detection branch.
+
+**Tests** (`PoseyTests/DocumentEmbeddingIndexTests.swift`):
+
+- `DocumentEmbeddingChunkingTests`: chunk boundaries with overlap, zero-overlap mode, empty text, offset → text round trip (this is the invariant that lets Milestone 6 render "jump to passage" links correctly).
+- `DocumentEmbeddingLanguageTests`: English / French detection, embedding-kind round trip through `embeddingKind(for:)` and `language(forKind:)`, English/hash-fallback kind decoding, cosine-similarity baseline (1, 0, -1, mismatched-dim → 0, zero-mag → 0).
+- `DocumentEmbeddingPersistenceTests`: end-to-end index → store → search; idempotent re-index; rebuild replaces priors; **cascade delete removes chunks** (relies on the foreign-key configuration verified by Milestone 1 tests); searching an unindexed doc returns empty (callers fall back to non-RAG); empty text throws.
+
+**Sanity build green on simulator** before commit; full simulator test pass after the one Equatable fix below.
+
+**One mid-flight fix:** my first cut declared `DocumentEmbeddingSearchResult: Equatable` but the type contains a `StoredDocumentChunk` which didn't conform. Auto-synthesis only fires when the conforming type explicitly declares the protocol. Added `: Equatable` to `StoredDocumentChunk`.
+
+**Pushed to `origin/main` immediately** per the push policy. Committed at the checkpoint per Mark's 5-hour-limit guidance so nothing is lost mid-milestone.
+
+**Next:** Milestone 3 — two-call intent classifier with `@Generable` enum.
+
 ## 2026-05-01 — Ask Posey Milestone 1: doc alignment + schema migrations + availability skeleton
 
 Mark approved `ask_posey_implementation_plan.md` with answers to the 8 open questions:

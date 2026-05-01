@@ -342,6 +342,48 @@ Anticipate what you don't.
 
 ---
 
+## Format Parity Is Standing Policy
+
+When a quality fix lands in one document format, ask immediately whether it
+applies to the others. The default answer is **yes — apply it everywhere it
+fits**. This is not a nice-to-have. The same reading experience must work the
+same way regardless of whether the source was TXT, MD, RTF, DOCX, HTML, EPUB,
+or PDF.
+
+Examples of fixes that **must** apply uniformly across all supported formats:
+
+- Normalization (soft hyphens, NBSP, ZWSP, BOM, tabs, line-break hyphens, dot
+  leaders, spaced letters/digits, ¬ markers, etc.) — the shared
+  `TextNormalizer` is the canonical surface; new passes go there and every
+  importer delegates to it.
+- TOC detection / skip-on-playback / TOC navigation surface — once we know
+  how to handle TOCs in one format, the others should use the same plumbing
+  (`document_toc` table, `playback_skip_until_offset` column, ReaderViewModel
+  filtering).
+- Inline images, visual stops, mixed-content page handling.
+- Reader UX (centering, search, notes anchoring, auto-restore, position
+  persistence) — these are format-agnostic by construction; new affordances
+  must remain so.
+
+**When a fix can't apply uniformly**, document the reason explicitly in
+DECISIONS.md or NEXT.md. "I only had time for PDF" is not a reason; "EPUB
+TOCs aren't typically dot-leader-based, so the PDF detector's heuristic
+needs an EPUB-specific variant" is. The principle is: every format gets the
+same care, or we know exactly why it doesn't.
+
+Treat this as a checklist the moment a fix lands:
+
+1. Which formats have an equivalent surface this fix could apply to?
+2. Does the same fix work as-is, with refactoring, or with a format-specific
+   variant?
+3. If it doesn't apply yet, what's the followup task? Add it to NEXT.md.
+
+This avoids the slow drift Posey has had to clean up before — fixes that
+lived only in the PDF importer and quietly missed every other format until
+the synthetic-corpus verifier caught them.
+
+---
+
 ## The LEGO Block System
 
 All Swift files use clearly bounded, numbered sections:

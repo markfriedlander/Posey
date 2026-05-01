@@ -240,6 +240,19 @@ Cost estimate: a 100k-char document → ~220 chunks → ~220 embedding calls. Ha
 3. Sort, take top-K (typically 5–10 per spec).
 4. Trim to fit RAG budget; emit annotated snippets with offsets so we can render "jump to" links.
 
+### 7.3 Considered for v2 — Entity-aware multi-factor relevance scoring
+
+Pure cosine similarity is the v1 ranking. **Mentat (a prior related project Mark referenced 2026-05-01) used a multi-factor formula instead**: semantic similarity + entity-match bonus + context relevance, with a 2× multiplier when a query entity matches a chunk entity.
+
+Why this matters for Posey: questions like "what does the author say about Hofstadter" hinge on the entity. Pure cosine on a 500-char window can return a thematically similar passage that doesn't actually mention the person, while a passage that names "Hofstadter" three times but is shorter or less topically dense gets ranked below it. The 2× entity-match boost rebalances that.
+
+We have most of the parts already: `NLTagger` for named-entity extraction, the chunk text in `document_chunks`, and the query string. A v2 implementation would:
+- Extract entities from each chunk at index time (cheap; one `NLTagger` pass per chunk during the same loop that produces the embedding).
+- Persist entities in a sibling table `document_chunk_entities` or as a JSON column on `document_chunks`.
+- At query time, extract entities from the user's question, then for each chunk compute `score = cosine + (entity_overlap * 2× factor)` (clamped to a sensible upper bound so a single entity match can't drown out semantic relevance entirely).
+
+**Decision for v1:** ship pure cosine first. Reasons: (a) it's faster to validate, (b) we don't yet know whether AFM's prompt tolerance for slightly-off-topic chunks makes the gains marginal, (c) the additional schema and indexing cost is meaningful and shouldn't land before we have a real complaint to fix. **Track this as a v2 candidate in `NEXT.md`** and revisit once Ask Posey is in real use and we can A/B against actual user questions.
+
 ---
 
 ## 8. UI surface

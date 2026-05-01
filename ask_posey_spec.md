@@ -122,6 +122,26 @@ A half-sheet that slides up from the bottom, anchored to the document behind it.
 
 **Transparency indicator:** For large documents, a small info line below the context anchor: "Working from the most relevant sections." Tapping it explains the limitation.
 
+**Indexing indicator (first-time per document):** When Ask Posey opens on a document that has not yet been indexed (a pre-existing import from before the embedding-index landed, or a freshly imported document where indexing happened in the background), show a simple "Indexing this document…" line in the sheet while it builds. When complete, replace it with a brief "Indexed N sections." confirmation that fades after a few seconds. This sets expectations for the small one-time cost and builds trust by being visible about the work.
+
+---
+
+## Source Attribution
+
+Every Ask Posey response carries attribution to the document chunks that contributed to it. This is distinct from the navigation pattern (which proposes destinations to jump to) — attribution shows the user which sources the model actually drew from when answering.
+
+**What gets tracked.** When the prompt builder injects RAG chunks into a Call 2 prompt, the IDs and offsets of those chunks are recorded as the *candidate sources* for that turn. After Call 2 returns, the `[1]`, `[2]`, `[3]`… reference markers Posey emits in the response (and any direct quotation it produces) are mapped back to the candidate chunks.
+
+**How it surfaces in the UI.** Below each assistant message in the threaded chat, Posey renders a small "Sources" strip — a horizontally scrollable row of compact pills, one per cited chunk. Each pill shows a short preview (first ~30 chars of the chunk text or the section title if available) and the page or character offset. Tapping a pill dismisses the sheet and scrolls the reader to that offset, the same way navigation cards do. Source attribution and navigation share the existing offset-based jump infrastructure.
+
+**When a response has no RAG context** (the `.immediate` intent path, where the answer comes from the anchor passage and surrounding sentences only), the Sources strip shows the anchor passage itself as the single source. Honest, never empty: every answer points back to where it came from.
+
+**Implementation notes.**
+- Affects the prompt builder: the assembled `RAGSnippet` array for a turn must be retained alongside the response so the UI can render attribution after the model returns.
+- Affects the message model: `AskPoseyMessage` (or whatever the v1 chat-message struct ends up named) needs an array of contributing-chunk references — at minimum `(chunk_index, start_offset, end_offset, text_preview)`.
+- Persisted in `ask_posey_conversations` so attribution survives across sessions: store the chunk references as a JSON column on the assistant turn, or as a sibling table if we need joins later.
+- Honesty principle: attribution is *what was injected*, not *what the model claims*. If the model paraphrases or hallucinates, the user can verify against the cited source by tapping through. This is load-bearing for the trust contract.
+
 ---
 
 ## Navigation Response Pattern
@@ -180,6 +200,8 @@ Ask Posey works the same way regardless of document format. The plainText field 
 11. Add navigation response pattern
 12. Add document-scoped note saving
 13. Add transparency indicators for large documents
+14. Add source attribution: track injected RAG chunks per turn, render a "Sources" strip under each assistant message, wire pills to the existing offset-jump infrastructure, persist attribution in `ask_posey_conversations`
+15. Add the indexing indicator: "Indexing this document…" → "Indexed N sections." for any document where the embedding index is being built on first invocation
 
 **Do not skip steps.** Do not build the full RAG before the basic two-call pattern works. Verify each step on device before proceeding.
 

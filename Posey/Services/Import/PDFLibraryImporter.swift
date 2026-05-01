@@ -100,11 +100,12 @@ extension PDFLibraryImporter {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
 
-        // Ask Posey embedding index — best-effort. PDFs can be very long
-        // and the embedding step is synchronous; if it ever becomes a
-        // perceptible UI freeze on the largest documents we'll move it
-        // to a background Task. Tracked in NEXT.md.
-        try? embeddingIndex?.indexIfNeeded(document)
+        // Ask Posey embedding index — best-effort (logs on failure).
+        // PDFs can be very long and the embedding step is synchronous;
+        // if it ever becomes a perceptible UI freeze on the largest
+        // documents we'll move it to a background Task. Tracked in
+        // NEXT.md.
+        embeddingIndex?.tryIndex(document)
 
         return document
     }

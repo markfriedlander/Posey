@@ -81,8 +81,8 @@ extension EPUBLibraryImporter {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
 
-        // Ask Posey embedding index — best-effort.
-        try? embeddingIndex?.indexIfNeeded(document)
+        // Ask Posey embedding index — best-effort (logs on failure).
+        embeddingIndex?.tryIndex(document)
 
         return document
     }

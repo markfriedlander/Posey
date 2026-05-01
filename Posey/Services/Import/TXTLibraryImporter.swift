@@ -64,7 +64,7 @@ struct TXTLibraryImporter {
         // here must NOT fail the import — the document is still
         // perfectly readable without RAG; the index will be retro-built
         // on first Ask Posey invocation if it's missing.
-        try? embeddingIndex?.indexIfNeeded(document)
+        embeddingIndex?.tryIndex(document)
 
         return document
     }

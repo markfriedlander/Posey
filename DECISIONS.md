@@ -1,5 +1,19 @@
 # Posey Decisions
 
+## 2026-05-01 — Every Commit Pushes To origin/main Immediately
+
+- Status: Accepted (operational policy)
+- Decision: Every commit gets pushed to `origin/main` immediately — "commit and push" is one action, not two. There are no exceptions: if you committed it, you push it. If a push fails, fix the cause now and push before moving on.
+- Rationale: At one point this session there were 21 commits sitting locally, ahead of `origin/main`. Local-only commits are invisible to Claude (claude.ai), invisible to anyone else who picks up the repo, and one bad day away from being lost. The cost of pushing every commit is nearly zero; the cost of not pushing is permanently losing work or coordination context. This is also load-bearing for the three-party collaboration model: Claude (claude.ai) syncs from GitHub, so unpushed commits make CC's work invisible to the rest of the team in practice.
+- Implementation: CLAUDE.md "Golden Rules" rule 5 spells this out, and the "After every meaningful commit" checklist now ends with "Push to `origin/main` immediately."
+
+## 2026-05-01 — Ask Posey Spec Supersedes Earlier ARCHITECTURE/CONSTITUTION Wording On Persistence
+
+- Status: Proposed (awaiting Mark + Claude confirmation; see `ask_posey_implementation_plan.md` §12.1)
+- Decision: When `ask_posey_spec.md` (2026-05-01) and the older Ask Posey sections in `ARCHITECTURE.md` / `CONSTITUTION.md` disagree, the spec wins. The spec persists conversation history in a new `ask_posey_conversations` SQLite table and auto-saves exchanges to notes; the older docs describe a transient in-memory session model with explicit save. The spec is the deliberate, dated revision that resolves Mark's earlier open questions, so it is the authoritative direction.
+- Rationale: CLAUDE.md is explicit that "the docs win and the code needs updating — or the docs need a deliberate revision. Do not let the code drift silently from the documented intent." A persisted, auto-saving model is materially different from a transient one (different schema, different UI affordances, different RAG capabilities), and the spec was written specifically to make that change. Letting the architecture doc remain out of sync would cause exactly the silent drift CLAUDE.md warns against.
+- Implementation: Update ARCHITECTURE.md "Ask Posey Architecture" and CONSTITUTION.md "Ask Posey — on-device AI reading assistance" as part of Milestone 1 so the docs and the impending schema migration land together. Until those edits ship, treat the spec as the source of truth.
+
 ## 2026-05-01 — TOC Region Is Completely Hidden From The Reading View
 
 - Status: Accepted

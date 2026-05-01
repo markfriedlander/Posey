@@ -9,6 +9,16 @@ struct LibraryView: View {
     @State private var isImporting = false
     @State private var path: [Document] = []
     @State private var documentPendingDeletion: Document? = nil
+    /// Guards `maybeRestoreLastOpenedDocument` so it runs exactly once per
+    /// app launch. Without this guard, `.task` re-fires when the library
+    /// re-appears after popping back from the reader, and the restore can
+    /// re-push the same document onto the navigation stack before
+    /// `.onChange(of: path)` has cleared `lastOpenedDocumentID`. The visible
+    /// symptom was: tap back from a reader → reader bounces right back; tap
+    /// back twice to actually return; some users saw two push animations
+    /// when a doc was tapped from the library because the queued restore
+    /// landed on top of the user's tap.
+    @State private var didAttemptInitialRestore = false
     private let playbackMode: AppLaunchConfiguration.PlaybackMode
     private let isTestMode: Bool
     private let shouldAutoOpenFirstDocument: Bool
@@ -117,7 +127,10 @@ struct LibraryView: View {
             .task {
                 viewModel.loadDocuments()
                 maybeOpenFirstDocument()
-                maybeRestoreLastOpenedDocument()
+                if !didAttemptInitialRestore {
+                    didAttemptInitialRestore = true
+                    maybeRestoreLastOpenedDocument()
+                }
                 // Debug builds always force the antenna ON at launch so dev
                 // sessions never need a manual toggle. Release builds respect
                 // whatever the user has set in UserDefaults.
@@ -127,9 +140,13 @@ struct LibraryView: View {
                 }
                 #endif
                 // Auto-restart API server if it was enabled before app was killed
-                // (or just force-enabled by the DEBUG block above).
+                // (or just force-enabled by the DEBUG block above). Pass
+                // showConnectionInfo: false so the alert doesn't fire — at
+                // launch the alert collides with the navigation-stack
+                // auto-restore push and the user's last-opened document
+                // silently fails to reopen.
                 if viewModel.localAPIEnabled && !viewModel.localAPIServer.isRunning {
-                    viewModel.toggleLocalAPI()
+                    viewModel.toggleLocalAPI(showConnectionInfo: false)
                 }
             }
             .onAppear {
@@ -410,7 +427,14 @@ private enum LibraryImportError: LocalizedError {
 extension LibraryViewModel {
 
     /// Toggle the local API server on or off. Prints connection info to console on start.
-    func toggleLocalAPI() {
+    /// `showConnectionInfo` controls the "API Ready — Copied to Clipboard" alert.
+    /// Manual user toggles surface the alert; the launch-time auto-start does NOT
+    /// — at launch, the alert collides with the navigation-stack auto-restore
+    /// push (UIKit refuses to mutate the navigation stack while another
+    /// transition or presentation is in flight) and the document the user was
+    /// last reading silently fails to restore. Suppressing the alert at
+    /// auto-start lets the restore push land cleanly.
+    func toggleLocalAPI(showConnectionInfo: Bool = true) {
         if localAPIServer.isRunning {
             localAPIServer.stop()
             localAPIEnabled = false
@@ -428,9 +452,11 @@ extension LibraryViewModel {
             )
             localAPIEnabled = true
             let info = localAPIServer.connectionInfo
-            UIPasteboard.general.string = info
-            apiConnectionInfo = info
             print("PoseyAPI: \(info)")
+            if showConnectionInfo {
+                UIPasteboard.general.string = info
+                apiConnectionInfo = info
+            }
         }
     }
 

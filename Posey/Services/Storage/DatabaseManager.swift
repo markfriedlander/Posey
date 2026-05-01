@@ -491,6 +491,58 @@ extension DatabaseManager {
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
             """)
+
+        // ========== Ask Posey Milestone 1 — schema additions ==========
+        // Persistent per-document conversation history. Every Ask Posey
+        // exchange (passage-scoped, document-scoped, or rolling summary)
+        // lands here. ON DELETE CASCADE keeps the table clean when a
+        // document is deleted from the library. See ask_posey_spec.md and
+        // ARCHITECTURE.md "Ask Posey Architecture" for semantics.
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ask_posey_conversations (
+                id TEXT PRIMARY KEY NOT NULL,
+                document_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                invocation TEXT NOT NULL,
+                anchor_offset INTEGER,
+                summary_of_turns_through INTEGER NOT NULL DEFAULT 0,
+                is_summary INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_ask_posey_doc_ts
+            ON ask_posey_conversations(document_id, timestamp);
+            """)
+
+        // Embedding index for Ask Posey RAG retrieval. One row per ~500-char
+        // chunk with 50-char overlap, built at import time for every
+        // supported format (TXT/MD/RTF/DOCX/HTML/EPUB/PDF) per the
+        // format-parity standing policy. The `embedding` BLOB packs
+        // [Double] little-endian; the embedding model used (English,
+        // detected-language NLEmbedding, or hash fallback) is captured in
+        // `embedding_kind` so Milestone 2 can validate retrieval and
+        // re-index if a model is upgraded.
+        try execute("""
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                start_offset INTEGER NOT NULL,
+                end_offset INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_kind TEXT NOT NULL DEFAULT 'unknown',
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_document_chunks_doc
+            ON document_chunks(document_id, chunk_index);
+            """)
+        // ========== End Ask Posey Milestone 1 schema additions ==========
     }
 
     private func execute(_ sql: String) throws {

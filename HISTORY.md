@@ -1,5 +1,40 @@
 # Posey History
 
+## 2026-05-01 — Ask Posey Milestone 1: doc alignment + schema migrations + availability skeleton
+
+Mark approved `ask_posey_implementation_plan.md` with answers to the 8 open questions:
+- Spec supersedes; ARCHITECTURE/CONSTITUTION updated as part of this milestone (12.1).
+- Retro-index existing imports on first invocation with a brief "Indexing..." state (12.2).
+- Multilingual from the start (12.3) — change of direction from my draft. Posey already supports multilingual documents, AFM is multilingual, and `NLLanguageRecognizer` + per-language `NLEmbedding` is straightforward.
+- Half-sheet confirmed but flagged as a design risk to validate on device (12.4).
+- Real streaming (12.5).
+- Privacy copy approved as written (12.6).
+- "Working from the most relevant sections" copy + placement confirmed (12.7).
+- Prose first; navigation in a later commit (12.8).
+
+**What landed in Milestone 1:**
+
+1. **`ARCHITECTURE.md` "Ask Posey Architecture" rewritten** to match the spec. One surface with intent routing (no longer "three modes"); two entry points in v1 (passage-scoped + document-scoped) with annotation-scoped explicitly deferred; persistent conversations with auto-save in `ask_posey_conversations`; rolling-summary tier modeled after Hal's MemoryStore; document-context tiers based on size; multilingual embedding index via `NLLanguageRecognizer` + per-language `NLEmbedding`; two-call intent + response flow; priority-ordered budget-enforced prompt builder (60/25/15); half-sheet UI with the design risk flagged.
+
+2. **`CONSTITUTION.md` "Ask Posey" deliberate scope revision rewritten** to match. Persistent per-document memory; auto-save; multilingual; "private by design" not "100% on-device"; hidden entirely on AFM-unavailable devices.
+
+3. **`DatabaseManager` migrations** for two new tables. Both follow the existing `CREATE TABLE IF NOT EXISTS` pattern with `ON DELETE CASCADE` from the documents table:
+   - `ask_posey_conversations` — `(id, document_id, timestamp, role, content, invocation, anchor_offset, summary_of_turns_through, is_summary)` plus `idx_ask_posey_doc_ts`.
+   - `document_chunks` — `(id, document_id, chunk_index, start_offset, end_offset, text, embedding, embedding_kind)` plus `idx_document_chunks_doc`. The `embedding_kind` column captures which embedding model the row was built with (per-language `NLEmbedding`, English fallback, or hash fallback) so Milestone 2 can re-index when the model changes.
+
+4. **`AskPoseyAvailability`** at `Posey/Services/AskPosey/AskPoseyAvailability.swift`. Single chokepoint mapping `SystemLanguageModel.default.availability` to a local enum (`available`, `frameworkUnavailable`, `appleIntelligenceNotEnabled`, `deviceNotEligible`, `modelNotReady`, `unknownUnavailable`). No caching — availability can change at runtime when the user toggles Apple Intelligence in Settings or model assets finish downloading. The Ask Posey UI gates on `isAvailable`; per-spec, when false the entry points are hidden entirely (no greyed-out state, no upsell).
+
+5. **Tests**:
+   - `AskPoseySchemaMigrationTests` — confirms both new tables, both new indexes, `NOT NULL` / `PRIMARY KEY` / `BLOB` constraints, and (most importantly) that **`ON DELETE CASCADE` actually fires** because `PRAGMA foreign_keys = ON` is set at open time. If that pragma ever regresses, the cascade test catches it.
+   - `AskPoseyAvailabilityTests` — confirms the API surface returns a consistent value, `isAvailable` agrees with `current`, the diagnostic description is non-empty, and the state type is properly `Equatable`.
+   - `FoundationModelsAvailabilityProbe` — unchanged from yesterday's kickoff; round-trip skipped on simulator.
+
+Acceptance: full PoseyTests suite passes on device; app boots; existing documents load; no behavior change. Migrations apply in-place to existing installs (the new tables don't affect the existing schema).
+
+**Pushed to `origin/main` immediately** per the new push policy.
+
+**Next:** Milestone 2 — document embedding index. Build chunks at import for all formats with multilingual `NLEmbedding`. Retro-index existing imports on first Ask Posey invocation with a brief "Indexing..." state.
+
 ## 2026-05-01 — Ask Posey kickoff: AFM verified end-to-end on device; implementation plan drafted
 
 Step 1 of the Ask Posey implementation order (per `ask_posey_spec.md`) is complete: Apple Foundation Models is confirmed working on Mark's iPhone 16 Plus and partially working on the iOS 26.3 simulator.

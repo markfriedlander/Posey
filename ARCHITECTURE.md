@@ -416,51 +416,120 @@ Only create files as the current block demands.
 
 ## Ask Posey Architecture
 
-Ask Posey is the on-device AI reading assistance feature, powered by Apple Foundation Models. It is fully offline, never requires a network connection, and is grounded in the source document.
+Ask Posey is the on-device AI reading assistance feature, powered by Apple Foundation Models (AFM). It is fully offline, never requires a network connection, and is grounded in the source document. The authoritative product specification lives in `ask_posey_spec.md` (2026-05-01); this section is the architectural realization of that spec.
 
 ### Three Interaction Patterns
 
-**Pattern 1 — Selection-scoped**
+There is **one Ask Posey surface** with intelligent intent routing — not three separate modes. What differs across patterns is the entry point and the initial context anchor; the modal sheet, conversation model, and intent classification are shared.
 
-- Entry point: text selection contextual menu
-- Context input: the selected text
-- No document-level retrieval needed; the selection is the complete context
-- Surface: full modal Ask Posey sheet with the selection quoted at the top
+**Pattern 1 — Passage-scoped (primary)**
+
+- Entry point: text selection contextual menu, or "Ask Posey" with the currently highlighted sentence as anchor when nothing is selected
+- Context anchor: the selected passage (or current sentence) plus 2–3 sentences of surrounding context
+- Routes through intent classification; default route is `.immediate` (passage-only context)
 
 **Pattern 2 — Document-scoped**
 
 - Entry point: Ask Posey glyph, far left of the bottom reader bar
-- Context input: `Document.plainText` — the full normalized plain text stored in SQLite
-- Surface: full modal Ask Posey sheet with the current sentence quoted at the top
-- Context window constraint: for long documents, `plainText` may exceed the model's context window. The architecture must not assume the full text always fits. A relevant-chunk selection strategy is required — for shorter documents the full text can be passed directly; for longer documents a windowed or retrieval-based approach is needed. A proven implementation of this pattern exists in a prior project and will be brought in as a named resource when the time comes. Do not build this from scratch without that reference.
+- Context anchor: the currently active sentence
+- Routes through intent classification — questions about the immediate passage answer locally; navigation questions trigger document-wide search; broad questions pull RAG retrieval against the full document
+- Long documents are handled via the embedding index (see "Document Context Tiers" below). The architecture never assumes the full `plainText` fits in the AFM context window.
 
-**Pattern 3 — Annotation-scoped**
+**Pattern 3 — Annotation-scoped (deferred)**
 
 - Entry point: Notes surface
-- Context input: document context plus the active annotation or reading position
-- Surface: Ask Posey sheet opened from within the Notes sheet
+- Status: deferred to a future pass per `ask_posey_spec.md`. The persistent-conversation surface in v1 already supports follow-up turns, which removes most of the original motivation for this pattern.
 
-### Session Model
+### Session Model — Persistent Per-Document Memory
 
-Pattern 3 uses a transient session model. While the Ask Posey sheet is open, a local `[Message]` array is maintained in the sheet's view model. Each turn appends to this array and feeds it to the model as context, supporting natural followup questions within the session. When the sheet closes, the exchange is either saved as a note by the user or discarded. No new tables, no persistent threading concept. Persistent conversation history is explicitly deferred — if usage proves it valuable, it will be added as a deliberate scope revision at that time.
+Ask Posey conversations are **persisted per document** in a new SQLite table, `ask_posey_conversations`, with one row per turn. Conversations are scoped to the document: opening Ask Posey on a document later restores recent context and exposes prior turns as a threaded chat history. Conversations never cross documents.
 
-Patterns 1 and 2 are single-turn by default; they can adopt the same transient session model if followup questions prove useful in practice.
+**Auto-save, no explicit save action.** Every Ask Posey exchange is written to `ask_posey_conversations` as it occurs. Passage-scoped exchanges are also surfaced as `Note` rows anchored to the invocation offset (so they appear in the user's notes list at the right reading position). Document-scoped exchanges are surfaced as document-level note entries (top of the notes list, separate from position-anchored notes). Notes use the existing edit/delete behavior — no special cases.
+
+**Conversation memory has two tiers, modeled after Hal's MemoryStore:**
+
+1. **Recent verbatim turns** — the last N turns (where N keeps the verbatim window under ~25% of the AFM context budget) are injected into the prompt as-is.
+2. **Rolling summary** — older turns are summarized into a single string (Hal Block 18 pattern: batched summarization at a configurable depth). The summary is persisted as an `is_summary=1` row in `ask_posey_conversations` and prepended to every prompt. RAG retrieval deduplicates against both the verbatim window and the summary via cosine similarity to avoid the model seeing the same content multiple times.
+
+### Document Context Tiers
+
+How much document context to send is determined by document size and routed by intent:
+
+| Document size | Strategy |
+|---|---|
+| Under ~8,000 chars | Send full `plainText` |
+| 8,000 – 100,000 chars | Rolling summary + RAG retrieval of top-K relevant chunks for the question |
+| Over 100,000 chars | RAG retrieval only; brief high-level summary if available; transparency note in UI: "Working from the most relevant sections of this document." |
+| Over 500,000 chars | Same as above plus a clear message that complete summarization is not possible |
+
+Thresholds are starting estimates and will be tuned empirically once the feature runs on real documents.
+
+### Embedding Index (Multilingual)
+
+A new SQLite table, `document_chunks`, holds embedded slices of every imported document — built **at import time for every supported format** per the format-parity standing policy.
+
+- Chunking: 500-char windows with 50-char overlap (per spec).
+- Language detection: `NLLanguageRecognizer` runs on `plainText` at import; the detected language drives selection of the matching `NLEmbedding`. Posey supports multilingual documents by design (the Gutenberg corpus alone has French, German, English) and AFM is multilingual, so the embedding tier matches that capability from day one.
+- Embedding model: `NLEmbedding.sentenceEmbedding(for: <detectedLang>)` when available; fall back to English if the detected language has no shipped sentence-embedding model. As a final fallback (rare), use Hal's hash-embedding so the index never silently breaks document import.
+- Storage: `[Double]` packed as a SQLite `BLOB`. Cosine similarity is computed in Swift; SQLite does the document-scoped filter via `WHERE document_id = ?`.
+
+### Two-Call Intent + Response Flow
+
+Every Ask Posey query uses two AFM calls:
+
+**Call 1 — Intent classification (lightweight).** A `@Generable` enum:
+
+```swift
+@Generable enum AskPoseyIntent {
+    case immediate   // about the passage being read; small local context
+    case search      // navigation; route to RAG and produce navigation cards
+    case general     // broad question; rolling summary + RAG
+}
+```
+
+This is fast and cheap. Its result determines what context Call 2 receives.
+
+**Call 2 — Response generation.** The user's question plus the context selected by Call 1 is sent to AFM via `streamResponse(to:)` for prose answers, or `respond(to:generating: NavigationResults.self)` for navigation. Streaming is real (not Hal-style fake streaming) — truthful and consistent with AFM's actual generation cadence.
+
+### Prompt Builder — Priority-Ordered, Budget-Enforced
+
+The prompt builder is the analog of Hal's `buildPromptHistory` (Block 20.1). Same discipline: each tier is added in priority order, with token estimates checked before append; tiers are dropped (lowest priority first) when the running total would exceed the budget. Budget split per spec: **60 / 25 / 15** (document context / conversation history / system + question), hardcoded for v1.
+
+Priority order:
+1. System prompt (Ask Posey instructions) — always included.
+2. Anchor passage (selected text or current sentence) — always included for non-`.general` intents.
+3. Recent verbatim conversation turns for this document.
+4. Rolling summary of older turns (if any).
+5. RAG snippets (intent-dependent), deduplicated against everything already in the prompt.
+6. User question — always last, never dropped.
 
 ### Data Model Implications
 
-- `Document.plainText` is the natural context input for all three patterns. No new fields are needed on `Document` for query purposes.
-- Ask Posey responses that the user wants to keep are saved as `Note` records, using the existing notes model. No new persistence layer is required.
-- The `currentSegment` and adjacent segments already accessible from `ReaderViewModel` provide the natural selection context for Patterns 1 and 3.
+- New table `ask_posey_conversations` (id, document_id, timestamp, role, content, invocation, anchor_offset, is_summary, summary_of_turns_through). Foreign keys to `documents` with `ON DELETE CASCADE`.
+- New table `document_chunks` (id, document_id, chunk_index, start_offset, end_offset, text, embedding BLOB). Foreign keys to `documents` with `ON DELETE CASCADE`.
+- No new field on `Document` — `plainText` remains the canonical text input.
+- No new field on `Note` for v1. Ask Posey notes are written to the existing notes model; if a `source` flag becomes useful it's a future migration.
 
 ### Surface Design
 
-The Ask Posey sheet is a full modal sheet for all three patterns. On a phone-sized screen, a panel that coexists with the document splits the screen in a way that serves neither surface. A full modal sheet gives the conversation room to breathe and works consistently across device sizes. The relevant text — selected text for Pattern 1, current sentence for Patterns 2 and 3 — is quoted at the top of the sheet so the reader has context without needing to see the full document simultaneously.
+The Ask Posey sheet is presented as a half-sheet (`.medium` detent default, `.large` available via drag) on phone-sized screens. The reading view remains visible behind it — the user should always know where they are in the document. **The half-sheet decision is a design risk to validate on device with real documents during the UI milestone**: if it feels cramped during real reading, the fallback is a full modal sheet. Don't ship a half-sheet that compromises the reading experience.
 
-On iPad, a split panel layout may be considered as a later enhancement. Design for phone-first.
+Sheet layout, top to bottom:
+1. Header strip — privacy lock icon, title, close button.
+2. Anchor passage (quoted style).
+3. Threaded chat history — prior turns for this document, oldest at top, scrollable.
+4. Streaming response area (when generating).
+5. Input field anchored at the bottom.
+
+For large documents, a transparency line appears below the anchor: "Working from the most relevant sections of this document."
+
+When AFM availability is anything other than `.available`, the Ask Posey entry points (selection-menu item, bottom-bar glyph) are **omitted entirely** rather than greyed out. No banner, no upsell.
+
+On iPad, a split panel layout may be considered as a later enhancement.
 
 ### Swift 6 Compliance
 
-All Ask Posey feature code must be strictly Swift 6 compliant. AFM calls are async and must be dispatched from clearly isolated contexts. The Ask Posey sheet view model must be `@MainActor` and all model responses must arrive on the main actor before updating published state.
+All Ask Posey feature code must be strictly Swift 6 compliant. AFM calls are async and dispatched from clearly isolated contexts. The Ask Posey sheet view model is `@MainActor` and all streamed snapshots are applied on the main actor before updating published state. `LanguageModelSession` is treated as owned by exactly one Task at a time; sessions are not reused across user turns in v1.
 
 ## OCR Architecture (Planned)
 

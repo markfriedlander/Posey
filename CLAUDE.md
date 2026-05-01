@@ -220,7 +220,13 @@ session, not just Posey. Components installed:
 
 - `idb-companion` (Facebook iOS Development Bridge) via Homebrew →
   `/opt/homebrew/Cellar/idb-companion/1.1.8`
-- `fb-idb` Python client v1.1.7 via `pip3`
+- `fb-idb` Python client v1.1.7 via `pip3` — note: `main.py` patched
+  for Python 3.14 (replaced removed `asyncio.get_event_loop()` with
+  `asyncio.new_event_loop()`); without the patch, every idb command
+  crashes. If `fb-idb` is reinstalled, re-apply the one-line patch in
+  `/opt/homebrew/lib/python3.14/site-packages/idb/cli/main.py:353`.
+- `node` via Homebrew (the MCP server runs through `npx`, which
+  requires Node).
 - `ios-simulator` MCP server via:
   ```
   "/Users/markfriedlander/Library/Application Support/Claude/claude-code/2.1.121/claude.app/Contents/MacOS/claude" \
@@ -274,6 +280,39 @@ scale, accessibility, or anything that requires physically interacting with
 the running app.
 
 ---
+
+## Test Tooling
+
+A few Python scripts in `tools/` exist to keep the test loop fast:
+
+- `tools/posey_test.py` — local-API test runner. Talks to the antenna
+  server inside the running app. Configure once with
+  `python3 tools/posey_test.py setup <ip> 8765 <token>`; the IP and
+  token are printed to the device console when the antenna is enabled.
+- `tools/generate_test_docs.py` — produces 47 synthetic edge-case
+  documents (TXT, MD, HTML, RTF) covering soft hyphens, NBSP, ZWSP,
+  BOM, spaced letters/digits, ligatures, mixed scripts, RTL, empty,
+  one-char, long-no-punct, dot-leader TOCs, and more. Default output
+  `~/.posey-corpus`. Each generator targets ONE artifact class so
+  regressions can be located precisely.
+- `tools/verify_synthetic_corpus.py` — drives Posey through the
+  synthetic corpus end-to-end. RESET_ALL → import every doc → fetch
+  plain + display text → run per-doc assertions → PASS/FAIL summary.
+  Requires the antenna to be on. Two specs (empty, whitespace-only)
+  are configured to expect rejection, and the verifier checks that
+  the rejection happened.
+- `tools/fetch_gutenberg.py` — downloads a curated 28-book sample
+  from Project Gutenberg via the Gutendex API across nine categories
+  (prose, nonfiction, poetry, drama, technical, illustrated, short
+  stories, multilang, longform). Caches by default; `--refresh` to
+  re-download. Writes `manifest.json` recording author, language,
+  subjects, and source URL for each.
+- `tools/verify_images.py` — pixel-comparison harness for verifying
+  that PDF visual pages match macOS PDFKit reference renders.
+
+All scripts are dependency-free (Python stdlib only) so they run on
+any Python 3.10+. Output directories default to `~/.posey-*` so the
+fixtures don't pollute the project tree.
 
 ## Engineering Principles
 

@@ -41,6 +41,12 @@ struct AppLaunchConfiguration {
     let shouldAutoCreateNoteOnReaderAppear: Bool
     let shouldAutoCreateBookmarkOnReaderAppear: Bool
     let automationNoteBody: String
+    /// Test-only: force a specific interface orientation at launch.
+    /// Accepted values (case-insensitive): "portrait", "landscape",
+    /// "landscapeLeft", "landscapeRight". Silently ignored otherwise.
+    /// Used by the simulator MCP (which has no rotation API) and by
+    /// future automated UI tests. Has no effect for end users.
+    let forceOrientation: String?
 
     static var current: AppLaunchConfiguration {
         let environment = ProcessInfo.processInfo.environment
@@ -56,7 +62,8 @@ struct AppLaunchConfiguration {
             shouldAutoPlayOnReaderAppear: environment["POSEY_AUTOMATION_PLAY_ON_APPEAR"] == "1",
             shouldAutoCreateNoteOnReaderAppear: environment["POSEY_AUTOMATION_CREATE_NOTE_ON_APPEAR"] == "1",
             shouldAutoCreateBookmarkOnReaderAppear: environment["POSEY_AUTOMATION_CREATE_BOOKMARK_ON_APPEAR"] == "1",
-            automationNoteBody: environment["POSEY_AUTOMATION_NOTE_BODY"] ?? "Automated smoke note"
+            automationNoteBody: environment["POSEY_AUTOMATION_NOTE_BODY"] ?? "Automated smoke note",
+            forceOrientation: environment["POSEY_FORCE_ORIENTATION"]
         )
     }
 

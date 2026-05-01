@@ -1,5 +1,21 @@
 # Posey History
 
+## 2026-05-01 — Step 8 accessibility pass: VoiceOver labels, Reduce Motion, search-bar touch targets
+
+First wave of the accessibility commitment. Audit performed via the simulator MCP accessibility tree on both Library and Reader views; findings implemented in a single batch.
+
+**VoiceOver labels added.** All eight reader chrome buttons (search, TOC, preferences, notes, previous, play/pause, next, restart) had accessibility identifiers but no `accessibilityLabel`. SF Symbol images are not announced as anything readable, so VoiceOver users got either silence or guessed icon names. Each button now has a concrete spoken label — `"Search in document"`, `"Table of contents"`, `"Reader preferences"`, `"Notes"`, `"Previous sentence"`, `"Play"`/`"Pause"` (state-aware), `"Next sentence"`, `"Restart from beginning"`. The three iconographic buttons in the search bar (chevron up/down, clear) gained `"Previous match"`, `"Next match"`, `"Clear search"`.
+
+**Search bar touch targets.** The chevron-up, chevron-down, and clear (xmark) buttons in the search bar were SF Symbol images at footnote font size with no explicit frame — their hit targets were ~22 pt, well below Apple's 44×44 minimum. Each now wraps its image in `.frame(width: 44, height: 44)`, matching every other custom button in the app.
+
+**Reduce Motion respected.** All animations in the reader view now check the system setting before easing. `@Environment(\.accessibilityReduceMotion)` is read at the view level for chrome-fade and search-bar transitions. Inside the view model (which can't access SwiftUI environment values), a `static var reduceMotionEnabled` reads `UIAccessibility.isReduceMotionEnabled` directly — used for scroll-to-current-sentence and scroll-to-search-match. When Reduce Motion is on, state changes still happen instantly but skip their easing curves; the bottom-transport vertical-offset on chrome show/hide also stops to prevent residual motion.
+
+**Tests:** Full PoseyTests suite passes on device (101 cases, `** TEST SUCCEEDED **`).
+
+**Findings deferred for later passes (queued in NEXT.md):**
+- Toolbar items in the Library nav bar (antenna toggle, Import File button) are visually present but absent from the accessibility tree. Looks like a SwiftUI navigation toolbar issue rather than a missing modifier — needs investigation.
+- Tap-to-reveal-chrome was unreliable when driven via simctl/idb's synthetic taps (highPriorityGesture, simultaneousGesture, and onTapGesture all failed equally). Mark hasn't reported it on device, so this is likely a sim-only artifact rather than a product bug. Worth verifying on device with a real finger before changing the gesture model.
+
 ## 2026-05-01 — Center the active sentence in landscape too (and re-improve portrait)
 
 Mark's portrait acceptance held but landscape "lost centering — disorienting." Investigation in the simulator at S050 with a forced-orientation env var confirmed the bug.

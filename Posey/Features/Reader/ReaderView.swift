@@ -10,6 +10,10 @@ import AppKit
 struct ReaderView: View {
     @StateObject private var viewModel: ReaderViewModel
     @Environment(\.scenePhase) private var scenePhase
+    /// Honors the system "Reduce Motion" accessibility setting. When true,
+    /// chrome fade and scroll animations skip their easing — visible state
+    /// changes still happen but without the easing curve.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let isTestMode: Bool
     @State private var isShowingNotesSheet = false
     @State private var isShowingPreferencesSheet = false
@@ -145,17 +149,17 @@ struct ReaderView: View {
                     .padding(.trailing, 12)
                     .opacity(isChromeVisible ? 1 : 0)
                     .allowsHitTesting(isChromeVisible)
-                    .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
                 }
             }
             .overlay(alignment: .bottom) {
                 controls
                     .opacity(isChromeVisible ? 1 : 0)
-                    .offset(y: isChromeVisible ? 0 : 20)
+                    .offset(y: isChromeVisible ? 0 : (reduceMotion ? 0 : 20))
                     .allowsHitTesting(isChromeVisible)
-                    .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
             }
-            .animation(.easeInOut(duration: 0.2), value: viewModel.isSearchActive)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: viewModel.isSearchActive)
             .onChange(of: viewModel.searchScrollSignal) { _, _ in
                 viewModel.scrollToSearchMatch(with: proxy)
             }
@@ -246,6 +250,7 @@ struct ReaderView: View {
                     .frame(width: 44, height: 44)
             }
             .accessibilityIdentifier("reader.search")
+            .accessibilityLabel("Search in document")
 
             if !viewModel.tocEntries.isEmpty {
                 Button {
@@ -258,6 +263,7 @@ struct ReaderView: View {
                         .frame(width: 44, height: 44)
                 }
                 .accessibilityIdentifier("reader.toc")
+                .accessibilityLabel("Table of contents")
             }
 
             Button {
@@ -270,6 +276,7 @@ struct ReaderView: View {
                     .frame(width: 44, height: 44)
             }
             .accessibilityIdentifier("reader.preferences")
+            .accessibilityLabel("Reader preferences")
 
             Button {
                 revealChrome()
@@ -282,6 +289,7 @@ struct ReaderView: View {
                     .frame(width: 44, height: 44)
             }
             .accessibilityIdentifier("reader.notes")
+            .accessibilityLabel("Notes")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
@@ -300,6 +308,7 @@ struct ReaderView: View {
                     .frame(width: 44, height: 44)
             }
             .accessibilityIdentifier("reader.previous")
+            .accessibilityLabel("Previous sentence")
 
             Spacer(minLength: 24)
 
@@ -313,6 +322,7 @@ struct ReaderView: View {
                     .frame(width: 44, height: 44)
             }
             .accessibilityIdentifier("reader.playPause")
+            .accessibilityLabel(viewModel.playbackState == .playing ? "Pause" : "Play")
 
             Spacer(minLength: 24)
 
@@ -326,6 +336,7 @@ struct ReaderView: View {
                     .frame(width: 44, height: 44)
             }
             .accessibilityIdentifier("reader.next")
+            .accessibilityLabel("Next sentence")
 
             Spacer(minLength: 24)
 
@@ -339,6 +350,7 @@ struct ReaderView: View {
                     .frame(width: 44, height: 44)
             }
             .accessibilityIdentifier("reader.restart")
+            .accessibilityLabel("Restart from beginning")
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 28)
@@ -410,7 +422,7 @@ struct ReaderView: View {
         chromeFadeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             guard Task.isCancelled == false else { return }
-            withAnimation(.easeInOut(duration: 0.25)) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
                 isChromeVisible = false
             }
         }
@@ -954,9 +966,24 @@ final class ReaderViewModel: ObservableObject {
         } else {
             scrollID = idx
         }
-        withAnimation(.easeInOut(duration: 0.25)) {
+        if Self.reduceMotionEnabled {
             proxy.scrollTo(scrollID, anchor: .center)
+        } else {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(scrollID, anchor: .center)
+            }
         }
+    }
+
+    /// Reads UIAccessibility's Reduce Motion flag. ViewModel methods can't
+    /// pull `\.accessibilityReduceMotion` from the SwiftUI environment, so we
+    /// check the UIKit static instead. Safe to call from any thread.
+    static var reduceMotionEnabled: Bool {
+        #if canImport(UIKit) && os(iOS)
+        return UIAccessibility.isReduceMotionEnabled
+        #else
+        return false
+        #endif
     }
 
     func isSearchMatch(segment: TextSegment) -> Bool {
@@ -1105,7 +1132,7 @@ final class ReaderViewModel: ObservableObject {
             proxy.scrollTo(scrollTargetID, anchor: .center)
         }
 
-        if animated {
+        if animated && !Self.reduceMotionEnabled {
             withAnimation(.easeInOut(duration: 0.25), action)
         } else {
             action()

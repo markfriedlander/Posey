@@ -1172,13 +1172,31 @@ final class ReaderViewModel: ObservableObject {
             return 0
         }
 
+        let raw: Int
         if let offsetMatch = segments.firstIndex(where: { segment in
             position.characterOffset >= segment.startOffset && position.characterOffset < segment.endOffset
         }) {
-            return offsetMatch
+            raw = offsetMatch
+        } else {
+            raw = boundedSentenceIndex(position.sentenceIndex)
         }
 
-        return boundedSentenceIndex(position.sentenceIndex)
+        // If the restored sentence falls inside a "playback-skip" region
+        // (e.g. a PDF Table of Contents detected at import time), advance
+        // past it. Reading a TOC aloud is a uniformly poor TTS experience;
+        // the importer flags the skip range, and we honor it whenever the
+        // saved position would land inside it. The TOC is still visible
+        // in the reader — it's just not the first thing the user hears.
+        let skipUntil = document.playbackSkipUntilOffset
+        guard skipUntil > 0,
+              segments.indices.contains(raw),
+              segments[raw].startOffset < skipUntil else {
+            return raw
+        }
+        if let firstAfter = segments.firstIndex(where: { $0.startOffset >= skipUntil }) {
+            return firstAfter
+        }
+        return raw
     }
 
     private func jumpToMarker(direction: Int) {

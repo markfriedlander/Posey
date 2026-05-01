@@ -280,13 +280,17 @@ final class LibraryViewModel: ObservableObject {
     @Published var apiConnectionInfo: String? = nil
 
     let databaseManager: DatabaseManager
-    private lazy var txtLibraryImporter    = TXTLibraryImporter(databaseManager: databaseManager)
-    private lazy var markdownLibraryImporter = MarkdownLibraryImporter(databaseManager: databaseManager)
-    private lazy var rtfLibraryImporter    = RTFLibraryImporter(databaseManager: databaseManager)
-    private lazy var docxLibraryImporter   = DOCXLibraryImporter(databaseManager: databaseManager)
-    private lazy var htmlLibraryImporter   = HTMLLibraryImporter(databaseManager: databaseManager)
-    private lazy var epubLibraryImporter   = EPUBLibraryImporter(databaseManager: databaseManager)
-    private lazy var pdfLibraryImporter    = PDFLibraryImporter(databaseManager: databaseManager)
+    /// Shared Ask Posey embedding index. Built once per LibraryViewModel
+    /// instance and handed to every importer so chunks land at import
+    /// time across all formats (format-parity standing policy).
+    private lazy var embeddingIndex = DocumentEmbeddingIndex(database: databaseManager)
+    private lazy var txtLibraryImporter      = TXTLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
+    private lazy var markdownLibraryImporter = MarkdownLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
+    private lazy var rtfLibraryImporter      = RTFLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
+    private lazy var docxLibraryImporter     = DOCXLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
+    private lazy var htmlLibraryImporter     = HTMLLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
+    private lazy var epubLibraryImporter     = EPUBLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
+    private lazy var pdfLibraryImporter      = PDFLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
     let localAPIServer = LocalAPIServer()
 
     init(databaseManager: DatabaseManager) {

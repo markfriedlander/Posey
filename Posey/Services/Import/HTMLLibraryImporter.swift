@@ -2,7 +2,14 @@ import Foundation
 
 struct HTMLLibraryImporter {
     let databaseManager: DatabaseManager
+    let embeddingIndex: DocumentEmbeddingIndex?
     private let importer = HTMLDocumentImporter()
+
+    init(databaseManager: DatabaseManager,
+         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+        self.databaseManager = databaseManager
+        self.embeddingIndex = embeddingIndex
+    }
 
     func importDocument(from url: URL) throws -> Document {
         let plainText = try importer.loadText(from: url)
@@ -49,6 +56,9 @@ struct HTMLLibraryImporter {
         if existingDocument == nil {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
+
+        // Ask Posey embedding index — best-effort.
+        try? embeddingIndex?.indexIfNeeded(document)
 
         return document
     }

@@ -2,7 +2,14 @@ import Foundation
 
 struct RTFLibraryImporter {
     let databaseManager: DatabaseManager
+    let embeddingIndex: DocumentEmbeddingIndex?
     private let textLoader = RTFDocumentImporter()
+
+    init(databaseManager: DatabaseManager,
+         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+        self.databaseManager = databaseManager
+        self.embeddingIndex = embeddingIndex
+    }
 
     func importDocument(from url: URL) throws -> Document {
         let plainText = try textLoader.loadText(from: url)
@@ -49,6 +56,9 @@ struct RTFLibraryImporter {
         if existingDocument == nil {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
+
+        // Ask Posey embedding index — best-effort.
+        try? embeddingIndex?.indexIfNeeded(document)
 
         return document
     }

@@ -415,6 +415,132 @@ extension DatabaseManager {
 
 // ========== BLOCK 05B: DOCUMENT TOC - END ==========
 
+// ========== BLOCK 05C: DOCUMENT CHUNKS (Ask Posey M2) - START ==========
+
+/// One row of `document_chunks`: a slice of plainText with its
+/// pre-computed embedding. Used by Ask Posey for RAG retrieval.
+/// Created at import time for every supported format.
+struct StoredDocumentChunk {
+    let chunkIndex: Int
+    let startOffset: Int
+    let endOffset: Int
+    let text: String
+    let embedding: [Double]
+    /// Identifies which embedding model produced `embedding`. Examples:
+    /// `"en-sentence"`, `"fr-sentence"`, `"english-fallback"`,
+    /// `"hash-fallback"`. Stored so future model upgrades can re-index
+    /// only the rows that need it.
+    let embeddingKind: String
+}
+
+extension DatabaseManager {
+    /// Replace any existing chunks for `documentID` with `chunks`. Wraps
+    /// the replacement in a single SQL transaction so a partial failure
+    /// can't leave the index in a half-rebuilt state.
+    func replaceChunks(_ chunks: [StoredDocumentChunk], for documentID: UUID) throws {
+        try execute("BEGIN TRANSACTION;")
+        do {
+            try execute("DELETE FROM document_chunks WHERE document_id = '\(documentID.uuidString)';")
+            let insertSQL = """
+            INSERT INTO document_chunks
+                (document_id, chunk_index, start_offset, end_offset, text, embedding, embedding_kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+            """
+            for chunk in chunks {
+                let statement = try prepareStatement(sql: insertSQL)
+                defer { sqlite3_finalize(statement) }
+                try bind(documentID.uuidString, at: 1, for: statement)
+                sqlite3_bind_int(statement, 2, Int32(chunk.chunkIndex))
+                sqlite3_bind_int(statement, 3, Int32(chunk.startOffset))
+                sqlite3_bind_int(statement, 4, Int32(chunk.endOffset))
+                try bind(chunk.text, at: 5, for: statement)
+
+                // Pack [Double] little-endian. The reader does the
+                // reverse on retrieval; both sides assume the
+                // current-machine endianness, which is fine for an
+                // app-private SQLite file that never moves between
+                // architectures.
+                let blob = chunk.embedding.withUnsafeBufferPointer {
+                    Data(buffer: $0)
+                }
+                let bytes = [UInt8](blob)
+                if sqlite3_bind_blob(statement, 6, bytes, Int32(bytes.count), SQLITE_TRANSIENT) != SQLITE_OK {
+                    throw DatabaseError.bindFailed(lastErrorMessage())
+                }
+                try bind(chunk.embeddingKind, at: 7, for: statement)
+                try step(statement)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Number of indexed chunks for a document. Used by callers that
+    /// need to decide whether to retro-index without paying for a full
+    /// row read.
+    func chunkCount(for documentID: UUID) throws -> Int {
+        let sql = "SELECT COUNT(*) FROM document_chunks WHERE document_id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(statement, 0))
+    }
+
+    /// Return all chunks for a document, in chunk-index order.
+    func chunks(for documentID: UUID) throws -> [StoredDocumentChunk] {
+        let sql = """
+        SELECT chunk_index, start_offset, end_offset, text, embedding, embedding_kind
+        FROM document_chunks
+        WHERE document_id = ?
+        ORDER BY chunk_index;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var results: [StoredDocumentChunk] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let index   = Int(sqlite3_column_int(statement, 0))
+            let start   = Int(sqlite3_column_int(statement, 1))
+            let end     = Int(sqlite3_column_int(statement, 2))
+            guard let text = sqliteString(statement, index: 3) else { continue }
+            guard let blobPtr = sqlite3_column_blob(statement, 4) else { continue }
+            let blobSize = Int(sqlite3_column_bytes(statement, 4))
+            let embedding = Data(bytes: blobPtr, count: blobSize)
+                .withUnsafeBytes { ptr -> [Double] in
+                    Array(ptr.bindMemory(to: Double.self))
+                }
+            let kind = sqliteString(statement, index: 5) ?? "unknown"
+            results.append(StoredDocumentChunk(
+                chunkIndex: index,
+                startOffset: start,
+                endOffset: end,
+                text: text,
+                embedding: embedding,
+                embeddingKind: kind
+            ))
+        }
+        return results
+    }
+
+    /// Drop every chunk for a document. Called on re-import so stale
+    /// embeddings don't linger when content changes. (The cascade
+    /// delete handles document removal; this helper is for the
+    /// re-import case where the document row stays but the chunks
+    /// need to be rebuilt.)
+    func deleteChunks(for documentID: UUID) throws {
+        let sql = "DELETE FROM document_chunks WHERE document_id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        try step(statement)
+    }
+}
+
+// ========== BLOCK 05C: DOCUMENT CHUNKS (Ask Posey M2) - END ==========
+
 // ========== BLOCK 06: SCHEMA AND HELPERS - START ==========
 
 extension DatabaseManager {

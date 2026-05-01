@@ -9,12 +9,15 @@ struct SentenceSegmenter {
     /// Segments produced by NLTokenizer or the paragraph fallback that exceed
     /// this limit are sub-split via the chain in `subsplit(_:into:)`.
     ///
-    /// 600 chars ≈ 90 words ≈ ~40 seconds of speech at normal rate.
-    /// All of Posey's display and TTS code assumes segments are bounded —
-    /// a segment much larger than this defeats read-along highlighting and
-    /// makes pause unresponsive because AVSpeechSynthesizer won't interrupt
-    /// mid-utterance cleanly at word boundaries.
-    private static let maxSegmentLength = 600
+    /// 250 chars ≈ 40 words ≈ ~15 seconds of speech at normal rate.
+    /// Tighter than the 600-char cap that landed earlier — that cap kept the
+    /// synthesizer responsive enough not to crash, but pause still felt
+    /// laggy in practice because each utterance held that many seconds of
+    /// pre-buffered audio. Smaller utterances mean each pre-buffered chunk
+    /// is short, so pause + state transitions feel instant. Read-along
+    /// highlighting also benefits — shorter segments mean tighter granularity
+    /// of "the active sentence."
+    private static let maxSegmentLength = 250
 
     func segments(for text: String) -> [TextSegment] {
         guard text.isEmpty == false else {

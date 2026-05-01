@@ -112,7 +112,13 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         switch mode {
         case .system:
             guard synthesizer.isSpeaking else { return }
-            if synthesizer.pauseSpeaking(at: .word) {
+            // .immediate halts the synthesizer mid-word, which feels truly
+            // responsive to a tap. .word waits for the next word boundary,
+            // which on the Best Available (Siri-tier) audio path can take
+            // hundreds of ms — long enough to feel broken. Reading apps
+            // resume from the saved sentence anyway, so a clean cut is
+            // preferable to a polished-sounding lag.
+            if synthesizer.pauseSpeaking(at: .immediate) {
                 state = .paused
             }
         case .simulated:

@@ -486,6 +486,45 @@ extension DatabaseManager {
         }
     }
 
+    /// Return the document's first `limit` chunks (oldest by
+    /// chunk_index). Used by the Ask Posey front-matter injection
+    /// path: document-scoped invocations always include the title
+    /// page so meta-questions ("who wrote this?", "what is this
+    /// document about?") get reliable grounding even when the
+    /// cosine retrieval misses the front matter.
+    func frontMatterChunks(for documentID: UUID, limit: Int) throws -> [StoredDocumentChunk] {
+        guard limit > 0 else { return [] }
+        let sql = """
+        SELECT chunk_index, start_offset, end_offset, text, embedding, embedding_kind
+        FROM document_chunks
+        WHERE document_id = ?
+        ORDER BY chunk_index ASC
+        LIMIT \(limit);
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var chunks: [StoredDocumentChunk] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let chunkIndex = Int(sqlite3_column_int(statement, 0))
+            let startOffset = Int(sqlite3_column_int(statement, 1))
+            let endOffset = Int(sqlite3_column_int(statement, 2))
+            guard let text = sqliteString(statement, index: 3) else { continue }
+            // Skip the embedding blob deserialization here — front
+            // matter is consumed for its TEXT, not for re-search.
+            let kind = sqliteString(statement, index: 5) ?? "unknown"
+            chunks.append(StoredDocumentChunk(
+                chunkIndex: chunkIndex,
+                startOffset: startOffset,
+                endOffset: endOffset,
+                text: text,
+                embedding: [],
+                embeddingKind: kind
+            ))
+        }
+        return chunks
+    }
+
     /// Number of indexed chunks for a document. Used by callers that
     /// need to decide whether to retro-index without paying for a full
     /// row read.
@@ -725,6 +764,31 @@ extension DatabaseManager {
         try bind(documentID.uuidString, at: 1, for: statement)
         guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int(statement, 0))
+    }
+
+    /// Wipe every row (real turns + summary rows) from
+    /// `ask_posey_conversations` for `documentID`. Used by the
+    /// `CLEAR_ASK_POSEY_CONVERSATION` API command (Three Hats QA
+    /// pass) so a test harness can run fresh-context Q&A without
+    /// previous wrong answers biasing the model. Returns the row
+    /// count that was deleted.
+    func clearAskPoseyConversation(for documentID: UUID) throws -> Int {
+        // First, count what's there so we can return a useful response.
+        var count = 0
+        let countSQL = "SELECT COUNT(*) FROM ask_posey_conversations WHERE document_id = ?;"
+        let countStmt = try prepareStatement(sql: countSQL)
+        try bind(documentID.uuidString, at: 1, for: countStmt)
+        if sqlite3_step(countStmt) == SQLITE_ROW {
+            count = Int(sqlite3_column_int(countStmt, 0))
+        }
+        sqlite3_finalize(countStmt)
+
+        let deleteSQL = "DELETE FROM ask_posey_conversations WHERE document_id = ?;"
+        let stmt = try prepareStatement(sql: deleteSQL)
+        defer { sqlite3_finalize(stmt) }
+        try bind(documentID.uuidString, at: 1, for: stmt)
+        try step(stmt)
+        return count
     }
 
     /// Decode the columns selected by `askPoseyTurns` / `askPoseyLatestSummary`

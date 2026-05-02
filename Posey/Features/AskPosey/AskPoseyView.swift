@@ -90,9 +90,20 @@ struct AskPoseyView: View {
                             // appear lands the user looking at the
                             // anchor with prior history above
                             // (off-screen, scroll up to see).
+                            //
+                            // **2026-05-02 fix.** When anchor is nil
+                            // (document-scoped invocation), we render
+                            // a doc-scope context row instead so the
+                            // sheet doesn't feel orphaned (just "Ask
+                            // Posey" with no doc connection). Both
+                            // share `anchorRowID` so the scroll-to
+                            // logic below works either way.
                             if let anchor = viewModel.anchor,
                                !anchor.trimmedDisplayText.isEmpty {
                                 anchorRow(anchor)
+                                    .id(Self.anchorRowID)
+                            } else {
+                                documentScopeRow
                                     .id(Self.anchorRowID)
                             }
 
@@ -147,10 +158,11 @@ struct AskPoseyView: View {
                         // history-load Task is still in flight.
                         Task { @MainActor in
                             try? await Task.sleep(for: .milliseconds(180))
-                            if viewModel.anchor != nil {
-                                withAnimation(.easeInOut(duration: 0.15)) {
-                                    proxy.scrollTo(Self.anchorRowID, anchor: .top)
-                                }
+                            // Both passage scope (anchor row) and
+                            // document scope (doc-scope row) share
+                            // `anchorRowID` so this works either way.
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                proxy.scrollTo(Self.anchorRowID, anchor: .top)
                             }
                         }
                     }
@@ -160,7 +172,7 @@ struct AskPoseyView: View {
 
                 composer
             }
-            .navigationTitle("Ask Posey")
+            .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -224,6 +236,56 @@ struct AskPoseyView: View {
 
 // ========== BLOCK 02: ANCHOR + PRIVACY + COMPOSER - START ==========
 private extension AskPoseyView {
+
+    /// Title shown in the sheet's nav bar. Falls back to "Ask Posey"
+    /// when no document title was provided (older callers, previews).
+    /// When a title IS available, we surface it directly so the sheet
+    /// always shows the user what document they're asking about —
+    /// crucial for document-scope invocations where there's no
+    /// anchor passage to provide that link.
+    var navigationTitleText: String {
+        if let title = viewModel.documentTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !title.isEmpty {
+            return title
+        }
+        return "Ask Posey"
+    }
+
+    /// Doc-scope context row — substitutes for the anchor row when
+    /// the user invoked Ask Posey on the whole document (no anchor
+    /// passage). Communicates "you're asking about this document as
+    /// a whole" so the sheet has a clear top-of-conversation cue.
+    /// Same visual style as `anchorRow` (thin material rounded
+    /// rectangle with a leading icon) so the layout reads
+    /// consistently regardless of scope.
+    var documentScopeRow: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "doc.text")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("ASKING ABOUT")
+                    .font(.caption2.smallCaps())
+                    .foregroundStyle(.secondary)
+                Text(navigationTitleText)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                Text("the whole document")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Asking about the whole document, \(navigationTitleText)")
+        .accessibilityIdentifier("askPosey.documentScopeRow")
+    }
 
     /// Anchor passage rendered as the first row in the chat list.
     /// Lives inside the LazyVStack so it scrolls with the

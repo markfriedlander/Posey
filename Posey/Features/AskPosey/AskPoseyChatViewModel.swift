@@ -41,6 +41,18 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// the user sends them.
     @Published private(set) var messages: [AskPoseyMessage] = []
 
+    /// Index into `messages` where this opening's session starts.
+    /// Everything before this index was loaded from SQLite at sheet
+    /// open; everything from this index forward was added in the
+    /// current sheet session. The view uses this to render the
+    /// anchor row at the boundary (iMessage pattern: prior history
+    /// above, anchor as section divider, this session below).
+    ///
+    /// Set after `loadHistory()` completes. Stays constant after
+    /// that — appending to `messages` grows the "this session" half
+    /// without moving the boundary.
+    @Published private(set) var historyBoundary: Int = 0
+
     /// Two-way bound to the composer TextField.
     @Published var inputText: String = ""
 
@@ -196,6 +208,10 @@ private extension AskPoseyChatViewModel {
             let stored = try db.askPoseyTurns(for: documentID, limit: historyFetchLimit)
             let translated = stored.compactMap(translateStoredTurn)
             messages = translated
+            // Mark the boundary between prior-session history and
+            // this-session additions. The view renders the anchor row
+            // at this index.
+            historyBoundary = translated.count
             // Populate the prompt-builder cache from the same
             // history; the cache is what the live send path passes
             // to the builder.

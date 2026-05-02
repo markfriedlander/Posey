@@ -206,6 +206,17 @@ struct ReaderView: View {
             .overlay(alignment: .top) {
                 indexingBannerView
             }
+            // Initial-load overlay. Big documents (Illuminatus,
+            // 1.6M chars / ~5–10s NLTokenizer pass) need feedback
+            // the moment the reader appears so the navigation push
+            // doesn't look like a hang. For small docs the overlay
+            // never gets a chance to render: `isLoading` flips to
+            // false before the first SwiftUI render cycle.
+            .overlay {
+                if viewModel.isLoading {
+                    openingDocumentOverlay
+                }
+            }
             .onAppear {
                 viewModel.handleAppear()
                 revealChrome()
@@ -327,6 +338,32 @@ struct ReaderView: View {
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.25),
                        value: progress)
         }
+    }
+
+    /// Full-screen loading affordance that covers the reader while
+    /// segmentation + display block parsing run on the background
+    /// queue. Uses `.background` with the system background color so
+    /// the still-empty `LazyVStack` underneath doesn't briefly show
+    /// "no content" while the load is in flight.
+    private var openingDocumentOverlay: some View {
+        ZStack {
+            Color(.systemBackground)
+                .ignoresSafeArea()
+            VStack(spacing: 14) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(1.2)
+                Text("Opening \(viewModel.document.title)…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Opening document \(viewModel.document.title)")
+        .accessibilityIdentifier("reader.openingOverlay")
+        .transition(.opacity)
     }
 
     private func indexingBannerPrimaryText(
@@ -841,16 +878,24 @@ final class ReaderViewModel: ObservableObject {
     // ========== BLOCK VM-SEARCH: SEARCH STATE - END ==========
 
     let document: Document
-    let segments: [TextSegment]
-    let displayBlocks: [DisplayBlock]
+    /// True between `init` returning and the background content load
+    /// completing. The reader view shows an "Opening this document…"
+    /// overlay during this window so big documents (Illuminatus's
+    /// 1.6M chars takes ~5–10s to segment via NLTokenizer) don't
+    /// look frozen. For small docs the loading task completes before
+    /// the first render cycle so the overlay never gets a chance to
+    /// render.
+    @Published private(set) var isLoading: Bool = true
+    @Published private(set) var segments: [TextSegment] = []
+    @Published private(set) var displayBlocks: [DisplayBlock] = []
     /// Table of contents entries for this document. Empty if not available.
-    private(set) var tocEntries: [StoredTOCEntry] = []
+    @Published private(set) var tocEntries: [StoredTOCEntry] = []
     /// Page-number → plainText offset map for the Go-to-page input in
     /// the TOC sheet. Empty for formats with no page concept (TXT, MD,
     /// RTF, DOCX, HTML); populated for PDF (form-feed-counted) and
     /// hocr-to-epub-style EPUBs (synthesized from "Page N" TOC titles).
     /// See `DocumentPageMap` for construction details.
-    private(set) var pageMap: DocumentPageMap = .empty
+    @Published private(set) var pageMap: DocumentPageMap = .empty
 
     private let databaseManager: DatabaseManager
     private let playbackService: SpeechPlaybackService
@@ -858,10 +903,18 @@ final class ReaderViewModel: ObservableObject {
     private let shouldAutoCreateNoteOnAppear: Bool
     private let shouldAutoCreateBookmarkOnAppear: Bool
     private let automationNoteBody: String
-    private let visualPauseBlockIDsBySentenceIndex: [Int: Int]
+    /// Updated by the loader once segments + displayBlocks land. Empty
+    /// until then. Consumers that need the mapping should gate on
+    /// `isLoading == false` (or `segments.isEmpty == false`).
+    private var visualPauseBlockIDsBySentenceIndex: [Int: Int] = [:]
     private var cancellables: Set<AnyCancellable> = []
     private var didRunAutomationActions = false
     private var acknowledgedVisualBlockIDs: Set<Int> = []
+    /// The async task that builds the heavy content (segmentation,
+    /// display block parsing, visual-pause map). Tests await this via
+    /// `awaitContentLoaded()`; the reader view doesn't need to —
+    /// `isLoading` drives its overlay.
+    private var contentLoadTask: Task<Void, Never>?
 
     init(
         document: Document,
@@ -881,20 +934,43 @@ final class ReaderViewModel: ObservableObject {
         self.shouldAutoCreateNoteOnAppear = shouldAutoCreateNoteOnAppear
         self.shouldAutoCreateBookmarkOnAppear = shouldAutoCreateBookmarkOnAppear
         self.automationNoteBody = automationNoteBody
-        // Build the segments + display blocks, then drop anything that
-        // falls within the document's playback-skip region (e.g. a PDF
-        // Table of Contents). After this filter:
-        //   • TOC sentences are not in `segments` → playback can't reach
-        //     them, restart-from-zero starts at the first BODY sentence,
-        //     search can't match TOC text, scroll can't position there.
-        //   • TOC blocks are not in `displayBlocks` → they're not rendered
-        //     in the reader, not scrollable, not visible.
-        //   • Character offsets are preserved on remaining segments/blocks
-        //     so position persistence continues to work in plainText
-        //     coordinate space.
-        // The TOC is still visible in the navigation surface (the TOC
-        // sheet / chrome button) — it's preserved as `document_toc`
-        // entries, just not as a region of the reading view.
+        // Init returns immediately so the navigation push doesn't block
+        // on multi-second NLTokenizer + display block work for big
+        // documents. The actual content load runs on a background
+        // dispatch queue and updates the @Published state on main when
+        // it completes; the reader view shows a loading overlay while
+        // `isLoading` is true.
+        self.contentLoadTask = Task { [weak self] in
+            await self?.loadContent()
+        }
+    }
+
+    /// Awaitable hook for tests: completes when the in-flight load
+    /// finishes. Safe to call after the load has already completed —
+    /// awaiting a finished Task returns immediately.
+    func awaitContentLoaded() async {
+        await contentLoadTask?.value
+    }
+
+    /// Bundle of values produced by the heavy content-load pass.
+    /// Pure data so the work can run on a background dispatch queue
+    /// without crossing actor boundaries.
+    fileprivate struct LoadedContent: Sendable {
+        let segments: [TextSegment]
+        let displayBlocks: [DisplayBlock]
+        let visualPauseMap: [Int: Int]
+    }
+
+    /// Heavy synchronous compute. Runs on a background dispatch queue
+    /// from `loadContent`. Pure function (only reads from `document`),
+    /// no MainActor-isolated state touched. The expensive piece is
+    /// `SentenceSegmenter().segments(for: plainText)` which runs
+    /// NLTokenizer over the entire plainText — for Illuminatus's
+    /// 1.6M chars this takes ~5–10s and is the reason this pass
+    /// can't run on init's main-thread call.
+    nonisolated fileprivate static func computeContent(
+        for document: Document
+    ) -> LoadedContent {
         let skipUntil = max(0, document.playbackSkipUntilOffset)
         let allSegments = SentenceSegmenter().segments(for: document.plainText)
         let bodySegments = (skipUntil > 0)
@@ -903,7 +979,7 @@ final class ReaderViewModel: ObservableObject {
         // Re-number IDs to be 0-based contiguous (the rest of the view
         // model treats segment.id as an array index — see currentSegment,
         // playPauseImageName, marker navigation, etc.).
-        self.segments = bodySegments.enumerated().map { index, seg in
+        let segments: [TextSegment] = bodySegments.enumerated().map { index, seg in
             TextSegment(id: index, text: seg.text, startOffset: seg.startOffset, endOffset: seg.endOffset)
         }
         let rawBlocks: [DisplayBlock]
@@ -919,19 +995,69 @@ final class ReaderViewModel: ObservableObject {
         let bodyBlocks: [DisplayBlock] = (skipUntil > 0)
             ? rawBlocks.filter { $0.startOffset >= skipUntil }
             : rawBlocks
-        // Split each paragraph block into per-TTS-segment rows so that
-        // highlight and scroll always target exactly the utterance being spoken.
-        self.displayBlocks = Self.splitParagraphBlocks(bodyBlocks, segments: self.segments)
-        self.visualPauseBlockIDsBySentenceIndex = ReaderViewModel.buildVisualPauseIndexMap(
-            displayBlocks: self.displayBlocks,
-            segments: self.segments
+        let displayBlocks = ReaderViewModel.splitParagraphBlocks(bodyBlocks, segments: segments)
+        let visualPauseMap = ReaderViewModel.buildVisualPauseIndexMap(
+            displayBlocks: displayBlocks,
+            segments: segments
         )
+        return LoadedContent(
+            segments: segments,
+            displayBlocks: displayBlocks,
+            visualPauseMap: visualPauseMap
+        )
+    }
+
+    /// Async loader. Runs the heavy compute on a userInitiated
+    /// background queue, then applies results on main and clears
+    /// `isLoading`. Lightweight DB-bound work (TOC entries, page map
+    /// derivation, position restoration) runs on main where it
+    /// belongs since DatabaseManager is single-threaded.
+    ///
+    /// Order matters here: segments / displayBlocks / visualPauseMap
+    /// are applied first, then position is restored (uses segments),
+    /// then playback observation is wired (initial emission uses
+    /// the restored position, not the default zero), then
+    /// `isLoading` flips false (so the loading overlay dismisses on
+    /// fully-prepared state), then automation hooks run (need
+    /// segments + currentSentenceIndex). Anything that violates
+    /// this order risks the user seeing a half-prepared reader.
+    private func loadContent() async {
+        let document = self.document
+        let computed = await Task.detached(priority: .userInitiated) {
+            ReaderViewModel.computeContent(for: document)
+        }.value
+
+        // 1. Heavy results.
+        self.segments = computed.segments
+        self.displayBlocks = computed.displayBlocks
+        self.visualPauseBlockIDsBySentenceIndex = computed.visualPauseMap
+
+        // 2. DB side dishes (cheap).
         self.tocEntries = (try? databaseManager.tocEntries(for: document.id)) ?? []
-        // Build the Go-to-page lookup table from existing data — no
-        // schema migration needed in v1. PDF: walk displayText form
-        // feeds. EPUB: harvest "Page N" titles from synthesized TOC.
-        // Other formats: empty (Go-to-page input hidden).
         self.pageMap = DocumentPageMap.build(for: document, tocEntries: self.tocEntries)
+
+        // 3. Position restore + playback prepare (depend on segments).
+        //    Wrapped so a DB error here doesn't leave the reader
+        //    permanently in the loading state.
+        do {
+            let position = try databaseManager.readingPosition(for: document.id)
+                ?? .initial(for: document.id)
+            self.currentSentenceIndex = self.restoreSentenceIndex(from: position)
+            self.playbackService.prepare(at: self.currentSentenceIndex)
+        } catch {
+            self.present(error)
+        }
+
+        // 4. Subscribe to playback events. Done AFTER prepare so the
+        //    initial sink emission carries the restored sentence
+        //    index, not a stale zero.
+        self.observePlayback()
+
+        // 5. Surface the reader.
+        self.isLoading = false
+
+        // 6. Test-mode automation hooks (depend on segments).
+        self.runAutomationIfNeeded()
     }
 
     var usesDisplayBlocks: Bool {
@@ -969,15 +1095,18 @@ final class ReaderViewModel: ObservableObject {
     }
 
     func handleAppear() {
-        do {
-            let position = try databaseManager.readingPosition(for: document.id) ?? .initial(for: document.id)
-            currentSentenceIndex = restoreSentenceIndex(from: position)
-            playbackService.prepare(at: currentSentenceIndex)
-            loadNotes()
-            observePlayback()
-            runAutomationIfNeeded()
-        } catch {
-            present(error)
+        // The heavy "open this document" work (segmentation, display
+        // block parsing, position restore, playback observation,
+        // automation hooks) happens in `loadContent` — kicked off
+        // from init and awaited before `isLoading` flips false.
+        // handleAppear's only responsibility is the segment-
+        // independent piece: loading the saved notes list. Wrapped
+        // in a Task that awaits the load so notes appear AFTER the
+        // reader content settles, not in a brief flash before.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.contentLoadTask?.value
+            self.loadNotes()
         }
     }
 
@@ -1556,7 +1685,7 @@ final class ReaderViewModel: ObservableObject {
         playbackService.pause()
     }
 
-    private static func buildVisualPauseIndexMap(displayBlocks: [DisplayBlock], segments: [TextSegment]) -> [Int: Int] {
+    nonisolated private static func buildVisualPauseIndexMap(displayBlocks: [DisplayBlock], segments: [TextSegment]) -> [Int: Int] {
         guard displayBlocks.isEmpty == false, segments.isEmpty == false else {
             return [:]
         }
@@ -1578,7 +1707,7 @@ final class ReaderViewModel: ObservableObject {
         return mapping
     }
 
-    private static func sentenceIndex(forOffset offset: Int, segments: [TextSegment]) -> Int? {
+    nonisolated private static func sentenceIndex(forOffset offset: Int, segments: [TextSegment]) -> Int? {
         segments.firstIndex(where: { segment in
             offset >= segment.startOffset && offset < segment.endOffset
         }) ?? segments.lastIndex(where: { segment in
@@ -1595,7 +1724,7 @@ final class ReaderViewModel: ObservableObject {
     /// After splitting, `isActive(block:)` returns true only for the one block
     /// containing the active utterance — so highlight and auto-scroll target
     /// exactly what is being spoken rather than an entire paragraph.
-    private static func splitParagraphBlocks(
+    nonisolated private static func splitParagraphBlocks(
         _ blocks: [DisplayBlock],
         segments: [TextSegment]
     ) -> [DisplayBlock] {

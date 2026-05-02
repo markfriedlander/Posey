@@ -18,25 +18,58 @@
   - **Indexing progress count** — Mark's follow-up after #1+#4: added `.documentIndexingDidProgress` notification posted every 50 chunks; banner shows "Indexing this document… / 847 of 3,300 sections" with a determinate progress ring (commit `c9b4867`).
   - **#5 Go-to-page input** — `DocumentPageMap` derived from existing on-disk data (no migration); PDF path walks form feeds, EPUB path harvests "Page N" TOC titles; new section in TOCSheet with number-pad input, format-honest accuracy footer, inline error UI (commit `4098815`).
 
+**Ask Posey milestones (M3–M7) — feature work:**
+
 - **Milestone 3 — Two-call intent classifier: NEXT.** AskPoseyService minimal session lifecycle + `@Generable` `AskPoseyIntent` enum. Unit tests for the classifier; manual on-device probe.
 - **Milestone 4 — Modal sheet UI shell:** AskPoseyView with anchor + composer, no AFM yet (echo back the question). Validate the half-sheet design risk on device with real documents before locking it in.
 - **Milestone 5 — Prose response loop:** Wire intent → prompt builder → AFM `streamResponse` → bubble updates; passage-scoped invocation only.
 - **Milestone 6 — Document-scoped + RAG:** Bottom-bar glyph; `.general` intent; RAG retrieval + rolling summary support.
-- **Milestone 7 — Navigation pattern + auto-save:** `.search` intent → Generable navigation cards → existing TOC jump infrastructure; auto-save to notes.
-- **Milestone 8 — Source attribution + indexing indicator (UI):** Track which RAG chunks contributed to each Ask Posey response and render a "Sources" strip under the assistant message — pills tap-jump to the cited offset via the existing infrastructure. Also wire the first-time "Indexing this document…" → "Indexed N sections." indicator into the sheet (the index work itself ships earlier; this is the UX surface for it). Both are spec'd in `ask_posey_spec.md` (sections "Source Attribution" and the indexing-indicator paragraph under "The Ask Posey Sheet UI"). Persistence: chunk references stored on the assistant turn in `ask_posey_conversations` so attribution survives across sessions.
+- **Milestone 7 — Navigation pattern + auto-save + source attribution + indexing indicator (UI):** `.search` intent → Generable navigation cards → existing TOC jump infrastructure; auto-save to notes; track which RAG chunks contributed to each response and render a "Sources" strip under the assistant message (pills tap-jump to the cited offset via the existing offset-jump infrastructure); first-time "Indexing this document…" → "Indexed N sections." indicator wired into the sheet (the index work itself ships in M2; this is the in-sheet UX surface for it). Both source attribution and indexing indicator are spec'd in `ask_posey_spec.md` (sections "Source Attribution" and the indexing-indicator paragraph under "The Ask Posey Sheet UI"). Persistence: chunk references stored on the assistant turn in `ask_posey_conversations` so attribution survives across sessions.
 
-**Ask Posey v2 candidates (after the v1 milestones land and we have real-use feedback):**
+**Post-Ask-Posey feature pass — M8:**
 
-- **Entity-aware multi-factor relevance scoring.** Pure cosine is the v1 ranking in `DocumentEmbeddingIndex`. Mentat's pattern — semantic similarity + entity-match bonus + context relevance, with a 2× multiplier when a query entity matches a chunk entity — is a strong v2 candidate. Most of the parts already exist (NLTagger for entity extraction, chunk text in `document_chunks`, query string at search time). A v2 implementation would extract entities at index time alongside the embedding, persist them, and score `cosine + entity_overlap × 2× factor` (clamped) at query time. See `ask_posey_implementation_plan.md` §7.3 for the design sketch. **Decision criterion for promoting from v2 → v1.x:** real-use complaints where pure-cosine retrieval misses obvious entity matches.
+- **Reading Style preferences (Standard / Focus / Immersive / Motion).** New "Reading Style" section in the preferences sheet with four options. These are **preferences, not separate application modes** — discoverable, consistent, user-controlled. Per `DECISIONS.md` "Reading Style as Preferences not Modes" (2026-05-01).
+  - **Standard** — current behavior. Single highlighted active sentence, surrounding text at full opacity.
+  - **Focus** — dim every non-active sentence to ~40–50% opacity so the eye is naturally drawn to the brightest element. Functionally additive on top of the existing highlight tier; same data model, just a different render path.
+  - **Immersive** — slot machine / drum roll scroll. Active sentence centered at full size and brightness; sentences above and below fade out and scale down slightly as they move away from center, creating a smooth rolling transition as playback advances. Higher implementation cost (custom layout + per-row transform driven by distance-from-center).
+  - **Motion** — large single centered sentence, optimized for walking / driving / hands-free reading. Inherits the **three-setting Off / On / Auto behavior** described next.
+- **Motion mode (Off / On / Auto).** When the Reading Style is set to Motion, three sub-settings let the user control when it activates:
+  - **Off** — never use Motion mode regardless of the device's actual movement state. Always use the user's last non-Motion Reading Style.
+  - **On** — Motion mode always. The user is intentionally using Motion mode regardless of device movement (e.g. a stationary reader with low vision who prefers the large centered sentence).
+  - **Auto** — Posey monitors device movement via `CoreMotion` and automatically switches between Motion (when moving) and the user's last non-Motion Reading Style (when still). **Auto requires explicit user consent before enabling CoreMotion monitoring** — Posey shows a clear opt-in screen explaining why motion data is needed and that it stays on-device.
+  - Per `DECISIONS.md` "Motion Mode Three-Setting Design" (2026-05-01).
+- **Audio export to M4A.** Render document to audio file via the existing TTS pipeline, saveable to Files and shareable via the share sheet. **Investigation required first:** does `AVSpeechSynthesizer.write(_:toBufferCallback:)` capture Best Available (Siri-tier) voices? Apple may gate premium / accessibility-channel voices from third-party capture. Custom voices almost certainly are capturable. Concretely: before designing the UI, run a test that calls `write(_:toBufferCallback:)` on a known Siri-tier voice utterance and check whether the buffer callback ever fires. If it doesn't, the audio-export surface is "Custom voice mode only" and the export button is disabled (or the voice picker is overlaid) when the user is in Best Available mode. UX: progress indicator while rendering, "Save to Files" + share-sheet entry on completion.
+- **Full format-parity audit across all 7 supported formats** (TXT, MD, RTF, DOCX, HTML, EPUB, PDF). Systematically verify every Posey capability behaves correctly in every format that can support it. For each capability that works in one format, implement in all supportable formats. Capabilities to audit:
+  - Inline images and visual stops
+  - TOC detection and navigation (PDF / EPUB done; need parity for DOCX TOC fields, etc.)
+  - Text normalization (the shared `TextNormalizer` is canonical; verify every importer delegates)
+  - Position persistence
+  - Search (Tier 1 today; v2 includes notes)
+  - Ask Posey indexing (M2 already covers all 7 formats; verify on real corpus)
+  - Audio export
+  - Accessibility labels and Dynamic Type
+  - Reading Style preferences (Standard/Focus/Immersive/Motion all four formats? probably yes)
+  Document any format-specific limitations with clear rationale (per the format-parity standing policy in CLAUDE.md).
+- **Mac Catalyst verification.** Verify Posey runs correctly on Mac via Catalyst, fix any layout or behavior issues. Note differences in voice availability and Local API behavior on Mac. Mac Catalyst will surface differences in: AVSpeechSynthesizer voice list, file picker behavior, accessibility surfaces, window sizing assumptions, NSWindow vs UIWindow paths, half-sheet detents (Catalyst doesn't always honor `.medium` cleanly).
+- **Multilingual embedding improvements.** Already shipped as part of M2 (`NLLanguageRecognizer.dominantLanguage` at import → matching `NLEmbedding.sentenceEmbedding(for:)` → English fallback → hash fallback). M8's task is to **verify** the multilingual path on the real corpus (Hugo French, Goethe German, the synthetic mixed-script fixtures) and tune any thresholds that surface poor retrieval on real questions.
+- **Entity-aware multi-factor relevance scoring v2** — promotes the previously-tracked v2 candidate to first-class M8 work. Multi-factor formula: `cosine + (entity_overlap × 2× factor) + context_relevance` (clamped). Most of the parts already exist (`NLTagger` for entity extraction, chunk text in `document_chunks`, query string at search time). Implementation: extract entities at index time alongside the embedding, persist them in a sibling table or JSON column, score with the new formula at query time. Behavioral A/B against pure cosine on real questions.
 
-**Audio export — planned post-Ask-Posey feature:**
+**Polish pass — M9:**
 
-Mark wants the option to export a document as an M4A audio file rendered via Posey's existing TTS pipeline, saveable to Files and shareable through the iOS share sheet. Someone without Posey could then listen in any audio player.
+- **Antenna default flipped to OFF for release.** Today's default is `true` for development convenience; before App Store submission this MUST flip to `false` so users opt in explicitly. Tracked in `LibraryView` `@AppStorage("localAPIEnabled")`.
+- **Dev tools invisible in release builds.** All development infrastructure — Local API server, antenna icon, dev toggles, test harnesses, AFM probe, hardcoded device IDs, test mode environment variables — must be **compiled out** of the release binary entirely, not merely defaulted off. Use `#if DEBUG` (or a separate build configuration) so a user picking up Posey from the App Store has no idea any of this exists. All code remains available in the codebase for development builds. Per `DECISIONS.md` "Dev Tools Invisible in Release Builds" (2026-05-01).
+- **Full accessibility pass with VoiceOver on device.** Final audit covering labels, navigation order, touch targets (44×44 minimum), Dynamic Type scaling, Reduce Motion respect across all surfaces. Per the accessibility-compliance commitment captured in `DECISIONS.md` (2026-05-01).
+- **Landscape centering polish.** Today off by ~5.5 px in landscape (acceptable but improvable). Final pass to listen for orientation changes and re-fire `scrollToCurrentSentence` once layout has settled.
+- **Go-to-page navigation polish.** Already shipped as part of pre-M3 fix sweep (commit `4098815`). M9's task is final UX polish: error message wording, accessibility audit on the page input, possibly a stepper alternative for users who don't want to type.
+- **App icon.** Serif P with oversized librarian glasses integrated into the letterform, monochromatic palette with subtle warm tortoiseshell tint on the glasses as the only color. Generate at every required size (1024 down to 20pt for spotlight); evaluate at multiple home-screen scales before locking the design.
 
-- **Mechanism:** `AVSpeechSynthesizer.write(_:toBufferCallback:)` writes synthesized audio to a buffer caller-by-caller, which we'd accumulate into an AAC-encoded `.m4a` file. The same `SpeechPlaybackService` that drives in-app playback already produces the segment-level utterances we'd feed in.
-- **Important caveat to investigate before any code lands:** Best Available (Siri-tier) voices may NOT be capturable via `write(_:toBufferCallback:)` because Apple gates premium / accessibility-channel voices from third-party audio capture. Custom voices (the user-selectable list from `AVSpeechSynthesisVoice.speechVoices()`) almost certainly are capturable. Concretely: before designing the UI, run a test that calls `write(_:toBufferCallback:)` on a known Siri-tier voice utterance and check whether the buffer callback ever fires. If it doesn't, the audio-export surface is "Custom voice mode only" and the export button is disabled (or the voice picker is overlaid) when the user is in Best Available mode.
-- **UX:** progress indicator while rendering (long documents take real time to synthesize); "Save to Files" + share-sheet entry point on completion.
-- **Out of scope for v1, do not begin implementation until Ask Posey ships and we've verified the Best Available capturability question.**
+**Submission — M10:**
+
+- **Privacy policy** document. Address: on-device-only processing for the core reader; Apple Intelligence (private by design, end-to-end encrypted Private Cloud Compute when used); no third-party AI services; no analytics; no network requests in the core path. Hosted at a stable URL referenced from the App Store listing.
+- **App Store metadata.** Description (lead with the core loop: import → read → listen with synced highlight → take notes → resume), keywords, primary and secondary categories, age rating, "What's New" copy.
+- **Screenshots.** Use the simulator MCP to capture key app states across iPhone and iPad sizes: empty library, populated library, reader with active highlight, TOC sheet with chapter list and Go-to-page input, Notes sheet, Preferences sheet (Reading Style, voice picker), Ask Posey sheet (passage-scoped, document-scoped, navigation results), accessibility-enabled appearance.
+- **App Store Connect navigation via browser automation.** Supervised — Mark present for sensitive steps (signing in, two-factor codes, final submission button). Use `mcp__Claude_in_Chrome__*` to drive the upload metadata + screenshots + binary submission flow, but pause at every irreversible step.
+- **Final submission.** Verify the build is the release configuration with all M9 cleanups in place. Submit. Monitor review feedback and respond.
 
 **Open user-reported issues to verify or fix:**
 - ~~Position persistence~~ — **Done** (2026-04-30). `PlaybackPreferences.lastOpenedDocumentID` restores the navigation state at cold launch.
@@ -90,9 +123,11 @@ Constraints (from CONSTITUTION.md / ARCHITECTURE.md):
 - Transient session: conversation lives while the sheet is open; user saves to notes or discards on close.
 - AI-generated content is always clearly labeled. Never presented as if it were the source document.
 
-**Future reader UX modes (not active work, captured before they get lost):**
-- **Dim surrounding text.** Instead of only highlighting the active sentence, reduce the opacity of every non-active sentence to ~40–50% so the eye is naturally drawn to the brightest element. Functionally additive — keep the existing highlight tier — and likely belongs as a user-selectable reading mode rather than the default.
-- **Slot machine / drum roll scroll.** Active sentence centered at full size and brightness; sentences above and below fade out and scale down slightly as they move away from center, creating a smooth rolling transition as playback advances. Higher implementation cost (custom layout + per-row transform driven by distance-from-center), so worth prototyping after the basic centering fix lands and proves stable. Also a user-selectable reading mode, not the default.
+**Future reader UX modes — superseded by M8 Reading Style preferences (2026-05-01):**
+- "Dim surrounding text" → **Focus** option in the M8 Reading Style section.
+- "Slot machine / drum roll scroll" → **Immersive** option in the M8 Reading Style section.
+- "In-motion mode" → **Motion** option with three-setting Off/On/Auto behavior in the M8 Reading Style section.
+- See M8 above for the consolidated design.
 
 ## Priority Order
 

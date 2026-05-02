@@ -1,5 +1,53 @@
 # Posey Decisions
 
+## 2026-05-01 — Reading Style Is A Preferences Section, Not Separate Application Modes
+
+- Status: Accepted
+- Decision: The four reading styles — Standard, Focus, Immersive, Motion — live as options in a new "Reading Style" section of the preferences sheet. They are user-selectable preferences, not separate application modes. Switching between them updates the active reader's render path; nothing else (data model, position memory, playback semantics, notes, search, Ask Posey) changes.
+- Rationale: Treating these as application modes (e.g. a top-level switcher in the chrome) would imply they're orthogonal experiences with different rules — and that's misleading, because they aren't. Each is a different way to display the same reading flow. Putting them under preferences makes them discoverable, consistent across the app, and easy to combine with other style choices (font size, voice mode) the user has already calibrated. It also keeps the reader chrome glyph-first and visually restrained per the existing reader principle.
+- Implementation:
+  - **Standard** — current behavior. Single highlighted active sentence, surrounding text at full opacity. Default for new users.
+  - **Focus** — dim every non-active sentence to ~40–50% opacity so the eye is drawn to the brightest element. Functionally additive on top of the existing highlight tier; same data model, just a different render-path opacity rule per row.
+  - **Immersive** — slot machine / drum roll scroll. Active sentence centered at full size and brightness; sentences above and below fade out and scale down with distance from center. Higher implementation cost (custom layout + per-row transform driven by distance-from-center).
+  - **Motion** — large single centered sentence optimized for walking / driving / hands-free reading. Inherits the three-setting Off / On / Auto behavior captured in the next decision.
+- Alternatives considered:
+  - Cycle through styles via a chrome glyph: rejected — adds chrome surface for a setting users don't change often, and obscures discoverability for new users.
+  - Make them per-document: rejected — most users want a consistent reading style across their library; per-document settings invite forgetting which doc has which style. Per-doc font size already exists; bundling reading style with it would expand a per-doc surface that should stay narrow.
+
+## 2026-05-01 — Motion Mode Three-Setting Design (Off / On / Auto, With Consent)
+
+- Status: Accepted
+- Decision: When the Reading Style is set to Motion, three sub-settings let the user control when it activates: **Off** (never), **On** (always), **Auto** (Posey monitors device motion via CoreMotion and switches automatically between Motion and the user's last non-Motion style). Auto requires explicit user consent before enabling CoreMotion monitoring — a clear opt-in screen explains why motion data is needed and that it stays on-device.
+- Rationale: Different users want different things from a "motion mode."
+  - Some want the large-single-sentence presentation regardless of whether they're moving (low vision, hands-free preference).
+  - Some want it only when they're physically moving and the standard reader becomes hard to track.
+  - Some never want it and prefer their chosen style at all times.
+  A single auto-detect setting can't serve all three. Three explicit settings respect each user's preference fully — manual use while still, manual use while moving, or fully automatic switching — without forcing one model on everyone.
+- Consent semantics: Auto is the only setting that activates CoreMotion. The opt-in screen is shown the first time the user picks Auto and never again unless the user revokes consent in Settings. Posey reads only the high-level "device is moving" signal; raw acceleration / orientation data never leaves the app. CoreMotion monitoring is paused when the app is backgrounded and resumed on foreground; battery cost is negligible at the polling rate needed for "is the user walking?" detection.
+- Alternatives considered:
+  - Two settings (Off / Auto) with no manual-On: rejected — denies the use case of users who want Motion as their default style regardless of movement.
+  - One global "Motion mode toggle" outside the Reading Style: rejected — Motion mode IS a reading style, not orthogonal to one. Putting it elsewhere would invite "what happens if Motion is on AND I'm in Focus" confusion.
+  - Auto without opt-in: rejected — silently enabling motion data collection without explicit consent is a privacy violation. Even though the data stays on-device, the user must understand and agree before Posey starts reading from CoreMotion.
+
+## 2026-05-01 — Dev Tools Compiled Out Of Release Builds, Not Just Defaulted Off
+
+- Status: Accepted
+- Decision: All development infrastructure — Local API server, antenna icon, dev toggles, test harnesses, AFM probe, hardcoded device IDs, test mode environment variables, anything else added for development convenience — must be **compiled out** of the release binary entirely via `#if DEBUG` guards (or a separate build configuration that excludes those source files). Users picking up Posey from the App Store must have no idea this infrastructure exists. All code remains in the codebase for development builds.
+- Rationale:
+  - **Security.** A reachable Local API server in the release binary is a real attack surface even if defaulted off. A malicious app could try to flip the toggle, scan for the listener, or exploit any parsing bug. Compiled-out means no listener code runs, ever, in release.
+  - **Professionalism.** Hidden toggles, antenna icons, hardcoded device IDs, and "TEST MODE" overlays signal "internal-build software," not a polished product. Even if users never find them, the code shipping with them is shipping baggage.
+  - **App Store integrity.** Apple's review explicitly looks for development affordances in release builds. Local API servers in particular have triggered rejections.
+  - **Predictability.** With a `#if DEBUG` discipline, developers know that `release == what users see`. No "I forgot to disable that toggle" classes of bug.
+- Implementation:
+  - Wrap dev-only code in `#if DEBUG` ... `#endif` so it doesn't reach the release binary.
+  - Where a feature has a debug surface AND a release surface (e.g. the antenna's `localAPIEnabled` `@AppStorage`), the AppStorage entry stays but the code that observes it and starts the listener is `#if DEBUG`-only.
+  - The AFM probe XCTest stays in the test target — XCTest bundles aren't shipped to users — so no special handling needed there.
+  - Document each guarded surface in the file with a brief comment so the next contributor knows why the gate exists.
+- Alternatives considered:
+  - Default-off with a hidden toggle: rejected — code still ships, surface still exists, attack surface still exists. Mark called this out specifically: "Antenna default flipped to OFF for release" is necessary but not sufficient.
+  - Separate "Development" target: rejected as M9's mechanism — adds maintenance overhead (every code change needs to think about target membership). `#if DEBUG` is simpler and gets the same outcome.
+  - Server-side feature flags: rejected — Posey is offline. There IS no server.
+
 ## 2026-05-01 — Every Commit Pushes To origin/main Immediately
 
 - Status: Accepted (operational policy)

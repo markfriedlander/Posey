@@ -756,6 +756,12 @@ final class ReaderViewModel: ObservableObject {
     let displayBlocks: [DisplayBlock]
     /// Table of contents entries for this document. Empty if not available.
     private(set) var tocEntries: [StoredTOCEntry] = []
+    /// Page-number → plainText offset map for the Go-to-page input in
+    /// the TOC sheet. Empty for formats with no page concept (TXT, MD,
+    /// RTF, DOCX, HTML); populated for PDF (form-feed-counted) and
+    /// hocr-to-epub-style EPUBs (synthesized from "Page N" TOC titles).
+    /// See `DocumentPageMap` for construction details.
+    private(set) var pageMap: DocumentPageMap = .empty
 
     private let databaseManager: DatabaseManager
     private let playbackService: SpeechPlaybackService
@@ -832,6 +838,11 @@ final class ReaderViewModel: ObservableObject {
             segments: self.segments
         )
         self.tocEntries = (try? databaseManager.tocEntries(for: document.id)) ?? []
+        // Build the Go-to-page lookup table from existing data — no
+        // schema migration needed in v1. PDF: walk displayText form
+        // feeds. EPUB: harvest "Page N" titles from synthesized TOC.
+        // Other formats: empty (Go-to-page input hidden).
+        self.pageMap = DocumentPageMap.build(for: document, tocEntries: self.tocEntries)
     }
 
     var usesDisplayBlocks: Bool {
@@ -1628,6 +1639,24 @@ final class ReaderViewModel: ObservableObject {
         persistPosition()
     }
 
+    /// Jump to the nearest sentence at the offset corresponding to the
+    /// given 1-indexed page number. Returns true on a successful jump,
+    /// false when the document has no page map or the page is out of
+    /// range — caller surfaces a gentle "page out of range" message.
+    /// Same semantics as `jumpToTOCEntry`: stops playback, updates
+    /// `currentSentenceIndex` to the closest segment at-or-before the
+    /// page-start offset, persists the new position.
+    @discardableResult
+    func jumpToPage(_ page: Int) -> Bool {
+        guard pageMap.hasPages,
+              let offset = pageMap.offset(forPage: page) else { return false }
+        stopPlayback()
+        let targetIndex = segments.lastIndex(where: { $0.startOffset <= offset }) ?? 0
+        currentSentenceIndex = targetIndex
+        persistPosition()
+        return true
+    }
+
     // ========== BLOCK VM-TOC: TABLE OF CONTENTS NAVIGATION - END ==========
 }
 
@@ -1674,23 +1703,43 @@ private struct ExpandedImageSheet: View {
 
 /// Sheet that lists a document's TOC entries. Tapping an entry jumps the reader
 /// to that section and dismisses the sheet. Only shown when TOC data is available.
+/// Also hosts the Go-to-page input below the chapter list when the document has
+/// recoverable per-page offsets (see `DocumentPageMap`).
 private struct TOCSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
     @Environment(\.dismiss) private var dismiss
 
+    @State private var pageInputText: String = ""
+    @State private var pageInputErrorMessage: String? = nil
+    @FocusState private var pageInputFocused: Bool
+
     var body: some View {
         NavigationStack {
-            List(viewModel.tocEntries, id: \.playOrder) { entry in
-                Button {
-                    viewModel.jumpToTOCEntry(entry)
-                    dismiss()
-                } label: {
-                    Text(entry.title)
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+            List {
+                Section {
+                    ForEach(viewModel.tocEntries, id: \.playOrder) { entry in
+                        Button {
+                            viewModel.jumpToTOCEntry(entry)
+                            dismiss()
+                        } label: {
+                            Text(entry.title)
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                .buttonStyle(.plain)
+                if viewModel.pageMap.hasPages {
+                    Section {
+                        goToPageRow
+                    } header: {
+                        Text("Go to page")
+                    } footer: {
+                        Text(goToPageFooter)
+                            .font(.caption2)
+                    }
+                }
             }
             .navigationTitle("Contents")
             .navigationBarTitleDisplayMode(.inline)
@@ -1699,6 +1748,77 @@ private struct TOCSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+    }
+
+    // MARK: - Go-to-page
+
+    private var goToPageRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("Page", text: $pageInputText)
+                    .keyboardType(.numberPad)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 120)
+                    .focused($pageInputFocused)
+                    .submitLabel(.go)
+                    .accessibilityIdentifier("toc.pageInput")
+                    .onSubmit { performJump() }
+                Button("Go") { performJump() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(pageInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("toc.pageGoButton")
+                Spacer(minLength: 0)
+                if let range = viewModel.pageMap.pageRange {
+                    Text("of \(range.upperBound)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            if let error = pageInputErrorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("toc.pageError")
+            }
+        }
+    }
+
+    private var goToPageFooter: String {
+        switch viewModel.document.fileType.lowercased() {
+        case "pdf":
+            return "Page numbers track the source PDF's pages."
+        case "epub":
+            return "Page mapping for EPUBs is approximate — pages are inferred from the file's internal structure and may not match a print edition."
+        default:
+            return ""
+        }
+    }
+
+    private func performJump() {
+        let trimmed = pageInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let page = Int(trimmed) else {
+            pageInputErrorMessage = "Enter a page number."
+            return
+        }
+        guard let range = viewModel.pageMap.pageRange else {
+            pageInputErrorMessage = "This document has no page index."
+            return
+        }
+        guard range.contains(page) else {
+            pageInputErrorMessage = "Pick a page between \(range.lowerBound) and \(range.upperBound)."
+            return
+        }
+        if viewModel.jumpToPage(page) {
+            pageInputErrorMessage = nil
+            pageInputFocused = false
+            dismiss()
+        } else {
+            // jumpToPage returned false despite a valid range — should
+            // be unreachable given the guard above, but render a
+            // generic error rather than swallowing silently.
+            pageInputErrorMessage = "Couldn't jump to that page."
         }
     }
 }

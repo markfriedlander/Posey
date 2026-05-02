@@ -77,6 +77,21 @@ protocol AskPoseyStreaming: Sendable {
         onSnapshot: @MainActor @Sendable (String) -> Void
     ) async throws -> AskPoseyResponseMetadata
 }
+
+/// Conversation summarization interface for the M6 hard-blocker
+/// auto-summarizer. The view model awaits an in-flight call before
+/// building its next prompt so the conversation summary is always
+/// current. Same fresh-session-per-call lifecycle as the prose path.
+@MainActor
+protocol AskPoseySummarizing: Sendable {
+    /// Compress a span of older conversation turns into a short prose
+    /// summary suitable for the prompt builder's `conversationSummary`
+    /// slot. Returns the summary text on success; throws an
+    /// `AskPoseyServiceError` translation of any AFM error so the
+    /// caller can decide whether to retry or fall back to no-summary.
+    @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+    func summarizeConversation(turns: [AskPoseyMessage]) async throws -> String
+}
 // ========== BLOCK 01: PROTOCOL - END ==========
 
 
@@ -165,7 +180,7 @@ nonisolated enum AskPoseyPrompts {
 #if canImport(FoundationModels)
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @MainActor
-final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming {
+final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySummarizing {
 
     private let model: SystemLanguageModel
     private let instructions: String
@@ -291,6 +306,68 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming {
             fullPromptForLogging: output.combinedForLogging,
             inferenceDuration: elapsed
         )
+    }
+
+    /// Summarize a span of older conversation turns into a short
+    /// prose summary. M6 hard-blocker per Mark's M5 architectural
+    /// correction — without this, M5's STM window quietly drops
+    /// older turns from the model's view as conversations grow past
+    /// ~3-4 turns. The cached summary lives in `ask_posey_conversations`
+    /// as an `is_summary = 1` row, surfaced to the prompt builder via
+    /// `AskPoseyPromptInputs.conversationSummary`.
+    ///
+    /// Same per-call lifecycle as the prose path: fresh
+    /// `LanguageModelSession`, dies when the function returns.
+    /// Temperature held at 0.2 — summarization wants determinism, not
+    /// creative reinterpretation.
+    func summarizeConversation(turns: [AskPoseyMessage]) async throws -> String {
+        guard model.availability == .available else {
+            throw AskPoseyServiceError.afmUnavailable
+        }
+        guard !turns.isEmpty else { return "" }
+
+        let summaryInstructions = """
+        You are summarizing an earlier portion of a reading-companion \
+        conversation between a user and an AI named Posey. Your job is \
+        to compress the exchange into a brief, faithful summary so the \
+        rest of the conversation can continue with shared context. \
+        Keep it short (3–6 sentences). Capture: the topics discussed, \
+        any specific passages or document sections referenced, and any \
+        commitments Posey made about what it found. Skip greetings and \
+        meta-talk. Never invent — only summarize what actually happened.
+        """
+
+        var transcriptLines: [String] = []
+        for turn in turns {
+            let speaker = turn.role == .user ? "User" : "Posey"
+            transcriptLines.append("\(speaker): \(turn.content)")
+        }
+        let body = """
+        Conversation to summarize:
+
+        \(transcriptLines.joined(separator: "\n\n"))
+        """
+
+        let session = LanguageModelSession(
+            model: model,
+            instructions: summaryInstructions
+        )
+        var accumulated = ""
+        do {
+            let stream = session.streamResponse(
+                options: GenerationOptions(temperature: 0.2)
+            ) { Prompt(body) }
+            for try await snapshot in stream {
+                accumulated = snapshot.content
+            }
+        } catch let g as LanguageModelSession.GenerationError {
+            throw Self.translate(g)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
+        }
+        return accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Map AFM's framework error type into our user-facing enum.

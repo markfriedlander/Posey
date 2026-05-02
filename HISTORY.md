@@ -1,5 +1,28 @@
 # Posey History
 
+## 2026-05-01 — Ask Posey Milestone 6: RAG retrieval + auto-summarization + document-scoped invocation
+
+M6 lights up the empty slots M5's prompt builder shipped accommodating. No restructuring — only data wiring.
+
+**RAG retrieval (`AskPoseyChatViewModel.retrieveRAGChunks(for:)`):** the chat view model now constructs a `DocumentEmbeddingIndex` lazily from its database manager and queries `search(documentID:query:limit:)` for the top 8 chunks ranked by cosine similarity to the user's question. Results translate from `DocumentEmbeddingSearchResult` to the prompt builder's `RetrievedChunk` shape. Cosine dedup filters chunks too similar to the anchor + recent verbatim STM (threshold 0.85, matching Hal's default) so the model never sees the same passage twice. `.search` intent skips RAG entirely — that path will route to navigation cards in M7. Failed searches log and fall back to no-RAG (better degraded grounding than a failed send).
+
+**Cosine dedup helpers (`DocumentEmbeddingIndex`):** two new internal methods — `embed(_:forDocument:)` embeds an arbitrary string using whichever embedding model the document was indexed with (resolves the dominant kind across stored chunks for re-index-in-progress edge cases), and `cosineSimilarity(_:_:)` re-exposes the existing private `cosine(_:_:)` so the chat view model can compute reference-vs-chunk similarity at the dedup boundary.
+
+**Auto-summarization (M6 hard-blocker per Mark's directive 2026-05-01):**
+- New `AskPoseySummarizing` protocol on the service surface; live `AskPoseyService` conforms.
+- `AskPoseyService.summarizeConversation(turns:)` runs a fresh `LanguageModelSession` with deterministic temperature (0.2 — summarization wants accuracy, not creativity), short instructions ("compress an earlier portion of a reading-companion conversation; keep it short, capture topics + passages + commitments, never invent"), and returns the trimmed prose.
+- `AskPoseyChatViewModel.summarizeOlderTurnsIfNeeded()` runs at the tail of `finalizeAssistantTurn`. Trigger: total non-summary turn count exceeds 8 AND the older slice (everything except the most-recent 6 verbatim) hasn't been folded into the existing summary yet. Snapshots the older slice, kicks off a background `Task` that calls `summarizer.summarizeConversation(...)`, persists the result as an `is_summary = 1` row in `ask_posey_conversations` with the new `summary_of_turns_through` watermark, updates the in-memory `cachedConversationSummary` so the next prompt-build picks it up.
+- Next `send()` awaits any in-flight `summarizationTask` BEFORE building its prompt — guarantees the conversation-summary slot is current.
+- Failure mode: summarization errors log via `NSLog` and the next send ships without an updated summary. Older verbatim turns silently roll out of the STM window. Non-fatal.
+
+**Document-scoped invocation entry point:** the bottom-bar sparkle glyph is now a `Menu` with two actions — "Ask about this passage" (the M5 path: anchor = current sentence) and "Ask about this document" (M6 path: anchor = nil, RAG does the heavy lifting). New `ReaderView.AskPoseyScope` enum and `openAskPosey(scope:)` parameterizes the construction. Per the resolved-decision document-scope pattern in `ask_posey_spec.md`.
+
+**Tests (7 new tests; all green):**
+- `DocumentEmbeddingIndexM6HelpersTests` — 5 tests: `embed(...)` returns empty when no chunks indexed (signal "skip dedup"); cosine identity = 1; cosine orthogonal = 0; shape mismatch returns 0 (defensive, never throws); zero-vector returns 0.
+- `AskPoseySummarizationTriggerTests` — 2 tests using stub classifier/streamer/summarizer: below-threshold (4 prior turns + 1 fresh exchange) doesn't fire; above-threshold (12 prior turns + 1 fresh exchange) fires exactly once with the older slice as input.
+
+**Build clean** on iPhone 17 simulator. Together with M5's 31 tests, the Ask Posey M5+M6 surface has 38 tests covering the structural correctness end-to-end. M5 device-install confirmed (iPhone 16 Plus); M6 device install + interactive verification queued for Mark's next pickup.
+
 ## 2026-05-01 — Ask Posey Milestone 5: full prompt-builder architecture + persistent conversation history
 
 The biggest M5 change is structural, not in features the user can see: Mark's architectural correction (logged in DECISIONS.md) reshapes Ask Posey from "transient sheet that asks AFM about the visible passage" to "persistent reading-companion that remembers everything ever discussed about a document." M5 ships the full prompt-builder architecture so M6/M7 are "fill in the data," not "restructure the system."

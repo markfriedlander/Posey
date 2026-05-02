@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class ReaderViewModelTests: XCTestCase {
-    func testRestorePrefersCharacterOffsetOverSentenceIndex() throws {
+    func testRestorePrefersCharacterOffsetOverSentenceIndex() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -39,6 +39,7 @@ final class ReaderViewModelTests: XCTestCase {
             playbackService: SpeechPlaybackService(mode: .simulated(stepInterval: 0.01))
         )
 
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
 
         XCTAssertEqual(viewModel.currentSentenceIndex, 1)
@@ -70,6 +71,7 @@ final class ReaderViewModelTests: XCTestCase {
             playbackService: SpeechPlaybackService(mode: .simulated(stepInterval: 0.2))
         )
 
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
         viewModel.togglePlayback()
         try await AsyncTestHelpers.waitUntil {
@@ -88,7 +90,7 @@ final class ReaderViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.playbackStateText, "playing")
     }
 
-    func testSaveDraftNoteCreatesNoteForCurrentSentence() throws {
+    func testSaveDraftNoteCreatesNoteForCurrentSentence() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -109,6 +111,7 @@ final class ReaderViewModelTests: XCTestCase {
         try manager.upsertReadingPosition(.initial(for: document.id))
 
         let viewModel = ReaderViewModel(document: document, databaseManager: manager)
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
         viewModel.noteDraft = "Track this sentence"
 
@@ -120,7 +123,7 @@ final class ReaderViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.noteDraft, "")
     }
 
-    func testAddBookmarkCreatesBookmarkForCurrentSentence() throws {
+    func testAddBookmarkCreatesBookmarkForCurrentSentence() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -141,6 +144,7 @@ final class ReaderViewModelTests: XCTestCase {
         try manager.upsertReadingPosition(.initial(for: document.id))
 
         let viewModel = ReaderViewModel(document: document, databaseManager: manager)
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
 
         viewModel.addBookmarkForCurrentSentence()
@@ -150,7 +154,7 @@ final class ReaderViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.notes.first?.body)
     }
 
-    func testJumpToNoteMovesReaderBackToAnchoredSentence() throws {
+    func testJumpToNoteMovesReaderBackToAnchoredSentence() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -171,6 +175,7 @@ final class ReaderViewModelTests: XCTestCase {
         try manager.upsertReadingPosition(.initial(for: document.id))
 
         let viewModel = ReaderViewModel(document: document, databaseManager: manager)
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
 
         viewModel.noteDraft = "Return here"
@@ -191,7 +196,7 @@ final class ReaderViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.currentSentenceIndex, 0)
     }
 
-    func testMarkdownDocumentUsesDisplayBlocksAndPreservesListMarkers() throws {
+    func testMarkdownDocumentUsesDisplayBlocksAndPreservesListMarkers() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -213,6 +218,7 @@ final class ReaderViewModelTests: XCTestCase {
         try manager.upsertDocument(document)
 
         let viewModel = ReaderViewModel(document: document, databaseManager: manager)
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
 
         XCTAssertTrue(viewModel.usesDisplayBlocks)
@@ -271,6 +277,7 @@ final class ReaderViewModelTests: XCTestCase {
         // Pre-seed a stale draft to confirm the entry path clears it.
         viewModel.noteDraft = "stale text from a previous entry"
 
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
         viewModel.togglePlayback()
         XCTAssertEqual(viewModel.playbackStateText, "playing")
@@ -308,6 +315,7 @@ final class ReaderViewModelTests: XCTestCase {
             playbackService: SpeechPlaybackService(mode: .simulated(stepInterval: 0.2))
         )
 
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
         viewModel.togglePlayback()
         try await AsyncTestHelpers.waitUntil {
@@ -320,7 +328,7 @@ final class ReaderViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.playbackStateText, "idle")
     }
 
-    func testPDFDocumentUsesDisplayBlocksWithoutPageHeadings() throws {
+    func testPDFDocumentUsesDisplayBlocksWithoutPageHeadings() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -342,6 +350,7 @@ final class ReaderViewModelTests: XCTestCase {
         try manager.upsertDocument(document)
 
         let viewModel = ReaderViewModel(document: document, databaseManager: manager)
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
 
         XCTAssertTrue(viewModel.usesDisplayBlocks)
@@ -355,7 +364,7 @@ final class ReaderViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.displayBlocks.contains(where: { $0.text.contains("Second page reminder: preserve context across page breaks.") }))
     }
 
-    func testPDFMarkerNavigationUsesPageBlocks() throws {
+    func testPDFMarkerNavigationUsesPageBlocks() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -377,6 +386,7 @@ final class ReaderViewModelTests: XCTestCase {
         try manager.upsertDocument(document)
 
         let viewModel = ReaderViewModel(document: document, databaseManager: manager)
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
         viewModel.goToNextMarker()
 
@@ -416,6 +426,7 @@ final class ReaderViewModelTests: XCTestCase {
             playbackService: SpeechPlaybackService(mode: .simulated(stepInterval: 0.2))
         )
 
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
         viewModel.togglePlayback()
 
@@ -435,7 +446,7 @@ final class ReaderViewModelTests: XCTestCase {
     /// reachable by playback or scroll, not searchable, and rewind/restart
     /// must land on the first body sentence — never inside the skipped
     /// region.
-    func testPlaybackSkipRegionIsHiddenFromReader() throws {
+    func testPlaybackSkipRegionIsHiddenFromReader() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -462,6 +473,7 @@ final class ReaderViewModelTests: XCTestCase {
         try manager.upsertDocument(document)
 
         let viewModel = ReaderViewModel(document: document, databaseManager: manager)
+        await viewModel.awaitContentLoaded()
 
         // No segment may begin inside the TOC region.
         for segment in viewModel.segments {
@@ -476,6 +488,7 @@ final class ReaderViewModelTests: XCTestCase {
 
         // Restart-from-beginning lands on the first body sentence (index 0
         // after the filter), not inside the TOC.
+        await viewModel.awaitContentLoaded()
         viewModel.handleAppear()
         viewModel.restartFromBeginning()
         XCTAssertEqual(viewModel.currentSentenceIndex, 0)
@@ -488,6 +501,7 @@ final class ReaderViewModelTests: XCTestCase {
                             characterOffset: 5, sentenceIndex: 0)
         )
         let migrated = ReaderViewModel(document: document, databaseManager: manager)
+        await migrated.awaitContentLoaded()
         migrated.handleAppear()
         XCTAssertEqual(migrated.currentSentenceIndex, 0)
         XCTAssertTrue(migrated.segments[migrated.currentSentenceIndex].text.contains("first body sentence"))

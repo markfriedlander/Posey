@@ -92,6 +92,9 @@ protocol AskPoseySummarizing: Sendable {
     @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
     func summarizeConversation(turns: [AskPoseyMessage]) async throws -> String
 }
+
+// AskPoseyNavigating is declared in AskPoseyNavigationCards.swift; the
+// live AskPoseyService extension below conforms.
 // ========== BLOCK 01: PROTOCOL - END ==========
 
 
@@ -180,7 +183,7 @@ nonisolated enum AskPoseyPrompts {
 #if canImport(FoundationModels)
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @MainActor
-final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySummarizing {
+final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySummarizing, AskPoseyNavigating {
 
     private let model: SystemLanguageModel
     private let instructions: String
@@ -368,6 +371,59 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
         }
         return accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// M7 navigation cards — Call-2 path for `.search` intent.
+    /// AFM is constrained via `@Generable` to pick 3–6 cards from
+    /// the supplied candidate chunks; we resolve the chosen indices
+    /// back to chunk metadata and return ready-to-render
+    /// `AskPoseyNavigationCard` values.
+    ///
+    /// Same fresh-session-per-call lifecycle as the other surfaces.
+    /// If AFM picks an out-of-range candidate index, we silently drop
+    /// that card rather than crashing — defensive parsing because the
+    /// `@Generable` schema can't constrain integers to a runtime-known
+    /// range.
+    func generateNavigationCards(
+        question: String,
+        candidates: [RetrievedChunk]
+    ) async throws -> [AskPoseyNavigationCard] {
+        guard model.availability == .available else {
+            throw AskPoseyServiceError.afmUnavailable
+        }
+        guard !candidates.isEmpty else {
+            // No retrieval results means nothing to navigate to. The
+            // caller surfaces a "no matches" UI state.
+            return []
+        }
+        let session = LanguageModelSession(
+            model: model,
+            instructions: AskPoseyNavigationPrompts.systemInstructions
+        )
+        let body = AskPoseyNavigationPrompts.body(question: question, candidates: candidates)
+        do {
+            let response = try await session.respond(
+                to: body,
+                generating: AskPoseyNavigationCardSet.self
+            )
+            return response.content.cards.compactMap { card in
+                guard candidates.indices.contains(card.candidateIndex) else { return nil }
+                let source = candidates[card.candidateIndex]
+                return AskPoseyNavigationCard(
+                    title: card.title,
+                    reason: card.reason,
+                    plainTextOffset: source.startOffset,
+                    relevance: source.relevance,
+                    chunkID: source.chunkID
+                )
+            }
+        } catch let g as LanguageModelSession.GenerationError {
+            throw Self.translate(g)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
+        }
     }
 
     /// Map AFM's framework error type into our user-facing enum.

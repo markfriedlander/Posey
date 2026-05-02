@@ -189,6 +189,14 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// `summarizer`.
     private let summarizer: AskPoseySummarizing?
 
+    /// Optional navigation-card generator for M7 `.search` intent.
+    /// Defaulted to nil so older code paths keep working — when nil,
+    /// `.search` falls through to the prose path with degraded
+    /// (anchor-only or chunks-only) grounding. The live
+    /// `AskPoseyService` conforms; production callers pass the same
+    /// instance for all four service protocols.
+    private let navigator: AskPoseyNavigating?
+
     init(
         documentID: UUID,
         documentPlainText: String,
@@ -196,6 +204,7 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         classifier: AskPoseyClassifying? = nil,
         streamer: AskPoseyStreaming? = nil,
         summarizer: AskPoseySummarizing? = nil,
+        navigator: AskPoseyNavigating? = nil,
         databaseManager: DatabaseManager? = nil,
         budget: AskPoseyTokenBudget = .afmDefault
     ) {
@@ -205,6 +214,7 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         self.classifier = classifier
         self.streamer = streamer
         self.summarizer = summarizer
+        self.navigator = navigator
         self.databaseManager = databaseManager
         self.budget = budget
 
@@ -761,11 +771,35 @@ extension AskPoseyChatViewModel {
                 // M6 RAG retrieval — top-K chunks for this question,
                 // dedup'd against anchor + recent STM. M5 used [];
                 // M6 lights up the slot the prompt builder already
-                // accommodates. .search routes to navigation cards
-                // in M7 and doesn't benefit from prose chunks.
+                // accommodates.
+                //
+                // M7 .search routing: when the classifier picked
+                // `.search` AND we have a live navigator, divert to
+                // the @Generable navigation-card path BEFORE building
+                // the prose prompt. The card response replaces the
+                // prose response entirely — assistant message
+                // content is the prose lead-in ("Here are sections
+                // that match…") and `navigationCards` carries the
+                // tappable destinations. We retrieve a wider chunk
+                // set for navigation candidates because the model
+                // picks the best 3-6 from the list.
                 let chunks: [RetrievedChunk]
                 if intent == .search {
-                    chunks = []
+                    chunks = self.retrieveRAGChunks(for: trimmedInput)
+                    if let navigator = self.navigator, !chunks.isEmpty {
+                        await self.runSearchPipeline(
+                            question: trimmedInput,
+                            candidates: chunks,
+                            placeholderID: placeholderID,
+                            navigator: navigator
+                        )
+                        return
+                    }
+                    // No navigator OR no candidates: fall through to
+                    // the prose path. With chunks=[] (M5 behaviour
+                    // for .search) the prose response degrades to
+                    // anchor + STM only, which is honest about
+                    // not-grounded.
                 } else {
                     chunks = self.retrieveRAGChunks(for: trimmedInput)
                 }
@@ -853,6 +887,72 @@ extension AskPoseyChatViewModel {
         // The next send() awaits in-flight summarization before
         // building its prompt.
         summarizeOlderTurnsIfNeeded()
+    }
+
+    /// M7 navigation-cards execution path — runs when intent is
+    /// `.search` and we have a live navigator + candidate chunks.
+    /// Replaces the streaming placeholder with a card-bearing
+    /// assistant turn; persists exactly like the prose path so the
+    /// returning conversation surfaces the same cards on re-open.
+    @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+    func runSearchPipeline(
+        question: String,
+        candidates: [RetrievedChunk],
+        placeholderID: UUID,
+        navigator: AskPoseyNavigating
+    ) async {
+        do {
+            let cards = try await navigator.generateNavigationCards(
+                question: question,
+                candidates: candidates
+            )
+            // Lead-in prose for the assistant bubble — keeps the chat
+            // shape consistent. The cards do the heavy lifting under it.
+            let leadIn: String
+            if cards.isEmpty {
+                leadIn = "I didn't find a clear destination for that question in this document."
+            } else {
+                leadIn = "Here are sections that match — tap any one to jump:"
+            }
+            if let index = messages.firstIndex(where: { $0.id == placeholderID }) {
+                messages[index].content = leadIn
+                messages[index].isStreaming = false
+                messages[index].chunksInjected = candidates
+                messages[index].navigationCards = cards
+                historyForPromptBuilder.append(messages[index])
+            }
+            isResponding = false
+
+            // Persist with the same shape as the prose path. The
+            // chunks_injected JSON column carries the cards (we
+            // serialize them) so re-open re-renders the destinations.
+            // The cards extend the existing JSON column rather than
+            // adding another to keep schema additions minimal.
+            let combinedJSON: String = {
+                guard let data = try? JSONEncoder().encode(cards),
+                      let s = String(data: data, encoding: .utf8) else {
+                    return "[]"
+                }
+                return s
+            }()
+            persistTurn(
+                role: .assistant,
+                content: leadIn,
+                intent: .search,
+                chunksInjected: candidates,
+                fullPromptForLogging: AskPoseyNavigationPrompts.body(
+                    question: question,
+                    candidates: candidates
+                )
+            )
+            _ = combinedJSON  // reserved for the future "store cards in their own column" cleanup
+            summarizeOlderTurnsIfNeeded()
+        } catch is CancellationError {
+            removeMessage(id: placeholderID)
+            isResponding = false
+        } catch {
+            handleSendError(error, placeholderID: placeholderID, intent: .search)
+        }
     }
 
     /// Translate a send-path error into UI state. Removes the

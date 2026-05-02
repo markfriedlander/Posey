@@ -26,19 +26,23 @@ struct AskPoseyView: View {
 
     @ObservedObject var viewModel: AskPoseyChatViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @FocusState private var composerFocused: Bool
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                anchorView
-
-                Divider().opacity(0.4)
-
-                // Chat history pinned to the bottom so newly-added
-                // messages stay visible without manual scrollTo work.
+                // Chat history. The anchor passage is the FIRST item
+                // in this list (when present) so it scrolls off
+                // naturally as the conversation grows — pinning it
+                // permanently above the scroll view burned vertical
+                // space the user wants for the actual conversation.
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
+                        if let anchor = viewModel.anchor,
+                           !anchor.trimmedDisplayText.isEmpty {
+                            anchorRow(anchor)
+                        }
                         ForEach(viewModel.messages) { message in
                             AskPoseyMessageBubble(message: message)
                         }
@@ -61,9 +65,6 @@ struct AskPoseyView: View {
             .navigationTitle("Ask Posey")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    privacyIndicator
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
                         viewModel.cancelInFlight()
@@ -73,7 +74,15 @@ struct AskPoseyView: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        // Detent strategy: on iPhone (compact horizontal size class)
+        // the .medium detent leaves no visible document behind the
+        // sheet, so we go straight to .large — the document
+        // momentarily slides offscreen but Ask Posey is the focused
+        // task at that point. On iPad / Mac (regular size class)
+        // there's enough horizontal real estate that .medium leaves
+        // useful document context visible behind the sheet, so both
+        // detents are offered.
+        .presentationDetents(detentsForCurrentDevice)
         .presentationContentInteraction(.scrolls)
         .interactiveDismissDisabled(viewModel.isResponding)
         .onAppear {
@@ -94,45 +103,50 @@ struct AskPoseyView: View {
 // ========== BLOCK 02: ANCHOR + PRIVACY + COMPOSER - START ==========
 private extension AskPoseyView {
 
-    @ViewBuilder
-    var anchorView: some View {
-        if let anchor = viewModel.anchor, !anchor.trimmedDisplayText.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                Label("Anchor", systemImage: "quote.opening")
+    /// Anchor passage rendered as the first row in the chat list.
+    /// Lives inside the LazyVStack so it scrolls with the
+    /// conversation rather than pinning permanently to the top of
+    /// the sheet — when a long Q&A pushes it off, the user can
+    /// scroll back to it like any other message.
+    func anchorRow(_ anchor: AskPoseyAnchor) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "quote.opening")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("ANCHOR")
                     .font(.caption2.smallCaps())
                     .foregroundStyle(.secondary)
                 Text(anchor.trimmedDisplayText)
                     .font(.callout)
                     .italic()
                     .foregroundStyle(.primary.opacity(0.85))
-                    .lineLimit(4)
-                    .truncationMode(.tail)
+                    .textSelection(.enabled)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.thinMaterial)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Anchor passage: \(anchor.trimmedDisplayText)")
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Anchor passage: \(anchor.trimmedDisplayText)")
+        .accessibilityIdentifier("askPosey.anchor")
     }
 
-    /// Lock-icon button explaining Posey's privacy posture. Per the
-    /// resolved spec copy: "private by design" — AFM runs on-device,
-    /// Apple's Private Cloud Compute is end-to-end encrypted for
-    /// complex requests, no third-party services.
-    var privacyIndicator: some View {
-        Button {
-            // M4: simple confirmation alert. M5/M6 may upgrade to
-            // a tappable info popover. Keeping the affordance
-            // minimal here so it's clearly not a primary action.
-        } label: {
-            Image(systemName: "lock.shield")
-                .imageScale(.medium)
-                .foregroundStyle(.secondary)
+    /// Detent strategy keyed off horizontal size class. iPhone in
+    /// portrait or landscape (compact) → `.large` only; the sheet
+    /// fully covers the document because `.medium` left no visible
+    /// document on a 16 Plus and the sheet IS the focused task at
+    /// that point. iPad / Mac / split-view-with-room (regular) →
+    /// `.medium` + `.large`; real estate is large enough that
+    /// `.medium` keeps document context visible behind the sheet.
+    var detentsForCurrentDevice: Set<PresentationDetent> {
+        if horizontalSizeClass == .compact {
+            return [.large]
+        } else {
+            return [.medium, .large]
         }
-        .accessibilityLabel("Private by design — explanation")
-        .accessibilityIdentifier("askPosey.privacyLock")
     }
 
     /// "Posey is thinking…" placeholder while a response is in

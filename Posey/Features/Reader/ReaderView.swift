@@ -792,6 +792,24 @@ private struct NotesSheet: View {
 
 @MainActor
 final class ReaderViewModel: ObservableObject {
+    /// Explicit empty deinit marked `nonisolated` to opt out of
+    /// `swift_task_deinitOnExecutorImpl` executor-hopping at
+    /// dealloc time. Without this, XCTest deallocates the view
+    /// model from a runner thread, the synthesised deinit hops
+    /// to MainActor, and the runtime trips a known Swift
+    /// Concurrency bug in `TaskLocal::StopLookupScope::~StopLookupScope`
+    /// — same shape as the crash that previously hit
+    /// `DocumentEmbeddingIndex` and was solved by marking that
+    /// class `nonisolated`. We can't make `ReaderViewModel`
+    /// nonisolated wholesale (it talks to AVSpeechSynthesizer,
+    /// Combine publishers, and SwiftUI bindings), so instead we
+    /// give the deinit explicit nonisolated discipline and let
+    /// it run wherever the last release happened. The body is
+    /// empty because all our cleanup is already driven by
+    /// `cancellables` going out of scope and SQLite finalisation
+    /// happening through `DatabaseManager`'s own deinit.
+    nonisolated deinit {}
+
     @Published var fontSize: CGFloat = PlaybackPreferences.shared.fontSize {
         didSet { PlaybackPreferences.shared.fontSize = fontSize }
     }
@@ -1002,8 +1020,22 @@ final class ReaderViewModel: ObservableObject {
             persistPosition()
         }
 
+        // Mark's M4 device pass surfaced this: previously we'd populate
+        // `noteDraft` with the surrounding-sentences capture AND show
+        // the active sentence as readonly context above the TextField.
+        // That meant the user saw the active sentence twice (once
+        // readonly, once in an editable draft they hadn't written) and
+        // got the previous sentence prepended — which on a PDF whose
+        // first segment jammed title + date + heading into one
+        // "sentence" looked outright broken. The active sentence is
+        // already visible above the TextField as reference; the user
+        // doesn't need it again in the draft.
+        //
+        // We still copy the surrounding-sentences capture to the
+        // clipboard so the share-with-other-app workflow that the
+        // capture text was originally designed for keeps working.
         let capture = notesCaptureText()
-        noteDraft = capture
+        noteDraft = ""
         copyToClipboard(capture)
     }
 

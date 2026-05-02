@@ -36,6 +36,7 @@ final class AskPoseySchemaMigrationTests: XCTestCase {
     func testAskPoseyConversationsTableCreated() throws {
         let columns = try columnsOf(table: "ask_posey_conversations")
         XCTAssertEqual(Set(columns.keys), [
+            // M1 columns
             "id",
             "document_id",
             "timestamp",
@@ -44,7 +45,13 @@ final class AskPoseySchemaMigrationTests: XCTestCase {
             "invocation",
             "anchor_offset",
             "summary_of_turns_through",
-            "is_summary"
+            "is_summary",
+            // M5 column additions
+            "intent",
+            "chunks_injected",
+            "full_prompt_for_logging",
+            "embedding",
+            "embedding_kind"
         ])
         // Spot-check a few constraints we'll rely on at the storage layer.
         XCTAssertEqual(columns["id"]?.type, "TEXT")
@@ -54,6 +61,17 @@ final class AskPoseySchemaMigrationTests: XCTestCase {
                        "anchor_offset must be nullable for document-scoped invocations")
         XCTAssertEqual(columns["summary_of_turns_through"]?.notNull, true)
         XCTAssertEqual(columns["is_summary"]?.notNull, true)
+        // M5 columns: intent + full_prompt_for_logging + embedding are
+        // nullable because legacy/M1 rows didn't carry them and the
+        // ALTER TABLE migration can't backfill. chunks_injected and
+        // embedding_kind have NOT NULL DEFAULTs so existing rows pick
+        // up the defaults.
+        XCTAssertEqual(columns["intent"]?.notNull, false)
+        XCTAssertEqual(columns["full_prompt_for_logging"]?.notNull, false)
+        XCTAssertEqual(columns["embedding"]?.notNull, false)
+        XCTAssertEqual(columns["embedding"]?.type, "BLOB")
+        XCTAssertEqual(columns["chunks_injected"]?.notNull, true)
+        XCTAssertEqual(columns["embedding_kind"]?.notNull, true)
     }
 
     func testAskPoseyConversationsIndexCreated() throws {

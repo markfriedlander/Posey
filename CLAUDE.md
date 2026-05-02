@@ -1,6 +1,38 @@
 # CLAUDE.md — Posey
 **Operational Reference for Claude Code**
-**Last Updated: March 2026**
+**Last Updated: May 2026**
+
+---
+
+## Three Hats — Developer, QA, and User
+
+Before declaring any feature or milestone done, you must wear three hats — not just one. This applies to every feature on this project, not just Ask Posey.
+
+**Hat 1 — Developer:** Did it build? Do the tests pass? Is the architecture correct? Is the code clean?
+
+**Hat 2 — QA:** Does it actually work? Did I try to break it? Did I test the edges, the error cases, the unexpected inputs? Did I verify it visually on device or simulator, not just in logs?
+
+**Hat 3 — User:** Would I actually want to use this? Does it feel right? Is the answer good enough that I'd trust it? Is the interaction natural? Would a real person find this useful or would they be frustrated?
+
+All three questions must be answered yes before the feature is done. A feature that compiles and passes tests but gives bad answers or feels awkward is not done. A feature that gives good answers but looks broken in the UI is not done. The bar is: would a real user be satisfied?
+
+This is a standing requirement. It applies in every session, for every feature, regardless of whether Mark explicitly asks. It is not sufficient to be a good developer. You must also be a rigorous QA engineer and a demanding user — simultaneously, on every piece of work you ship.
+
+**For Ask Posey specifically**, the three-hats requirement means:
+
+Before declaring any Ask Posey milestone done, have genuine multi-turn conversations on at least three different documents using the `/ask` endpoint. Not smoke tests. Not plumbing verification. Real conversations the way a user would have them.
+
+For each document:
+- Ask questions that require finding specific facts — authors, dates, definitions
+- Ask questions that require connecting information from different parts of the document
+- Ask follow-up questions that reference previous answers
+- Ask something not in the document — verify Posey says so honestly rather than hallucinating
+
+Evaluate every answer against what the document actually contains. Wrong, vague, or incomplete answers when the information is available are failures. Find the root cause — RAG retrieval? Prompt construction? Context budget? Temperature? — and fix it before moving on.
+
+Use the simulator MCP to verify the UI after each response. Formatting renders correctly. Sources appear and persist after navigation. Conversation layout is correct.
+
+The standard: if Mark picked up the phone and asked the same question, would he get a genuinely useful, trustworthy answer presented in a UI that feels right? That is the bar.
 
 ---
 

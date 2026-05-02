@@ -187,20 +187,33 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
 
     private let model: SystemLanguageModel
     private let instructions: String
-    /// Temperature for the prose response loop. Mark's starting hint
-    /// (2026-05-01): begin at 0.5, watch the local-API loop, willing
-    /// to push to 0.7 if responses feel mechanical. Easy to tune from
-    /// one place — no magic numbers buried in call sites.
-    private let proseTemperature: Double
+    /// Temperature for the GROUNDED call (Mark's "what did I find").
+    /// Low — accuracy first, no creative drift. Real Q&A iteration
+    /// settled on 0.1: anything higher introduced stochastic
+    /// "drops Mark Friedlander" failures on the AI Book test.
+    private let groundedTemperature: Double
+
+    /// Temperature for the POLISH call (Mark's "make it sound like
+    /// Posey"). Warmer so the rewrite reads conversational, slightly
+    /// irreverent, present. Per Mark 2026-05-02: "0.1 is too cold.
+    /// A robotic Posey is a failed Posey regardless of factual
+    /// accuracy." Started at 0.7; dropped to 0.5 after first
+    /// real-Q&A test revealed the polish call inventing an ISBN
+    /// when the grounded answer said "doesn't say." 0.5 keeps the
+    /// warmth without giving the model enough creative latitude to
+    /// add facts the grounded answer doesn't contain.
+    private let polishTemperature: Double
 
     init(
         model: SystemLanguageModel = .default,
         instructions: String = AskPoseyPrompts.classifierInstructions,
-        proseTemperature: Double = 0.1
+        groundedTemperature: Double = 0.1,
+        polishTemperature: Double = 0.4
     ) {
         self.model = model
         self.instructions = instructions
-        self.proseTemperature = proseTemperature
+        self.groundedTemperature = groundedTemperature
+        self.polishTemperature = polishTemperature
     }
 
     /// Classify the user's question into an `AskPoseyIntent`.
@@ -267,36 +280,181 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         }
 
         let output = AskPoseyPromptBuilder.build(inputs, budget: budget)
-
-        // Fresh session per call — system framing comes from the
-        // builder, not from the classifier instructions, so we
-        // override the field set in init for this call only.
-        let session = LanguageModelSession(
-            model: model,
-            instructions: output.instructions
-        )
-        let renderedBody = output.renderedBody
-
         let started = Date()
-        var accumulated = ""
+
+        // ---- Call 1: GROUNDED (low temp, accuracy first) ----
+        // No streaming to user — the grounded text isn't what the
+        // user sees. The polish call streams to user.
+        var grounded = ""
         do {
-            let stream = session.streamResponse(
-                options: GenerationOptions(temperature: proseTemperature)
-            ) { Prompt(renderedBody) }
-            for try await snapshot in stream {
-                accumulated = snapshot.content
-                onSnapshot(accumulated)
-            }
-        } catch let generationError as LanguageModelSession.GenerationError {
-            throw Self.translate(generationError)
+            grounded = try await runGroundedCall(
+                instructions: output.instructions,
+                body: output.renderedBody
+            )
+            NSLog("AskPosey: grounded call returned %d chars", grounded.count)
         } catch is CancellationError {
-            // Caller cancelled (sheet dismissed, user hit Done).
-            // Re-throw so the calling Task can clean up; no need to
-            // translate to AskPoseyServiceError because the UI is
-            // tearing down anyway.
             throw CancellationError()
-        } catch {
-            throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
+        } catch let originalError {
+            NSLog("AskPosey: grounded call threw: type=%@ description=%@",
+                  String(describing: type(of: originalError)),
+                  String(describing: originalError).prefix(200) as CVarArg)
+            // Refusal-retry per Mark 2026-05-02: detect refusal both
+            // by typed-case match (preferred) AND by stringified
+            // payload (defensive — `if case .refusal = g` proved
+            // unreliable on AFM's macro-generated enum case in this
+            // Swift toolchain). Either path leads to the retry; the
+            // string check is the safety net.
+            let isRefusal: Bool
+            if let g = originalError as? LanguageModelSession.GenerationError {
+                // Multiple defenses against pattern-matching quirks
+                // on AFM's macro-generated enum: (1) full pattern
+                // with associated value wildcards, (2) switch form,
+                // (3) string-based fallback. Belt and suspenders
+                // because the typed pattern was silently failing in
+                // device tests despite the error clearly being a
+                // refusal at runtime.
+                let switched: Bool = {
+                    switch g {
+                    case .refusal:
+                        return true
+                    default:
+                        return false
+                    }
+                }()
+                let stringified = "\(g)"
+                let stringContains = stringified.contains("refusal(")
+                    || stringified.lowercased().contains("refusal")
+                isRefusal = switched || stringContains
+                NSLog("AskPosey: refusal-detection switched=%@ stringContains=%@ stringified=%@",
+                      String(describing: switched),
+                      String(describing: stringContains),
+                      stringified.prefix(120) as CVarArg)
+            } else {
+                isRefusal = "\(originalError)".contains("refusal(")
+            }
+
+            if isRefusal {
+                NSLog("AskPosey: grounded call refused; retrying with neutral rephrasing")
+                let rephrased = AskPoseyPromptBuilder.neutralRephrasingPromptBody(
+                    originalUserQuestion: inputs.currentQuestion,
+                    originalRenderedBody: output.renderedBody
+                )
+                do {
+                    grounded = try await runGroundedCall(
+                        instructions: output.instructions,
+                        body: rephrased
+                    )
+                    NSLog("AskPosey: neutral-rephrasing retry succeeded")
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let retryError {
+                    let isRetryRefusal: Bool
+                    if let r = retryError as? LanguageModelSession.GenerationError {
+                        let switched: Bool = {
+                            switch r {
+                            case .refusal: return true
+                            default: return false
+                            }
+                        }()
+                        let s = "\(r)"
+                        let stringContains = s.contains("refusal(") || s.lowercased().contains("refusal")
+                        isRetryRefusal = switched || stringContains
+                        NSLog("AskPosey: retry refusal-detection switched=%@ stringContains=%@ s=%@",
+                              String(describing: switched),
+                              String(describing: stringContains),
+                              s.prefix(120) as CVarArg)
+                    } else {
+                        isRetryRefusal = "\(retryError)".lowercased().contains("refusal")
+                    }
+                    if isRetryRefusal {
+                        NSLog("AskPosey: retry also refused; surfacing informative failure")
+                        throw AskPoseyServiceError.permanent(
+                            underlyingDescription: "informativeRefusalFailure"
+                        )
+                    }
+                    if let r = retryError as? LanguageModelSession.GenerationError {
+                        throw Self.translate(r)
+                    }
+                    throw AskPoseyServiceError.permanent(underlyingDescription: "\(retryError)")
+                }
+            } else {
+                // Debug marker so we can see which path threw when
+                // the user-facing error appears.
+                if let g = originalError as? LanguageModelSession.GenerationError {
+                    NSLog("AskPosey: NOT classified as refusal; translating raw")
+                    throw AskPoseyServiceError.permanent(
+                        underlyingDescription: "[NO-RETRY-PATH-typed] \(g)"
+                    )
+                }
+                throw AskPoseyServiceError.permanent(
+                    underlyingDescription: "[NO-RETRY-PATH-untyped] \(originalError)"
+                )
+            }
+        }
+
+        // ---- Call 2: POLISH (Posey's voice, warmer temp) ----
+        // Streams to user. On polish failure, fall back gracefully
+        // to the grounded text so the user gets the right answer
+        // even if the voice rewrite breaks.
+        //
+        // **Refusal-shape guard.** If the grounded answer is a
+        // not-in-the-document response, skip the polish entirely.
+        // The polish call at temp 0.5 has demonstrated capacity to
+        // invent specific facts (e.g. an ISBN) when given an empty
+        // draft and a question implying a number-shaped answer. The
+        // grounded answer is already short and clean; polishing it
+        // is high-risk, low-reward.
+        let groundedLower = grounded.lowercased()
+        let refusalShape = [
+            "the document doesn't say",
+            "the document does not say",
+            "doesn't say",
+            "does not say",
+            "the document doesn't mention",
+            "the document does not mention",
+            "doesn't mention",
+            "isn't mentioned",
+            "is not mentioned",
+            "not in the document",
+            "not present in",
+            "the document doesn't specify",
+            "the document does not specify",
+            "doesn't specify"
+        ].contains(where: { groundedLower.contains($0) })
+
+        var accumulated = ""
+        if refusalShape {
+            // Stream the grounded text through verbatim. The
+            // grounded call's wording is already short and clean
+            // ("The document doesn't say.") — no polish needed.
+            accumulated = grounded
+            onSnapshot(grounded)
+        } else {
+            do {
+                let polishSession = LanguageModelSession(
+                    model: model,
+                    instructions: AskPoseyPromptBuilder.polishInstructions
+                )
+                let polishBody = AskPoseyPromptBuilder.polishPromptBody(
+                    question: inputs.currentQuestion,
+                    groundedDraft: grounded
+                )
+                let stream = polishSession.streamResponse(
+                    options: GenerationOptions(temperature: polishTemperature)
+                ) { Prompt(polishBody) }
+                for try await snapshot in stream {
+                    accumulated = snapshot.content
+                    onSnapshot(accumulated)
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Polish failed (refusal, transient, anything). Fall
+                // back to the grounded answer — better to ship a
+                // robotic-but-correct reply than nothing.
+                accumulated = grounded
+                onSnapshot(grounded)
+            }
         }
 
         let elapsed = Date().timeIntervalSince(started)
@@ -309,6 +467,24 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             fullPromptForLogging: output.combinedForLogging,
             inferenceDuration: elapsed
         )
+    }
+
+    /// Single grounded-call helper — low-temp, no streaming, returns
+    /// the full accumulated text. Used both for the primary attempt
+    /// and the neutral-rephrasing retry. Throws raw
+    /// `LanguageModelSession.GenerationError` so the caller can
+    /// pattern-match `.refusal` and decide on retry; other errors
+    /// bubble unchanged.
+    private func runGroundedCall(instructions: String, body: String) async throws -> String {
+        let session = LanguageModelSession(model: model, instructions: instructions)
+        var accumulated = ""
+        let stream = session.streamResponse(
+            options: GenerationOptions(temperature: groundedTemperature)
+        ) { Prompt(body) }
+        for try await snapshot in stream {
+            accumulated = snapshot.content
+        }
+        return accumulated
     }
 
     /// Summarize a span of older conversation turns into a short

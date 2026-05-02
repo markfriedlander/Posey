@@ -25,9 +25,35 @@ import SwiftUI
 struct AskPoseyView: View {
 
     @ObservedObject var viewModel: AskPoseyChatViewModel
+    /// Mirrors the embedding-index notifications so we can show a
+    /// sheet-internal "Indexing this document…" notice when the user
+    /// opens Ask Posey on a doc that's still building its embedding
+    /// index. Spec: `ask_posey_spec.md` "indexing-indicator" surface.
+    /// M7: in-sheet UX for the M2 work.
+    @StateObject private var indexingTracker = IndexingTracker()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @FocusState private var composerFocused: Bool
+    /// Per-sheet view-state tracking for the M7 auto-save-to-notes
+    /// button. Lives in the view (not the view model) because it's
+    /// purely UI feedback — once the sheet dismisses, the persisted
+    /// note is the source of truth and the in-memory flag is gone.
+    @State private var savedAssistantMessageIDs: Set<UUID> = []
+
+    /// Closure invoked when the user taps a Sources-strip pill below
+    /// an assistant bubble. Owned by the host (ReaderView) which
+    /// dismisses the sheet and calls `ReaderViewModel.jumpToOffset`.
+    /// Optional — when nil, the pills render for awareness but don't
+    /// trigger navigation. M7 source attribution surface.
+    let onJumpToChunk: ((Int) -> Void)?
+
+    init(
+        viewModel: AskPoseyChatViewModel,
+        onJumpToChunk: ((Int) -> Void)? = nil
+    ) {
+        self.viewModel = viewModel
+        self.onJumpToChunk = onJumpToChunk
+    }
 
     /// Stable id for the anchor row so ScrollViewReader can scroll to
     /// it on initial appear. Anchor row sits at the boundary between
@@ -38,6 +64,7 @@ struct AskPoseyView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                indexingNotice
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
@@ -75,7 +102,18 @@ struct AskPoseyView: View {
                                 ForEach(
                                     Array(viewModel.messages.suffix(from: viewModel.historyBoundary))
                                 ) { message in
-                                    AskPoseyMessageBubble(message: message)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        AskPoseyMessageBubble(message: message)
+                                        if message.role == .assistant,
+                                           !message.chunksInjected.isEmpty {
+                                            sourcesStrip(for: message.chunksInjected)
+                                        }
+                                        if message.role == .assistant,
+                                           !message.isStreaming,
+                                           !message.content.isEmpty {
+                                            saveToNotesButton(for: message)
+                                        }
+                                    }
                                 }
                             }
 
@@ -284,6 +322,124 @@ private extension AskPoseyView {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(.thinMaterial)
+    }
+
+    /// M7 in-sheet indexing indicator. Visible when the document's
+    /// embedding index is still being built — Ask Posey can run
+    /// without it (anchor + STM still work) but RAG-grounded answers
+    /// are weaker until indexing completes. The notice tells the
+    /// user that's why; spec'd in `ask_posey_spec.md`
+    /// "indexing-indicator" subsection of "The Ask Posey Sheet UI".
+    @ViewBuilder
+    var indexingNotice: some View {
+        let docID = viewModel.documentID
+        if indexingTracker.isIndexing(docID) {
+            let progress = indexingTracker.indexingProgress[docID]
+            HStack(spacing: 10) {
+                if let progress, progress.total > 0 {
+                    let fraction = min(1.0, Double(progress.processed) / Double(progress.total))
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                    Text("Indexing this document… \(progress.processed) of \(progress.total) sections")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                    Text("Indexing this document for Ask Posey…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.thinMaterial)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("askPosey.indexingNotice")
+        }
+    }
+
+    /// M7 auto-save to notes — small "Save to Notes" button below
+    /// each finalised assistant bubble. Tapping persists the Q + A
+    /// pair as a Note on the document, anchored to the conversation's
+    /// anchor offset (or first cited chunk for document-scoped). The
+    /// per-message saved-state lives in `savedAssistantMessageIDs` so
+    /// the button can flip to a "Saved" state after success without
+    /// the view model needing to track it.
+    func saveToNotesButton(for message: AskPoseyMessage) -> some View {
+        let isSaved = savedAssistantMessageIDs.contains(message.id)
+        return HStack {
+            Spacer().frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                guard !isSaved else { return }
+                if viewModel.saveAssistantTurnToNotes(message) {
+                    savedAssistantMessageIDs.insert(message.id)
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: isSaved ? "checkmark.circle.fill" : "square.and.pencil")
+                        .imageScale(.small)
+                    Text(isSaved ? "Saved" : "Save to Notes")
+                        .font(.caption2)
+                }
+                .foregroundStyle(isSaved ? Color.secondary : Color.accentColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            }
+            .buttonStyle(.plain)
+            .disabled(isSaved)
+            .accessibilityLabel(isSaved ? "Saved to notes" : "Save this answer to notes")
+            .accessibilityIdentifier("askPosey.saveToNotes")
+        }
+        .padding(.trailing, 8)
+    }
+
+    /// M7 source attribution: a horizontal scroll of pill buttons
+    /// listing the document chunks injected into the prompt that
+    /// produced this assistant response. Tapping a pill dismisses the
+    /// sheet and jumps the reader to the chunk's offset (when
+    /// `onJumpToChunk` is wired). Spec'd in
+    /// `ask_posey_spec.md` "Source Attribution".
+    func sourcesStrip(for chunks: [RetrievedChunk]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                Text("SOURCES")
+                    .font(.caption2.smallCaps())
+                    .foregroundStyle(.secondary)
+                    .padding(.trailing, 2)
+                ForEach(Array(chunks.enumerated()), id: \.offset) { index, chunk in
+                    Button {
+                        guard let onJumpToChunk else { return }
+                        // Cancel any in-flight stream + dismiss the
+                        // sheet first so the user lands on the reader
+                        // with the jump already applied.
+                        viewModel.cancelInFlight()
+                        onJumpToChunk(chunk.startOffset)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("\(index + 1)")
+                                .font(.caption2.weight(.semibold))
+                            Text(String(format: "%.0f%%", chunk.relevance * 100))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.thinMaterial, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Source \(index + 1) at offset \(chunk.startOffset), relevance \(String(format: "%.0f", chunk.relevance * 100)) percent. Tap to jump.")
+                    .disabled(onJumpToChunk == nil)
+                }
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 14)
+        }
+        .accessibilityElement(children: .contain)
     }
 
     /// Visual divider between prior-session history and the anchor

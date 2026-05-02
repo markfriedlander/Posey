@@ -1,5 +1,20 @@
 # Posey History
 
+## 2026-05-01 — Ask Posey Milestone 7: source attribution + auto-save to notes + in-sheet indexing indicator
+
+Three of M7's four scoped features land here. The fourth (`.search` intent → @Generable navigation cards) is intentionally deferred — M5's prompt builder already routes `.search` through the same prose path with degraded but non-broken behavior, and the deeper navigation-card UX needs a deliberate design pass before implementation. Recorded as a polish item in NEXT.md.
+
+**Source attribution** — assistant bubbles whose response was grounded by RAG chunks now show a horizontal "SOURCES" pill strip below the bubble. Each pill displays the chunk's rank (1, 2, 3…) and relevance percent (e.g. "87%"). Tapping a pill cancels any in-flight stream, dismisses the sheet, and jumps the reader to the chunk's `startOffset` via the new `ReaderViewModel.jumpToOffset(_:)` (refactored out of the existing `jumpToTOCEntry` since both use the identical "find sentence at-or-before offset → set currentSentenceIndex → persist position" flow). Implementation:
+- `AskPoseyMessage.chunksInjected: [RetrievedChunk]` field added; populated in `finalizeAssistantTurn` from response metadata.
+- `AskPoseyView.sourcesStrip(for:)` ViewBuilder with horizontal `ScrollView` + Capsule pills.
+- `AskPoseyView.onJumpToChunk: ((Int) -> Void)?` closure parameter — `ReaderView`'s `.sheet` callsite passes `viewModel.jumpToOffset(_:)` so taps land in the reader.
+
+**Auto-save to notes** — finalised assistant bubbles get a small "Save to Notes" button. Tapping persists the Q + A pair as a Note row on the document via the existing `DatabaseManager.insertNote(_:)`, anchored to the conversation's anchor offset (or the first cited chunk's offset for document-scoped, or 0 as last resort). Per-sheet `savedAssistantMessageIDs: Set<UUID>` tracks the per-button "Saved" state — flips to a checkmark + dimmed label once the persist succeeds. Implementation: `AskPoseyChatViewModel.saveAssistantTurnToNotes(_:)` walks the message array backwards from the assistant bubble to find the corresponding user question, formats `"Q: <question>\n\nA: <answer>"`, and inserts the Note. Failure is non-fatal; logs via NSLog.
+
+**In-sheet indexing indicator** — when the user opens Ask Posey on a document whose embedding index is still being built, a sheet-internal notice appears above the chat history: "Indexing this document… N of M sections" with a circular progress indicator (or "Indexing this document for Ask Posey…" without progress data when none is available). Reuses the M2 `IndexingTracker` + `.documentIndexingDidProgress` notification plumbing. The notice hides as soon as indexing completes — no manual dismiss required. Spec'd in `ask_posey_spec.md` "indexing-indicator" subsection.
+
+**Build clean** on iPhone 17 simulator. `ReaderViewModel.jumpToOffset(_:)` refactor preserves `jumpToTOCEntry` semantics (the M5/M6 test suite passes unchanged).
+
 ## 2026-05-01 — Local API Ask Posey endpoints: `/ask` + `/open-ask-posey` for autonomous test infrastructure
 
 Per Mark's directive (2026-05-01): Posey now exposes the full Ask Posey pipeline through the local API so an autonomous test harness can drive multi-turn conversations end-to-end without UI involvement, AND can programmatically open the Ask Posey sheet on the simulator so visual verification via the simulator MCP becomes possible. Together these answer "we can verify Ask Posey ourselves before bothering Mark."

@@ -249,6 +249,76 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     func awaitHistoryLoaded() async {
         await historyLoadTask?.value
     }
+
+    /// M7 auto-save to notes: persists an Ask Posey turn (the question
+    /// the user asked + the assistant's answer) as a Note on the
+    /// document, anchored to the offset the conversation was about
+    /// (the anchor's offset for passage-scoped, or the assistant
+    /// turn's first cited chunk for document-scoped, or 0 as a last
+    /// resort). Returns true on success.
+    ///
+    /// The body text is two-paragraph: "Q: <question>\n\nA: <answer>"
+    /// — the same shape Posey's notes already have for surrounding-
+    /// context captures. When persistence fails (transient SQLite
+    /// issue, no DB) the caller surfaces the error; we don't log.
+    func saveAssistantTurnToNotes(_ message: AskPoseyMessage) -> Bool {
+        guard message.role == .assistant else { return false }
+        guard let db = databaseManager else { return false }
+
+        // Find the user turn that preceded this assistant message —
+        // that's the question the user asked. Walk backwards through
+        // messages from this index.
+        guard let assistantIndex = messages.firstIndex(where: { $0.id == message.id }) else {
+            return false
+        }
+        var question: String?
+        if assistantIndex > 0 {
+            for i in stride(from: assistantIndex - 1, through: 0, by: -1) {
+                if messages[i].role == .user {
+                    question = messages[i].content
+                    break
+                }
+            }
+        }
+
+        // Anchor: prefer the conversation's anchor offset, then the
+        // first injected chunk's start, then 0. End offset matches
+        // start (a point anchor — same shape playback-position notes use).
+        let startOffset: Int
+        if let anchor {
+            startOffset = max(0, anchor.plainTextOffset)
+        } else if let firstChunk = message.chunksInjected.first {
+            startOffset = max(0, firstChunk.startOffset)
+        } else {
+            startOffset = 0
+        }
+        let endOffset = startOffset
+
+        let body: String
+        if let q = question, !q.isEmpty {
+            body = "Q: \(q)\n\nA: \(message.content)"
+        } else {
+            body = message.content
+        }
+
+        let note = Note(
+            id: UUID(),
+            documentID: documentID,
+            createdAt: Date(),
+            updatedAt: Date(),
+            kind: .note,
+            startOffset: startOffset,
+            endOffset: endOffset,
+            body: body
+        )
+        do {
+            try db.insertNote(note)
+            return true
+        } catch {
+            NSLog("AskPosey saveAssistantTurnToNotes failed: \(error)")
+            return false
+        }
+    }
 }
 // ========== BLOCK 01: VIEW MODEL CORE - END ==========
 
@@ -758,6 +828,7 @@ extension AskPoseyChatViewModel {
         if let index = messages.firstIndex(where: { $0.id == placeholderID }) {
             messages[index].content = metadata.finalText
             messages[index].isStreaming = false
+            messages[index].chunksInjected = metadata.chunksInjected
             // Mirror the finalized turn into the prompt-builder cache
             // (replacing the placeholder we appended at send-start
             // with content "" — that placeholder was never in the

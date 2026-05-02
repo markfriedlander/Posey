@@ -1,5 +1,34 @@
 # Posey History
 
+## 2026-05-01 — Autonomous M7-complete + M8-mostly-complete + M9 polish wave
+
+Per Mark's "continue autonomously through M9" directive (2026-05-01), shipped a substantive batch covering the previously-deferred items that don't require design input or interactive verification.
+
+**M7 navigation cards (closes M7):** `.search`-classified questions now route to a `@Generable AskPoseyNavigationCardSet` schema (`AskPoseyNavigationCards.swift`). AFM is asked to pick 3–6 destinations from candidate chunks; out-of-range indices drop silently (defensive parsing). `AskPoseyNavigating` protocol; `AskPoseyService.generateNavigationCards`; `AskPoseyChatViewModel.runSearchPipeline` finalizes turns with `navigationCards: [AskPoseyNavigationCard]` instead of streaming prose. New `AskPoseyView.navigationCardList(for:)` renders a vertical list of Material-backed buttons with arrow.right.circle.fill icon, title, and reason; tap dismisses the sheet and jumps the reader via the same `onJumpToChunk` source-attribution pills use. Sources strip is suppressed when navigation cards are present (the cards themselves are the source link).
+
+**Immersive reading style:** distance-based opacity (1.0 at center, -0.30/row, 0.05 floor) and scale (1.0, -0.15/row, 0.55 floor) curves applied to every segment row. Smooth `easeInOut(0.18)` animation on `currentSentenceIndex` changes, honors Reduce Motion. New `ReaderViewModel.distanceFromActive(segment:)` and (block:) drive the falloff. Search matches stay full-opacity in any mode so the search affordance never gets dimmed.
+
+**Motion reading style + CoreMotion:** large centered active sentence at 1.6× the configured font size; surrounding rows use the same Immersive falloff. Three-setting design (Off / On / Auto) per `DECISIONS.md`. New `MotionDetector` class wraps `CMMotionActivityManager` (preferred — uses Apple's built-in walking/running/cycling/automotive classification) + accelerometer fallback (low-pass-filtered magnitude). **Privacy contract: detector.start(consented:) is a no-op without the consent flag** — defense-in-depth against accidental CoreMotion engagement. `MotionConsentSheet` (BLOCK P1B in ReaderView.swift) explains the privacy model before Auto engages: "Motion data stays on this device. Posey doesn't send movement data anywhere. You can switch Motion to Off or On at any time and the monitoring stops immediately." `INFOPLIST_KEY_NSMotionUsageDescription` added so iOS shows the privacy reason on the system permission prompt.
+
+**Audio export to M4A:** `AudioExporter` class renders documents to `.m4a` via `AVSpeechSynthesizer.write(_:toBufferCallback:)` → `AVAudioFile` (AAC). **Best-Available capture investigation runs at render time:** if the first utterance produces no buffers, `AudioExporter` throws `.voiceNotCapturable` so the UI tells the user to switch to a Custom voice. State machine: `idle / rendering(progress, i, total) / finished(url) / failed(reason)`. New `AudioExportSheet` (BLOCK P1C of ReaderView.swift) with three states: rendering (linear ProgressView + cancel), finished (ShareLink to save/share), failed (error message). Footer text in the prefs section explains the Best-Available caveat up front.
+
+**M8 entity-aware multi-factor relevance scoring v2:** new `DocumentEmbeddingIndex.searchWithEntityBoost(...)` re-ranks the embedding-search results by `cosine + 2.0 × Jaccard(query_entities, chunk_entities)`, clamped to [-1, 3]. Wider candidate pool (3× requested limit) so entity-rich chunks that ranked lower on pure cosine can still surface. New `extractEntities(from:)` (NLTagger.nameType — personalName / placeName / organizationName, lowercased) and `jaccardOverlap(_:_:)` helpers. `AskPoseyChatViewModel.retrieveRAGChunks(...)` now uses the boosted variant; falls back to pure cosine when neither side has entities. New `EntityScoringTests` (8 tests, all green): empty string / person / place / org / Jaccard empty / identical / disjoint / partial.
+
+**M9 landscape centering polish:** `onChange(of: verticalSizeClass)` and `onChange(of: horizontalSizeClass)` hooks re-fire `scrollToCurrentSentence` twice (60 ms + 180 ms) after rotation / iPad split-view resize. Two-stage delay matches the initial-appear pattern: first scroll lands approximately, second catches up after the lazy-VStack layout pass realizes previously off-screen rows. Closes the "rotating mid-read leaves the active sentence off-center" issue Mark accepted as good-enough-for-now in earlier passes.
+
+**Format-parity audit harness (`tools/format_parity_audit.py`):** systematic capability matrix — for each of 7 supported formats (txt / md / rtf / docx / html / epub / pdf) verifies: import OK, character count > 0, plainText present, displayText present, /ask runs end-to-end. Writes `tools/format_parity_audit_report.json`. Skeleton on top of the synthetic-corpus generator so iteration on real-world artifacts builds incrementally.
+
+**Multilingual verification harness (`tools/multilingual_verify.py`):** downloads a 5-language corpus (English / French / German / Spanish / Italian — Project Gutenberg, ~150KB each), imports into Posey, drives `/ask` with one canonical question per language, reports retrieval shape (chunks_injected / rag_tokens / prompt_tokens / inference_duration). Skeleton — Mark refines question→expected-passage anchors in a follow-up pass; the harness exercises the API plumbing now.
+
+**Build clean** on iPhone 17 simulator throughout. M5/M6/M7/M8 test suites (entity scoring + prompt builder + CRUD + summarization trigger + schema + drop priority + estimator + budget + surrounding window) all green. Total Ask Posey + reader test count is now ~46 across the new test files added in this run.
+
+**Items still queued for genuine-decision-point passes (recorded in NEXT.md):**
+- Mac Catalyst verification (running on Mac, layout audit)
+- VoiceOver pass (interactive testing with the screen reader)
+- App icon (design input from Mark)
+- M10 submission flow (privacy policy text approval, App Store metadata, final submission)
+- LocalAPIServer class deeper compile-out (cleanup candidate)
+
 ## 2026-05-01 — Milestone 8 + 9 partials: lock-screen audio, Reading Style preference, dev-tools-out-of-release
 
 Five M8/M9 wins shipped autonomously per Mark's "go through M9" directive (2026-05-01). Items deferred to dedicated implementation passes are recorded explicitly in NEXT.md.

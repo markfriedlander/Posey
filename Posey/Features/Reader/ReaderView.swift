@@ -6,6 +6,9 @@ import UIKit
 #elseif canImport(AppKit)
 import AppKit
 #endif
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 
 struct ReaderView: View {
     @StateObject private var viewModel: ReaderViewModel
@@ -623,6 +626,16 @@ struct ReaderView: View {
     /// sheet is presenting. M5+ will share this entry point with
     /// the passage-scoped invocation (text-selection menu); the
     /// only difference will be how the anchor is built.
+    ///
+    /// **M5 wiring (2026-05-01).** The chat view model now takes:
+    /// - documentID + plainText so the prompt builder can reach into
+    ///   `ask_posey_conversations` for prior history and compute
+    ///   surrounding context around the anchor offset.
+    /// - A live `AskPoseyService` (when available on the runtime
+    ///   platform) so `send()` actually streams a real AFM response.
+    ///   Both classifier and streamer are nil on platforms without
+    ///   FoundationModels — the view model falls back to the M4 echo
+    ///   stub so previews/tests keep running.
     private func openAskPosey() {
         let segments = viewModel.segments
         let active = segments.indices.contains(viewModel.currentSentenceIndex)
@@ -641,7 +654,30 @@ struct ReaderView: View {
         // doesn't keep advancing under the user. We don't auto-resume
         // on dismiss — let the user decide.
         viewModel.stopPlayback()
-        askPoseyChat = AskPoseyChatViewModel(anchor: anchor)
+
+        // Build a live service if AFM is available on this platform/OS.
+        // Falls back to nil — the view model degrades gracefully to
+        // its echo-stub send path in that case.
+        let document = viewModel.document
+        let database = viewModel.databaseManager
+        var classifier: AskPoseyClassifying?
+        var streamer: AskPoseyStreaming?
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+            let service = AskPoseyService()
+            classifier = service
+            streamer = service
+        }
+        #endif
+
+        askPoseyChat = AskPoseyChatViewModel(
+            documentID: document.id,
+            documentPlainText: document.plainText,
+            anchor: anchor,
+            classifier: classifier,
+            streamer: streamer,
+            databaseManager: database
+        )
     }
 }
 
@@ -897,7 +933,11 @@ final class ReaderViewModel: ObservableObject {
     /// See `DocumentPageMap` for construction details.
     @Published private(set) var pageMap: DocumentPageMap = .empty
 
-    private let databaseManager: DatabaseManager
+    /// Public read access for the database handle so external sites
+    /// (Ask Posey M5+) can persist and read per-document state without
+    /// re-injecting it. Storage stays internal — only the manager is
+    /// exposed, never the underlying SQLite handle.
+    let databaseManager: DatabaseManager
     private let playbackService: SpeechPlaybackService
     private let shouldAutoPlayOnAppear: Bool
     private let shouldAutoCreateNoteOnAppear: Bool

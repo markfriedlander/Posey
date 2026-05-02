@@ -1,5 +1,52 @@
 # Posey Decisions
 
+## 2026-05-01 — Ask Posey: App Owns The Context, Not The Model
+
+- Status: Accepted
+- Decision: For every Ask Posey call, the `LanguageModelSession` is constructed fresh, used once, and discarded. The app assembles the entire prompt body via `AskPoseyPromptBuilder` from explicit inputs; AFM never carries a transcript across calls. Even within a single sheet open, no state accumulates inside the model — the prompt builder rebuilds the full envelope per turn.
+- Rationale: Complete control and observability. We know exactly what the model sees on every turn — every byte traces back to either an explicit caller input or a section the builder generated from one. We know the per-section token budget, what got dropped, which RAG chunks contributed. None of that is possible if AFM manages its own session context. This makes the 60/25/15 budget split (or whatever it tunes to) meaningful and enforceable, enables fact-verification (checking AFM's claims against the chunks actually injected), and makes the local-API tuning loop's "what did the model see, what got dropped, where did answers fall short" view possible.
+- Implementation:
+  - Per-call lifecycle: `AskPoseyService.streamProseResponse` constructs `LanguageModelSession(model:instructions:)`, runs one `streamResponse` round-trip, returns when the stream terminates. The session goes out of scope and is deallocated.
+  - All conversation history flows through the prompt builder. Recent verbatim turns load from `ask_posey_conversations` (M5+); older turns will summarize into a cached `is_summary = 1` row (M6); even older turns become semantically retrievable (M6+).
+  - `AskPoseyPromptOutput.combinedForLogging` records exactly what the model effectively saw — instructions + body — for the local-API tuning loop. Persisted as `full_prompt_for_logging` per assistant turn.
+  - Drop priority is explicit: oldest RAG chunks first → conversation summary → oldest STM turns → surrounding context → user-question truncation. System framing + anchor are non-droppable. Each drop records a `DroppedSection` with section identifier and human-readable reason.
+- Alternatives considered:
+  - Persistent `LanguageModelSession` reused across turns within a sheet: rejected — AFM's transcript management is opaque, would couple our context-window enforcement to whatever AFM decides to keep, and would silently break the "we know exactly what the model sees" property the moment AFM's policy shifts.
+  - "Context manager middleware" that wraps a persistent session and decides per-call what to inject: rejected — same opacity problem one layer up. The trustworthy boundary is "every prompt is built from scratch, by us, every call."
+  - Letting the model decide what context it needs (function-calling pattern): rejected for v1 — adds a round-trip + cognitive cost the focused passage-grounded use case doesn't need. Reconsider when the surface widens beyond passage / document / annotation.
+- Source: Mark's directive 2026-05-01 ("Kill the LanguageModelSession after every response. Do not use a persistent session and rely on AFM's own context management."). Hal blocks 17 / 18 / 20.1 / 21 / 7.5 served as the proven example of this approach at scale; Posey adapts the principle without copying the code (Posey is per-document, not global; budget split differs; RAG is over document chunks, not conversation memory).
+
+## 2026-05-01 — Ask Posey: Conversation History Is Permanent, Not Session-Scoped
+
+- Status: Accepted
+- Decision: Prior Ask Posey conversations for a document persist in `ask_posey_conversations` indefinitely. Closing the sheet does not discard the conversation. Reopening the sheet for the same document reaches into the table and loads recent verbatim turns into the prompt builder; older turns summarize (M6); even older are semantically retrievable (M6+).
+- Rationale: A reading companion has to remember. The product promise — Posey is a friend who read the same book and never loses the thread, even if you put it down for a week and pick it up at a different chapter — depends on history that survives across sessions. Without persistence, every sheet open is a stranger, and the prompt builder's STM window has nothing to fill it with. The 60/25/15 budget split is meaningful only if we can actually fill the verbatim/summary/RAG slots from real history.
+- Implementation:
+  - Schema: `ask_posey_conversations` carries 14 columns (M1's 9 + M5's 5: `intent`, `chunks_injected`, `full_prompt_for_logging`, `embedding`, `embedding_kind`). `ON DELETE CASCADE` on the document_id FK ensures rows die when the document is removed; otherwise they live forever.
+  - View model: `AskPoseyChatViewModel.init(documentID:...)` queries `askPoseyTurns(for:limit:)` on init; `historyBoundary` marks where prior history ends and this-session additions begin.
+  - UI: prior conversation renders above an "Earlier conversation" divider; anchor at the boundary; this-session messages below — iMessage pattern. The user lands on the anchor; prior context is above the fold, scroll up to find it. Invisible unless looked for, always there if wanted.
+  - Persistence: every send writes the user turn immediately (so a crash mid-stream preserves what was asked); every successful stream completion writes the assistant turn with full metadata (chunks JSON + full prompt body for the local-API tuning loop).
+- Alternatives considered:
+  - Session-scoped chat (M4 default): rejected — breaks the product promise.
+  - History stored only per-thread (a "thread" surface like Hal's): deferred — passage-scoped invocation in M5 is naturally per-document; threading within a document can return as a UX layer in a later milestone if the conversation volume warrants it. The schema accommodates threading (timestamp + metadata) without restructuring.
+- Source: Mark's correction 2026-05-01 ("Conversation history is permanent, not session-scoped").
+
+## 2026-05-01 — Ask Posey: Document RAG Is M5 Infrastructure, Not An M6 Enhancement
+
+- Status: Accepted
+- Decision: The full prompt-builder architecture — including the `documentChunks` slot, the RAG section rendering, the cosine-dedup hooks, and the drop priority for chunks — ships in M5, even though M5 leaves `documentChunks: []` and the RAG section renders empty. M6 turns retrieval on and fills the slot; the builder doesn't change. Same applies to `conversationSummary` — M5 accepts nil cleanly, M6's auto-summarizer fills it.
+- Rationale: Document RAG is load-bearing infrastructure for Ask Posey's value, not an enhancement. Without it, the model has the anchor + a few sentences of surrounding context — that's enough to look up a word but not to answer "wait, didn't the author address this earlier?" Building the architecture in M5 means M6 is "fill in the data" rather than "restructure the system" — the builder, the budget enforcement, the drop priority, the source-attribution metadata, the test coverage all exist before the data is wired. M7's source-attribution UI reads from the same `chunksInjected` field the builder already populates.
+- Implementation:
+  - Builder: `RetrievedChunk` value type, `documentChunks: [RetrievedChunk]` input, MEMORY_LONG section renderer with budget enforcement and drop tracking, `chunksInjected` output. M5 always passes empty array; the section silently skips, no overhead.
+  - Budget: `ragBudgetTokens: 1800` (largest allocation by design — RAG is what makes answers accurate).
+  - Drop priority: oldest chunks dropped first when the budget overflows; chunks come pre-ranked by relevance (highest first), so "drop oldest" preserves the most relevant by construction.
+  - Persistence: `chunks_injected` JSON column carries which chunks went in per assistant turn (M5 always `'[]'`; M6 fills); M7 reads back to render "Sources" attribution pills.
+  - Auto-summarization: `AskPoseyPromptInputs.conversationSummary: String?` accepts nil cleanly; the section is rendered only when populated. M6 implements the background summarizer that fills it. **This is an explicit hard M6 blocker recorded in NEXT.md** because without it, the M5 STM window silently drops turns past ~3-4 and the "remembers everything" promise breaks at scale.
+- Alternatives considered:
+  - Wait for M6 to add the chunk slot, summary slot, and drop priority: rejected — this is the "fix it later" pattern that produces architectural debt. Building the right shape from M5 costs an extra evening of work and saves a refactor.
+  - Skip the RAG slot in M5 entirely, add it as a single block in M6: rejected — same problem, plus the M5 token budget would tune around an empty RAG slot and need re-tuning when chunks land.
+- Source: Mark's correction 2026-05-01.
+
 ## 2026-05-01 — Reading Style Is A Preferences Section, Not Separate Application Modes
 
 - Status: Accepted

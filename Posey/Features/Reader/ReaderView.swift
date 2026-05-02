@@ -24,6 +24,13 @@ struct ReaderView: View {
     @State private var isShowingNotesSheet = false
     @State private var isShowingPreferencesSheet = false
     @State private var isShowingTOCSheet = false
+    /// Holds the Ask Posey chat view model while the sheet is open.
+    /// `nil` when the sheet is dismissed. Using a value-typed item
+    /// (instead of a separate `isShowing` Bool) means the view model
+    /// is reconstructed on every open — fresh anchor capture, fresh
+    /// transcript — and dropped on close so the deinit cancels any
+    /// in-flight task.
+    @State private var askPoseyChat: AskPoseyChatViewModel? = nil
     @State private var isChromeVisible = true
     @State private var chromeFadeTask: Task<Void, Never>?
     @State private var expandedImageItem: ExpandedImageItem? = nil
@@ -251,6 +258,18 @@ struct ReaderView: View {
             .sheet(item: $expandedImageItem) { item in
                 ExpandedImageSheet(imageID: item.id, viewModel: viewModel)
             }
+            // Ask Posey modal sheet (M4: shell + echo stub; M5+: live
+            // AFM). Item-bound so the view model's lifetime tracks
+            // the sheet — `nil` when closed, a fresh instance with
+            // captured anchor when open. The deinit cancels any
+            // in-flight Task so a long generation doesn't keep
+            // running after dismiss.
+            .sheet(
+                item: $askPoseyChat,
+                onDismiss: { askPoseyChat = nil }
+            ) { chatVM in
+                AskPoseyView(viewModel: chatVM)
+            }
         }
     }
 
@@ -406,6 +425,30 @@ struct ReaderView: View {
 
     private var controls: some View {
         HStack(spacing: 0) {
+            // Ask Posey glyph — far left, opposite Restart, per
+            // ARCHITECTURE.md "Ask Posey Architecture" §"Surface
+            // Design". Hidden entirely when AFM is unavailable on
+            // this device, per the AskPosey availability gate
+            // captured in DECISIONS.md / ask_posey_spec.md
+            // resolved decision 5. The glyph sits OUTSIDE the
+            // existing transport HStack — no collision with
+            // Previous / Play / Next / Restart spacing.
+            if AskPoseyAvailability.isAvailable {
+                Button {
+                    revealChrome()
+                    openAskPosey()
+                } label: {
+                    Image(systemName: "sparkle")
+                        .font(.title3)
+                        .foregroundStyle(chromeTint)
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityIdentifier("reader.askPosey")
+                .accessibilityLabel("Ask Posey about this passage")
+
+                Spacer(minLength: 24)
+            }
+
             Button {
                 revealChrome()
                 viewModel.goToPreviousMarker()
@@ -534,6 +577,34 @@ struct ReaderView: View {
                 isChromeVisible = false
             }
         }
+    }
+
+    /// Capture the active sentence as the Ask Posey anchor and open
+    /// the sheet. The captured anchor is the active sentence at the
+    /// moment of invocation — playback paused or running — so the
+    /// model has stable context even if playback advances while the
+    /// sheet is presenting. M5+ will share this entry point with
+    /// the passage-scoped invocation (text-selection menu); the
+    /// only difference will be how the anchor is built.
+    private func openAskPosey() {
+        let segments = viewModel.segments
+        let active = segments.indices.contains(viewModel.currentSentenceIndex)
+            ? segments[viewModel.currentSentenceIndex]
+            : segments.first
+        let anchor: AskPoseyAnchor?
+        if let active {
+            anchor = AskPoseyAnchor(
+                text: active.text,
+                plainTextOffset: active.startOffset
+            )
+        } else {
+            anchor = nil
+        }
+        // Stop playback while the sheet is open so the document
+        // doesn't keep advancing under the user. We don't auto-resume
+        // on dismiss — let the user decide.
+        viewModel.stopPlayback()
+        askPoseyChat = AskPoseyChatViewModel(anchor: anchor)
     }
 }
 

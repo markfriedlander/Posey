@@ -131,6 +131,88 @@ final class IndexingTrackerTests: XCTestCase {
                       "Malformed notifications must not corrupt tracker state")
     }
 
+    func testProgressNotificationUpdatesPublishedProgress() async throws {
+        let id = UUID()
+        center.post(name: .documentIndexingDidStart, object: nil,
+                    userInfo: [DocumentEmbeddingIndex.notificationDocumentIDKey: id])
+        center.post(name: .documentIndexingDidProgress, object: nil,
+                    userInfo: [
+                        DocumentEmbeddingIndex.notificationDocumentIDKey: id,
+                        DocumentEmbeddingIndex.notificationProcessedChunksKey: 50,
+                        DocumentEmbeddingIndex.notificationTotalChunksKey: 200
+                    ])
+        try await Task.sleep(for: .milliseconds(50))
+        let firstSnapshot = try XCTUnwrap(tracker.indexingProgress[id])
+        XCTAssertEqual(firstSnapshot.processed, 50)
+        XCTAssertEqual(firstSnapshot.total, 200)
+        XCTAssertEqual(firstSnapshot.fraction, 0.25, accuracy: 0.001)
+
+        center.post(name: .documentIndexingDidProgress, object: nil,
+                    userInfo: [
+                        DocumentEmbeddingIndex.notificationDocumentIDKey: id,
+                        DocumentEmbeddingIndex.notificationProcessedChunksKey: 150,
+                        DocumentEmbeddingIndex.notificationTotalChunksKey: 200
+                    ])
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(tracker.indexingProgress[id]?.processed, 150,
+                       "Subsequent progress notifications must overwrite the previous snapshot")
+    }
+
+    func testProgressIsClearedOnComplete() async throws {
+        let id = UUID()
+        center.post(name: .documentIndexingDidProgress, object: nil,
+                    userInfo: [
+                        DocumentEmbeddingIndex.notificationDocumentIDKey: id,
+                        DocumentEmbeddingIndex.notificationProcessedChunksKey: 100,
+                        DocumentEmbeddingIndex.notificationTotalChunksKey: 200
+                    ])
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNotNil(tracker.indexingProgress[id])
+
+        center.post(name: .documentIndexingDidComplete, object: nil,
+                    userInfo: [
+                        DocumentEmbeddingIndex.notificationDocumentIDKey: id,
+                        DocumentEmbeddingIndex.notificationChunkCountKey: 200
+                    ])
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(tracker.indexingProgress[id],
+                     "Completed indexing must clear the in-flight progress entry")
+    }
+
+    func testProgressIsClearedOnFail() async throws {
+        let id = UUID()
+        center.post(name: .documentIndexingDidProgress, object: nil,
+                    userInfo: [
+                        DocumentEmbeddingIndex.notificationDocumentIDKey: id,
+                        DocumentEmbeddingIndex.notificationProcessedChunksKey: 100,
+                        DocumentEmbeddingIndex.notificationTotalChunksKey: 200
+                    ])
+        try await Task.sleep(for: .milliseconds(50))
+
+        struct Boom: Error {}
+        center.post(name: .documentIndexingDidFail, object: nil,
+                    userInfo: [
+                        DocumentEmbeddingIndex.notificationDocumentIDKey: id,
+                        DocumentEmbeddingIndex.notificationErrorKey: Boom()
+                    ])
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(tracker.indexingProgress[id],
+                     "Failed indexing must clear the in-flight progress entry")
+    }
+
+    func testProgressFractionClampedAtBounds() {
+        // Direct test of the IndexingProgress struct without going
+        // through notifications — easier to assert numerics.
+        let zero = IndexingTracker.IndexingProgress(processed: 0, total: 0)
+        XCTAssertEqual(zero.fraction, 0,
+                       "Zero total should produce 0 fraction, not NaN")
+        let mid = IndexingTracker.IndexingProgress(processed: 50, total: 200)
+        XCTAssertEqual(mid.fraction, 0.25, accuracy: 0.001)
+        let over = IndexingTracker.IndexingProgress(processed: 200, total: 100)
+        XCTAssertEqual(over.fraction, 1.0,
+                       "Fraction should clamp at 1.0 even when processed > total")
+    }
+
     func testDismissCompletionRemovesEntry() async throws {
         let id = UUID()
         center.post(name: .documentIndexingDidComplete, object: nil,

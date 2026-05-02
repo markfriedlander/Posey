@@ -32,19 +32,29 @@ struct AskPoseyMessage: Identifiable, Equatable, Sendable {
     var content: String
     var isStreaming: Bool
     let timestamp: Date
+    /// Document chunks the prompt builder injected to ground this
+    /// assistant turn (M7 source attribution surface). Empty for
+    /// user messages and for assistant turns that didn't receive any
+    /// RAG chunks. Populated by the chat view model in
+    /// `finalizeAssistantTurn(...)` from the response metadata. The
+    /// view renders these as a tappable "Sources" strip below the
+    /// bubble — each pill jumps the reader to the chunk's offset.
+    var chunksInjected: [RetrievedChunk]
 
     init(
         id: UUID = UUID(),
         role: Role,
         content: String,
         isStreaming: Bool = false,
-        timestamp: Date = .now
+        timestamp: Date = .now,
+        chunksInjected: [RetrievedChunk] = []
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.isStreaming = isStreaming
         self.timestamp = timestamp
+        self.chunksInjected = chunksInjected
     }
 }
 // ========== BLOCK 01: MESSAGE - END ==========

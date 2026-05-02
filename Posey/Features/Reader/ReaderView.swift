@@ -282,7 +282,15 @@ struct ReaderView: View {
                 item: $askPoseyChat,
                 onDismiss: { askPoseyChat = nil }
             ) { chatVM in
-                AskPoseyView(viewModel: chatVM)
+                AskPoseyView(
+                    viewModel: chatVM,
+                    onJumpToChunk: { offset in
+                        // M7 source-attribution tap: dismiss the
+                        // sheet (the AskPoseyView calls dismiss()
+                        // before invoking this) and jump the reader.
+                        viewModel.jumpToOffset(offset)
+                    }
+                )
             }
             .onReceive(
                 NotificationCenter.default
@@ -1951,9 +1959,18 @@ final class ReaderViewModel: ObservableObject {
     /// Jumps playback and scroll position to the sentence nearest to a TOC entry's
     /// plainTextOffset. Stops any active playback before jumping.
     func jumpToTOCEntry(_ entry: StoredTOCEntry) {
-        guard entry.plainTextOffset >= 0 else { return }
+        jumpToOffset(entry.plainTextOffset)
+    }
+
+    /// Jump the reader to the sentence at-or-before `plainTextOffset`.
+    /// Shared infrastructure for TOC entries (`jumpToTOCEntry`),
+    /// page-jumps (`jumpToPage`), and M7 Ask Posey source-attribution
+    /// pill taps. Stops playback so the user lands on a stable
+    /// position rather than an immediately-advancing one.
+    func jumpToOffset(_ plainTextOffset: Int) {
+        guard plainTextOffset >= 0 else { return }
         stopPlayback()
-        let targetIndex = segments.lastIndex(where: { $0.startOffset <= entry.plainTextOffset })
+        let targetIndex = segments.lastIndex(where: { $0.startOffset <= plainTextOffset })
             ?? 0
         currentSentenceIndex = targetIndex
         persistPosition()

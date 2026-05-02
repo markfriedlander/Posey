@@ -550,6 +550,223 @@ extension DatabaseManager {
 
 // ========== BLOCK 05C: DOCUMENT CHUNKS (Ask Posey M2) - END ==========
 
+// ========== BLOCK 05D: ASK POSEY CONVERSATIONS (M5) - START ==========
+
+/// One row of `ask_posey_conversations`: a single message in a
+/// per-document conversation thread. Conversations are persistent —
+/// closing the Ask Posey sheet does not discard them; opening it again
+/// for the same document continues the thread.
+///
+/// `nonisolated` because callers include both the MainActor-isolated
+/// view model and (via the prompt builder) test code that runs off the
+/// main actor. The type holds only `Sendable` value-typed properties.
+nonisolated struct StoredAskPoseyTurn: Equatable, Sendable, Identifiable {
+    /// The unique row identifier. Stable across the lifetime of the
+    /// row — used as the SwiftUI `Identifiable` key when surfacing
+    /// historical turns in the sheet.
+    let id: String
+    let documentID: UUID
+    let timestamp: Date
+    /// `"user"` or `"assistant"`. Modeled as a string rather than an
+    /// enum because the SQL column is `TEXT`; the view model translates
+    /// to/from `AskPoseyMessage.Role` at the boundary.
+    let role: String
+    let content: String
+    /// `"passage"` (M5), `"document"` (M6), or `"annotation"` (later).
+    /// Recorded per turn so retrievers in M6+ can prefer matching
+    /// invocation kinds when budget is tight.
+    let invocation: String
+    /// Character offset of the anchor passage at the moment the turn
+    /// was created. `nil` when the invocation didn't capture an anchor
+    /// (M6 document-scope) or the row is a summary.
+    let anchorOffset: Int?
+    /// `AskPoseyIntent` raw value when this turn is a user message.
+    /// `nil` for assistant turns and pre-M5 legacy rows.
+    let intent: String?
+    /// JSON-encoded array of chunk references actually injected into
+    /// the prompt that produced this assistant turn. Empty in M5
+    /// (`"[]"`); M6 fills it; M7 surfaces it as a "Sources" strip.
+    let chunksInjectedJSON: String
+    /// Verbatim prompt body the model saw on this turn. Optional
+    /// because user turns and pre-M5 rows don't carry one. Used by
+    /// the local-API tuning loop to inspect what was actually injected.
+    let fullPromptForLogging: String?
+    /// Watermark — when `is_summary == 1`, this row is a summary that
+    /// covers turns up to and including this user-turn count. Lets the
+    /// prompt builder pick the right summary without rebuilding it
+    /// when conversation lengths cross the STM boundary.
+    let summaryOfTurnsThrough: Int
+    /// `true` when this row is a generated summary rather than a real
+    /// user/assistant message. Summary rows are surfaced to the prompt
+    /// builder's `conversationSummary` slot, never to the verbatim
+    /// `conversationHistory` slot.
+    let isSummary: Bool
+}
+
+extension DatabaseManager {
+    /// Append a single turn to the persistent conversation log for
+    /// `documentID`. Called both for user turns (immediately on send)
+    /// and assistant turns (after streaming completes). Writing each
+    /// side individually rather than as a paired transaction keeps the
+    /// model honest about partial responses — if AFM crashes mid-
+    /// stream, the user turn is still on disk and can be retried.
+    func appendAskPoseyTurn(_ turn: StoredAskPoseyTurn) throws {
+        let sql = """
+        INSERT INTO ask_posey_conversations (
+            id, document_id, timestamp, role, content, invocation,
+            anchor_offset, summary_of_turns_through, is_summary,
+            intent, chunks_injected, full_prompt_for_logging
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(turn.id, at: 1, for: statement)
+        try bind(turn.documentID.uuidString, at: 2, for: statement)
+        sqlite3_bind_double(statement, 3, turn.timestamp.timeIntervalSince1970)
+        try bind(turn.role, at: 4, for: statement)
+        try bind(turn.content, at: 5, for: statement)
+        try bind(turn.invocation, at: 6, for: statement)
+        if let offset = turn.anchorOffset {
+            sqlite3_bind_int(statement, 7, Int32(offset))
+        } else {
+            sqlite3_bind_null(statement, 7)
+        }
+        sqlite3_bind_int(statement, 8, Int32(turn.summaryOfTurnsThrough))
+        sqlite3_bind_int(statement, 9, turn.isSummary ? 1 : 0)
+        if let intent = turn.intent {
+            try bind(intent, at: 10, for: statement)
+        } else {
+            sqlite3_bind_null(statement, 10)
+        }
+        try bind(turn.chunksInjectedJSON, at: 11, for: statement)
+        if let prompt = turn.fullPromptForLogging {
+            try bind(prompt, at: 12, for: statement)
+        } else {
+            sqlite3_bind_null(statement, 12)
+        }
+        try step(statement)
+    }
+
+    /// Return non-summary conversation turns for a document, oldest-first.
+    /// `limit == nil` returns every turn; positive `limit` caps to the
+    /// most recent N rows (still returned oldest-first so the prompt
+    /// builder can append them in chronological order).
+    ///
+    /// Summary rows are intentionally excluded — they live in the
+    /// `conversationSummary` slot of the prompt, not the verbatim STM
+    /// slot. Use `askPoseyLatestSummary(for:)` for those.
+    func askPoseyTurns(for documentID: UUID, limit: Int? = nil) throws -> [StoredAskPoseyTurn] {
+        let baseSQL = """
+        SELECT id, document_id, timestamp, role, content, invocation,
+               anchor_offset, summary_of_turns_through, is_summary,
+               intent, chunks_injected, full_prompt_for_logging
+        FROM ask_posey_conversations
+        WHERE document_id = ? AND is_summary = 0
+        """
+        let sql: String
+        if let limit, limit > 0 {
+            // Inner query takes the most recent N by timestamp DESC,
+            // outer query reverses to ASC for the prompt builder.
+            sql = """
+            SELECT * FROM (
+                \(baseSQL)
+                ORDER BY timestamp DESC
+                LIMIT \(limit)
+            ) ORDER BY timestamp ASC;
+            """
+        } else {
+            sql = "\(baseSQL) ORDER BY timestamp ASC;"
+        }
+
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+
+        var turns: [StoredAskPoseyTurn] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let turn = decodeAskPoseyTurn(statement: statement) else { continue }
+            turns.append(turn)
+        }
+        return turns
+    }
+
+    /// Most recent summary row covering older turns for `documentID`,
+    /// or `nil` if no summary exists yet. M6 writes these; M5 always
+    /// returns nil.
+    func askPoseyLatestSummary(for documentID: UUID) throws -> StoredAskPoseyTurn? {
+        let sql = """
+        SELECT id, document_id, timestamp, role, content, invocation,
+               anchor_offset, summary_of_turns_through, is_summary,
+               intent, chunks_injected, full_prompt_for_logging
+        FROM ask_posey_conversations
+        WHERE document_id = ? AND is_summary = 1
+        ORDER BY summary_of_turns_through DESC
+        LIMIT 1;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        if sqlite3_step(statement) == SQLITE_ROW {
+            return decodeAskPoseyTurn(statement: statement)
+        }
+        return nil
+    }
+
+    /// Count of non-summary turns for a document. Used by the view
+    /// model's "should we fetch history at all" early exit so a
+    /// fresh-document open doesn't hit SELECT before any turns exist.
+    func askPoseyTurnCount(for documentID: UUID) throws -> Int {
+        let sql = """
+        SELECT COUNT(*) FROM ask_posey_conversations
+        WHERE document_id = ? AND is_summary = 0;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(statement, 0))
+    }
+
+    /// Decode the columns selected by `askPoseyTurns` / `askPoseyLatestSummary`
+    /// into the value type. The two queries share the same SELECT list
+    /// so they can share this decoder.
+    private func decodeAskPoseyTurn(statement: OpaquePointer?) -> StoredAskPoseyTurn? {
+        guard
+            let id = sqliteString(statement, index: 0),
+            let docIDString = sqliteString(statement, index: 1),
+            let docID = UUID(uuidString: docIDString),
+            let role = sqliteString(statement, index: 3),
+            let content = sqliteString(statement, index: 4),
+            let invocation = sqliteString(statement, index: 5)
+        else { return nil }
+        let timestamp = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+        let anchorOffset: Int? = sqlite3_column_type(statement, 6) == SQLITE_NULL
+            ? nil
+            : Int(sqlite3_column_int(statement, 6))
+        let summaryThrough = Int(sqlite3_column_int(statement, 7))
+        let isSummary = sqlite3_column_int(statement, 8) != 0
+        let intent = sqliteString(statement, index: 9)
+        let chunksInjected = sqliteString(statement, index: 10) ?? "[]"
+        let fullPrompt = sqliteString(statement, index: 11)
+        return StoredAskPoseyTurn(
+            id: id,
+            documentID: docID,
+            timestamp: timestamp,
+            role: role,
+            content: content,
+            invocation: invocation,
+            anchorOffset: anchorOffset,
+            intent: intent,
+            chunksInjectedJSON: chunksInjected,
+            fullPromptForLogging: fullPrompt,
+            summaryOfTurnsThrough: summaryThrough,
+            isSummary: isSummary
+        )
+    }
+}
+
+// ========== BLOCK 05D: ASK POSEY CONVERSATIONS (M5) - END ==========
+
 // ========== BLOCK 06: SCHEMA AND HELPERS - START ==========
 
 extension DatabaseManager {
@@ -651,6 +868,36 @@ extension DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_ask_posey_doc_ts
             ON ask_posey_conversations(document_id, timestamp);
             """)
+
+        // ========== Ask Posey Milestone 5 — column additions ==========
+        // Five columns added to support the M5 prose response loop and the
+        // observability the prompt builder needs:
+        //
+        // - intent: classified AskPoseyIntent ('immediate' | 'search' |
+        //   'general'), nullable for legacy rows. Persisted per turn so
+        //   we can audit how the classifier routed real questions.
+        //
+        // - chunks_injected: JSON array of chunk references (id, offset,
+        //   relevance score) actually injected into the prompt for this
+        //   assistant turn. M5 writes '[]' (no RAG yet); M6 fills it; M7
+        //   surfaces it as the "Sources" strip below assistant bubbles.
+        //
+        // - full_prompt_for_logging: the rendered prompt body the model
+        //   saw on this turn. Large but invaluable for the local-API
+        //   tuning loop Mark called for ("watch what gets injected, what
+        //   gets dropped, where answers fall short"). Nullable so
+        //   pre-M5 turns don't need backfill.
+        //
+        // - embedding / embedding_kind: per-turn semantic embedding for
+        //   M6+ "retrieve relevant older turns when budget is tight"
+        //   path. Mirrors the document_chunks pattern. Nullable in M5;
+        //   M6 backfills + populates new turns at write time.
+        try addColumnIfNeeded(table: "ask_posey_conversations", column: "intent", definition: "TEXT")
+        try addColumnIfNeeded(table: "ask_posey_conversations", column: "chunks_injected", definition: "TEXT NOT NULL DEFAULT '[]'")
+        try addColumnIfNeeded(table: "ask_posey_conversations", column: "full_prompt_for_logging", definition: "TEXT")
+        try addColumnIfNeeded(table: "ask_posey_conversations", column: "embedding", definition: "BLOB")
+        try addColumnIfNeeded(table: "ask_posey_conversations", column: "embedding_kind", definition: "TEXT NOT NULL DEFAULT 'unknown'")
+        // ========== End Ask Posey Milestone 5 column additions ==========
 
         // Embedding index for Ask Posey RAG retrieval. One row per ~500-char
         // chunk with 50-char overlap, built at import time for every

@@ -1,5 +1,83 @@
 # Posey History
 
+## 2026-05-02 — Cascade-delete end-to-end verification before clean re-import
+
+Mark wanted to delete and re-import the AI Book to get a clean test baseline. Before he did, audited cascade coverage and added an end-to-end test exercising actual deletes (the existing schema-migration test only checked the FK contract via `PRAGMA foreign_key_list`).
+
+Audit findings: every `CREATE TABLE` that references `documents(id)` includes `ON DELETE CASCADE`, and `PRAGMA foreign_keys = ON` is set on connection open. `deleteDocument(_:)` is a single `DELETE FROM documents` — the cascade does the rest. **No fixes needed; coverage was already complete.**
+
+Tables verified: `reading_positions`, `notes`, `document_images`, `document_toc`, `ask_posey_conversations` (M1 + M5 columns + summary rows with `is_summary=1`), `document_chunks` (M2). New `PoseyTests/CascadeDeleteEndToEndTests` seeds real data into all 6 child tables, runs `deleteDocument`, asserts every child count drops to zero. Passes on iPhone 17 simulator. If a future schema migration adds a new `document_id`-referencing table, extend this test to cover it.
+
+## 2026-05-02 — AFM cooldown — standing test-harness requirement
+
+Sustained sequential `/ask` calls put AFM into a `Code=-1 (null)` error state where every subsequent call fails until Posey relaunches. Per Mark, the fix is testing-side, not app-side — real users naturally pause between questions; the harness should imitate that pacing. Treat AFM exactly like any rate-limited third-party API.
+
+**`tools/posey_test.py`** — new `_ask_cooldown()` helper inserts 2.5s ± 500ms jittered sleep before each `/ask`. Tunable via `POSEY_TEST_COOLDOWN_SECONDS` and `POSEY_TEST_COOLDOWN_JITTER`; disable with `POSEY_TEST_NO_COOLDOWN=1` for one-shot tests only. Module docstring documents the contract.
+
+**`tools/qa_battery.sh` (new, executable)** — promoted the ad-hoc `/tmp/qa_test.sh` into the repo as the canonical Three Hats QA driver. Pulls config from `tools/.posey_api_config.json` so it stays in sync with `posey_test.py`. Runs the standard 4-question pattern (factual / connection / follow-up / not-in-doc) across the three pinned documents (AI Book, Copyright PDF, Internet Steps PDF) with cooldown built into each call.
+
+**CLAUDE.md** — new "AFM Cooldown" section under Three Hats. Explicit "do not 'fix' this by adding rate-limiting to the app itself; the app is correct, the harness is the place for politeness."
+
+End-to-end verification post-cooldown: 12/12 questions across 3 documents, **zero AFM errors.** Voice quality intact (Internet Steps Q1: *"So, this document is about the whole mp3.com thing, right? Yeah, it's a scholarly paper that dives into the legal and tech stuff... It's a pretty interesting read, if you're into that sort of thing."* — librarian-DJ).
+
+## 2026-05-02 — Two-call voice polish pipeline + refusal retry + classifier fallback
+
+Three independent improvements driven by Mark's feedback after the first Three Hats QA pass: voice was too cold at temp 0.1, AFM refusals weren't being retried, and the classifier itself was sometimes refusing before the prose retry could fire.
+
+**Two-call pipeline (MicroDoc-style summarize → polish):**
+- Call 1 GROUNDED at temp 0.1 — accuracy first, no streaming to user. The grounded text isn't what the user sees.
+- Call 2 POLISH at temp 0.55 — Posey's voice (warm, slightly irreverent, librarian-DJ), streams to user.
+- Polish system prompt establishes character explicitly: *"the kind of person who reads obscure passages between DJ sets on a pirate radio station: engaged, occasionally playful, deeply knowledgeable, never stiff"*.
+- Non-negotiable rules: keep every fact, **match the draft's certainty** (no hedges when grounded was confident), **match the draft's length** (no rambling), no preamble openers ("Sure! / Great question!"), expressive phrasing welcome but no factual claims dressed up as metaphor.
+- Tuning iterated through 0.7 → 0.5 → 0.4 → 0.55: 0.7 produced metaphor drift ("the wild party of the Internet"), 0.5 invented facts (an ISBN), 0.4 flattened voice ("That's a tough one. I don't know if..."), 0.55 settled the balance.
+
+**Refusal-shape guard before polish:** if the grounded answer is a not-in-the-document response (`"doesn't say"`, `"isn't mentioned"`, `"not in the document"`, etc.), skip polish entirely and stream grounded verbatim. Closes a hallucination hole found in real Q&A: at temp 0.5 the polish call invented an ISBN ("978-0-14-115136-5") when grounded correctly said "doesn't say."
+
+**Refusal retry (Mark's three-step pattern):**
+1. Try → grounded call at 0.1.
+2. On `.refusal` → retry once with `AskPoseyPromptBuilder.neutralRephrasingPromptBody` — the user's original question is QUOTED verbatim (preserving intent), wrapped in a fact-finding frame ("please summarize the relevant factual information the document excerpts above provide that bears on this question"). User intent preserved; only the surrounding framing shifts.
+3. If retry also refuses → throw `informativeRefusalFailure` → chat view model surfaces *"Posey had trouble with that one. Try asking about a specific passage or a more concrete aspect of the topic."*
+
+**Belt-and-suspenders refusal detection.** `if case .refusal = g` was silently failing on AFM's macro-generated enum case in this Swift toolchain; the typed-pattern check now combines explicit `switch g { case .refusal: ... }` with stringified payload checks (`"\(g)".contains("refusal(")` lowercased fallback) so the retry path fires reliably. Logged via NSLog for device-side debugging.
+
+**Classifier-refusal fallback.** AFM was sometimes refusing the *classifier* call itself for sensitive-content questions, before the prose retry could fire. Real example: *"How does Mark's role compare to the AI contributors?"* — classifier refused; user got the raw refusal error before the prose retry path could engage. Fix: classifier-refusal in the chat view model silently falls back to `.general` intent. The classifier is internal infrastructure — its refusals shouldn't surface as hard user-facing failures. Other classifier errors (transient, AFM unavailable) still surface via `handleSendError`.
+
+**`/ask` response now includes `fullPrompt`** so the test harness can debug answer-quality failures without a second query.
+
+End-to-end Q&A on three documents, post-pipeline: voice appears reliably on narrative questions (Q3 follow-ups, Q1 broad summaries), stays clean on terse factual answers (Q1 authors → simple list with no over-polish), refusal-shape guard prevents hallucinated facts on out-of-doc questions. Polish call once spontaneously incorporated the librarian-DJ metaphor from the system prompt: *"It's like having a DJ who knows the set, keeps the energy up, and makes sure everyone gets a chance to shine."*
+
+## 2026-05-02 — Three Hats QA pass on real conversations across 3 documents
+
+Mark's standing requirement (CLAUDE.md section added this session): every feature must pass three hats — Developer (it builds, tests pass, architecture right), QA (it works, edge cases tried, verified visually), User (would a real person trust it?). For Ask Posey specifically: real multi-turn conversations on at least three documents, factual / connection / follow-up / out-of-doc question types per document, before declaring any milestone done.
+
+Drove the full pattern on AI Book Collaboration Project (RTF, 148K), The Clouds Of High-tech Copyright Law (PDF, 21K), and The Internet Steps to the Beat (PDF, 51K). Mark's exact prediction held — *"Who are the authors?"* on the AI book initially returned *"the document does not specify the authors"* exactly as he warned. Then iterated. Each failure mode found got a root-cause fix:
+
+1. **Front-matter retrieval miss.** Cosine ranks "Who wrote this?" against AI/consciousness chunks, never the title page. **Fix:** new `DatabaseManager.frontMatterChunks(for:limit:)` always prepends the document's first 4 chunks (≈1800 chars) as relevance-1.0 RAG candidates for document-scoped invocations. Title page + TOC + contributor list become reliable anchors.
+
+2. **Stale conversation poisoning.** Persisted "doesn't specify the authors" turns from earlier wrong answers were self-reinforcing via STM + summary. **Fix:** new `CLEAR_ASK_POSEY_CONVERSATION` API command + `DatabaseManager.clearAskPoseyConversation(for:)` helper. Test harness clears between battery runs for fresh-context Q&A.
+
+3. **Format imitation / persona capture.** Original `[user]: / [assistant]:` script primed AFM to continue rather than answer. Tried XML markers — model imitated the markup itself, dumping `<past_exchanges>`, `<current_question>`, `<answer>` tags into its replies. **Final form:** plain-prose ALL-CAPS section labels (`ANCHOR PASSAGE`, `DOCUMENT EXCERPTS`, `EARLIER IN THIS CONVERSATION`, `USER QUESTION`) — parseable structure but unimitable. Conversation history rendered as third-person narrative, **without prior assistant replies** (only "the user has so far asked X, then Y") so the model has topic context but no template to copy.
+
+4. **Current-question duplication.** User message was being appended to `historyForPromptBuilder` at send-start, putting the current question both in `EARLIER IN THIS CONVERSATION` and in the `USER QUESTION` section. **Fix:** defer the append to finalize-time so past exchanges hold ONLY genuinely-prior turns.
+
+5. **Token estimator under-counting.** AFM's actual tokenizer counts ~14% denser than our 3.5 chars/token estimate. Real test hit `exceededContextWindowSize` (4091/4096) when our estimator said we were well under budget. **Fix:** chars/token tightened to 3.0; `responseReserveTokens` bumped 512 → 1024; section budgets rebalanced to 180/300/600/300/1400 (sum 2780) against the new 3072 ceiling.
+
+6. **Anti-hallucination instructions.** Original "if you don't have enough say so" biased toward refusal even when info was in front matter under different vocabulary. **Fix:** explicit synthesis instruction — map question vocabulary to document vocabulary (authors → contributors / moderator), front matter answers most who/what questions, never invent specific dates/numbers/names.
+
+7. **Role attribution.** Question *"What's the author's name?"* on a student paper that anonymized the author with an ID# was answered "Professor Sharp" (the recipient). **Fix:** explicit instruction "if only an ID# appears, say the author isn't identified by name; do NOT substitute another person from the front matter."
+
+8. **Front-matter structured metadata.** Dates / course names / professor names embedded in noisy front matter (Wayback Machine timestamps, page footers) sometimes refused as "not in the document." **Fix:** explicit instruction to trust these fields when clearly visible.
+
+9. **Abstract-vs-contributor cherry-picking.** Model picked "ChatGPT, Claude, Gemini" from a brief abstract while ignoring the fuller "Mark Friedlander: Moderator + ChatGPT/Claude/Gemini" contributor list elsewhere. **Fix:** explicit "abstracts often understate the full roster; scan every excerpt before listing contributors; the COMBINED set is the answer."
+
+10. **AFM safety filter UX.** Empty assistant bubbles on refusal felt broken. **Fix:** typed-error-aware fallback bubble messages (`handleSendError` rewrites the placeholder with a user-friendly note).
+
+11. **Stochastic instability at temp 0.5.** Ran Q1 four times, lost Mark Friedlander on 1 of 4. Lowered to temp 0.3, then 0.1 for the grounded call — stable across retries.
+
+12. **`/ask` exposes `fullPrompt`** for debugging.
+
+Final battery results pre-polish: 10/12 PASS, 2 AFM safety refusals on synthesis-style questions involving philosophical/legal interpretation. Refusals are AFM-side (opaque safety filter); fix is UX-side (handleSendError). Three new DECISIONS entries already covered the architectural commitments; CLAUDE.md gained the Three Hats standing requirement.
+
 ## 2026-05-01 — Autonomous M7-complete + M8-mostly-complete + M9 polish wave
 
 Per Mark's "continue autonomously through M9" directive (2026-05-01), shipped a substantive batch covering the previously-deferred items that don't require design input or interactive verification.

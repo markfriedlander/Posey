@@ -316,7 +316,17 @@ final class LibraryViewModel: ObservableObject {
     /// Before App Store submission this default must flip back to `false`
     /// — public users should opt into the API explicitly. Tracked in
     /// NEXT.md under the App-Store-readiness checklist.
+    /// Local API antenna default. **DEBUG: ON, RELEASE: OFF.** Per
+    /// Mark's M9-blocker requirement — App Store builds must ship
+    /// with the antenna OFF by default so users opt in explicitly.
+    /// DEBUG builds keep the development convenience of auto-start
+    /// (further force-on'd at launch in `body.onAppear`'s `#if DEBUG`
+    /// block, so resetting the toggle in dev sessions is harmless).
+    #if DEBUG
     @AppStorage("localAPIEnabled") var localAPIEnabled: Bool = true
+    #else
+    @AppStorage("localAPIEnabled") var localAPIEnabled: Bool = false
+    #endif
     /// Set to the connection string when the API starts; drives the "copied" alert.
     @Published var apiConnectionInfo: String? = nil
 

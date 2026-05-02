@@ -995,6 +995,13 @@ final class ReaderViewModel: ObservableObject {
     /// exposed, never the underlying SQLite handle.
     let databaseManager: DatabaseManager
     private let playbackService: SpeechPlaybackService
+
+    /// M8 lock-screen + background-audio controller. Lazily created
+    /// on first content-load completion so the document title is
+    /// available; subsequent `update(...)` calls reflect the active
+    /// sentence + playback state. Built only on real iOS (UIKit
+    /// available); preview/test paths can keep it nil.
+    private var nowPlayingController: NowPlayingController?
     private let shouldAutoPlayOnAppear: Bool
     private let shouldAutoCreateNoteOnAppear: Bool
     private let shouldAutoCreateBookmarkOnAppear: Bool
@@ -1154,6 +1161,41 @@ final class ReaderViewModel: ObservableObject {
 
         // 6. Test-mode automation hooks (depend on segments).
         self.runAutomationIfNeeded()
+
+        // 7. M8 lock-screen / Control Center plumbing. Build the
+        //    NowPlayingController now that segments + title are
+        //    available and seed the initial metadata. Subsequent
+        //    state/sentence changes flow through `updateNowPlaying()`.
+        self.installNowPlayingController()
+    }
+
+    /// Build the NowPlayingController and seed initial metadata.
+    /// Idempotent — re-installing on a re-load just overwrites the
+    /// previous controller. M8 lock-screen + background-audio support.
+    private func installNowPlayingController() {
+        let controller = NowPlayingController(commands: NowPlayingController.Commands(
+            togglePlayback:   { [weak self] in self?.togglePlayback() },
+            nextSentence:     { [weak self] in self?.goToNextMarker() },
+            previousSentence: { [weak self] in self?.goToPreviousMarker() }
+        ))
+        self.nowPlayingController = controller
+        updateNowPlaying()
+    }
+
+    /// Push current document title + active sentence + playback state
+    /// to the lock screen / Control Center. Called on every sentence
+    /// advance and every state change so the lock screen stays current.
+    func updateNowPlaying() {
+        guard let controller = nowPlayingController else { return }
+        let activeSentence = segments.indices.contains(currentSentenceIndex)
+            ? segments[currentSentenceIndex].text
+            : nil
+        let isPlaying = (playbackState == .playing)
+        controller.update(
+            title: document.title,
+            sentenceText: activeSentence,
+            isPlaying: isPlaying
+        )
     }
 
     var usesDisplayBlocks: Bool {
@@ -1754,12 +1796,17 @@ final class ReaderViewModel: ObservableObject {
                 self.currentSentenceIndex = self.boundedSentenceIndex(index)
                 self.pauseForVisualBlockIfNeeded(atSentenceIndex: self.currentSentenceIndex)
                 self.persistPosition()
+                // M8: refresh lock-screen sentence text on every advance.
+                self.updateNowPlaying()
             }
             .store(in: &cancellables)
 
         playbackService.$state
             .sink { [weak self] state in
                 self?.playbackState = state
+                // M8: refresh lock-screen play/pause indicator on
+                // every state change.
+                self?.updateNowPlaying()
             }
             .store(in: &cancellables)
     }

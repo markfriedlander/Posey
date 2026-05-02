@@ -374,6 +374,47 @@ nonisolated final class DocumentEmbeddingIndex {
         return Array(allScored.prefix(limit))
     }
 
+    // MARK: Reference embedding + cosine for M6 dedup
+
+    /// Embed an arbitrary string using the same embedding model the
+    /// document was indexed with. Used by the M6 RAG dedup path to
+    /// compute a reference vector for "anchor + recent STM" so we can
+    /// drop chunks too similar to content already in the prompt.
+    ///
+    /// Returns an empty array if the document has no chunks indexed
+    /// yet — callers should treat that as "skip dedup, ship all
+    /// retrieved chunks." The embedding kind is inferred from the
+    /// stored chunks; if chunks are mixed-kind (a re-index is in
+    /// progress), the most common kind wins.
+    func embed(_ text: String, forDocument documentID: UUID) -> [Double] {
+        let stored: [StoredDocumentChunk]
+        do {
+            stored = try database.chunks(for: documentID)
+        } catch {
+            return []
+        }
+        guard !stored.isEmpty, !text.isEmpty else { return [] }
+        // Pick the most common embedding kind across the document's
+        // chunks. Mixed-kind tables happen briefly during re-index;
+        // resolving to the dominant kind avoids skewing the reference
+        // vector toward a minority embedder.
+        let kindCounts = Dictionary(grouping: stored, by: { $0.embeddingKind }).mapValues(\.count)
+        guard let dominantKind = kindCounts.max(by: { $0.value < $1.value })?.key else {
+            return []
+        }
+        let language = Self.language(forKind: dominantKind)
+        let embedder = Self.embedder(for: language)
+        return Self.embed(text, with: embedder)
+    }
+
+    /// Cosine similarity in [-1, 1] between two embedding vectors.
+    /// Mirrors the private `cosine(_:_:)` used by `search` —
+    /// re-exposed for the M6 dedup path. Returns 0 when shapes don't
+    /// match or either vector is empty.
+    static func cosineSimilarity(_ a: [Double], _ b: [Double]) -> Double {
+        Self.cosine(a, b)
+    }
+
     // MARK: Chunking (visible for testing)
 
     /// Slice `text` into overlapping chunks per the instance's

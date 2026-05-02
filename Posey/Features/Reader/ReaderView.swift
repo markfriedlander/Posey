@@ -474,9 +474,19 @@ struct ReaderView: View {
             // existing transport HStack — no collision with
             // Previous / Play / Next / Restart spacing.
             if AskPoseyAvailability.isAvailable {
-                Button {
-                    revealChrome()
-                    openAskPosey()
+                Menu {
+                    Button {
+                        revealChrome()
+                        openAskPosey(scope: .passage)
+                    } label: {
+                        Label("Ask about this passage", systemImage: "quote.bubble")
+                    }
+                    Button {
+                        revealChrome()
+                        openAskPosey(scope: .document)
+                    } label: {
+                        Label("Ask about this document", systemImage: "books.vertical")
+                    }
                 } label: {
                     Image(systemName: "sparkle")
                         .font(.title3)
@@ -484,7 +494,7 @@ struct ReaderView: View {
                         .frame(width: 44, height: 44)
                 }
                 .accessibilityIdentifier("reader.askPosey")
-                .accessibilityLabel("Ask Posey about this passage")
+                .accessibilityLabel("Ask Posey")
 
                 Spacer(minLength: 24)
             }
@@ -636,18 +646,35 @@ struct ReaderView: View {
     ///   Both classifier and streamer are nil on platforms without
     ///   FoundationModels — the view model falls back to the M4 echo
     ///   stub so previews/tests keep running.
-    private func openAskPosey() {
+    ///
+    /// **M6 (2026-05-01).** `scope` parameter selects between
+    /// passage-scoped (anchor = current sentence; tight surrounding
+    /// window; classifier routes mostly to `.immediate`) and
+    /// document-scoped (anchor = nil; classifier routes mostly to
+    /// `.general`; the prompt builder relies more heavily on RAG
+    /// chunks since there's no anchor passage to ground the answer).
+    enum AskPoseyScope { case passage, document }
+
+    private func openAskPosey(scope: AskPoseyScope) {
         let segments = viewModel.segments
         let active = segments.indices.contains(viewModel.currentSentenceIndex)
             ? segments[viewModel.currentSentenceIndex]
             : segments.first
         let anchor: AskPoseyAnchor?
-        if let active {
-            anchor = AskPoseyAnchor(
-                text: active.text,
-                plainTextOffset: active.startOffset
-            )
-        } else {
+        switch scope {
+        case .passage:
+            if let active {
+                anchor = AskPoseyAnchor(
+                    text: active.text,
+                    plainTextOffset: active.startOffset
+                )
+            } else {
+                anchor = nil
+            }
+        case .document:
+            // Document-scoped: no anchor. The prompt builder skips
+            // the ANCHOR + SURROUNDING sections and the RAG section
+            // does the heavy lifting via M6 retrieval.
             anchor = nil
         }
         // Stop playback while the sheet is open so the document
@@ -662,11 +689,13 @@ struct ReaderView: View {
         let database = viewModel.databaseManager
         var classifier: AskPoseyClassifying?
         var streamer: AskPoseyStreaming?
+        var summarizer: AskPoseySummarizing?
         #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
             let service = AskPoseyService()
             classifier = service
             streamer = service
+            summarizer = service
         }
         #endif
 
@@ -676,6 +705,7 @@ struct ReaderView: View {
             anchor: anchor,
             classifier: classifier,
             streamer: streamer,
+            summarizer: summarizer,
             databaseManager: database
         )
     }

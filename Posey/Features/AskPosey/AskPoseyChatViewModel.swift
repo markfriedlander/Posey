@@ -102,6 +102,15 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// so previews/tests can run without a real DB.
     private let databaseManager: DatabaseManager?
 
+    /// Lazily-constructed embedding index for M6 RAG retrieval.
+    /// Built on first need from `databaseManager` so M5's empty-RAG
+    /// path doesn't pay any setup cost. `nil` whenever the view
+    /// model has no DB (preview / unit-test paths).
+    private lazy var embeddingIndex: DocumentEmbeddingIndex? = {
+        guard let db = databaseManager else { return nil }
+        return DocumentEmbeddingIndex(database: db)
+    }()
+
     /// Token budget passed to the prompt builder. Single tuning point.
     private let budget: AskPoseyTokenBudget
 
@@ -126,12 +135,67 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// compress turns dropped by the budget into a summary.
     private let historyFetchLimit: Int = 30
 
+    /// Top-K cap for RAG retrieval. Sized so the budget enforcer can
+    /// pick the best chunks rather than the only ones it got handed.
+    /// Average chunk ≈ 500 chars ≈ 142 tokens, so K=8 maps to
+    /// roughly 1136 tokens of raw chunk content — well under the
+    /// 1800-token RAG budget, leaving the cosine-dedup pass and the
+    /// builder's own drop logic room to make ranking decisions.
+    private let ragTopK: Int = 8
+
+    /// Cosine similarity threshold above which a candidate chunk is
+    /// considered redundant with content already in the prompt
+    /// (anchor + STM verbatim concatenated). Mirrors Hal's 0.85
+    /// default. Tunable via the local-API loop alongside the token
+    /// budget constants.
+    private let ragDedupThreshold: Double = 0.85
+
+    /// In-flight conversation-summarization task. Set when a turn
+    /// finalizes with enough older messages to need summarizing; the
+    /// next send awaits this before building its prompt so the
+    /// summary section is always current.
+    private var summarizationTask: Task<Void, Never>?
+
+    /// Cached summary string fetched from `ask_posey_conversations`
+    /// (`is_summary = 1`). Refreshed whenever the summarization task
+    /// completes. The prompt builder reads this directly via the
+    /// `conversationSummary` input.
+    private var cachedConversationSummary: String?
+
+    /// Watermark — the index past which the current summary covers.
+    /// `summarizeOlderTurnsIfNeeded` uses this to decide whether the
+    /// existing summary is still good or needs to be re-run with the
+    /// new boundary.
+    private var summaryCoveredThrough: Int = 0
+
+    /// Threshold past which auto-summarization triggers. When the
+    /// non-summary turn count exceeds the recent-verbatim window plus
+    /// this margin, we summarize the older half. Sized so a typical
+    /// ~3-4-turn STM stays untouched and summarization only fires
+    /// when conversations grow long.
+    private let summarizeWhenTurnsExceed: Int = 8
+
+    /// How many of the most recent turns to keep verbatim (i.e. NOT
+    /// fold into the summary). The rest get summarized whenever the
+    /// trigger fires above.
+    private let keepVerbatimRecent: Int = 6
+
+    /// Optional summarizer for the M6 auto-summarization path.
+    /// Defaulted to nil (and tolerated as nil) so M5/older code paths
+    /// keep working — when nil, summarization simply doesn't fire and
+    /// the prompt builder receives `conversationSummary: nil`. The
+    /// live `AskPoseyService` conforms to all three protocols, so
+    /// production callers pass the same instance for `streamer` and
+    /// `summarizer`.
+    private let summarizer: AskPoseySummarizing?
+
     init(
         documentID: UUID,
         documentPlainText: String,
         anchor: AskPoseyAnchor?,
         classifier: AskPoseyClassifying? = nil,
         streamer: AskPoseyStreaming? = nil,
+        summarizer: AskPoseySummarizing? = nil,
         databaseManager: DatabaseManager? = nil,
         budget: AskPoseyTokenBudget = .afmDefault
     ) {
@@ -140,6 +204,7 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         self.anchor = anchor
         self.classifier = classifier
         self.streamer = streamer
+        self.summarizer = summarizer
         self.databaseManager = databaseManager
         self.budget = budget
 
@@ -203,6 +268,15 @@ private extension AskPoseyChatViewModel {
         }
 
         do {
+            // Load the most recent summary row (M6 fills these; M5
+            // always returns nil). Capture both the text and the
+            // watermark so the auto-summarizer trigger knows where
+            // the existing summary leaves off.
+            if let summary = try db.askPoseyLatestSummary(for: documentID) {
+                cachedConversationSummary = summary.content
+                summaryCoveredThrough = summary.summaryOfTurnsThrough
+            }
+
             let count = try db.askPoseyTurnCount(for: documentID)
             guard count > 0 else { return }
             let stored = try db.askPoseyTurns(for: documentID, limit: historyFetchLimit)
@@ -291,6 +365,169 @@ private extension AskPoseyChatViewModel {
     }
 }
 // ========== BLOCK 02: HISTORY LOADING + PERSISTENCE - END ==========
+
+
+// ========== BLOCK 02B: RAG RETRIEVAL (M6) - START ==========
+private extension AskPoseyChatViewModel {
+
+    /// Retrieve top-K document chunks most similar to the user's
+    /// question. M6: lights up the empty-array slot M5's prompt
+    /// builder shipped accommodating. The `DocumentEmbeddingIndex`
+    /// is the cosine-search engine M2 built; we just translate its
+    /// results into the prompt builder's `RetrievedChunk` shape and
+    /// drop chunks too similar to content already in the prompt.
+    ///
+    /// Cosine dedup against the anchor + recent verbatim STM means
+    /// the model never sees the same passage twice — once as anchor
+    /// quote and once as a "retrieved" chunk. Threshold is
+    /// `ragDedupThreshold` (0.85), matching Hal's default.
+    func retrieveRAGChunks(for question: String) -> [RetrievedChunk] {
+        guard let index = embeddingIndex else { return [] }
+
+        let results: [DocumentEmbeddingSearchResult]
+        do {
+            results = try index.search(documentID: documentID, query: question, limit: ragTopK)
+        } catch {
+            // Index unavailable / query failed → fall back to no RAG.
+            // Better to ship a less-grounded answer than to error out
+            // the whole send.
+            NSLog("AskPosey RAG search failed: \(error)")
+            return []
+        }
+        guard !results.isEmpty else { return [] }
+
+        // Reference text for cosine dedup: anchor + recent STM. We
+        // don't include the conversation summary here because the
+        // summary is by definition compressed — its embedding doesn't
+        // accurately reflect the verbatim content a chunk might
+        // duplicate. Skip dedup entirely if the index can't embed the
+        // reference (an offline-language fallback edge case).
+        let referenceText = referenceTextForDedup()
+        let referenceVector = referenceText.isEmpty
+            ? [Double]()
+            : index.embed(referenceText, forDocument: documentID)
+
+        // Translate to RetrievedChunk and dedup.
+        var translated: [RetrievedChunk] = []
+        for result in results {
+            if !referenceVector.isEmpty {
+                let chunkVector = result.chunk.embedding
+                let sim = DocumentEmbeddingIndex.cosineSimilarity(referenceVector, chunkVector)
+                if sim >= ragDedupThreshold {
+                    // Skip — too similar to what the prompt already
+                    // contains verbatim. Diagnostic logs only; no
+                    // user-facing surface in M6.
+                    continue
+                }
+            }
+            translated.append(RetrievedChunk(
+                chunkID: result.chunk.chunkIndex,
+                startOffset: result.chunk.startOffset,
+                text: result.chunk.text,
+                relevance: result.similarity
+            ))
+        }
+        return translated
+    }
+
+    /// Concatenate anchor + recent verbatim STM into a single string
+    /// the embedding model can embed for dedup comparison. Empty
+    /// when there's nothing to dedup against.
+    func referenceTextForDedup() -> String {
+        var parts: [String] = []
+        if let anchor, !anchor.trimmedDisplayText.isEmpty {
+            parts.append(anchor.trimmedDisplayText)
+        }
+        for message in historyForPromptBuilder.suffix(keepVerbatimRecent) {
+            parts.append(message.content)
+        }
+        return parts.joined(separator: "\n\n")
+    }
+}
+// ========== BLOCK 02B: RAG RETRIEVAL (M6) - END ==========
+
+
+// ========== BLOCK 02C: AUTO-SUMMARIZATION (M6 hard blocker) - START ==========
+private extension AskPoseyChatViewModel {
+
+    /// After a turn finalizes, decide whether to summarize older turns
+    /// and kick the work off in the background. The next send() awaits
+    /// `summarizationTask` before building its prompt so the summary
+    /// is current.
+    ///
+    /// Trigger condition: total non-summary turn count exceeds
+    /// `summarizeWhenTurnsExceed` AND there's at least one turn newer
+    /// than `summaryCoveredThrough` that's older than the
+    /// `keepVerbatimRecent` window. In English: "we have enough turns
+    /// to bother summarizing, and the older half hasn't been folded
+    /// into the existing summary yet."
+    func summarizeOlderTurnsIfNeeded() {
+        guard summarizer != nil, databaseManager != nil else { return }
+        guard summarizationTask == nil else { return }
+
+        let total = historyForPromptBuilder.count
+        guard total > summarizeWhenTurnsExceed else { return }
+
+        // Identify the older slice that needs summarizing — everything
+        // except the most-recent N kept verbatim.
+        let olderEndIndex = max(0, total - keepVerbatimRecent)
+        let olderTurns = Array(historyForPromptBuilder.prefix(olderEndIndex))
+        guard !olderTurns.isEmpty else { return }
+
+        // Skip if the existing summary already covers this watermark.
+        // `summaryCoveredThrough` is in "non-summary turn count" units
+        // — same dimension as `olderEndIndex`.
+        guard olderEndIndex > summaryCoveredThrough else { return }
+
+        // Snapshot the data the task needs so it doesn't capture
+        // mutating self state.
+        let toSummarize = olderTurns
+        let watermark = olderEndIndex
+        guard let summarizer else { return }
+        guard let db = databaseManager else { return }
+        let docID = documentID
+
+        summarizationTask = Task { @MainActor [weak self] in
+            defer { self?.summarizationTask = nil }
+            do {
+                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+                    let summary = try await summarizer.summarizeConversation(turns: toSummarize)
+                    guard !summary.isEmpty else { return }
+
+                    // Persist as is_summary = 1 row with the new
+                    // watermark.
+                    let summaryTurn = StoredAskPoseyTurn(
+                        id: UUID().uuidString,
+                        documentID: docID,
+                        timestamp: Date(),
+                        role: "assistant",
+                        content: summary,
+                        invocation: "passage",
+                        anchorOffset: nil,
+                        intent: nil,
+                        chunksInjectedJSON: "[]",
+                        fullPromptForLogging: nil,
+                        summaryOfTurnsThrough: watermark,
+                        isSummary: true
+                    )
+                    try db.appendAskPoseyTurn(summaryTurn)
+
+                    // Update view model caches. The next send() picks
+                    // up the new summary via `cachedConversationSummary`.
+                    self?.cachedConversationSummary = summary
+                    self?.summaryCoveredThrough = watermark
+                }
+            } catch {
+                // Summarization failure is non-fatal — the next turn
+                // ships without an updated summary; the older verbatim
+                // turns silently roll out of the STM window. Logged
+                // for the local-API tuning loop.
+                NSLog("AskPosey summarization failed: \(error)")
+            }
+        }
+    }
+}
+// ========== BLOCK 02C: AUTO-SUMMARIZATION (M6 hard blocker) - END ==========
 
 
 // ========== BLOCK 03: SURROUNDING CONTEXT - START ==========
@@ -444,14 +681,33 @@ extension AskPoseyChatViewModel {
                     return
                 }
 
+                // Wait for any in-flight summarization from the
+                // previous turn to land BEFORE building this prompt
+                // so the conversation summary is current.
+                if let task = self.summarizationTask {
+                    await task.value
+                }
+
+                // M6 RAG retrieval — top-K chunks for this question,
+                // dedup'd against anchor + recent STM. M5 used [];
+                // M6 lights up the slot the prompt builder already
+                // accommodates. .search routes to navigation cards
+                // in M7 and doesn't benefit from prose chunks.
+                let chunks: [RetrievedChunk]
+                if intent == .search {
+                    chunks = []
+                } else {
+                    chunks = self.retrieveRAGChunks(for: trimmedInput)
+                }
+
                 // Call 2: prompt build + stream.
                 let inputs = AskPoseyPromptInputs(
                     intent: intent,
                     anchor: self.anchor,
                     surroundingContext: self.surroundingContext(for: intent),
                     conversationHistory: self.historyForPromptBuilder,
-                    conversationSummary: nil,         // M6 fills
-                    documentChunks: [],               // M6 fills
+                    conversationSummary: self.cachedConversationSummary,
+                    documentChunks: chunks,
                     currentQuestion: trimmedInput
                 )
 
@@ -492,7 +748,8 @@ extension AskPoseyChatViewModel {
     /// Finalize the assistant turn after streaming completes. Marks
     /// the placeholder non-streaming, persists the turn with metadata,
     /// updates the prompt-builder cache so the next send sees this
-    /// exchange.
+    /// exchange. Triggers M6 auto-summarization in the background if
+    /// the conversation has grown past the verbatim-STM window.
     func finalizeAssistantTurn(
         metadata: AskPoseyResponseMetadata,
         placeholderID: UUID,
@@ -517,6 +774,14 @@ extension AskPoseyChatViewModel {
             chunksInjected: metadata.chunksInjected,
             fullPromptForLogging: metadata.fullPromptForLogging
         )
+
+        // M6 hard-blocker: kick off auto-summarization in the
+        // background if the conversation has outgrown the verbatim
+        // STM window. Won't fire on most M5/M6-typical exchanges
+        // (3-4 turn passages); fires when conversations grow long.
+        // The next send() awaits in-flight summarization before
+        // building its prompt.
+        summarizeOlderTurnsIfNeeded()
     }
 
     /// Translate a send-path error into UI state. Removes the

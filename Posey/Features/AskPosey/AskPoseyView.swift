@@ -105,7 +105,13 @@ struct AskPoseyView: View {
                                     VStack(alignment: .leading, spacing: 4) {
                                         AskPoseyMessageBubble(message: message)
                                         if message.role == .assistant,
-                                           !message.chunksInjected.isEmpty {
+                                           !message.navigationCards.isEmpty {
+                                            navigationCardList(for: message)
+                                        } else if message.role == .assistant,
+                                                  !message.chunksInjected.isEmpty {
+                                            // Sources strip only when not in
+                                            // navigation-card mode — cards
+                                            // are themselves the source link.
                                             sourcesStrip(for: message.chunksInjected)
                                         }
                                         if message.role == .assistant,
@@ -395,6 +401,52 @@ private extension AskPoseyView {
             .accessibilityIdentifier("askPosey.saveToNotes")
         }
         .padding(.trailing, 8)
+    }
+
+    /// M7 navigation cards — vertical list of tappable destinations
+    /// that replace prose for `.search` intent responses. Each card
+    /// shows the title + reason; tapping cancels any in-flight stream,
+    /// dismisses the sheet, and jumps the reader to the card's offset
+    /// via the same `onJumpToChunk` closure source-attribution pills
+    /// use.
+    func navigationCardList(for message: AskPoseyMessage) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(message.navigationCards) { card in
+                Button {
+                    guard let onJumpToChunk else { return }
+                    viewModel.cancelInFlight()
+                    onJumpToChunk(card.plainTextOffset)
+                    dismiss()
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: "arrow.right.circle.fill")
+                                .imageScale(.medium)
+                                .foregroundStyle(.tint)
+                            Text(card.title)
+                                .font(.callout.weight(.semibold))
+                                .multilineTextAlignment(.leading)
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 4)
+                        }
+                        Text(card.reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.leading)
+                            .padding(.leading, 24)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Jump to \(card.title). \(card.reason)")
+                .accessibilityIdentifier("askPosey.navCard")
+                .disabled(onJumpToChunk == nil)
+            }
+        }
     }
 
     /// M7 source attribution: a horizontal scroll of pill buttons

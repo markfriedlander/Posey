@@ -199,16 +199,30 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
     /// A robotic Posey is a failed Posey regardless of factual
     /// accuracy." Started at 0.7; dropped to 0.5 after first
     /// real-Q&A test revealed the polish call inventing an ISBN
-    /// when the grounded answer said "doesn't say." 0.5 keeps the
-    /// warmth without giving the model enough creative latitude to
-    /// add facts the grounded answer doesn't contain.
+    /// when the grounded answer said "doesn't say."
+    ///
+    /// **2026-05-02 second iteration.** After the integrated UI test
+    /// on real device, real Q&A showed polish at 0.55 was producing
+    /// near-identical-to-grounded output for terse factual answers
+    /// ("Who are the authors?" → grounded text passed through with
+    /// trivial reordering). Root cause was the polish prompt rules
+    /// pulling the model toward minimal change. Prompt was rebalanced
+    /// (explicit DOs alongside DON'Ts, "stay close to length" instead
+    /// of "match the length"). First attempt at 0.65 overshot — model
+    /// invented metaphors describing the document's people ("Mark is
+    /// like the DJ in the room", "the methodology is like a dance",
+    /// "it's a bit like a game of charades"). Settled at 0.6 with the
+    /// prompt re-tightened around "don't invent metaphors that
+    /// describe the document's people, topics, or events" — the DOs
+    /// stay in place so voice still emerges, but metaphor-padding is
+    /// explicitly out of bounds.
     private let polishTemperature: Double
 
     init(
         model: SystemLanguageModel = .default,
         instructions: String = AskPoseyPrompts.classifierInstructions,
         groundedTemperature: Double = 0.1,
-        polishTemperature: Double = 0.55
+        polishTemperature: Double = 0.65
     ) {
         self.model = model
         self.instructions = instructions

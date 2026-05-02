@@ -1,5 +1,75 @@
 # Posey History
 
+## 2026-05-01 — Pre-open hang fix: async ReaderViewModel content loading
+
+Claude (claude.ai)'s M4 device pass surfaced one final issue Mark's manual testing also confirmed: opening Illuminatus showed a blank screen for several seconds before the reader appeared, with no user-facing feedback. Investigation: `ReaderViewModel.init` was doing `SentenceSegmenter().segments(for: plainText)` synchronously — for Illuminatus's 1.6M-char plainText that's ~5–10s of NLTokenizer iteration. SwiftUI `NavigationStack.navigationDestination(for:)` blocks the navigation push until init returns, so the user sees the previous screen frozen for that whole window.
+
+Refactor: heavy compute moves to a `Task.detached(priority: .userInitiated)` background dispatch; new `@Published var isLoading: Bool = true` drives a full-screen "Opening &lt;title&gt;…" overlay until segmentation + display block parsing complete. Position restoration, playback prepare, and observation move from `handleAppear` into `loadContent`'s tail because they all depend on segments and the post-load ordering is now strict: segments → displayBlocks → visualPauseMap → tocEntries → pageMap → position restore → playback prepare → observePlayback (subscribed AFTER prepare so the initial sink emission carries the restored sentence index, not a stale 0) → `isLoading = false` → automation hooks. `splitParagraphBlocks`, `buildVisualPauseIndexMap`, and the static `sentenceIndex(forOffset:segments:)` are marked `nonisolated` so the detached compute closure can call them without MainActor crossings.
+
+`handleAppear` is now lightweight: awaits `contentLoadTask?.value`, then loads notes. New public `awaitContentLoaded()` lets tests synchronise without polling.
+
+The previously-shipped `nonisolated deinit {}` (commit `19af951`) continues to keep XCTest's runner-thread dealloc from hitting the MainActor deinit Swift Concurrency runtime bug.
+
+Tests: all 12 ReaderViewModelTests converted from sync to `async throws`; every viewModel construction site adds `await viewModel.awaitContentLoaded()` before accessing segments / displayBlocks / currentSentenceIndex. The `testPlaybackSkipRegionIsHiddenFromReader` test was where the missing-await bug surfaced (Array out-of-bounds crash on `migrated.segments[0]` because that test constructs a SECOND view model for migration verification and I'd only added the await for the first). Full suite green on simulator: 12/12 pass, zero failures, no dealloc crashes.
+
+Pushed in commit `cb2ac8a`. For Illuminatus on Mark's iPhone the user-visible behaviour is now: tap document → reader frame appears immediately with circular spinner + "Opening Illuminatus TRILOGY EBOOK…" caption → ~5–10s of background work → overlay fades, reader ready. Small docs flip `isLoading` false before the first render cycle so the overlay never renders for them.
+
+## 2026-05-01 — M4 device-pass polish + ReaderViewModel deinit crash fix
+
+Claude (claude.ai)'s device review of M4 produced five follow-up items, all addressed. Plus a related crash that surfaced during testing.
+
+**Polish (commit `19af951`):**
+- **Detents.** `.large` only on iPhone (compact horizontal size class) — `.medium` left no visible document on a 16 Plus, and Ask Posey IS the focused task at that point so going straight to full-screen is right. iPad/Mac (regular) keep `.medium` + `.large` available.
+- **Anchor scrolls with conversation.** Moved from a pinned bar above the chat list INTO the LazyVStack as the first row, so it scrolls off naturally as the conversation grows. The user can still scroll back to see "where this conversation started" but the conversation gets the room.
+- **Privacy lock indicator removed.** Per Claude's read it was confusing rather than reassuring. Privacy explanation moves to the App Store description and a future About section.
+- **Notes draft no longer auto-populates.** Previous-sentence-plus-current-sentence text was being auto-typed into the editable draft, while the active sentence was already shown above as readonly context — so the user saw the active sentence twice and got prepended OCR running-headers (the "9/11/25, 1:33 PM" Wayback Machine timestamp on every page of "The Internet Steps to the Beat" PDF). Investigation confirmed that text is genuine source content, not a Notes-flow bug — running headers leak into plainText. Surrounding-sentence capture still copies to the clipboard so the share-with-other-app workflow keeps working; only the visible draft is empty. Existing `testPrepareForNotesEntryPausesPlaybackAndCapturesLookbackContext` test renamed and rewritten to assert the new clean-draft behaviour.
+
+**Deinit crash fix (same commit):**
+Mark's simulator captured a `Posey [...] crashed... ReaderViewModel.__deallocating_deinit + 124 → swift_task_deinitOnExecutorImpl + 104 → swift::TaskLocal::StopLookupScope::~StopLookupScope + 112 → malloc abort: POINTER_BEING_FREED_WAS_NOT_ALLOCATED`. Same shape as the earlier `DocumentEmbeddingIndex` crash that was solved by marking that class `nonisolated`. ReaderViewModel can't go fully nonisolated (it touches AVSpeechSynthesizer, Combine publishers, SwiftUI bindings — all MainActor in practice). Solution: `nonisolated deinit {}` — Swift 5 + approachable concurrency accepts the explicit nonisolated discipline on deinit and lets it run wherever the last release happens, no MainActor hop, no TaskLocal teardown crash.
+
+## 2026-05-01 — Ask Posey Milestone 4: modal sheet UI shell with echo stub
+
+The structural shell for the Ask Posey conversation surface, AFM-availability-gated. Calls into the M3 classifier are deferred to M5 — this milestone proved the layout works on real documents before wiring AFM, addressing the half-sheet vs full-modal design risk Mark called out in the implementation plan §12.4.
+
+`Posey/Features/AskPosey/`:
+- **`AskPoseyMessage.swift`** — value types: `AskPoseyMessage` (id, role, content, isStreaming, timestamp), `AskPoseyAnchor` (text, plainTextOffset). All `Sendable` so streamed snapshots from a background queue can cross actor boundaries cleanly when M5 lands.
+- **`AskPoseyChatViewModel.swift`** — `@MainActor ObservableObject`. `@Published` messages, inputText, isResponding. `canSend` gates Send while responding or input is whitespace-only. `sendEchoStub()` for M4 (appends user message, simulates 0.45s delay, appends `[stub] You asked: …` reply). `cancelInFlight()` from sheet dismiss. `Identifiable` so SwiftUI's `sheet(item:)` uses the view model itself as the presentation key. `previewSeedTranscript` hook gated to `#if DEBUG` so seeding doesn't ship in release.
+- **`AskPoseyView.swift`** — half-sheet (post-polish: `.large` only on iPhone, `.medium` + `.large` on iPad/Mac). Anchor + chat history + composer all inside one LazyVStack so the anchor scrolls with the conversation. `defaultScrollAnchor(.bottom)` keeps newly added messages visible. Composer auto-focuses 250ms after present. Two `#Preview` canvases (empty + populated transcript).
+
+`ReaderView` wiring:
+- `@State askPoseyChat: AskPoseyChatViewModel?` — `sheet(item:)` so the view model lifetime tracks the sheet. Fresh instance per open captures the active sentence as anchor.
+- Bottom-bar Ask Posey glyph (sparkle SF Symbol) at the far left of the controls HStack — opposite Restart, per `ARCHITECTURE.md` "Surface Design". Hidden via `if AskPoseyAvailability.isAvailable` so the entire affordance is invisible on devices without Apple Intelligence (per resolved decision 5).
+- `openAskPosey()` helper: captures the active sentence, wraps in `AskPoseyAnchor`, stops playback (the document doesn't keep advancing under the user), constructs the chat view model.
+
+Verified on Mark's iPhone 16 Plus: glyph present, sheet presents at half-sheet, echo stub round-trips at ~450ms, anchor visible, dismiss clean.
+
+## 2026-05-01 — Ask Posey Milestone 3: two-call intent classifier
+
+Lays the foundation for the Call-1 / Call-2 pattern. Three new files in `Posey/Services/AskPosey/`:
+
+- **`AskPoseyIntent.swift`** — the `@Generable` enum: `.immediate | .search | .general`. `String`-raw-value for trivial logging / persistence; raw values pinned by unit test (renaming a case is a deliberate schema change). Gated to iOS 26+ via `#if canImport(FoundationModels)` and `@available`.
+- **`AskPoseyService.swift`** — the live classifier. `AskPoseyClassifying` protocol exposes `classifyIntent(question:anchor:) async throws -> AskPoseyIntent` so M5+ UI can swap stubs in. `AskPoseyServiceError` translates `LanguageModelSession.GenerationError` (all 9 cases including the missed `.refusal`) into `.afmUnavailable / .transient / .permanent`. Per-call session lifecycle (no transcript reuse — independent classifications shouldn't bias each other).
+- `AskPoseyPrompts` enum with `nonisolated` discipline (so its static defaults work in init parameter positions). Pure-string assembly tested directly.
+
+Tests:
+- `AskPoseyPromptTests` (7 cases): question included, all three buckets listed, anchor included when present, anchor omitted when absent or whitespace-only, question whitespace trimmed, instructions stay short and contain "classify".
+- `AskPoseyIntentTests` (3 cases): cases present, raw values pinned, Codable round trip.
+- `AskPoseyServiceOnDeviceProbe` (2 cases): real AFM round-trip with anchored and non-anchored questions. Skipped on simulator (model assets not installed); both pass on Mark's iPhone 16 Plus (0.7s and 1.0s respectively) — first end-to-end `@Generable` classification on real hardware.
+
+## 2026-05-01 — M8/M9/M10 doc lock-in + three new structural decisions
+
+Mark wanted the post-Ask-Posey roadmap pinned down before we got deep into M3-M7 implementation. NEXT.md restructured into three explicit milestone groups:
+
+- **M3-M7 Ask Posey feature work** (M7 absorbed the previous M8 source-attribution + indexing-indicator UI work so navigation, auto-save, attribution, and the in-sheet "Indexing N of M sections" affordance all ship together — they share the same surface).
+- **M8 — Feature pass:** Reading Style preferences (Standard / Focus / Immersive / Motion) as preferences not modes, Motion mode three-setting design (Off / On / Auto with explicit consent before CoreMotion), audio export to M4A, full format-parity audit across all 7 formats, Mac Catalyst verification, multilingual embedding verification, entity-aware multi-factor relevance scoring v2, lock-screen + background audio support (added later via Mark's follow-up: `AVAudioSession.playback`, `UIBackgroundModes` audio, `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter`).
+- **M9 — Polish pass:** antenna default OFF for release, dev tools compiled out of release builds (`#if DEBUG`), full accessibility pass on device, landscape centering polish, go-to-page UX polish, app icon (serif P with oversized librarian glasses, monochromatic with subtle warm tortoiseshell tint).
+- **M10 — Submission:** privacy policy, App Store metadata, screenshots via simulator MCP, App Store Connect navigation via supervised browser automation, final submission.
+
+DECISIONS.md three new entries:
+1. **Reading Style is a preferences section, not separate modes** — discoverability + consistency.
+2. **Motion mode three-setting design (Off / On / Auto, with explicit consent)** — different users want different things; a single auto-detect can't serve all three.
+3. **Dev tools compiled out of release builds** — security, professionalism, App Store integrity, predictability.
+
 ## 2026-05-01 — Pre-M3 fix sweep: Illuminatus front matter, TOC fallback, indexing UI, page nav
 
 Mark's reproduction case for the new embedding-index path was the Illuminatus TRILOGY EBOOK — a 1.6M-char EPUB from the Internet Archive. Five issues surfaced together; one investigation shaped two fixes; the rest landed in their own commits.

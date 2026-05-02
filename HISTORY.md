@@ -1,5 +1,25 @@
 # Posey History
 
+## 2026-05-01 — Local API Ask Posey endpoints: `/ask` + `/open-ask-posey` for autonomous test infrastructure
+
+Per Mark's directive (2026-05-01): Posey now exposes the full Ask Posey pipeline through the local API so an autonomous test harness can drive multi-turn conversations end-to-end without UI involvement, AND can programmatically open the Ask Posey sheet on the simulator so visual verification via the simulator MCP becomes possible. Together these answer "we can verify Ask Posey ourselves before bothering Mark."
+
+**`POST /ask`** — backend pipeline. Body: `{"documentID": "<uuid>", "question": "<text>", "scope": "passage"|"document", "anchorText": "<text|null>", "anchorOffset": <int|null>}`. Constructs a fresh `AskPoseyChatViewModel` in `LibraryViewModel.apiAsk(bodyData:)`, awaits history load, sets the input, calls the live `send()` which runs the same path the UI does (intent classification → prompt build → AFM stream → SQLite persist). Returns a JSON envelope with the assistant response, classified intent (via the persisted turn's `intent` field), token breakdown (per-section costs), dropped sections (each with reason), chunks injected (chunk IDs + start offsets + relevance scores), full prompt body for logging, inference duration, and translated error description. Verified end-to-end on Mark's iPhone 16 Plus: 3.5s round-trip, 1542 prompt tokens, 8 RAG chunks injected, real document-grounded prose response. The send writes turns to `ask_posey_conversations` exactly the same way the UI's `send()` does, so subsequent sheet opens see the conversation — driving the API populates the UI's prior-history view automatically.
+
+**`POST /open-ask-posey`** — UI driver for the simulator MCP. Body: `{"documentID": "<uuid>", "scope": "passage"|"document"}`. Posts a `Notification.Name.openAskPoseyForDocument` event the LibraryView and ReaderView both observe. LibraryView updates its `NavigationStack` path to push the matching document; ReaderView (newly mounted) re-receives the redelivered notification 500ms later (the original post arrives before ReaderView's `onReceive` registers, so the LibraryView observer schedules a redelivery flagged with `userInfo["redelivered"] = true` to avoid an infinite navigation loop) and calls `openAskPosey(scope:)` to present the sheet.
+
+**`Notification.Name.openAskPoseyForDocument`** — new shared notification name in `Posey/Services/LocalAPI/AskPoseyNotifications.swift`. Single contract surface for both observers.
+
+**Endpoint plumbing changes (`LocalAPIServer`):** two new injected handlers — `askHandler: (@Sendable (Data) async -> String)?` and `openAskPoseyHandler: (@Sendable (Data) async -> String)?`. Both take `Data` (raw body bytes) rather than `[String: Any]` because dictionaries with `Any` values aren't `Sendable`. Each handler parses JSON internally, an additive change that doesn't touch the existing three handlers (commandHandler / importHandler / stateHandler).
+
+**`tools/posey_test.py` extensions:** two new commands matching the new endpoints — `posey_test.py ask <doc-id> <question> [--scope passage|document] [--anchor-text <text>] [--anchor-offset <int>]` drives `/ask`, prints the JSON envelope; `posey_test.py open-ask-posey <doc-id> [--scope passage|document]` drives `/open-ask-posey`, prints the dispatched notification confirmation. Both reuse the existing `_http` helper so the 600s timeout for `/ask` (AFM streams can take seconds) is honored.
+
+**Token capture for simulator:** the API server's startup token line was migrated from `print(...)` to `NSLog(...)` so it flows through unified logging and can be captured via `xcrun simctl spawn <udid> log show --predicate 'eventMessage CONTAINS "PoseyAPI: Token"'`. Lets autonomous test harnesses fetch the simulator's keychain-backed token without a manual Xcode console session.
+
+**End-to-end visual verification on simulator:** confirmed by booting iPhone 17 sim, installing the build, importing a small test doc via `/import`, calling `/ask` (writes user turn to SQLite, fails on the AFM stream because simulator has no AFM models — expected, error correctly translated), then calling `/open-ask-posey` and screenshotting via the simulator MCP. The sheet renders with the prior user turn ("What are the three principles?") above the "Earlier conversation" divider, the anchor row showing the active sentence, and the composer ready — exact iMessage layout M5 designed. The .gitignore now covers `tools/.posey_api_config.*.json` so per-target API configs don't leak.
+
+**Build clean** on iPhone 17 simulator. Device-installed and verified live.
+
 ## 2026-05-01 — Ask Posey Milestone 6: RAG retrieval + auto-summarization + document-scoped invocation
 
 M6 lights up the empty slots M5's prompt builder shipped accommodating. No restructuring — only data wiring.

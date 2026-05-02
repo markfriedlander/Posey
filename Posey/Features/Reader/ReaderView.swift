@@ -284,6 +284,24 @@ struct ReaderView: View {
             ) { chatVM in
                 AskPoseyView(viewModel: chatVM)
             }
+            .onReceive(
+                NotificationCenter.default
+                    .publisher(for: .openAskPoseyForDocument)
+            ) { notification in
+                // M6 simulator-MCP UI driver: open the sheet when the
+                // local API's /open-ask-posey endpoint dispatches the
+                // notification. Only respond if this ReaderView is
+                // hosting the matching document — multiple
+                // simultaneous reader scenes are possible on iPad.
+                guard
+                    let info = notification.userInfo,
+                    let documentID = info["documentID"] as? UUID,
+                    documentID == viewModel.document.id
+                else { return }
+                let scopeStr = (info["scope"] as? String)?.lowercased() ?? "passage"
+                let scope: AskPoseyScope = (scopeStr == "document") ? .document : .passage
+                openAskPosey(scope: scope)
+            }
         }
     }
 

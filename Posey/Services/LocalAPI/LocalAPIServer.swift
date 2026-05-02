@@ -22,6 +22,19 @@ final class LocalAPIServer {
     private var commandHandler: (@Sendable (String) async -> String)?
     private var importHandler:  (@Sendable (String, Data) async -> String)?
     private var stateHandler:   (@Sendable () async -> String)?
+    /// Ask Posey backend pipeline handler — runs intent classification,
+    /// prompt building, AFM streaming end-to-end and returns JSON.
+    /// Drives autonomous multi-turn Ask Posey conversation testing
+    /// without UI involvement (M6 test infrastructure per Mark).
+    /// Receives the raw request body bytes; the handler parses JSON
+    /// internally so [String: Any] doesn't have to cross the
+    /// `@Sendable` actor boundary.
+    private var askHandler: (@Sendable (Data) async -> String)?
+    /// Ask Posey UI driver — opens the Ask Posey sheet on the given
+    /// document so simulator MCP screenshots can verify the user
+    /// experience programmatically. Posts a notification the UI
+    /// layer observes.
+    private var openAskPoseyHandler: (@Sendable (Data) async -> String)?
 
     // MARK: — Keychain token
 
@@ -88,12 +101,16 @@ extension LocalAPIServer {
     func start(
         commandHandler: @escaping @Sendable (String) async -> String,
         importHandler:  @escaping @Sendable (String, Data) async -> String,
-        stateHandler:   @escaping @Sendable () async -> String
+        stateHandler:   @escaping @Sendable () async -> String,
+        askHandler:     (@Sendable (Data) async -> String)? = nil,
+        openAskPoseyHandler: (@Sendable (Data) async -> String)? = nil
     ) {
         guard !isRunning else { return }
         self.commandHandler = commandHandler
         self.importHandler  = importHandler
         self.stateHandler   = stateHandler
+        self.askHandler     = askHandler
+        self.openAskPoseyHandler = openAskPoseyHandler
 
         do {
             // Capture before the closure to avoid crossing actor boundaries.
@@ -112,10 +129,16 @@ extension LocalAPIServer {
             l.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    print("PoseyAPI: Ready — \(ip):\(port)")
-                    print("PoseyAPI: Token — \(token)")
+                    // Use NSLog (not print) so the simulator's
+                    // unified log captures the token line — `xcrun
+                    // simctl spawn <udid> log show --predicate
+                    // 'eventMessage CONTAINS "PoseyAPI"'` then dumps
+                    // it. Lets autonomous test harnesses fetch the
+                    // token without a manual Xcode console session.
+                    NSLog("PoseyAPI: Ready — %@:%d", ip, Int(port))
+                    NSLog("PoseyAPI: Token — %@", token)
                 case .failed(let e):
-                    print("PoseyAPI: Failed — \(e)")
+                    NSLog("PoseyAPI: Failed — %@", "\(e)")
                 default: break
                 }
             }
@@ -132,6 +155,8 @@ extension LocalAPIServer {
         commandHandler = nil
         importHandler  = nil
         stateHandler   = nil
+        askHandler     = nil
+        openAskPoseyHandler = nil
         print("PoseyAPI: Stopped")
     }
 }
@@ -241,9 +266,11 @@ extension LocalAPIServer {
 
     private func route(_ req: ParsedRequest) async -> (Int, String) {
         switch (req.method, req.path) {
-        case ("POST", "/command"): return await handleCommand(req)
-        case ("POST", "/import"):  return await handleImport(req)
-        case ("GET",  "/state"):   return await handleState()
+        case ("POST", "/command"):         return await handleCommand(req)
+        case ("POST", "/import"):          return await handleImport(req)
+        case ("GET",  "/state"):           return await handleState()
+        case ("POST", "/ask"):             return await handleAsk(req)
+        case ("POST", "/open-ask-posey"):  return await handleOpenAskPosey(req)
         default: return (404, #"{"error":"Not found"}"#)
         }
     }
@@ -283,6 +310,46 @@ extension LocalAPIServer {
             return (503, #"{"error":"State handler unavailable"}"#)
         }
         let result = await handler()
+        return (200, result)
+    }
+
+    // POST /ask {"documentID": "<uuid>", "question": "<text>", "anchorOffset": <int|null>}
+    //
+    // Runs the full Ask Posey pipeline (intent classification + prompt
+    // building + AFM streaming) end-to-end and returns the response
+    // as JSON including the response text, classified intent, token
+    // breakdown, dropped sections, and chunks injected. Drives
+    // autonomous multi-turn Ask Posey conversation testing without UI.
+    //
+    // Persistence: every turn this endpoint runs writes to
+    // ask_posey_conversations exactly the same way the UI's send()
+    // does, so subsequent sheet opens see the conversation.
+    private func handleAsk(_ req: ParsedRequest) async -> (Int, String) {
+        guard let bodyData = req.bodyData,
+              !bodyData.isEmpty else {
+            return (400, #"{"error":"Missing request body"}"#)
+        }
+        guard let handler = askHandler else {
+            return (503, #"{"error":"Ask handler unavailable"}"#)
+        }
+        let result = await handler(bodyData)
+        return (200, result)
+    }
+
+    // POST /open-ask-posey {"documentID": "<uuid>", "scope": "passage"|"document"}
+    //
+    // Programmatically navigate the running app to the named document
+    // and open the Ask Posey sheet. The simulator MCP can then
+    // screenshot the sheet to verify the user experience.
+    private func handleOpenAskPosey(_ req: ParsedRequest) async -> (Int, String) {
+        guard let bodyData = req.bodyData,
+              !bodyData.isEmpty else {
+            return (400, #"{"error":"Missing request body"}"#)
+        }
+        guard let handler = openAskPoseyHandler else {
+            return (503, #"{"error":"open-ask-posey handler unavailable"}"#)
+        }
+        let result = await handler(bodyData)
         return (200, result)
     }
 }

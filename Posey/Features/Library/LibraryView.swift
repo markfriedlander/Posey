@@ -112,6 +112,47 @@ struct LibraryView: View {
                     automationNoteBody: automationNoteBody
                 )
             }
+            .onReceive(
+                NotificationCenter.default
+                    .publisher(for: .openAskPoseyForDocument)
+            ) { notification in
+                // M6 simulator-MCP UI driver: when /open-ask-posey
+                // posts this notification, navigate to the matching
+                // document. ReaderView listens to the same
+                // notification and opens the Ask Posey sheet on
+                // appear / receipt — so by the time the screenshot
+                // fires, the sheet is up.
+                guard
+                    let info = notification.userInfo,
+                    let documentID = info["documentID"] as? UUID
+                else { return }
+                let documents = (try? viewModel.databaseManager.documents()) ?? []
+                guard let document = documents.first(where: { $0.id == documentID }) else { return }
+                // Push if not already at this document.
+                let needsNavigation = path.last?.id != documentID
+                if needsNavigation {
+                    path = [document]
+                }
+                // Re-post the notification on a short delay so
+                // ReaderView (just mounted) catches it. Without this,
+                // ReaderView's onReceive registers AFTER the original
+                // post and never fires. Using userInfo.markRedelivered
+                // so the Library observer doesn't re-fire and create
+                // an infinite navigation loop.
+                if needsNavigation,
+                   info["redelivered"] == nil {
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(500))
+                        var redeliveredInfo = info
+                        redeliveredInfo["redelivered"] = true
+                        NotificationCenter.default.post(
+                            name: .openAskPoseyForDocument,
+                            object: nil,
+                            userInfo: redeliveredInfo
+                        )
+                    }
+                }
+            }
             .fileImporter(
                 isPresented: $isImporting,
                 allowedContentTypes: [.plainText, .rtf, .html, .pdf] + richDocumentContentTypes + markdownContentTypes,
@@ -452,6 +493,12 @@ extension LibraryViewModel {
                 },
                 stateHandler: { [weak self] in
                     await self?.apiState() ?? #"{"error":"unavailable"}"#
+                },
+                askHandler: { [weak self] data in
+                    await self?.apiAsk(bodyData: data) ?? #"{"error":"unavailable"}"#
+                },
+                openAskPoseyHandler: { [weak self] data in
+                    await self?.apiOpenAskPosey(bodyData: data) ?? #"{"error":"unavailable"}"#
                 }
             )
             localAPIEnabled = true
@@ -613,6 +660,225 @@ extension LibraryViewModel {
             "documentCount": docs.count,
             "connectionInfo": localAPIServer.connectionInfo
         ])
+    }
+
+    // MARK: — Ask Posey backend handler (M6 test infrastructure)
+    //
+    // POST /ask body shape:
+    //   { "documentID": "<uuid>", "question": "<text>",
+    //     "anchorOffset": <int|null>, "anchorText": "<text|null>",
+    //     "scope": "passage"|"document"  // default passage if anchor present, else document
+    //   }
+    //
+    // Runs the FULL pipeline: intent classification → prompt builder
+    // (anchor + surrounding + STM verbatim + summary + RAG chunks +
+    // user question) → fresh LanguageModelSession → AFM stream →
+    // metadata. Persists user + assistant turns to
+    // ask_posey_conversations exactly the same way the UI's send()
+    // does, so the sheet sees the new conversation when next opened.
+
+    func apiAsk(bodyData: Data) async -> String {
+        guard let body = (try? JSONSerialization.jsonObject(with: bodyData)) as? [String: Any] else {
+            return #"{"error":"Malformed JSON body"}"#
+        }
+        guard let idStr = body["documentID"] as? String,
+              let docID = UUID(uuidString: idStr) else {
+            return #"{"error":"Missing or invalid documentID"}"#
+        }
+        guard let question = body["question"] as? String,
+              !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return #"{"error":"Missing or empty question"}"#
+        }
+
+        // Look up the document. Must exist for the conversation FK
+        // to satisfy when persistence runs.
+        let documents: [Document]
+        do {
+            documents = try databaseManager.documents()
+        } catch {
+            return #"{"error":"Document lookup failed: \#(error)"}"#
+        }
+        guard let document = documents.first(where: { $0.id == docID }) else {
+            return #"{"error":"Document not found"}"#
+        }
+
+        // Build anchor based on scope. Default: passage scope when
+        // anchor info is supplied; document scope when not.
+        let anchor: AskPoseyAnchor?
+        let scopeStr = (body["scope"] as? String)?.lowercased()
+        let anchorText = body["anchorText"] as? String
+        let anchorOffset = body["anchorOffset"] as? Int
+        switch scopeStr {
+        case "document":
+            anchor = nil
+        case "passage", nil, "":
+            if let anchorText, let anchorOffset {
+                anchor = AskPoseyAnchor(text: anchorText, plainTextOffset: anchorOffset)
+            } else {
+                // No anchor info supplied — degrade to document scope
+                // so the pipeline runs without an anchor. The view
+                // model copes; the prompt builder skips ANCHOR.
+                anchor = nil
+            }
+        default:
+            return #"{"error":"Unknown scope; expected 'passage' or 'document'"}"#
+        }
+
+        // Compose live deps if available on this OS. Without them
+        // the view model's send() falls back to the echo stub —
+        // useful for tests that don't have AFM.
+        var classifier: AskPoseyClassifying?
+        var streamer: AskPoseyStreaming?
+        var summarizer: AskPoseySummarizing?
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+            let service = AskPoseyService()
+            classifier = service
+            streamer = service
+            summarizer = service
+        }
+        #endif
+
+        let viewModel = AskPoseyChatViewModel(
+            documentID: docID,
+            documentPlainText: document.plainText,
+            anchor: anchor,
+            classifier: classifier,
+            streamer: streamer,
+            summarizer: summarizer,
+            databaseManager: databaseManager
+        )
+        await viewModel.awaitHistoryLoaded()
+
+        viewModel.inputText = question
+        if classifier != nil, streamer != nil {
+            #if canImport(FoundationModels)
+            if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+                await viewModel.send()
+            } else {
+                await viewModel.sendEchoStub()
+            }
+            #else
+            await viewModel.sendEchoStub()
+            #endif
+        } else {
+            await viewModel.sendEchoStub()
+        }
+
+        // Pull metadata for the JSON response.
+        let assistantMessage = viewModel.messages.last(where: { $0.role == .assistant })
+        let response = assistantMessage?.content ?? ""
+
+        var payload: [String: Any] = [
+            "documentID": docID.uuidString,
+            "question": question,
+            "response": response
+        ]
+        if let metadata = viewModel.lastMetadata {
+            payload["promptTokens"] = metadata.promptTokenTotal
+            payload["inferenceDuration"] = metadata.inferenceDuration
+            payload["breakdown"] = [
+                "system": metadata.breakdown.system,
+                "anchor": metadata.breakdown.anchor,
+                "surrounding": metadata.breakdown.surrounding,
+                "conversationSummary": metadata.breakdown.conversationSummary,
+                "stm": metadata.breakdown.stm,
+                "ragChunks": metadata.breakdown.ragChunks,
+                "userQuestion": metadata.breakdown.userQuestion,
+                "totalIncludingScaffolding": metadata.breakdown.totalIncludingScaffolding
+            ]
+            payload["droppedSections"] = metadata.droppedSections.map { drop in
+                [
+                    "section": drop.section.rawValue,
+                    "identifier": drop.identifier,
+                    "reason": drop.reason
+                ]
+            }
+            payload["chunksInjected"] = metadata.chunksInjected.map { chunk in
+                [
+                    "chunkID": chunk.chunkID,
+                    "startOffset": chunk.startOffset,
+                    "relevance": chunk.relevance
+                ]
+            }
+        } else if viewModel.lastError != nil {
+            payload["note"] = "No metadata — send failed; see error field"
+        } else {
+            payload["note"] = "No metadata — likely echo-stub path (AFM unavailable)"
+        }
+
+        if let error = viewModel.lastError {
+            payload["error"] = error.errorDescription ?? "\(error)"
+            // When the send failed, the most recent assistant message
+            // in `messages` is from the PREVIOUS successful turn, not
+            // this one. Surface that explicitly so the test runner
+            // doesn't think the error message is the response.
+            payload["response"] = ""
+        }
+
+        return json(payload)
+    }
+
+    // MARK: — Open Ask Posey UI driver (simulator MCP integration)
+    //
+    // POST /open-ask-posey body shape:
+    //   { "documentID": "<uuid>", "scope": "passage"|"document" }
+    //
+    // Posts a NotificationCenter event the LibraryView and ReaderView
+    // observe to navigate to the document and open the sheet. The
+    // simulator MCP can then screenshot the sheet to verify the user
+    // experience.
+
+    func apiOpenAskPosey(bodyData: Data) async -> String {
+        guard let body = (try? JSONSerialization.jsonObject(with: bodyData)) as? [String: Any] else {
+            return #"{"error":"Malformed JSON body"}"#
+        }
+        guard let idStr = body["documentID"] as? String,
+              let docID = UUID(uuidString: idStr) else {
+            return #"{"error":"Missing or invalid documentID"}"#
+        }
+        let scope = (body["scope"] as? String)?.lowercased() ?? "passage"
+        guard scope == "passage" || scope == "document" else {
+            return #"{"error":"Unknown scope; expected 'passage' or 'document'"}"#
+        }
+
+        // Verify the document exists so the UI doesn't get a phantom
+        // request that never resolves.
+        let documents: [Document]
+        do {
+            documents = try databaseManager.documents()
+        } catch {
+            return #"{"error":"Document lookup failed: \#(error)"}"#
+        }
+        guard documents.contains(where: { $0.id == docID }) else {
+            return #"{"error":"Document not found"}"#
+        }
+
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: .openAskPoseyForDocument,
+                object: nil,
+                userInfo: [
+                    "documentID": docID,
+                    "scope": scope
+                ]
+            )
+        }
+
+        return json([
+            "documentID": docID.uuidString,
+            "scope": scope,
+            "status": "opened",
+            "note": "NotificationCenter post dispatched; UI will navigate + open sheet"
+        ])
+    }
+
+    // MARK: — Notifications for the simulator MCP UI driver
+
+    // Defined here rather than in a separate file because it's used
+    // only by the local API → UI handoff path.
+    static var openAskPoseyForDocumentNotification: Notification.Name {
+        Notification.Name.openAskPoseyForDocument
     }
 
     // MARK: — JSON helper

@@ -388,6 +388,73 @@ def main() -> None:
         verbose = "--verbose" in args or "-v" in args
         run_audit(verbose=verbose)
 
+    # ── ask ──────────────────────────────────────────────────────────────────
+    # Drives the full Ask Posey pipeline (intent classify -> prompt build ->
+    # AFM stream) for a single turn. M6 test infrastructure per Mark.
+    #
+    # Examples:
+    #   posey_test.py ask <doc-id> "what does this passage mean?"
+    #   posey_test.py ask <doc-id> "summarize this document" --scope document
+    #   posey_test.py ask <doc-id> "what does this mean?" \
+    #                    --anchor-text "Two roads diverged" --anchor-offset 1024
+    elif verb == "ask":
+        if len(args) < 3:
+            print("Usage: posey_test.py ask <doc-id> <question> "
+                  "[--scope passage|document] "
+                  "[--anchor-text <text>] [--anchor-offset <int>]")
+            sys.exit(1)
+        doc_id = args[1]
+        question = args[2]
+        scope = "passage"
+        anchor_text = None
+        anchor_offset = None
+        i = 3
+        while i < len(args):
+            if args[i] == "--scope" and i + 1 < len(args):
+                scope = args[i + 1].lower(); i += 2
+            elif args[i] == "--anchor-text" and i + 1 < len(args):
+                anchor_text = args[i + 1]; i += 2
+            elif args[i] == "--anchor-offset" and i + 1 < len(args):
+                anchor_offset = int(args[i + 1]); i += 2
+            else:
+                print(f"Unknown ask flag: {args[i]}"); sys.exit(1)
+        body_dict = {"documentID": doc_id, "question": question, "scope": scope}
+        if anchor_text is not None:
+            body_dict["anchorText"] = anchor_text
+        if anchor_offset is not None:
+            body_dict["anchorOffset"] = anchor_offset
+        body = json.dumps(body_dict).encode()
+        status, data = _http("POST", "/ask", body=body,
+                             extra_headers={"Content-Type": "application/json"},
+                             timeout=600)
+        if status != 200:
+            print(f"HTTP {status}: {data}"); sys.exit(1)
+        print(json.dumps(data, indent=2))
+
+    # ── open-ask-posey ───────────────────────────────────────────────────────
+    # Programmatically opens the Ask Posey sheet on a given document so the
+    # simulator MCP can screenshot the user experience. Posts a notification
+    # the running app's UI layer observes.
+    elif verb in ("open-ask-posey", "openask"):
+        if len(args) < 2:
+            print("Usage: posey_test.py open-ask-posey <doc-id> [--scope passage|document]")
+            sys.exit(1)
+        doc_id = args[1]
+        scope = "passage"
+        i = 2
+        while i < len(args):
+            if args[i] == "--scope" and i + 1 < len(args):
+                scope = args[i + 1].lower(); i += 2
+            else:
+                print(f"Unknown open-ask-posey flag: {args[i]}"); sys.exit(1)
+        body = json.dumps({"documentID": doc_id, "scope": scope}).encode()
+        status, data = _http("POST", "/open-ask-posey", body=body,
+                             extra_headers={"Content-Type": "application/json"},
+                             timeout=30)
+        if status != 200:
+            print(f"HTTP {status}: {data}"); sys.exit(1)
+        print(json.dumps(data, indent=2))
+
     else:
         print(f"Unknown command: {verb}\n")
         print(__doc__)

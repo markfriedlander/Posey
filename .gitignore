@@ -26,3 +26,4 @@ __pycache__/
 
 # Claude Code session state (per-machine, scheduled tasks, local prefs)
 .claude/
+tools/.posey_api_config.*.json

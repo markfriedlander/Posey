@@ -4,6 +4,20 @@ posey_test.py — Posey Local API Test Runner
 =============================================
 Single-file, zero-dependency test runner for Posey's Local API.
 
+API POLITENESS (CLAUDE.md "AFM cooldown" — standing requirement)
+----------------------------------------------------------------
+Sequential /ask calls hammer Apple Foundation Models hard enough to
+put it into a Code=-1 (null) error state where every subsequent
+request fails until the app is relaunched. The fix is testing-side,
+not app-side: real users naturally pause between questions, so this
+runner inserts a cooldown (default 2.5s ± 500ms jitter) before each
+/ask call. Treat this exactly like a rate-limited third-party API.
+
+Override via env vars (rarely needed):
+- POSEY_TEST_COOLDOWN_SECONDS=1.5   tighter cooldown (use cautiously)
+- POSEY_TEST_COOLDOWN_JITTER=0.0    deterministic timing
+- POSEY_TEST_NO_COOLDOWN=1          disable entirely (one-shot tests only)
+
 SETUP (one time)
 ----------------
   1. In Posey, tap the antenna icon (top-left of Library screen) to enable the API.
@@ -132,6 +146,25 @@ def _import_file(path: str) -> dict:
     if status != 200:
         return {"error": f"HTTP {status}", "detail": result}
     return result if isinstance(result, dict) else {"raw": result}
+
+
+def _ask_cooldown() -> None:
+    """Sleep before an /ask call to give AFM time to recover. See module
+    docstring 'API POLITENESS' for the rationale.
+
+    Default: uniform ~2.5s with ±500ms jitter. Skipped when
+    POSEY_TEST_NO_COOLDOWN=1. Configurable via
+    POSEY_TEST_COOLDOWN_SECONDS / POSEY_TEST_COOLDOWN_JITTER.
+    """
+    import random as _random
+    import time as _time
+    if os.environ.get("POSEY_TEST_NO_COOLDOWN") == "1":
+        return
+    base = float(os.environ.get("POSEY_TEST_COOLDOWN_SECONDS", "2.5"))
+    jitter = float(os.environ.get("POSEY_TEST_COOLDOWN_JITTER", "0.5"))
+    delay = max(0.0, base + _random.uniform(-jitter, jitter))
+    if delay > 0:
+        _time.sleep(delay)
 
 
 def _state() -> dict:
@@ -424,6 +457,9 @@ def main() -> None:
         if anchor_offset is not None:
             body_dict["anchorOffset"] = anchor_offset
         body = json.dumps(body_dict).encode()
+        # API politeness — cool AFM off before slamming it again.
+        # See module docstring "API POLITENESS" for the rationale.
+        _ask_cooldown()
         status, data = _http("POST", "/ask", body=body,
                              extra_headers={"Content-Type": "application/json"},
                              timeout=600)

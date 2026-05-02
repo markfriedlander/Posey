@@ -915,6 +915,28 @@ private struct ReaderPreferencesSheet: View {
                 }
 
                 // Motion sub-settings (only visible when Motion is the chosen Reading Style)
+                // Audio export section (M8)
+                Section {
+                    Button {
+                        viewModel.beginAudioExport()
+                    } label: {
+                        HStack {
+                            Image(systemName: "waveform.badge.plus")
+                            Text("Export to Audio File")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(.secondary)
+                        }
+                        .foregroundStyle(.primary)
+                    }
+                    .accessibilityIdentifier("preferences.exportAudio")
+                } header: {
+                    Text("Audio Export")
+                } footer: {
+                    Text("Render this document to an .m4a file you can save or share. Best Available voices are usually gated from capture; switch to a Custom voice in Playback above if export refuses.")
+                        .font(.caption2)
+                }
+
                 if viewModel.readingStyle == .motion {
                     Section {
                         Picker("When to use Motion", selection: $viewModel.motionPreference) {
@@ -1021,6 +1043,9 @@ private struct ReaderPreferencesSheet: View {
             .sheet(isPresented: $viewModel.showMotionConsent) {
                 MotionConsentSheet(viewModel: viewModel)
             }
+            .sheet(isPresented: $viewModel.showAudioExport) {
+                AudioExportSheet(viewModel: viewModel)
+            }
         }
     }
 }
@@ -1082,6 +1107,98 @@ private struct MotionConsentSheet: View {
     }
 }
 // ========== BLOCK P1B: MOTION CONSENT SHEET - END ==========
+
+
+// ========== BLOCK P1C: AUDIO EXPORT SHEET - START ==========
+/// M8 audio export progress + completion sheet. Drives the export
+/// from `ReaderViewModel.audioExporter`, which the ReaderViewModel
+/// rebuilds on each export kickoff. Three states surface as
+/// distinct UI: rendering (progress + cancel), finished (share +
+/// done), failed (error message + dismiss).
+private struct AudioExportSheet: View {
+    @ObservedObject var viewModel: ReaderViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var isShowingShare: Bool = false
+    @State private var shareURL: URL? = nil
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Export Audio")
+                    .font(.title2.weight(.semibold))
+                if let exporter = viewModel.audioExporter {
+                    body(for: exporter)
+                } else {
+                    Text("Export not started.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .navigationTitle("Audio Export")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        viewModel.audioExporter?.cancel()
+                        dismiss()
+                    }
+                }
+            }
+            .sheet(isPresented: $isShowingShare) {
+                if let url = shareURL {
+                    ShareLink(item: url) {
+                        Text("Share \(url.lastPathComponent)")
+                    }
+                    .padding(20)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func body(for exporter: AudioExporter) -> some View {
+        switch exporter.state {
+        case .idle:
+            Text("Preparing…")
+                .foregroundStyle(.secondary)
+        case .rendering(let progress, let i, let total):
+            VStack(alignment: .leading, spacing: 8) {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                Text("Rendering segment \(i) of \(total) — \(Int(progress * 100))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Cancel", role: .destructive) {
+                    exporter.cancel()
+                }
+                .padding(.top, 8)
+            }
+        case .finished(let url):
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Export complete", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text(url.lastPathComponent)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                ShareLink(item: url) {
+                    Label("Share or Save to Files", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        case .failed(let reason):
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Export failed", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(reason)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+// ========== BLOCK P1C: AUDIO EXPORT SHEET - END ==========
 
 private struct NotesSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
@@ -1224,6 +1341,38 @@ final class ReaderViewModel: ObservableObject {
     @Published private(set) var isDeviceMoving: Bool = false
     private let motionDetector = MotionDetector()
     private var motionDetectorCancellable: AnyCancellable?
+
+    /// M8 audio export. The exporter is recreated on each kickoff so
+    /// the UI's progress observation always sees a fresh state
+    /// machine. `showAudioExport` drives the presentation of the
+    /// export sheet from the preferences UI.
+    @Published var showAudioExport: Bool = false
+    @Published private(set) var audioExporter: AudioExporter?
+
+    /// Kick off an audio export. Builds a fresh AudioExporter,
+    /// presents the export sheet, and starts rendering on a
+    /// background Task. The sheet observes the exporter's state
+    /// directly.
+    func beginAudioExport() {
+        let exporter = AudioExporter()
+        audioExporter = exporter
+        showAudioExport = true
+        let segmentsCopy = segments
+        let voiceModeCopy = voiceMode
+        let title = document.title
+        Task { @MainActor in
+            do {
+                _ = try await exporter.render(
+                    segments: segmentsCopy,
+                    voiceMode: voiceModeCopy,
+                    documentTitle: title
+                )
+            } catch {
+                // exporter.state already carries .failed(reason:); the
+                // sheet renders that. Nothing else to do here.
+            }
+        }
+    }
     @Published private(set) var currentSentenceIndex: Int = 0
     @Published private(set) var playbackState: SpeechPlaybackService.PlaybackState = .idle
     @Published private(set) var focusedDisplayBlockID: Int?

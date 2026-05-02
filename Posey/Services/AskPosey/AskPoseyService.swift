@@ -208,7 +208,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         model: SystemLanguageModel = .default,
         instructions: String = AskPoseyPrompts.classifierInstructions,
         groundedTemperature: Double = 0.1,
-        polishTemperature: Double = 0.4
+        polishTemperature: Double = 0.55
     ) {
         self.model = model
         self.instructions = instructions

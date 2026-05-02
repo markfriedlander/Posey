@@ -88,7 +88,7 @@ clear_doc() {
 
 # Document IDs from Mark's iPhone — pinned for repeatability.
 # Update these if the docs are re-imported or replaced.
-AI_BOOK=B2A84DC8-390C-4BB5-B52A-ACF13BE3E560
+AI_BOOK=E5C815A6-52BC-4221-B02B-1F02F0B7403E
 COPYRIGHT=9C500458-0DE9-4659-9758-233A9104D8AF
 INTERNET_STEPS=DAE62045-DC03-48A4-A520-2F050F8FB3BE
 

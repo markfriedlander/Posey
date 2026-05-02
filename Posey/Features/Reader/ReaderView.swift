@@ -19,6 +19,12 @@ struct ReaderView: View {
     /// row indicator (not in v1).
     @StateObject private var indexingTracker = IndexingTracker()
     @Environment(\.scenePhase) private var scenePhase
+    /// M9 landscape polish hook. iPhone rotation flips
+    /// `verticalSizeClass`: portrait → .regular, landscape → .compact.
+    /// We observe the change to re-fire the scroll-to-current-sentence
+    /// pass once the new layout has settled.
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.horizontalSizeClass) private var readerHorizontalSizeClass
     /// Honors the system "Reduce Motion" accessibility setting. When true,
     /// chrome fade and scroll animations skip their easing — visible state
     /// changes still happen but without the easing curve.
@@ -256,6 +262,34 @@ struct ReaderView: View {
             }
             .onChange(of: viewModel.focusedDisplayBlockID) { _, _ in
                 viewModel.scrollToCurrentSentence(with: proxy, animated: true)
+            }
+            // M9 landscape polish: re-fire scrollToCurrentSentence
+            // after orientation changes settle. Without this, rotating
+            // mid-read leaves the active sentence off-center until the
+            // next playback advance — the previous behavior Mark
+            // accepted as "good enough for now" and asked to fix as
+            // a polish pass. The two-stage delay (60ms + 180ms)
+            // matches the initial-appear pattern: first scroll lands
+            // approximately, second scroll catches up after the lazy
+            // layout pass realizes the previously off-screen rows.
+            .onChange(of: verticalSizeClass) { _, _ in
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(60))
+                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                    try? await Task.sleep(for: .milliseconds(180))
+                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                }
+            }
+            .onChange(of: readerHorizontalSizeClass) { _, _ in
+                // iPad split-view + Mac Catalyst window resize also
+                // shift the layout in ways that benefit from the
+                // re-center pass.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(60))
+                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                    try? await Task.sleep(for: .milliseconds(180))
+                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                }
             }
             .onChange(of: scenePhase) { _, newValue in
                 if newValue == .background || newValue == .inactive {

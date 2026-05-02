@@ -466,7 +466,12 @@ private extension AskPoseyChatViewModel {
 
         let results: [DocumentEmbeddingSearchResult]
         do {
-            results = try index.search(documentID: documentID, query: question, limit: ragTopK)
+            // M8 entity-boosted ranking — re-ranks by cosine + Jaccard
+            // entity overlap so chunks that share named entities with
+            // the question (people, places, organizations) get a
+            // relevance bump. Falls back to pure cosine when neither
+            // side has named entities.
+            results = try index.searchWithEntityBoost(documentID: documentID, query: question, limit: ragTopK)
         } catch {
             // Index unavailable / query failed → fall back to no RAG.
             // Better to ship a less-grounded answer than to error out

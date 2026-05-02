@@ -461,6 +461,22 @@ private extension AskPoseyChatViewModel {
     /// the model never sees the same passage twice — once as anchor
     /// quote and once as a "retrieved" chunk. Threshold is
     /// `ragDedupThreshold` (0.85), matching Hal's default.
+    ///
+    /// **2026-05-02 fix — front-matter injection for document-scoped
+    /// invocations.** Real Q&A on a sample document ("Who are the
+    /// authors?" on the AI Book Collaboration Project) revealed a
+    /// systematic cosine-retrieval miss: meta-questions about a
+    /// document ("who wrote it", "what is it about", "what's the
+    /// abstract") rarely surface the title-page / front-matter
+    /// content because the question's vocabulary
+    /// ("authors / writers / abstract") doesn't share a semantic
+    /// neighbourhood with how front matter is typically written
+    /// ("by X with collaborators Y, Z; A Collaborative Exploration of…").
+    /// When the invocation is document-scoped (anchor nil), we now
+    /// always prepend the document's first 2 chunks as "front matter"
+    /// candidates with relevance 1.0 — the budget enforcer keeps
+    /// them by virtue of being top-of-list, and meta-questions get
+    /// reliable grounding.
     func retrieveRAGChunks(for question: String) -> [RetrievedChunk] {
         guard let index = embeddingIndex else { return [] }
 
@@ -479,7 +495,31 @@ private extension AskPoseyChatViewModel {
             NSLog("AskPosey RAG search failed: \(error)")
             return []
         }
-        guard !results.isEmpty else { return [] }
+
+        // Front-matter injection for document-scoped invocations.
+        // Always prepend the document's first 4 chunks so the prompt
+        // sees the title page + table of contents + contributor list.
+        // Two chunks (~900 chars at the default 450 char chunk size)
+        // covered only the abstract on real-world tests; bumped to 4
+        // (~1800 chars) so contributor names listed in the TOC also
+        // make it in. Deduplicates against any cosine match for the
+        // same chunk ID.
+        var frontMatter: [RetrievedChunk] = []
+        if anchor == nil, let db = databaseManager {
+            let storedFront = (try? db.frontMatterChunks(for: documentID, limit: 4)) ?? []
+            for stored in storedFront {
+                let alreadyPresent = results.contains { $0.chunk.chunkIndex == stored.chunkIndex }
+                if alreadyPresent { continue }
+                frontMatter.append(RetrievedChunk(
+                    chunkID: stored.chunkIndex,
+                    startOffset: stored.startOffset,
+                    text: stored.text,
+                    relevance: 1.0
+                ))
+            }
+        }
+
+        guard !results.isEmpty || !frontMatter.isEmpty else { return [] }
 
         // Reference text for cosine dedup: anchor + recent STM. We
         // don't include the conversation summary here because the
@@ -512,7 +552,11 @@ private extension AskPoseyChatViewModel {
                 relevance: result.similarity
             ))
         }
-        return translated
+        // Front matter goes first — its synthetic relevance 1.0
+        // makes it a budget-survivor by virtue of position-in-list
+        // (the prompt builder iterates top-of-list and drops from
+        // the bottom on overflow).
+        return frontMatter + translated
     }
 
     /// Concatenate anchor + recent verbatim STM into a single string

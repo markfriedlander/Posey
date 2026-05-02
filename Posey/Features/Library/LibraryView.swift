@@ -593,6 +593,21 @@ extension LibraryViewModel {
                 for doc in docs { byType[doc.fileType, default: 0] += 1 }
                 return json(["documentCount": docs.count, "byFileType": byType])
 
+            case "CLEAR_ASK_POSEY_CONVERSATION":
+                // Wipe the persisted conversation for a given document
+                // so the test harness can start clean. Mark's Three
+                // Hats QA pass needs this to evaluate fresh-context
+                // answer quality without prior turns biasing the
+                // model. Implemented as a direct DELETE since
+                // ask_posey_conversations cascades on document_id —
+                // we only delete the conversation rows, the document
+                // itself stays put.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Missing or invalid document ID"}"#
+                }
+                let cleared = try databaseManager.clearAskPoseyConversation(for: id)
+                return json(["documentID": idStr, "rowsCleared": cleared])
+
             case "GET_IMAGE":
                 guard let imageID = arg, !imageID.isEmpty else {
                     return #"{"error":"Missing image ID"}"#
@@ -794,6 +809,11 @@ extension LibraryViewModel {
         if let metadata = viewModel.lastMetadata {
             payload["promptTokens"] = metadata.promptTokenTotal
             payload["inferenceDuration"] = metadata.inferenceDuration
+            // Mark's Three Hats QA pass needs the verbatim prompt
+            // body to debug answer-quality failures. Returned as
+            // `fullPrompt` so test runners can inspect what the
+            // model actually saw.
+            payload["fullPrompt"] = metadata.fullPromptForLogging
             payload["breakdown"] = [
                 "system": metadata.breakdown.system,
                 "anchor": metadata.breakdown.anchor,

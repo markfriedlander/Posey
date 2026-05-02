@@ -149,21 +149,65 @@ nonisolated enum AskPoseyPromptBuilder {
     /// The classifier in `AskPoseyService.swift` carries its own
     /// instructions; this is the prose-response variant. Kept short
     /// because every token here costs context budget on every call.
+    ///
+    /// **2026-05-02 revision** — the original instructions emphasized
+    /// "if you don't have enough, say so" and that biased the model
+    /// toward refusal even when the answer WAS in the prompt's front
+    /// matter, just under different vocabulary (e.g. the user asks
+    /// "who are the authors?" and the document calls them "moderator
+    /// + AI collaborators"). The revised framing tells the model to
+    /// SYNTHESIZE from what's present and only refuse when truly
+    /// nothing in the prompt can answer the question. Refusal-
+    /// over-hallucination is still the bias, but synthesis is now
+    /// explicitly preferred over surface vocabulary matching.
     static let proseInstructions: String = """
     You are Posey, a quiet, focused reading companion. The user is reading a \
-    document and asking you about it. Your answers are grounded in the \
-    document — the anchor passage, the surrounding sentences, and any \
-    additional excerpts the app has retrieved are in front of you.
+    document and asking you about it. The relevant excerpts the app has \
+    retrieved appear below — the anchor passage they were on, sentences \
+    around it, and additional sections of the document.
 
-    Answer the user's question directly. If the answer is in the passage, \
-    quote or paraphrase it. If the user is asking about something earlier \
-    in the conversation, use the recent history shown. If you don't have \
-    enough to answer well, say so briefly — never invent passages or \
-    citations the document doesn't contain.
+    The user's CURRENT question is in the USER block at the bottom of the \
+    prompt. Answer THAT question — not earlier ones in the conversation \
+    history. The conversation history is background context (what you've \
+    discussed so far), not a script you should continue or repeat. Each \
+    new question deserves a fresh, direct answer.
+
+    When you answer:
+    - If the answer is in the excerpts, give it directly. Quote or paraphrase. \
+    Synthesize across multiple excerpts when needed.
+    - The user's question may use different vocabulary from the document \
+    (e.g. "authors" when the document says "contributors" or "moderator" or \
+    "collaborators"). Map the question to the closest concept the document \
+    discusses and answer from that — don't refuse just because the literal \
+    word doesn't appear.
+    - "Who are the authors?" / "who wrote this?" / "who contributed?" / \
+    "who created this?" all ask the same thing: list every person, AI \
+    model, and system named in the title page, contributor list, or \
+    table-of-contents author roster — including editors, moderators, \
+    curators, hosts, and collaborators. If the front matter lists a \
+    moderator alongside contributing AIs, the moderator counts. Don't \
+    cherry-pick from a brief abstract when a fuller contributor list is \
+    also in the excerpts.
+    - Front matter — the title, abstract, table of contents, and contributor \
+    list — answers most "who wrote this", "what is this about", and "who \
+    contributed" questions. Use it.
+    - If the user is following up on something earlier in the conversation, \
+    use the recent history shown.
+    - If the answer is genuinely not in the excerpts (e.g. the user asks \
+    for a publication year, an author's biography, a price, a specific \
+    date or count) and you cannot find it, say so plainly: "The document \
+    doesn't say." Do NOT guess plausible-sounding numbers, dates, names, \
+    or facts. The penalty for refusing a question is much smaller than \
+    the penalty for inventing an answer that sounds right but isn't in \
+    the document. If you're tempted to fill in a year or a number from \
+    memory, stop — your only sources are the excerpts and the conversation \
+    history. General-knowledge guesses are not allowed.
+    - Never invent specific quotes, page numbers, citations, dates, prices, \
+    counts, or names that aren't directly visible in the excerpts.
 
     Speak in prose. Use lists or markdown only when the question is \
-    structurally asking for them (steps, comparisons). Never announce that \
-    you're using context — just use it.
+    structurally asking for them. Never announce that you're using context — \
+    just use it.
     """
 
     /// Surrounding-sentence window in tokens, keyed off intent. Tight
@@ -352,6 +396,11 @@ private extension AskPoseyPromptBuilder {
     }
 
     static func renderUserBlock(text: String) -> String {
+        // Bare USER block — AFM treats injected instruction prose
+        // as part of the user's turn and dumped excerpts back
+        // verbatim when we tried to add framing here. The system
+        // instructions handle "answer THIS, don't repeat earlier
+        // turns" framing; this block is just the verbatim question.
         """
         #=== BEGIN USER ===#
 
@@ -364,6 +413,16 @@ private extension AskPoseyPromptBuilder {
     /// STM rendering with budget enforcement and drop tracking. Returns
     /// the rendered block (or empty if no turns fit) and pushes drop
     /// records into `droppedSink` for each turn that didn't make it.
+    ///
+    /// **2026-05-02 format change.** The original `[user]: ... [assistant]: ...`
+    /// script format primed AFM to continue the most-recent
+    /// assistant turn pattern instead of answering the new user
+    /// question — verified on real Q&A: Q2 ("methodology?") echoed
+    /// Q1's authors answer instead of responding to Q2. Switched to
+    /// a third-person paraphrase format with "User asked" / "Posey
+    /// explained" markers so the model can't pattern-match to continue
+    /// the script. The current question lives in the standalone USER
+    /// block; the history block is purely background context.
     static func renderSTMBlock(
         history: [AskPoseyMessage],
         budgetTokens: Int,
@@ -376,10 +435,7 @@ private extension AskPoseyPromptBuilder {
         // overflow; everything earlier is "dropped".
         var keptReversed: [AskPoseyMessage] = []
         var spent = 0
-        // Scaffolding overhead per turn — speaker label + colon + space + newlines.
-        // Estimating at 8 tokens per turn so the budget reflects real cost,
-        // not just message body cost.
-        let perTurnScaffolding = 8
+        let perTurnScaffolding = 12  // "User asked: " + "Posey replied: " markers
 
         for message in history.reversed() {
             let bodyTokens = AskPoseyTokenEstimator.tokens(in: message.content) + perTurnScaffolding
@@ -399,15 +455,23 @@ private extension AskPoseyPromptBuilder {
 
         let kept = Array(keptReversed.reversed())
         let lines: [String] = kept.map { msg in
-            let speaker = msg.role == .user ? "[user]" : "[assistant]"
-            return "\(speaker): \(msg.content)"
+            // Prose-style markers so the model treats history as
+            // background notes, not a script to continue. Indented
+            // bullets so even a literal-minded continuation pattern
+            // sees a list rather than a "[assistant]:" script.
+            switch msg.role {
+            case .user:
+                return "  • User asked: \(msg.content)"
+            case .assistant:
+                return "  • Posey replied: \(msg.content)"
+            }
         }
         return """
         #=== BEGIN CONVERSATION_RECENT ===#
 
-        Recent conversation history (verbatim):
+        Earlier in this conversation about this document (oldest first, for context only — do not repeat or continue these replies; the user's NEW question is in the USER block below):
 
-        \(lines.joined(separator: "\n\n"))
+        \(lines.joined(separator: "\n"))
 
         #=== END CONVERSATION_RECENT ===#
         """

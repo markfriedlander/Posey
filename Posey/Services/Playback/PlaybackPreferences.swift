@@ -18,6 +18,53 @@ final class PlaybackPreferences {
         static let customRate           = "posey.playback.customRate"
         static let fontSize             = "posey.reader.fontSize"
         static let lastOpenedDocumentID = "posey.library.lastOpenedDocumentID"
+        static let readingStyle         = "posey.reader.readingStyle"
+    }
+
+    /// M8 Reading Style preferences. Currently shipping Standard +
+    /// Focus; Immersive (custom layout work) and Motion (CoreMotion +
+    /// consent flow) deferred to dedicated implementation passes.
+    /// Persisted as a string so future cases append without migration.
+    enum ReadingStyle: String, CaseIterable, Equatable {
+        /// Single highlighted active sentence, surrounding text at
+        /// full opacity. Default — current behavior.
+        case standard
+        /// Dim every non-active sentence to ~45% opacity so the eye
+        /// is naturally drawn to the active one. Functionally
+        /// additive on top of the existing highlight tier.
+        case focus
+
+        var displayName: String {
+            switch self {
+            case .standard: return "Standard"
+            case .focus:    return "Focus"
+            }
+        }
+
+        var description: String {
+            switch self {
+            case .standard:
+                return "Single highlighted active sentence; surrounding text at full opacity."
+            case .focus:
+                return "Dim every non-active sentence so your eye lands on the brightest one."
+            }
+        }
+    }
+
+    /// User-chosen reading style. Defaults to `.standard` for new
+    /// installs (the current Posey behavior). Stored as the raw
+    /// string so future cases append cleanly.
+    var readingStyle: ReadingStyle {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: Keys.readingStyle),
+                  let style = ReadingStyle(rawValue: raw) else {
+                return .standard
+            }
+            return style
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: Keys.readingStyle)
+        }
     }
 
     private enum ModeToken {

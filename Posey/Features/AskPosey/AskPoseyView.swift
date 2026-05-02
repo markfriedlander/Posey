@@ -266,6 +266,8 @@ struct AskPoseyMessageBubble: View {
         .sheet(isPresented: .constant(true)) {
             AskPoseyView(
                 viewModel: AskPoseyChatViewModel(
+                    documentID: UUID(),
+                    documentPlainText: "",
                     anchor: AskPoseyAnchor(
                         text: "It was the year when they finally immanentized the Eschaton.",
                         plainTextOffset: 0
@@ -287,6 +289,8 @@ struct AskPoseyMessageBubble: View {
 private struct PopulatedAskPoseyPreview: View {
     @StateObject private var viewModel: AskPoseyChatViewModel = {
         let vm = AskPoseyChatViewModel(
+            documentID: UUID(),
+            documentPlainText: "",
             anchor: AskPoseyAnchor(
                 text: "The history of the world is the history of the warfare between secret societies.",
                 plainTextOffset: 1234

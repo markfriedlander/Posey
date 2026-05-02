@@ -808,6 +808,18 @@ extension AskPoseyChatViewModel {
             guard let self else { return }
             do {
                 // Call 1: intent classification.
+                //
+                // **2026-05-02 fix.** AFM's safety filter sometimes
+                // refuses the classifier call itself for questions
+                // it considers sensitive (e.g. "How does Mark's role
+                // compare to the AI contributors?"). The classifier
+                // is internal infrastructure — its refusal shouldn't
+                // surface to the user as a hard failure. Fall back
+                // to `.general` intent so the prose pipeline still
+                // runs, where the proper retry-with-rephrasing logic
+                // can handle the user-facing refusal path. Other
+                // classifier errors (transient, AFM unavailable)
+                // still surface via handleSendError.
                 let intent: AskPoseyIntent
                 do {
                     intent = try await classifier.classifyIntent(
@@ -815,8 +827,15 @@ extension AskPoseyChatViewModel {
                         anchor: anchorTextForClassifier
                     )
                 } catch {
-                    self.handleSendError(error, placeholderID: placeholderID, intent: nil)
-                    return
+                    let errorString = "\(error)"
+                    let isClassifierRefusal = errorString.lowercased().contains("refusal")
+                    if isClassifierRefusal {
+                        NSLog("AskPosey: classifier refused; defaulting to .general intent")
+                        intent = .general
+                    } else {
+                        self.handleSendError(error, placeholderID: placeholderID, intent: nil)
+                        return
+                    }
                 }
 
                 // Wait for any in-flight summarization from the
@@ -1053,12 +1072,19 @@ extension AskPoseyChatViewModel {
             bubbleText = "Posey can't answer right now — Apple Intelligence isn't available on this device."
         case .transient:
             bubbleText = "Posey ran into a temporary issue. Try again in a moment."
-        case .permanent:
-            // AFM .refusal lands here — the most common cause is the
-            // safety filter flagging the prompt. Keep the user-facing
-            // text gentle; technical detail is in lastError for the
-            // alert.
-            bubbleText = "Posey couldn't answer this one — try rephrasing the question."
+        case .permanent(let description):
+            // AskPoseyService surfaces `informativeRefusalFailure` as
+            // the underlyingDescription when both the primary
+            // grounded call AND the neutral-rephrased retry both got
+            // .refusal'd by AFM. Per Mark 2026-05-02 the failure
+            // message should be more actionable than "try
+            // rephrasing" — give the user a hint at what kinds of
+            // questions Posey can usually handle.
+            if description.contains("informativeRefusalFailure") {
+                bubbleText = "Posey had trouble with that one. Try asking about a specific passage or a more concrete aspect of the topic."
+            } else {
+                bubbleText = "Posey couldn't answer this one — try rephrasing the question."
+            }
         }
 
         if let index = messages.firstIndex(where: { $0.id == placeholderID }) {

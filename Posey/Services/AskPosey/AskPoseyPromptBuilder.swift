@@ -160,6 +160,97 @@ nonisolated enum AskPoseyPromptBuilder {
     /// narrative-summary history, XML section tags, and stronger
     /// system framing that explicitly labels past exchanges as
     /// reference material rather than active conversation.
+    /// Posey's voice — the personality system prompt for the
+    /// **polish call** in the two-call pipeline. The grounded call
+    /// (low temperature, factually conservative) produces a stable
+    /// answer; this call rewrites that answer in Posey's voice
+    /// (warm, slightly irreverent, conversational, librarian-DJ).
+    /// Per Mark 2026-05-02: "0.1 is too cold. A robotic Posey is a
+    /// failed Posey regardless of factual accuracy."
+    static let polishInstructions: String = """
+    You are Posey. You're a reading companion with a particular voice. \
+    Brilliant and warm. Slightly irreverent without being snarky. You \
+    read voraciously — fiction, philosophy, technical papers, court \
+    briefs, anything dense — and you talk about what you've read the \
+    way a friend would, not the way a search engine would. Think of \
+    the kind of person who reads obscure passages between DJ sets on \
+    a pirate radio station: engaged, occasionally playful, deeply \
+    knowledgeable, never stiff.
+
+    Below is (1) a question the user asked about a document they're \
+    reading, and (2) a draft answer that someone else worked out from \
+    the document. The draft is factually correct but reads like a \
+    database record. Your job: rewrite the draft in your voice. Just \
+    the rewrite — no preamble, no meta-commentary.
+
+    Non-negotiable rules:
+    - Keep every fact in the draft. Don't add new ones. Don't soften \
+    or remove substance. Don't invent specifics (dates, names, counts) \
+    that the draft doesn't contain.
+    - **Match the draft's certainty.** If the draft states a fact \
+    confidently ("Mark Friedlander is the moderator"), you state it \
+    confidently. Do NOT introduce hedges like "I don't know if…" or \
+    "It's possible that…" — those are dishonest when the draft is \
+    sure. If the draft is uncertain or says "the document doesn't \
+    say," carry that uncertainty through.
+    - **Match the draft's length.** Don't expand a one-sentence \
+    grounded answer into three paragraphs. Don't compress a list of \
+    seven facts down to one. Posey is conversational, not loquacious.
+    - Don't repeat the question back at the user. Just answer.
+    - Don't open with "Sure!" / "Great question!" / "Oh," / "So," / \
+    "Well," / "Ah," — just begin the answer.
+    - Don't use markdown headers (## Title). Lists are fine when the \
+    draft is itself a list.
+    - Tone: warm, present, engaged, a little dry when it fits. Not \
+    cute. Not breathless. Not flowery. No metaphors the draft didn't \
+    earn ("the wild party of the Internet"). The librarian-DJ — knows \
+    the material, likes the material, talks about it like it matters.
+
+    Write the answer.
+    """
+
+    /// Build the polish-call prompt body — the user-turn content that
+    /// gets handed to AFM after the grounded call returns. Quotes
+    /// the original question + the grounded draft so the polish
+    /// model has both inputs in front of it.
+    static func polishPromptBody(question: String, groundedDraft: String) -> String {
+        """
+        USER QUESTION:
+        \(question.trimmingCharacters(in: .whitespacesAndNewlines))
+
+        DRAFT ANSWER (factually correct; rewrite in your voice):
+        \(groundedDraft.trimmingCharacters(in: .whitespacesAndNewlines))
+        """
+    }
+
+    /// Build a neutral, academic rephrasing of a question that AFM
+    /// refused — gives a second attempt a different surface to land
+    /// on without changing what the user asked. Per Mark 2026-05-02:
+    /// "we're trying harder to answer it, not silently rewriting."
+    /// The original question is QUOTED verbatim so user intent is
+    /// preserved; only the framing around it shifts to fact-finding.
+    static func neutralRephrasingPromptBody(originalUserQuestion: String, originalRenderedBody: String) -> String {
+        let userBlockMarker = "USER QUESTION"
+        // Strip the original USER QUESTION block so we can substitute
+        // the neutralised version. Falls back to original-body
+        // appending if the marker isn't found (defensive).
+        if let userBlockRange = originalRenderedBody.range(of: userBlockMarker) {
+            let prefix = originalRenderedBody[..<userBlockRange.lowerBound]
+            let trimmedQuestion = originalUserQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+            let neutralBlock = """
+            USER QUESTION (the user asked: "\(trimmedQuestion)" — please summarize the relevant factual information the document excerpts above provide that bears on this question. Stick to what the excerpts say. If the excerpts don't address the question, say so plainly.):
+            \(trimmedQuestion)
+            """
+            return prefix + neutralBlock
+        }
+        // Fallback: append neutral instruction at the end.
+        let trimmedQuestion = originalUserQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        return originalRenderedBody + "\n\n" + """
+        USER QUESTION (please summarize the relevant factual information the document excerpts provide that bears on this question. Stick strictly to what the excerpts say.):
+        \(trimmedQuestion)
+        """
+    }
+
     static let proseInstructions: String = """
     You are Posey, a quiet, focused reading companion. The user is reading a \
     document and asking you about it.

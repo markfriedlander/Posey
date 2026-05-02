@@ -150,27 +150,31 @@ nonisolated enum AskPoseyPromptBuilder {
     /// instructions; this is the prose-response variant. Kept short
     /// because every token here costs context budget on every call.
     ///
-    /// **2026-05-02 revision** — the original instructions emphasized
-    /// "if you don't have enough, say so" and that biased the model
-    /// toward refusal even when the answer WAS in the prompt's front
-    /// matter, just under different vocabulary (e.g. the user asks
-    /// "who are the authors?" and the document calls them "moderator
-    /// + AI collaborators"). The revised framing tells the model to
-    /// SYNTHESIZE from what's present and only refuse when truly
-    /// nothing in the prompt can answer the question. Refusal-
-    /// over-hallucination is still the bias, but synthesis is now
-    /// explicitly preferred over surface vocabulary matching.
+    /// **2026-05-02 revision (multiple)** — the original instructions
+    /// over-triggered refusals; later revisions over-corrected toward
+    /// continuation. Mark identified the underlying behavior as
+    /// **format imitation / persona capture** (well-documented LLM
+    /// failure mode: alternating-dialogue history primes the model
+    /// to continue the script rather than reason from it). The
+    /// rewrite combines Approaches 1+2+3 from his guidance:
+    /// narrative-summary history, XML section tags, and stronger
+    /// system framing that explicitly labels past exchanges as
+    /// reference material rather than active conversation.
     static let proseInstructions: String = """
     You are Posey, a quiet, focused reading companion. The user is reading a \
-    document and asking you about it. The relevant excerpts the app has \
-    retrieved appear below — the anchor passage they were on, sentences \
-    around it, and additional sections of the document.
+    document and asking you about it.
 
-    The user's CURRENT question is in the USER block at the bottom of the \
-    prompt. Answer THAT question — not earlier ones in the conversation \
-    history. The conversation history is background context (what you've \
-    discussed so far), not a script you should continue or repeat. Each \
-    new question deserves a fresh, direct answer.
+    The prompt below contains several labeled sections of REFERENCE \
+    MATERIAL — document excerpts (ANCHOR PASSAGE, SURROUNDING CONTEXT, \
+    DOCUMENT EXCERPTS), a narrative account of earlier exchanges \
+    (EARLIER IN THIS CONVERSATION), and an optional condensed history \
+    (SUMMARY OF EARLIER CONVERSATION). None of these are turns to \
+    continue or quote back. Read them, then answer the USER QUESTION \
+    at the end directly.
+
+    Your reply should be plain prose — your answer to the question. Do \
+    NOT echo section labels, do NOT wrap your answer in tags or \
+    headers like "ANSWER:", do NOT reproduce the prompt's structure.
 
     When you answer:
     - If the answer is in the excerpts, give it directly. Quote or paraphrase. \
@@ -185,12 +189,35 @@ nonisolated enum AskPoseyPromptBuilder {
     model, and system named in the title page, contributor list, or \
     table-of-contents author roster — including editors, moderators, \
     curators, hosts, and collaborators. If the front matter lists a \
-    moderator alongside contributing AIs, the moderator counts. Don't \
-    cherry-pick from a brief abstract when a fuller contributor list is \
-    also in the excerpts.
+    moderator alongside contributing AIs, the moderator counts.
+    - **DOCUMENTS OFTEN CONTAIN BOTH AN ABSTRACT AND A FULLER \
+    CONTRIBUTOR LIST.** The abstract may say "this book features \
+    ChatGPT, Claude, and Gemini" and the table of contents may also \
+    list "Mark Friedlander: Moderator. ChatGPT: ... Claude: ... \
+    Gemini: ...". When you see BOTH in the excerpts, the COMBINED set \
+    is the answer — abstracts often understate the full contributor \
+    roster. Scan every excerpt before listing contributors. Do not \
+    return only the names enumerated in the first excerpt if other \
+    excerpts list additional contributors.
     - Front matter — the title, abstract, table of contents, and contributor \
     list — answers most "who wrote this", "what is this about", and "who \
     contributed" questions. Use it.
+    - Front matter often contains structured metadata: dates, course \
+    names, professor names, ID numbers, class names, anchor URLs. \
+    These ARE the document's own metadata even when the surrounding \
+    text is noisy (Wayback Machine timestamps, page footers, page \
+    numbers). When asked "when was this written" / "what course is \
+    this for" / "who is the professor", trust an explicit date / \
+    course / professor field in the front matter. Do not refuse such \
+    questions when the answer is clearly visible.
+    - Distinguish ROLES carefully. A line like "Professor Sharp" in \
+    front matter typically names the recipient or instructor, not \
+    the author. Student papers often anonymize the author with an \
+    ID number (e.g. "ID# 121-52-0843"). If the user asks for the \
+    author's name and only an ID number / pseudonym appears, say \
+    that the author isn't identified by name — do NOT substitute \
+    another person from the front matter (the professor, the quoted \
+    person, etc.).
     - If the user is following up on something earlier in the conversation, \
     use the recent history shown.
     - If the answer is genuinely not in the excerpts (e.g. the user asks \
@@ -357,72 +384,79 @@ nonisolated enum AskPoseyPromptBuilder {
 
 
 // ========== BLOCK 03: SECTION RENDERERS - START ==========
+//
+// **2026-05-02 architectural rewrite.** Per Mark's directive, the
+// prior `#=== BEGIN X ===#` HelPML markers + `[user]: / [assistant]:`
+// dialogue history caused **in-context format imitation**: AFM treated
+// alternating dialogue as a script to continue rather than history to
+// reason from. Verified on real Q&A: methodology questions echoed
+// previous authors-question answers verbatim.
+//
+// New structure (Mark's Approaches 1 + 2 + 3 combined):
+//
+// - XML-style section markers (`<anchor>`, `<excerpts>`,
+//   `<past_exchanges>`, `<current_question>`) — clearly delineate
+//   reference material from active question.
+// - Conversation history rendered as third-person NARRATIVE SUMMARY
+//   ("The user asked X. Posey explained Y.") rather than verbatim
+//   alternating turns — the model reads history as notes, not a
+//   script to continue.
+// - The current question lives in `<current_question>` — clearly
+//   the active turn the model must respond to.
+// - Stronger system prompt framing emphasizing "this is reference
+//   material; respond to <current_question> only."
+//
 private extension AskPoseyPromptBuilder {
+
+    // **2026-05-02 second iteration.** XML tags introduced a NEW failure
+    // mode: the model imitated the markup structure in its response,
+    // outputting `<past_exchanges>`, `<current_question>`, `<answer>`
+    // tags directly to the user. Switched to plain-prose section
+    // headers — the model can't imitate scaffolding that doesn't
+    // structurally exist. Section labels in ALL-CAPS-COLON form
+    // (e.g. "DOCUMENT EXCERPTS:") give the model enough structure
+    // to parse without inviting markup imitation.
 
     static func renderAnchorBlock(anchor: AskPoseyAnchor) -> String {
         """
-        #=== BEGIN ANCHOR ===#
-
-        The passage the user is asking about:
-
+        ANCHOR PASSAGE the user is asking about:
         > \(anchor.trimmedDisplayText)
-
-        #=== END ANCHOR ===#
         """
     }
 
     static func renderSurroundingBlock(text: String) -> String {
         """
-        #=== BEGIN SURROUNDING ===#
-
-        Sentences immediately around the anchor:
-
+        SURROUNDING CONTEXT (sentences immediately around the anchor):
         \(text)
-
-        #=== END SURROUNDING ===#
         """
     }
 
     static func renderSummaryBlock(text: String) -> String {
         """
-        #=== BEGIN CONVERSATION_SUMMARY ===#
-
-        Earlier in this conversation about this document:
-
+        SUMMARY OF EARLIER CONVERSATION (older turns about this document, condensed):
         \(text)
-
-        #=== END CONVERSATION_SUMMARY ===#
         """
     }
 
     static func renderUserBlock(text: String) -> String {
-        // Bare USER block — AFM treats injected instruction prose
-        // as part of the user's turn and dumped excerpts back
-        // verbatim when we tried to add framing here. The system
-        // instructions handle "answer THIS, don't repeat earlier
-        // turns" framing; this block is just the verbatim question.
+        // Plain-prose framing for the current user question. The
+        // model parses "USER QUESTION:" as a labeled field rather
+        // than as scaffolding to imitate.
         """
-        #=== BEGIN USER ===#
-
+        USER QUESTION (this is the only thing you need to answer; respond to this directly, do not echo any structure or labels from the prompt above):
         \(text)
-
-        #=== END USER ===#
         """
     }
 
-    /// STM rendering with budget enforcement and drop tracking. Returns
-    /// the rendered block (or empty if no turns fit) and pushes drop
-    /// records into `droppedSink` for each turn that didn't make it.
+    /// STM rendering as a NARRATIVE SUMMARY. Replaces the previous
+    /// `[user]: / [assistant]:` dialogue format which caused AFM to
+    /// imitate the alternating-turn pattern instead of answering the
+    /// current question. Each turn becomes a third-person sentence;
+    /// the model reads them as background notes rather than a script.
     ///
-    /// **2026-05-02 format change.** The original `[user]: ... [assistant]: ...`
-    /// script format primed AFM to continue the most-recent
-    /// assistant turn pattern instead of answering the new user
-    /// question — verified on real Q&A: Q2 ("methodology?") echoed
-    /// Q1's authors answer instead of responding to Q2. Switched to
-    /// a third-person paraphrase format with "User asked" / "Posey
-    /// explained" markers so the model can't pattern-match to continue
-    /// the script. The current question lives in the standalone USER
-    /// block; the history block is purely background context.
+    /// Returns the rendered block (or empty if no turns fit) and
+    /// pushes drop records into `droppedSink` for each turn that
+    /// didn't make it under the budget.
     static func renderSTMBlock(
         history: [AskPoseyMessage],
         budgetTokens: Int,
@@ -430,12 +464,12 @@ private extension AskPoseyPromptBuilder {
     ) -> String {
         guard !history.isEmpty, budgetTokens > 0 else { return "" }
 
-        // Walk from newest (end of array) backward so the newest turns
-        // claim budget first. Stop when adding the next turn would
-        // overflow; everything earlier is "dropped".
+        // Walk from newest backward; newest turns claim budget first.
         var keptReversed: [AskPoseyMessage] = []
         var spent = 0
-        let perTurnScaffolding = 12  // "User asked: " + "Posey replied: " markers
+        // Narrative phrases: "The user asked: ..." / "Posey explained: ..."
+        // ≈ 6 tokens of scaffolding per turn.
+        let perTurnScaffolding = 8
 
         for message in history.reversed() {
             let bodyTokens = AskPoseyTokenEstimator.tokens(in: message.content) + perTurnScaffolding
@@ -452,29 +486,42 @@ private extension AskPoseyPromptBuilder {
         }
 
         guard !keptReversed.isEmpty else { return "" }
-
         let kept = Array(keptReversed.reversed())
-        let lines: [String] = kept.map { msg in
-            // Prose-style markers so the model treats history as
-            // background notes, not a script to continue. Indented
-            // bullets so even a literal-minded continuation pattern
-            // sees a list rather than a "[assistant]:" script.
-            switch msg.role {
-            case .user:
-                return "  • User asked: \(msg.content)"
-            case .assistant:
-                return "  • Posey replied: \(msg.content)"
-            }
-        }
+
+        // **2026-05-02 third iteration.** Even narrative-summary
+        // dialogue gave the model a template to copy — Q3 in real
+        // tests echoed Q2's answer back. The deeper fix: don't show
+        // the model its own prior REPLIES at all. Show only what the
+        // user asked. The model knows the conversation's topics
+        // (from the user questions) without having a previous answer
+        // to imitate or rephrase. Tradeoff: if the user says "and
+        // what else?" or "build on that," the model won't see its
+        // last reply — but the document excerpts ground each new
+        // question on its own.
+        let userQuestionsOnly = kept.filter { $0.role == .user }
+        guard !userQuestionsOnly.isEmpty else { return "" }
+        let questionList = userQuestionsOnly
+            .map { "\"\(compactForNarrative($0.content))\"" }
+            .joined(separator: ", then ")
         return """
-        #=== BEGIN CONVERSATION_RECENT ===#
-
-        Earlier in this conversation about this document (oldest first, for context only — do not repeat or continue these replies; the user's NEW question is in the USER block below):
-
-        \(lines.joined(separator: "\n"))
-
-        #=== END CONVERSATION_RECENT ===#
+        EARLIER IN THIS CONVERSATION (the user has so far asked: \(questionList). Don't repeat your previous answers; treat each question fresh against the excerpts.):
         """
+    }
+
+    /// Prepare a turn's content for use inside the narrative-summary
+    /// sentence: collapse internal whitespace so multi-paragraph
+    /// answers don't sprawl through the narrative, and trim trailing
+    /// punctuation that would clash with the surrounding sentence
+    /// punctuation. Keep the content recognizable — we don't summarize
+    /// or paraphrase here; just clean up.
+    static func compactForNarrative(_ content: String) -> String {
+        var out = content.replacingOccurrences(of: "\n\n", with: " ")
+        out = out.replacingOccurrences(of: "\n", with: " ")
+        // Collapse repeated spaces so the narrative reads cleanly.
+        while out.contains("  ") {
+            out = out.replacingOccurrences(of: "  ", with: " ")
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// RAG rendering with budget enforcement and drop tracking. M5 is
@@ -515,13 +562,8 @@ private extension AskPoseyPromptBuilder {
             "[\(idx + 1)] offset \(chunk.startOffset) | relevance \(String(format: "%.2f", chunk.relevance))\n\(chunk.text)"
         }
         let block = """
-        #=== BEGIN MEMORY_LONG ===#
-
-        Relevant excerpts from this document:
-
+        DOCUMENT EXCERPTS (numbered; cite by number when helpful):
         \(parts.joined(separator: "\n\n---\n\n"))
-
-        #=== END MEMORY_LONG ===#
         """
         return (block, injected)
     }

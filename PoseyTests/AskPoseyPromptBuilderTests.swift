@@ -16,14 +16,14 @@ final class AskPoseyTokenEstimatorTests: XCTestCase {
     }
 
     func testRoughRatio() {
-        // 35 chars / 3.5 = 10 tokens.
-        let s = String(repeating: "a", count: 35)
+        // 30 chars / 3.0 = 10 tokens (2026-05-02 ratio change).
+        let s = String(repeating: "a", count: 30)
         XCTAssertEqual(AskPoseyTokenEstimator.tokens(in: s), 10)
     }
 
     func testCharsRoundtrip() {
-        // 10 tokens * 3.5 = 35 chars.
-        XCTAssertEqual(AskPoseyTokenEstimator.chars(in: 10), 35)
+        // 10 tokens * 3.0 = 30 chars (2026-05-02 ratio change).
+        XCTAssertEqual(AskPoseyTokenEstimator.chars(in: 10), 30)
     }
 
     func testZeroTokensZeroChars() {
@@ -41,22 +41,22 @@ final class AskPoseyTokenBudgetTests: XCTestCase {
     func testAFMDefaultMatchesPlannedSplit() {
         let b = AskPoseyTokenBudget.afmDefault
         XCTAssertEqual(b.contextWindowTokens, 4096)
-        XCTAssertEqual(b.responseReserveTokens, 512)
+        XCTAssertEqual(b.responseReserveTokens, 1024)  // 2026-05-02: bumped
         XCTAssertEqual(b.systemBudgetTokens, 180)
-        XCTAssertEqual(b.anchorBudgetTokens, 360)
-        XCTAssertEqual(b.stmBudgetTokens, 720)
-        XCTAssertEqual(b.summaryBudgetTokens, 360)
-        XCTAssertEqual(b.ragBudgetTokens, 1800)
+        XCTAssertEqual(b.anchorBudgetTokens, 300)      // 2026-05-02: 360 → 300
+        XCTAssertEqual(b.stmBudgetTokens, 600)         // 2026-05-02: 720 → 600
+        XCTAssertEqual(b.summaryBudgetTokens, 300)     // 2026-05-02: 360 → 300
+        XCTAssertEqual(b.ragBudgetTokens, 1400)        // 2026-05-02: 1800 → 1400
     }
 
     func testPromptCeilingExcludesResponseReserve() {
         let b = AskPoseyTokenBudget.afmDefault
-        XCTAssertEqual(b.promptCeilingTokens, 4096 - 512)
+        XCTAssertEqual(b.promptCeilingTokens, 4096 - 1024)
     }
 
     func testAllocatedSectionBudgetSumsCorrectly() {
         let b = AskPoseyTokenBudget.afmDefault
-        XCTAssertEqual(b.allocatedSectionBudget, 180 + 360 + 720 + 360 + 1800)
+        XCTAssertEqual(b.allocatedSectionBudget, 180 + 300 + 600 + 300 + 1400)
     }
 
     func testUserQuestionBudgetIsRemainder() {
@@ -109,11 +109,11 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
         let out = AskPoseyPromptBuilder.build(inputs)
 
         XCTAssertFalse(out.instructions.isEmpty)
-        XCTAssertTrue(out.renderedBody.contains("#=== BEGIN ANCHOR ===#"))
-        XCTAssertTrue(out.renderedBody.contains("#=== BEGIN USER ===#"))
-        XCTAssertFalse(out.renderedBody.contains("#=== BEGIN MEMORY_LONG ===#"))
-        XCTAssertFalse(out.renderedBody.contains("#=== BEGIN CONVERSATION_RECENT ===#"))
-        XCTAssertFalse(out.renderedBody.contains("#=== BEGIN CONVERSATION_SUMMARY ===#"))
+        XCTAssertTrue(out.renderedBody.contains("ANCHOR PASSAGE"))
+        XCTAssertTrue(out.renderedBody.contains("USER QUESTION"))
+        XCTAssertFalse(out.renderedBody.contains("DOCUMENT EXCERPTS"))
+        XCTAssertFalse(out.renderedBody.contains("EARLIER IN THIS CONVERSATION"))
+        XCTAssertFalse(out.renderedBody.contains("SUMMARY OF EARLIER CONVERSATION"))
         XCTAssertEqual(out.chunksInjected.count, 0)
         XCTAssertEqual(out.droppedSections.count, 0)
     }
@@ -121,7 +121,7 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
     func testNilAnchor_OmitsAnchorSection() {
         let inputs = makeInputs(anchor: nil)
         let out = AskPoseyPromptBuilder.build(inputs)
-        XCTAssertFalse(out.renderedBody.contains("#=== BEGIN ANCHOR ===#"))
+        XCTAssertFalse(out.renderedBody.contains("ANCHOR PASSAGE"))
     }
 
     func testHistoryTurnsRenderInChronologicalOrder() {
@@ -134,7 +134,7 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
         let inputs = makeInputs(anchor: makeAnchor(), history: history)
         let out = AskPoseyPromptBuilder.build(inputs)
 
-        XCTAssertTrue(out.renderedBody.contains("#=== BEGIN CONVERSATION_RECENT ===#"))
+        XCTAssertTrue(out.renderedBody.contains("EARLIER IN THIS CONVERSATION"))
         let firstIndex = out.renderedBody.range(of: "First question")?.lowerBound
         let secondIndex = out.renderedBody.range(of: "Second question")?.lowerBound
         XCTAssertNotNil(firstIndex)
@@ -150,7 +150,7 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
             surrounding: "Two roads diverged in a yellow wood."
         )
         let out = AskPoseyPromptBuilder.build(inputs)
-        XCTAssertTrue(out.renderedBody.contains("#=== BEGIN SURROUNDING ===#"))
+        XCTAssertTrue(out.renderedBody.contains("SURROUNDING CONTEXT"))
         XCTAssertTrue(out.renderedBody.contains("Two roads diverged"))
     }
 
@@ -163,7 +163,7 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
             surrounding: "Two roads diverged in a yellow wood."
         )
         let out = AskPoseyPromptBuilder.build(inputs)
-        XCTAssertFalse(out.renderedBody.contains("#=== BEGIN SURROUNDING ===#"))
+        XCTAssertFalse(out.renderedBody.contains("SURROUNDING CONTEXT"))
     }
 
     func testRAGChunksRender_WhenPresent() {
@@ -175,7 +175,7 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
         )
         let inputs = makeInputs(anchor: makeAnchor(), chunks: [chunk])
         let out = AskPoseyPromptBuilder.build(inputs)
-        XCTAssertTrue(out.renderedBody.contains("#=== BEGIN MEMORY_LONG ===#"))
+        XCTAssertTrue(out.renderedBody.contains("DOCUMENT EXCERPTS"))
         XCTAssertTrue(out.renderedBody.contains("A document chunk"))
         XCTAssertEqual(out.chunksInjected.count, 1)
         XCTAssertEqual(out.chunksInjected.first?.chunkID, 42)
@@ -304,7 +304,7 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
         let out = AskPoseyPromptBuilder.build(inputs, budget: budget)
         let truncations = out.droppedSections.filter { $0.section == .userQuestionTruncated }
         XCTAssertFalse(truncations.isEmpty, "Long user question should be truncated to fit")
-        XCTAssertTrue(out.renderedBody.contains("#=== BEGIN USER ===#"),
+        XCTAssertTrue(out.renderedBody.contains("USER QUESTION"),
                       "User section must still render even after truncation")
     }
 }

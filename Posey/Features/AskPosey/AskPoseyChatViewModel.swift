@@ -76,6 +76,13 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// view model — the assistant turn row carries those fields.
     @Published private(set) var lastMetadata: AskPoseyResponseMetadata?
 
+    /// Last classified intent (from Call 1 of the most recent send).
+    /// Surface for the local-API tuning loop so /ask responses can
+    /// report what the classifier picked. The intent on the persisted
+    /// turn row is the canonical source; this is the in-memory mirror
+    /// for the API path that doesn't re-query SQLite.
+    @Published private(set) var lastIntent: AskPoseyIntent?
+
     /// The passage that was active at sheet invocation. Constant
     /// for the lifetime of this view model — re-opening the sheet
     /// creates a new view model with a new anchor.
@@ -84,6 +91,13 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// Document the conversation is anchored to. Used for both
     /// SQLite reads (prior history) and writes (every turn appends).
     let documentID: UUID
+
+    /// Document title — surfaced to the user in the sheet's nav bar
+    /// so document-scoped opens don't feel orphaned (just "Ask Posey"
+    /// with no doc context). Optional so older test/preview call
+    /// sites that didn't pass a title keep working with the
+    /// "Ask Posey" fallback the view applies.
+    let documentTitle: String?
 
     /// Document plainText, used to compute surrounding context around
     /// the anchor offset per intent. Held by reference internally so
@@ -200,6 +214,7 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     init(
         documentID: UUID,
         documentPlainText: String,
+        documentTitle: String? = nil,
         anchor: AskPoseyAnchor?,
         classifier: AskPoseyClassifying? = nil,
         streamer: AskPoseyStreaming? = nil,
@@ -210,6 +225,7 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     ) {
         self.documentID = documentID
         self.documentPlainText = documentPlainText
+        self.documentTitle = documentTitle
         self.anchor = anchor
         self.classifier = classifier
         self.streamer = streamer
@@ -954,6 +970,7 @@ extension AskPoseyChatViewModel {
             historyForPromptBuilder.append(messages[index])
         }
         lastMetadata = metadata
+        lastIntent = intent
         isResponding = false
 
         persistTurn(

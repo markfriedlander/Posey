@@ -883,6 +883,7 @@ struct ReaderView: View {
         askPoseyChat = AskPoseyChatViewModel(
             documentID: document.id,
             documentPlainText: document.plainText,
+            documentTitle: document.title,
             anchor: anchor,
             classifier: classifier,
             streamer: streamer,

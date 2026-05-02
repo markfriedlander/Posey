@@ -774,6 +774,7 @@ extension LibraryViewModel {
         let viewModel = AskPoseyChatViewModel(
             documentID: docID,
             documentPlainText: document.plainText,
+            documentTitle: document.title,
             anchor: anchor,
             classifier: classifier,
             streamer: streamer,
@@ -806,6 +807,9 @@ extension LibraryViewModel {
             "question": question,
             "response": response
         ]
+        if let intent = viewModel.lastIntent {
+            payload["intent"] = intent.rawValue
+        }
         if let metadata = viewModel.lastMetadata {
             payload["promptTokens"] = metadata.promptTokenTotal
             payload["inferenceDuration"] = metadata.inferenceDuration

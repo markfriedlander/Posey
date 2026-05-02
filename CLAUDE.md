@@ -34,6 +34,19 @@ Use the simulator MCP to verify the UI after each response. Formatting renders c
 
 The standard: if Mark picked up the phone and asked the same question, would he get a genuinely useful, trustworthy answer presented in a UI that feels right? That is the bar.
 
+### AFM Cooldown — Standing Test-Harness Requirement
+
+Sequential `/ask` calls without pacing push Apple Foundation Models on the device into a `Code=-1 (null)` error state where every subsequent call fails until Posey is relaunched. **This is a testing infrastructure issue, not an app bug.** Real users naturally pause between questions; the test harness must imitate that pacing.
+
+Standing requirement: when driving sequential `/ask` calls (any test that asks more than one question in a row), insert a **2.5s ± 500ms jittered cooldown** before each `/ask`. Treat AFM exactly like any rate-limited third-party API.
+
+Implementation:
+- `tools/posey_test.py ask` automatically applies the cooldown unless `POSEY_TEST_NO_COOLDOWN=1`. Tunable via `POSEY_TEST_COOLDOWN_SECONDS` and `POSEY_TEST_COOLDOWN_JITTER`.
+- `tools/qa_battery.sh` is the canonical Three Hats QA driver — runs the standard 4-question pattern across three documents with cooldown built in. Use it (or follow its pattern) for any future Q&A regression sweep.
+- Ad-hoc one-shot tests (single `/ask`, no follow-up) can disable cooldown via `POSEY_TEST_NO_COOLDOWN=1`. Only do this when you're certain there's no sequential pressure.
+
+Do not "fix" this by adding rate-limiting to the app itself. The app is correct; the harness is the place to add politeness.
+
 ---
 
 ## Read This First

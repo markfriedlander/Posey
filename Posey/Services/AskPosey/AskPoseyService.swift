@@ -25,6 +25,58 @@ protocol AskPoseyClassifying: Sendable {
     @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
     func classifyIntent(question: String, anchor: String?) async throws -> AskPoseyIntent
 }
+
+/// Metadata carried alongside a completed prose response. The view
+/// model uses these fields to (a) persist the assistant turn into
+/// `ask_posey_conversations` with the right diagnostics, (b) surface
+/// the M7 "Sources" attribution strip when chunks have made it in
+/// (M5 always reports an empty array), and (c) support the local-API
+/// tuning loop's "what did the model see, what got dropped" view.
+struct AskPoseyResponseMetadata: Sendable, Equatable {
+    /// Final assistant message text. Same value the streaming
+    /// callback's last snapshot delivered, captured here for the
+    /// caller's persistence path so race conditions on snapshot
+    /// observation don't corrupt the saved row.
+    let finalText: String
+    /// Total prompt tokens estimated by `AskPoseyTokenEstimator` —
+    /// scaffolding included. Recorded per turn for tuning.
+    let promptTokenTotal: Int
+    /// Per-section token costs.
+    let breakdown: AskPoseyPromptTokenBreakdown
+    /// Drops applied during prompt assembly, with reasons.
+    let droppedSections: [AskPoseyPromptDroppedSection]
+    /// Document chunks that actually made it into the prompt. M5: [].
+    /// Persisted as JSON in `ask_posey_conversations.chunks_injected`.
+    let chunksInjected: [RetrievedChunk]
+    /// Verbatim prompt body the model saw — instructions + rendered
+    /// body joined. Persisted as `full_prompt_for_logging`.
+    let fullPromptForLogging: String
+    /// AFM round-trip duration end-to-end (first request to last
+    /// snapshot). Useful for budget-tuning correlation against
+    /// response-quality observations.
+    let inferenceDuration: TimeInterval
+}
+
+/// Streaming prose interface. Same protocol-driven test/preview
+/// substitution rationale as `AskPoseyClassifying`. The closure is
+/// invoked each time AFM emits a snapshot — the view model uses it
+/// to update the assistant bubble's content in place. The closure is
+/// `@MainActor` because AFM's stream emits on a background queue and
+/// the view model needs to mutate `@Published` state.
+@MainActor
+protocol AskPoseyStreaming: Sendable {
+    /// Build a prompt from `inputs`, run a fresh `LanguageModelSession`
+    /// against the system instructions, stream the response, and
+    /// return final metadata. Each snapshot delivers the **accumulated**
+    /// content so the view model can simply assign it to the assistant
+    /// bubble without diffing.
+    @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+    func streamProseResponse(
+        inputs: AskPoseyPromptInputs,
+        budget: AskPoseyTokenBudget,
+        onSnapshot: @MainActor @Sendable (String) -> Void
+    ) async throws -> AskPoseyResponseMetadata
+}
 // ========== BLOCK 01: PROTOCOL - END ==========
 
 
@@ -113,17 +165,24 @@ nonisolated enum AskPoseyPrompts {
 #if canImport(FoundationModels)
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @MainActor
-final class AskPoseyService: AskPoseyClassifying {
+final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming {
 
     private let model: SystemLanguageModel
     private let instructions: String
+    /// Temperature for the prose response loop. Mark's starting hint
+    /// (2026-05-01): begin at 0.5, watch the local-API loop, willing
+    /// to push to 0.7 if responses feel mechanical. Easy to tune from
+    /// one place — no magic numbers buried in call sites.
+    private let proseTemperature: Double
 
     init(
         model: SystemLanguageModel = .default,
-        instructions: String = AskPoseyPrompts.classifierInstructions
+        instructions: String = AskPoseyPrompts.classifierInstructions,
+        proseTemperature: Double = 0.5
     ) {
         self.model = model
         self.instructions = instructions
+        self.proseTemperature = proseTemperature
     }
 
     /// Classify the user's question into an `AskPoseyIntent`.
@@ -162,6 +221,76 @@ final class AskPoseyService: AskPoseyClassifying {
         } catch {
             throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
         }
+    }
+
+    /// Stream a prose response for an Ask Posey turn.
+    ///
+    /// **Lifecycle.** A fresh `LanguageModelSession` is created here,
+    /// used for one streaming round-trip, and dropped when the function
+    /// returns. AFM sessions accumulate a transcript across calls;
+    /// reusing one would let an earlier turn's wording bias the next.
+    /// Per Mark's directive (2026-05-01): the app owns the context,
+    /// not the model. Every byte the model sees on this turn is
+    /// explicitly placed there by `AskPoseyPromptBuilder`.
+    ///
+    /// **Threading.** `@MainActor` because the snapshot callback
+    /// updates the chat view model's `@Published` state. The
+    /// underlying `streamResponse` work runs on AFM's queue; we await
+    /// each snapshot on main, which is fast — accumulated string
+    /// assignment is constant time.
+    func streamProseResponse(
+        inputs: AskPoseyPromptInputs,
+        budget: AskPoseyTokenBudget = .afmDefault,
+        onSnapshot: @MainActor @Sendable (String) -> Void
+    ) async throws -> AskPoseyResponseMetadata {
+
+        guard model.availability == .available else {
+            throw AskPoseyServiceError.afmUnavailable
+        }
+
+        let output = AskPoseyPromptBuilder.build(inputs, budget: budget)
+
+        // Fresh session per call — system framing comes from the
+        // builder, not from the classifier instructions, so we
+        // override the field set in init for this call only.
+        let session = LanguageModelSession(
+            model: model,
+            instructions: output.instructions
+        )
+        let renderedBody = output.renderedBody
+
+        let started = Date()
+        var accumulated = ""
+        do {
+            let stream = session.streamResponse(
+                options: GenerationOptions(temperature: proseTemperature)
+            ) { Prompt(renderedBody) }
+            for try await snapshot in stream {
+                accumulated = snapshot.content
+                onSnapshot(accumulated)
+            }
+        } catch let generationError as LanguageModelSession.GenerationError {
+            throw Self.translate(generationError)
+        } catch is CancellationError {
+            // Caller cancelled (sheet dismissed, user hit Done).
+            // Re-throw so the calling Task can clean up; no need to
+            // translate to AskPoseyServiceError because the UI is
+            // tearing down anyway.
+            throw CancellationError()
+        } catch {
+            throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
+        }
+
+        let elapsed = Date().timeIntervalSince(started)
+        return AskPoseyResponseMetadata(
+            finalText: accumulated,
+            promptTokenTotal: output.tokenBreakdown.totalIncludingScaffolding,
+            breakdown: output.tokenBreakdown,
+            droppedSections: output.droppedSections,
+            chunksInjected: output.chunksInjected,
+            fullPromptForLogging: output.combinedForLogging,
+            inferenceDuration: elapsed
+        )
     }
 
     /// Map AFM's framework error type into our user-facing enum.

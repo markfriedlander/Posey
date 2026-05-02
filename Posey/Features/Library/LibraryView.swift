@@ -80,6 +80,13 @@ struct LibraryView: View {
             }
             .navigationTitle("Posey")
             .toolbar {
+                #if DEBUG
+                // M9 release-binary hygiene: the local-API antenna
+                // toggle is a development-only affordance. DEBUG
+                // builds expose it; release App Store builds compile
+                // it out entirely so a user picking up Posey from
+                // the App Store has no idea the developer-API
+                // surface exists.
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         viewModel.toggleLocalAPI()
@@ -92,6 +99,7 @@ struct LibraryView: View {
                     .accessibilityIdentifier("library.apiToggle")
                     .accessibilityLabel(viewModel.localAPIEnabled ? "API On" : "API Off")
                 }
+                #endif
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Import File") {
                         isImporting = true
@@ -172,23 +180,22 @@ struct LibraryView: View {
                     didAttemptInitialRestore = true
                     maybeRestoreLastOpenedDocument()
                 }
-                // Debug builds always force the antenna ON at launch so dev
-                // sessions never need a manual toggle. Release builds respect
-                // whatever the user has set in UserDefaults.
+                // M9 release-binary hygiene: the local API server is
+                // a development tool. DEBUG builds force-on the
+                // antenna at launch (developer convenience); RELEASE
+                // builds compile out the auto-start AND the toggle UI
+                // entirely so the API never starts unless someone
+                // recompiles in DEBUG configuration. The
+                // localAPIEnabled @AppStorage default is also OFF in
+                // RELEASE (LibraryViewModel) — defense in depth.
                 #if DEBUG
                 if !viewModel.localAPIEnabled {
                     viewModel.localAPIEnabled = true
                 }
-                #endif
-                // Auto-restart API server if it was enabled before app was killed
-                // (or just force-enabled by the DEBUG block above). Pass
-                // showConnectionInfo: false so the alert doesn't fire — at
-                // launch the alert collides with the navigation-stack
-                // auto-restore push and the user's last-opened document
-                // silently fails to reopen.
                 if viewModel.localAPIEnabled && !viewModel.localAPIServer.isRunning {
                     viewModel.toggleLocalAPI(showConnectionInfo: false)
                 }
+                #endif
             }
             .onAppear {
                 viewModel.loadDocuments()

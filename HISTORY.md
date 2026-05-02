@@ -1,5 +1,35 @@
 # Posey History
 
+## 2026-05-01 — Milestone 8 + 9 partials: lock-screen audio, Reading Style preference, dev-tools-out-of-release
+
+Five M8/M9 wins shipped autonomously per Mark's "go through M9" directive (2026-05-01). Items deferred to dedicated implementation passes are recorded explicitly in NEXT.md.
+
+**M8 antenna OFF default for release** — `LibraryViewModel.localAPIEnabled` `@AppStorage` default flips DEBUG → `true`, RELEASE → `false`. App Store binary ships with the antenna OFF; users opt in explicitly. DEBUG builds keep the development convenience.
+
+**M8 lock-screen + background audio** — `INFOPLIST_KEY_UIBackgroundModes = audio` added so `AVSpeechSynthesizer` keeps playing when the screen locks. New `NowPlayingController` wires `MPNowPlayingInfoCenter` (document title + active sentence + play/pause indicator) and `MPRemoteCommandCenter` (play / pause / togglePlayPause / nextTrack / previousTrack). `ReaderViewModel` builds the controller after content load; `observePlayback` updates it on every state change + sentence advance. Lock screen now shows Posey as a first-class audio player rather than a generic "Audio playing" placeholder.
+
+**M8 Reading Style preference (Standard + Focus)** — `PlaybackPreferences.ReadingStyle` enum with two cases ships now; Immersive (custom layout) and Motion (CoreMotion + consent flow) deferred. New segmented Picker in the Reader Preferences sheet. `segmentOpacity(_:)` and `blockOpacity(_:)` in the render path apply 0.45 opacity to non-active non-search-match rows when the user is in Focus mode; full opacity in Standard. Search matches stay full-opacity in either mode so the search affordance never gets dimmed away. Persisted via `UserDefaults` under `posey.reader.readingStyle`.
+
+**M9 dev-tools out of release** — antenna toolbar item wrapped in `#if DEBUG` so the icon literally doesn't render in App Store builds. Auto-start at launch wrapped in `#if DEBUG` so the API server can't start unless someone recompiles in Debug configuration. Defense in depth on top of the antenna OFF default. Release config builds clean (`** BUILD SUCCEEDED **`).
+
+**Deferred** (recorded in NEXT.md M9 section, not shipped here):
+- Reading Style: Immersive (custom slot-machine layout per `DECISIONS.md`)
+- Reading Style: Motion (three-setting Off/On/Auto with `CoreMotion` + explicit consent screen)
+- Audio export to M4A (needs `AVSpeechSynthesizer.write(_:toBufferCallback:)` Best-Available capture investigation first)
+- Format-parity audit across all 7 supported formats
+- Mac Catalyst verification
+- Multilingual embedding verification on real corpus
+- Entity-aware multi-factor relevance scoring v2
+- VoiceOver accessibility audit (needs interactive verification with the screen reader)
+- Landscape centering polish (low-priority; +5.5 px off-center accepted)
+- Go-to-page input UX polish
+- App icon (needs Mark's design input)
+- M10 submission flow (privacy policy, App Store metadata, screenshots, App Store Connect navigation)
+
+These remain on the roadmap; the autonomous run prioritized landing the highest-value structural pieces (architecture-correct M5/M6 prompt builder, persistent conversation history, RAG retrieval, source attribution, lock-screen audio, dev-tools hygiene) over the items that need device verification, design input, or interactive testing.
+
+**Build clean** on iPhone 17 simulator + iPhone 16 Plus device. Ask Posey M5/M6 test suite still green.
+
 ## 2026-05-01 — Ask Posey Milestone 7: source attribution + auto-save to notes + in-sheet indexing indicator
 
 Three of M7's four scoped features land here. The fourth (`.search` intent → @Generable navigation cards) is intentionally deferred — M5's prompt builder already routes `.search` through the same prose path with degraded but non-broken behavior, and the deeper navigation-card UX needs a deliberate design pass before implementation. Recorded as a polish item in NEXT.md.

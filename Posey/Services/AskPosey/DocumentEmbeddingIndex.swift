@@ -374,6 +374,94 @@ nonisolated final class DocumentEmbeddingIndex {
         return Array(allScored.prefix(limit))
     }
 
+    // MARK: Entity-aware multi-factor scoring (M8 / v2)
+
+    /// Search variant that re-ranks by combining cosine similarity
+    /// with entity overlap between the query and each chunk. Per
+    /// `NEXT.md` "Entity-aware multi-factor relevance scoring v2":
+    /// `score = cosine + 2.0 × jaccard(query_entities, chunk_entities)`,
+    /// clamped to [-1, 3]. Entities are extracted via `NLTagger`
+    /// `nameType` at query time (for the question) and at score time
+    /// (for each candidate chunk).
+    ///
+    /// Workflow:
+    /// 1. Run regular embedding search to get a wider candidate set
+    ///    (3× the requested limit) so re-ranking can promote
+    ///    entity-rich chunks that ranked lower on pure cosine.
+    /// 2. Extract query entities once.
+    /// 3. For each candidate, extract chunk entities and compute
+    ///    Jaccard overlap.
+    /// 4. New score, sort, return top `limit`.
+    ///
+    /// Falls back gracefully: when neither side has entities, Jaccard
+    /// is 0 and score reduces to pure cosine — same behavior as the
+    /// existing `search`.
+    func searchWithEntityBoost(
+        documentID: UUID,
+        query: String,
+        limit: Int
+    ) throws -> [DocumentEmbeddingSearchResult] {
+        guard !query.isEmpty else { return [] }
+        let widerLimit = max(limit * 3, limit)
+        let candidates = try search(documentID: documentID, query: query, limit: widerLimit)
+        guard !candidates.isEmpty else { return [] }
+
+        let queryEntities = Self.extractEntities(from: query)
+
+        // Score every candidate; the multi-factor formula clamps
+        // into a stable range so downstream UI (relevance pills)
+        // stays sensible.
+        let rescored: [DocumentEmbeddingSearchResult] = candidates.map { candidate in
+            let chunkEntities = Self.extractEntities(from: candidate.chunk.text)
+            let overlap = Self.jaccardOverlap(queryEntities, chunkEntities)
+            let raw = candidate.similarity + 2.0 * overlap
+            let clamped = max(-1.0, min(3.0, raw))
+            return DocumentEmbeddingSearchResult(chunk: candidate.chunk, similarity: clamped)
+        }
+
+        return Array(rescored.sorted { $0.similarity > $1.similarity }.prefix(limit))
+    }
+
+    /// Extract person / place / organization names from `text` via
+    /// `NLTagger.nameType`. Lowercased for case-insensitive overlap
+    /// comparison. Returns a Set so repeated mentions don't inflate
+    /// the overlap score.
+    static func extractEntities(from text: String) -> Set<String> {
+        guard !text.isEmpty else { return [] }
+        var result = Set<String>()
+        let tagger = NLTagger(tagSchemes: [.nameType])
+        tagger.string = text
+        let options: NLTagger.Options = [.omitWhitespace, .omitPunctuation, .joinNames]
+        tagger.enumerateTags(
+            in: text.startIndex..<text.endIndex,
+            unit: .word,
+            scheme: .nameType,
+            options: options
+        ) { tag, range in
+            guard let tag else { return true }
+            switch tag {
+            case .personalName, .placeName, .organizationName:
+                let span = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if span.count >= 2 { result.insert(span) }
+            default:
+                break
+            }
+            return true
+        }
+        return result
+    }
+
+    /// Jaccard similarity of two sets — `|intersection| / |union|`,
+    /// or 0 when either is empty (avoids divide-by-zero AND is the
+    /// honest answer: zero shared entities means no entity overlap).
+    static func jaccardOverlap(_ a: Set<String>, _ b: Set<String>) -> Double {
+        guard !a.isEmpty, !b.isEmpty else { return 0.0 }
+        let intersection = a.intersection(b).count
+        let union = a.union(b).count
+        guard union > 0 else { return 0.0 }
+        return Double(intersection) / Double(union)
+    }
+
     // MARK: Reference embedding + cosine for M6 dedup
 
     /// Embed an arbitrary string using the same embedding model the

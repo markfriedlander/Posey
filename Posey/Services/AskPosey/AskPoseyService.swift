@@ -196,7 +196,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
     init(
         model: SystemLanguageModel = .default,
         instructions: String = AskPoseyPrompts.classifierInstructions,
-        proseTemperature: Double = 0.3
+        proseTemperature: Double = 0.1
     ) {
         self.model = model
         self.instructions = instructions

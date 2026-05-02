@@ -21,7 +21,16 @@ nonisolated enum AskPoseyTokenEstimator {
     /// Empirical chars-per-token ratio for English prose. Tune via
     /// the local-API loop; do not bake other constants in terms of
     /// this number — if the ratio changes, only this line should change.
-    static let charsPerToken: Double = 3.5
+    ///
+    /// **2026-05-02 tuning.** AFM's actual tokenizer counts more
+    /// densely than our 3.5 estimate suggested — real Q&A overflowed
+    /// the 4096 context window even when we measured well under
+    /// budget (e.g. 4091 actual tokens vs ~3584 estimated). Tightening
+    /// to 3.0 chars/token gives a more pessimistic estimate, so the
+    /// drop logic kicks in earlier and we stay under AFM's actual
+    /// limit. Combined with the larger response reserve (1024) below,
+    /// this gives ~25% headroom for tokenizer disagreement.
+    static let charsPerToken: Double = 3.0
 
     /// Approximate token count for a string. Floors at 1 for any
     /// non-empty input so a single-character section still costs
@@ -76,17 +85,23 @@ nonisolated struct AskPoseyTokenBudget: Sendable, Equatable {
     /// ceiling shared by every Ask Posey request.
     var contextWindowTokens: Int = 4096
 
-    /// Tokens reserved for the model's response. Lower than Hal's
-    /// 30% reserve because Posey's job is focused, anchor-grounded
-    /// answers, not open-ended conversation. Tune up if responses
-    /// get truncated.
-    var responseReserveTokens: Int = 512
+    /// Tokens reserved for the model's response. Bumped from 512 →
+    /// 1024 on 2026-05-02 after real Q&A revealed AFM's actual token
+    /// count exceeded our estimate by ~14% — even with the prompt
+    /// builder reporting "well under budget" we were hitting AFM's
+    /// 4096 context window with `exceededContextWindowSize` errors.
+    /// 1024-token reserve plus the tightened chars-per-token estimate
+    /// (3.0 instead of 3.5) gives ~25% headroom for tokenizer
+    /// disagreement.
+    var responseReserveTokens: Int = 1024
 
     // MARK: - Section sub-budgets (sum ≈ prompt ceiling)
 
     /// System framing + per-call instructions. Never dropped; if a
     /// future Posey identity grows beyond this budget, raise the cap
     /// here rather than special-casing in the builder.
+    /// 2026-05-02: still 180 — system instructions stayed under
+    /// budget despite the rewrites.
     var systemBudgetTokens: Int = 180
 
     /// Anchor passage + immediate surrounding context. Non-droppable
@@ -94,23 +109,25 @@ nonisolated struct AskPoseyTokenBudget: Sendable, Equatable {
     /// the answer in this specific passage. The "surrounding" portion
     /// is sized by intent (`AskPoseyPromptBuilder.surroundingWindowTokens`)
     /// inside this allocation.
-    var anchorBudgetTokens: Int = 360
+    /// 2026-05-02: 360 → 300 to fit the tightened response-reserve.
+    var anchorBudgetTokens: Int = 300
 
     /// Recent verbatim conversation history (most recent ~3–4 turns).
     /// Highest-priority droppable section: budget overflow drops
     /// older STM turns one at a time, preserving the most recent.
-    var stmBudgetTokens: Int = 720
+    /// 2026-05-02: 720 → 600. Narrative-summary format compresses
+    /// well; ~3 turns still fit.
+    var stmBudgetTokens: Int = 600
 
-    /// Compressed older-turn summary. M5 leaves this nil; M6's
-    /// background summarizer populates it. The budget exists from M5
-    /// so the architecture is shaped right from day one.
-    var summaryBudgetTokens: Int = 360
+    /// Compressed older-turn summary. M6's background summarizer
+    /// populates this. 2026-05-02: 360 → 300 to fit budget.
+    var summaryBudgetTokens: Int = 300
 
-    /// Retrieved document chunks (RAG). M5 leaves this empty; M6
-    /// populates via cosine search over `document_chunks`. Largest
-    /// allocation because document grounding is what makes answers
-    /// accurate.
-    var ragBudgetTokens: Int = 1800
+    /// Retrieved document chunks (RAG). 2026-05-02: 1800 → 1400 to
+    /// fit the tightened response-reserve. Front-matter chunks
+    /// (relevance 1.0) still survive; cosine-ranked chunks lower in
+    /// the list drop sooner under the smaller cap.
+    var ragBudgetTokens: Int = 1400
 
     // MARK: - Derived
 

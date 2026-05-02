@@ -765,9 +765,18 @@ extension AskPoseyChatViewModel {
         // Snapshot the user-visible message and clear the composer
         // immediately so the UI feels responsive even before AFM
         // returns a token.
+        //
+        // **2026-05-02 fix.** Do NOT append the current user message
+        // to `historyForPromptBuilder` here — the prompt builder
+        // already places the current question in `<current_question>`,
+        // and duplicating it in `<past_exchanges>` confuses the model
+        // (it treats the question both as history and as the active
+        // turn). The user message lands in `historyForPromptBuilder`
+        // at finalize time alongside the assistant reply, so the
+        // *next* send's prompt has the just-completed exchange in
+        // its past_exchanges section.
         let userMessage = AskPoseyMessage(role: .user, content: trimmedInput)
         messages.append(userMessage)
-        historyForPromptBuilder.append(userMessage)
         inputText = ""
         isResponding = true
         lastError = nil
@@ -912,10 +921,17 @@ extension AskPoseyChatViewModel {
             messages[index].content = metadata.finalText
             messages[index].isStreaming = false
             messages[index].chunksInjected = metadata.chunksInjected
-            // Mirror the finalized turn into the prompt-builder cache
-            // (replacing the placeholder we appended at send-start
-            // with content "" — that placeholder was never in the
-            // cache, so just append the final).
+            // Append BOTH the user turn (which we deliberately held
+            // out of historyForPromptBuilder at send-start to avoid
+            // duplicating the current question into <past_exchanges>)
+            // AND the finalized assistant turn. The next send's
+            // prompt sees this Q+A pair as background context.
+            if let userIndex = messages[..<index].lastIndex(where: { $0.role == .user }) {
+                let userTurn = messages[userIndex]
+                if !historyForPromptBuilder.contains(where: { $0.id == userTurn.id }) {
+                    historyForPromptBuilder.append(userTurn)
+                }
+            }
             historyForPromptBuilder.append(messages[index])
         }
         lastMetadata = metadata
@@ -968,6 +984,15 @@ extension AskPoseyChatViewModel {
                 messages[index].isStreaming = false
                 messages[index].chunksInjected = candidates
                 messages[index].navigationCards = cards
+                // Same dedup-then-append pattern as the prose finalize
+                // — pair the just-finalized user turn with this
+                // assistant reply.
+                if let userIndex = messages[..<index].lastIndex(where: { $0.role == .user }) {
+                    let userTurn = messages[userIndex]
+                    if !historyForPromptBuilder.contains(where: { $0.id == userTurn.id }) {
+                        historyForPromptBuilder.append(userTurn)
+                    }
+                }
                 historyForPromptBuilder.append(messages[index])
             }
             isResponding = false
@@ -1004,15 +1029,41 @@ extension AskPoseyChatViewModel {
         }
     }
 
-    /// Translate a send-path error into UI state. Removes the
-    /// streaming placeholder, surfaces the typed error, clears
-    /// in-flight state.
+    /// Translate a send-path error into UI state. Replaces the
+    /// streaming placeholder with a user-visible failure message
+    /// (rather than removing it silently — leaving an unanswered user
+    /// question with no response feels broken). Surfaces the typed
+    /// error via `lastError` for the alert path too. AFM refusals
+    /// (`.permanent` from a guardrail violation) get the
+    /// "couldn't answer this one — try rephrasing" message; transient
+    /// errors get a softer try-again message; AFM-unavailable gets
+    /// the explicit unavailability note.
     func handleSendError(_ error: Error, placeholderID: UUID, intent: AskPoseyIntent?) {
-        removeMessage(id: placeholderID)
-        if let serviceError = error as? AskPoseyServiceError {
-            lastError = serviceError
+        let serviceError: AskPoseyServiceError
+        if let typed = error as? AskPoseyServiceError {
+            serviceError = typed
         } else {
-            lastError = .permanent(underlyingDescription: "\(error)")
+            serviceError = .permanent(underlyingDescription: "\(error)")
+        }
+        lastError = serviceError
+
+        let bubbleText: String
+        switch serviceError {
+        case .afmUnavailable:
+            bubbleText = "Posey can't answer right now — Apple Intelligence isn't available on this device."
+        case .transient:
+            bubbleText = "Posey ran into a temporary issue. Try again in a moment."
+        case .permanent:
+            // AFM .refusal lands here — the most common cause is the
+            // safety filter flagging the prompt. Keep the user-facing
+            // text gentle; technical detail is in lastError for the
+            // alert.
+            bubbleText = "Posey couldn't answer this one — try rephrasing the question."
+        }
+
+        if let index = messages.firstIndex(where: { $0.id == placeholderID }) {
+            messages[index].content = bubbleText
+            messages[index].isStreaming = false
         }
         _ = intent  // intent reserved for analytics in M5+ — unused for now
         isResponding = false

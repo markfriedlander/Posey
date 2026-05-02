@@ -88,6 +88,7 @@ struct ReaderView: View {
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 6)
+                            .opacity(blockOpacity(block))
                             .background(
                                 RoundedRectangle(cornerRadius: 10)
                                     .fill(blockBackground(block))
@@ -100,6 +101,7 @@ struct ReaderView: View {
                             Text(segment.text)
                                 .textSelection(.enabled)
                                 .font(.system(size: viewModel.fontSize))
+                                .opacity(segmentOpacity(segment))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 6)
@@ -621,6 +623,30 @@ struct ReaderView: View {
         }
     }
 
+    /// M8 Reading Style render-path opacity. `.standard` returns 1.0
+    /// for everything (current behavior). `.focus` dims non-active
+    /// non-search-match segments to 0.45 so the eye is naturally
+    /// drawn to the brightest one. Search matches stay at full
+    /// opacity in either mode so the search affordance never gets
+    /// eaten by the dimming pass.
+    private func segmentOpacity(_ segment: TextSegment) -> Double {
+        guard viewModel.readingStyle == .focus else { return 1.0 }
+        if viewModel.isCurrentSearchMatch(segment: segment) { return 1.0 }
+        if viewModel.isSearchMatch(segment: segment) { return 1.0 }
+        if viewModel.isActive(segment: segment) { return 1.0 }
+        return 0.45
+    }
+
+    /// Display-block variant of `segmentOpacity`. Same rule —
+    /// `.standard` is full opacity, `.focus` dims non-active blocks.
+    private func blockOpacity(_ block: DisplayBlock) -> Double {
+        guard viewModel.readingStyle == .focus else { return 1.0 }
+        if viewModel.isCurrentSearchMatch(block: block) { return 1.0 }
+        if viewModel.isSearchMatch(block: block) { return 1.0 }
+        if viewModel.isActive(block: block) { return 1.0 }
+        return 0.45
+    }
+
     private func segmentBackground(_ segment: TextSegment) -> Color {
         if viewModel.isCurrentSearchMatch(segment: segment) {
             return Color.primary.opacity(0.28)
@@ -771,6 +797,25 @@ private struct ReaderPreferencesSheet: View {
                         Slider(value: $viewModel.fontSize, in: 14...44, step: 1)
                             .accessibilityIdentifier("preferences.fontSize")
                     }
+                }
+
+                // Reading Style section (M8)
+                Section {
+                    Picker("Reading Style", selection: $viewModel.readingStyle) {
+                        ForEach(PlaybackPreferences.ReadingStyle.allCases, id: \.self) { style in
+                            Text(style.displayName).tag(style)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("preferences.readingStyle")
+                    Text(viewModel.readingStyle.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Reading Style")
+                } footer: {
+                    Text("Standard keeps surrounding text at full opacity. Focus dims it so the active sentence stands out.")
+                        .font(.caption2)
                 }
 
                 // Playback section
@@ -941,6 +986,14 @@ final class ReaderViewModel: ObservableObject {
 
     @Published var fontSize: CGFloat = PlaybackPreferences.shared.fontSize {
         didSet { PlaybackPreferences.shared.fontSize = fontSize }
+    }
+
+    /// M8 Reading Style preference. Reflects the user's choice from
+    /// the preferences sheet; persisted via `PlaybackPreferences`.
+    /// `didSet` writes back so the choice survives launches and
+    /// across documents.
+    @Published var readingStyle: PlaybackPreferences.ReadingStyle = PlaybackPreferences.shared.readingStyle {
+        didSet { PlaybackPreferences.shared.readingStyle = readingStyle }
     }
     @Published private(set) var currentSentenceIndex: Int = 0
     @Published private(set) var playbackState: SpeechPlaybackService.PlaybackState = .idle

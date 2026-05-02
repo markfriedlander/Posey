@@ -211,9 +211,35 @@ nonisolated final class DocumentEmbeddingIndex {
             let kind = Self.embeddingKind(for: language)
             let embedder = Self.embedder(for: language)
             let chunks = Self.chunk(plainText, configuration: configuration)
+            let totalChunks = chunks.count
+
+            // Post an initial 0-of-N progress so the UI can render the
+            // count immediately — without this, the user briefly sees
+            // "Indexing this document…" with no number while the first
+            // batch processes.
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(
+                    name: .documentIndexingDidProgress,
+                    object: nil,
+                    userInfo: [
+                        DocumentEmbeddingIndex.notificationDocumentIDKey: documentID,
+                        DocumentEmbeddingIndex.notificationProcessedChunksKey: 0,
+                        DocumentEmbeddingIndex.notificationTotalChunksKey: totalChunks
+                    ]
+                )
+            }
+
+            // Embed in chunks of 50 between progress posts. Posting
+            // every chunk would flood the main queue; 50 is a balance
+            // between responsiveness (the UI updates ~6× per second
+            // for a typical 5-10ms-per-chunk pace) and overhead. For
+            // small documents (< 50 chunks) the loop completes without
+            // posting any intermediate progress and the .didComplete
+            // notification carries the final count.
+            let progressBatchSize = 50
             var stored: [StoredDocumentChunk] = []
-            stored.reserveCapacity(chunks.count)
-            for chunk in chunks {
+            stored.reserveCapacity(totalChunks)
+            for (index, chunk) in chunks.enumerated() {
                 let vector = Self.embed(chunk.text, with: embedder)
                 stored.append(StoredDocumentChunk(
                     chunkIndex: chunk.chunkIndex,
@@ -223,6 +249,21 @@ nonisolated final class DocumentEmbeddingIndex {
                     embedding: vector,
                     embeddingKind: kind
                 ))
+                let processed = index + 1
+                if processed % progressBatchSize == 0 && processed < totalChunks {
+                    let snapshot = processed
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(
+                            name: .documentIndexingDidProgress,
+                            object: nil,
+                            userInfo: [
+                                DocumentEmbeddingIndex.notificationDocumentIDKey: documentID,
+                                DocumentEmbeddingIndex.notificationProcessedChunksKey: snapshot,
+                                DocumentEmbeddingIndex.notificationTotalChunksKey: totalChunks
+                            ]
+                        )
+                    }
+                }
             }
 
             // Persist + notify on main. SQLite handle is single-threaded
@@ -268,6 +309,13 @@ nonisolated final class DocumentEmbeddingIndex {
     static let notificationChunkCountKey = "posey.askposey.indexing.chunkCount"
     /// Notification userInfo key for the failure error. Present on .didFail.
     static let notificationErrorKey = "posey.askposey.indexing.error"
+    /// Notification userInfo key for processed-chunk count. Present on
+    /// .didProgress. Use alongside `notificationTotalChunksKey` to
+    /// render "Indexing N of M sections".
+    static let notificationProcessedChunksKey = "posey.askposey.indexing.processedChunks"
+    /// Notification userInfo key for total-chunk count. Present on
+    /// .didProgress. Total is known up front from the chunking pass.
+    static let notificationTotalChunksKey = "posey.askposey.indexing.totalChunks"
 
     /// Force a rebuild of the chunk index for a document. Used by
     /// re-import paths where the underlying text may have changed.
@@ -531,5 +579,11 @@ extension Notification.Name {
     /// temporarily unavailable for this document," not a hard import
     /// failure.
     static let documentIndexingDidFail     = Notification.Name("posey.askposey.indexingDidFail")
+    /// Posted periodically during background indexing so UI can render
+    /// "Indexing 847 of 3,300 sections" instead of an indeterminate
+    /// spinner. Posted at every progress checkpoint (currently every
+    /// 50 chunks); not posted on completion (the .didComplete
+    /// notification covers that).
+    static let documentIndexingDidProgress = Notification.Name("posey.askposey.indexingDidProgress")
 }
 // ========== BLOCK 05: NOTIFICATION NAMES - END ==========

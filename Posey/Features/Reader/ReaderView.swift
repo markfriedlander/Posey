@@ -266,25 +266,83 @@ struct ReaderView: View {
     private var indexingBannerView: some View {
         if AskPoseyAvailability.isAvailable,
            indexingTracker.isIndexing(viewModel.document.id) {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .scaleEffect(0.7)
-                Text("Indexing this document…")
-                    .font(.footnote)
-                    .foregroundStyle(.primary.opacity(0.85))
+            let progress = indexingTracker.indexingProgress[viewModel.document.id]
+            HStack(spacing: 10) {
+                // Always show an animated indicator. When we have a
+                // determinate progress fraction, use a small circular
+                // progress ring so the user can SEE forward motion;
+                // otherwise (very small docs that complete before the
+                // first 50-chunk batch posts) fall back to the
+                // indeterminate spinner.
+                if let progress {
+                    ProgressView(value: progress.fraction)
+                        .progressViewStyle(.circular)
+                        .scaleEffect(0.7)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .scaleEffect(0.7)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(indexingBannerPrimaryText(progress: progress))
+                        .font(.footnote)
+                        .foregroundStyle(.primary.opacity(0.85))
+                    if let progress {
+                        Text(indexingBannerCountText(progress: progress))
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .foregroundStyle(.primary.opacity(0.55))
+                    }
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(.thinMaterial, in: Capsule())
             .padding(.top, 12)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Indexing this document for Ask Posey")
+            .accessibilityLabel(indexingBannerAccessibilityLabel(progress: progress))
             .accessibilityIdentifier("reader.indexingBanner")
             .transition(.opacity.combined(with: .move(edge: .top)))
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.25),
                        value: indexingTracker.indexingDocumentIDs)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25),
+                       value: progress)
         }
+    }
+
+    private func indexingBannerPrimaryText(
+        progress: IndexingTracker.IndexingProgress?
+    ) -> String {
+        // Even with progress data we keep the primary line stable
+        // ("Indexing this document…") rather than rewriting it on every
+        // batch. The count line beneath provides the live signal.
+        // Stable wording reduces visual noise during fast indexing.
+        return "Indexing this document…"
+    }
+
+    private func indexingBannerCountText(
+        progress: IndexingTracker.IndexingProgress
+    ) -> String {
+        let processed = Self.formattedChunkCount(progress.processed)
+        let total = Self.formattedChunkCount(progress.total)
+        return "\(processed) of \(total) sections"
+    }
+
+    private func indexingBannerAccessibilityLabel(
+        progress: IndexingTracker.IndexingProgress?
+    ) -> String {
+        if let progress {
+            let pct = Int((progress.fraction * 100).rounded())
+            return "Indexing this document for Ask Posey, \(pct) percent complete"
+        }
+        return "Indexing this document for Ask Posey"
+    }
+
+    private static func formattedChunkCount(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.groupingSeparator = ","
+        return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
     private var topControls: some View {

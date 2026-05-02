@@ -89,6 +89,8 @@ struct ReaderView: View {
                             .padding(.horizontal, 14)
                             .padding(.vertical, 6)
                             .opacity(blockOpacity(block))
+                            .scaleEffect(blockScale(block), anchor: .center)
+                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: viewModel.currentSentenceIndex)
                             .background(
                                 RoundedRectangle(cornerRadius: 10)
                                     .fill(blockBackground(block))
@@ -100,11 +102,14 @@ struct ReaderView: View {
                         ForEach(viewModel.segments) { segment in
                             Text(segment.text)
                                 .textSelection(.enabled)
-                                .font(.system(size: viewModel.fontSize))
+                                .font(.system(size: motionFontSize(forSegment: segment)))
                                 .opacity(segmentOpacity(segment))
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(maxWidth: .infinity, alignment: motionAlignment)
+                                .multilineTextAlignment(motionTextAlignment)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 6)
+                            .scaleEffect(segmentScale(segment), anchor: .center)
+                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: viewModel.currentSentenceIndex)
                             .background(
                                 RoundedRectangle(cornerRadius: 10)
                                     .fill(segmentBackground(segment))
@@ -626,25 +631,113 @@ struct ReaderView: View {
     /// M8 Reading Style render-path opacity. `.standard` returns 1.0
     /// for everything (current behavior). `.focus` dims non-active
     /// non-search-match segments to 0.45 so the eye is naturally
-    /// drawn to the brightest one. Search matches stay at full
-    /// opacity in either mode so the search affordance never gets
+    /// drawn to the brightest one. `.immersive` applies a smooth
+    /// distance-based falloff so sentences fade out as they move
+    /// away from the active row. Search matches stay at full
+    /// opacity in any mode so the search affordance never gets
     /// eaten by the dimming pass.
     private func segmentOpacity(_ segment: TextSegment) -> Double {
-        guard viewModel.readingStyle == .focus else { return 1.0 }
         if viewModel.isCurrentSearchMatch(segment: segment) { return 1.0 }
         if viewModel.isSearchMatch(segment: segment) { return 1.0 }
-        if viewModel.isActive(segment: segment) { return 1.0 }
-        return 0.45
+        switch viewModel.readingStyle {
+        case .standard:
+            return 1.0
+        case .focus:
+            return viewModel.isActive(segment: segment) ? 1.0 : 0.45
+        case .immersive, .motion:
+            return immersiveOpacity(forDistanceFromActive: viewModel.distanceFromActive(segment: segment))
+        }
     }
 
-    /// Display-block variant of `segmentOpacity`. Same rule —
-    /// `.standard` is full opacity, `.focus` dims non-active blocks.
+    /// Display-block variant of `segmentOpacity`.
     private func blockOpacity(_ block: DisplayBlock) -> Double {
-        guard viewModel.readingStyle == .focus else { return 1.0 }
         if viewModel.isCurrentSearchMatch(block: block) { return 1.0 }
         if viewModel.isSearchMatch(block: block) { return 1.0 }
-        if viewModel.isActive(block: block) { return 1.0 }
-        return 0.45
+        switch viewModel.readingStyle {
+        case .standard:
+            return 1.0
+        case .focus:
+            return viewModel.isActive(block: block) ? 1.0 : 0.45
+        case .immersive, .motion:
+            return immersiveOpacity(forDistanceFromActive: viewModel.distanceFromActive(block: block))
+        }
+    }
+
+    /// M8 Immersive scale factor. Active row at 1.0, falls off to
+    /// 0.85 at distance 1, then keeps shrinking gently. `.motion`
+    /// uses the same curve but the user typically only sees the
+    /// active row anyway since it's the largest.
+    private func segmentScale(_ segment: TextSegment) -> Double {
+        switch viewModel.readingStyle {
+        case .standard, .focus:
+            return 1.0
+        case .immersive, .motion:
+            return immersiveScale(forDistanceFromActive: viewModel.distanceFromActive(segment: segment))
+        }
+    }
+
+    private func blockScale(_ block: DisplayBlock) -> Double {
+        switch viewModel.readingStyle {
+        case .standard, .focus:
+            return 1.0
+        case .immersive, .motion:
+            return immersiveScale(forDistanceFromActive: viewModel.distanceFromActive(block: block))
+        }
+    }
+
+    /// Distance-based opacity curve for Immersive / Motion. Active
+    /// row at 1.0; falls off geometrically with each row away. After
+    /// 4 rows of distance the row is ~5% opacity — invisible but
+    /// preserved in the layout so scrolling stays smooth.
+    private func immersiveOpacity(forDistanceFromActive distance: Int) -> Double {
+        guard distance > 0 else { return 1.0 }
+        let raw = 1.0 - 0.30 * Double(distance)
+        return max(0.05, raw)
+    }
+
+    /// Distance-based scale curve. Active row at 1.0; gentle 15%
+    /// shrink per row outward, floor at 0.55.
+    private func immersiveScale(forDistanceFromActive distance: Int) -> Double {
+        guard distance > 0 else { return 1.0 }
+        let raw = 1.0 - 0.15 * Double(distance)
+        return max(0.55, raw)
+    }
+
+    /// M8 Motion mode: the active sentence renders at ~1.6× the
+    /// configured font size, all other rows at the normal size. The
+    /// distance-based opacity already handles fade — Motion just
+    /// upscales the centerpiece.
+    private func motionFontSize(forSegment segment: TextSegment) -> CGFloat {
+        guard isMotionRenderActive else { return viewModel.fontSize }
+        return viewModel.isActive(segment: segment)
+            ? viewModel.fontSize * 1.6
+            : viewModel.fontSize
+    }
+
+    /// Whether the render path should treat the current state as
+    /// "Motion is on." Resolves the user's three-setting choice:
+    /// .off never engages, .on always engages, .auto engages when
+    /// CoreMotion reports the device is moving (and the user has
+    /// consented). Reads `viewModel.isDeviceMoving` so it tracks
+    /// the detector's @Published flag.
+    private var isMotionRenderActive: Bool {
+        guard viewModel.readingStyle == .motion else { return false }
+        switch viewModel.motionPreference {
+        case .off:  return false
+        case .on:   return true
+        case .auto: return viewModel.motionAutoConsent && viewModel.isDeviceMoving
+        }
+    }
+
+    /// Motion mode centers the active sentence both vertically (via
+    /// the scroll anchor) and horizontally so the user reading
+    /// hands-free has a single bright row to follow.
+    private var motionAlignment: Alignment {
+        isMotionRenderActive ? .center : .leading
+    }
+
+    private var motionTextAlignment: TextAlignment {
+        isMotionRenderActive ? .center : .leading
     }
 
     private func segmentBackground(_ segment: TextSegment) -> Color {
@@ -817,8 +910,45 @@ private struct ReaderPreferencesSheet: View {
                 } header: {
                     Text("Reading Style")
                 } footer: {
-                    Text("Standard keeps surrounding text at full opacity. Focus dims it so the active sentence stands out.")
+                    Text("Standard keeps surrounding text at full opacity. Focus dims it. Immersive centers the active sentence and fades the rest. Motion enlarges one sentence at a time for hands-free reading.")
                         .font(.caption2)
+                }
+
+                // Motion sub-settings (only visible when Motion is the chosen Reading Style)
+                if viewModel.readingStyle == .motion {
+                    Section {
+                        Picker("When to use Motion", selection: $viewModel.motionPreference) {
+                            ForEach(PlaybackPreferences.MotionPreference.allCases, id: \.self) { p in
+                                Text(p.displayName).tag(p)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("preferences.motionPreference")
+
+                        if viewModel.motionPreference == .auto && !viewModel.motionAutoConsent {
+                            Button {
+                                viewModel.showMotionConsent = true
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.orange)
+                                    Text("Auto needs your permission to read motion sensors. Tap to review.")
+                                        .font(.callout)
+                                        .foregroundStyle(.primary)
+                                }
+                            }
+                            .accessibilityIdentifier("preferences.motionConsentReview")
+                        } else {
+                            Text(viewModel.motionPreference.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } header: {
+                        Text("Motion Mode")
+                    } footer: {
+                        Text("Auto monitors device motion via CoreMotion to switch between Motion and your last non-Motion style. Motion data stays on this device.")
+                            .font(.caption2)
+                    }
                 }
 
                 // Playback section
@@ -888,10 +1018,70 @@ private struct ReaderPreferencesSheet: View {
             .onChange(of: viewModel.voiceMode) { _, _ in
                 draftRatePercentage = viewModel.customRatePercentage
             }
+            .sheet(isPresented: $viewModel.showMotionConsent) {
+                MotionConsentSheet(viewModel: viewModel)
+            }
         }
     }
 }
 // ========== BLOCK P1: READER PREFERENCES SHEET - END ==========
+
+
+// ========== BLOCK P1B: MOTION CONSENT SHEET - START ==========
+/// M8 Motion-Auto consent screen. Surfaces the privacy contract for
+/// CoreMotion monitoring before the user can pick Auto. Per
+/// `DECISIONS.md` "Motion Mode Three-Setting Design" (2026-05-01)
+/// CoreMotion monitoring is privacy-sensitive and never engages
+/// without explicit opt-in.
+private struct MotionConsentSheet: View {
+    @ObservedObject var viewModel: ReaderViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Image(systemName: "figure.walk.motion")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.tint)
+                        .padding(.top, 8)
+                    Text("Auto Motion Mode")
+                        .font(.title2.weight(.semibold))
+                    Text("To switch automatically between Motion mode and your standard reading style based on whether you're moving, Posey reads movement data from your iPhone's motion sensors via CoreMotion.")
+                        .font(.body)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Motion data stays on this device.", systemImage: "lock.shield")
+                        Label("Posey doesn't send movement data anywhere — no analytics, no servers.", systemImage: "wifi.slash")
+                        Label("You can switch Motion to Off or On at any time and the monitoring stops immediately.", systemImage: "hand.raised")
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    HStack {
+                        Button("Cancel") {
+                            // User declined — revert Auto to Off so
+                            // CoreMotion never engages. The picker
+                            // re-renders accordingly.
+                            viewModel.motionPreference = .off
+                            dismiss()
+                        }
+                        .buttonStyle(.bordered)
+                        Spacer()
+                        Button("Allow Motion Monitoring") {
+                            viewModel.motionAutoConsent = true
+                            dismiss()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(20)
+            }
+            .navigationTitle("Motion Permission")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+// ========== BLOCK P1B: MOTION CONSENT SHEET - END ==========
 
 private struct NotesSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
@@ -996,8 +1186,44 @@ final class ReaderViewModel: ObservableObject {
     /// `didSet` writes back so the choice survives launches and
     /// across documents.
     @Published var readingStyle: PlaybackPreferences.ReadingStyle = PlaybackPreferences.shared.readingStyle {
-        didSet { PlaybackPreferences.shared.readingStyle = readingStyle }
+        didSet {
+            PlaybackPreferences.shared.readingStyle = readingStyle
+            reconcileMotionDetector()
+        }
     }
+
+    /// M8 Motion sub-preference (Off / On / Auto). Honored only when
+    /// `readingStyle == .motion`. Persisted via PlaybackPreferences.
+    @Published var motionPreference: PlaybackPreferences.MotionPreference = PlaybackPreferences.shared.motionPreference {
+        didSet {
+            PlaybackPreferences.shared.motionPreference = motionPreference
+            reconcileMotionDetector()
+        }
+    }
+
+    /// M8 Motion-Auto consent. Required before CoreMotion monitoring
+    /// engages. The preferences sheet routes the user through a
+    /// dedicated consent screen the first time they pick Auto.
+    @Published var motionAutoConsent: Bool = PlaybackPreferences.shared.motionAutoConsent {
+        didSet {
+            PlaybackPreferences.shared.motionAutoConsent = motionAutoConsent
+            reconcileMotionDetector()
+        }
+    }
+
+    /// Drives the Motion-consent sheet's presentation from the
+    /// preferences UI. Set to true when the user taps "review
+    /// permission"; cleared when they accept or dismiss.
+    @Published var showMotionConsent: Bool = false
+
+    /// CoreMotion-backed detector for the Motion-Auto path. Started
+    /// only when the user has chosen .motion + .auto + consented.
+    /// Observed by the render path's `isMotionRenderActive` so the
+    /// reading style flips between large-centered and the user's
+    /// last non-Motion style as they walk / stop.
+    @Published private(set) var isDeviceMoving: Bool = false
+    private let motionDetector = MotionDetector()
+    private var motionDetectorCancellable: AnyCancellable?
     @Published private(set) var currentSentenceIndex: Int = 0
     @Published private(set) var playbackState: SpeechPlaybackService.PlaybackState = .idle
     @Published private(set) var focusedDisplayBlockID: Int?
@@ -1595,6 +1821,60 @@ final class ReaderViewModel: ObservableObject {
 
     func isActive(segment: TextSegment) -> Bool {
         segment.id == currentSentenceIndex
+    }
+
+    /// Start or stop the CoreMotion-backed motion detector based on
+    /// the current readingStyle + motionPreference + consent state.
+    /// Called from the property `didSet` hooks of all three so the
+    /// detector is always in the right state without an explicit
+    /// "rebuild" lifecycle. Safe to call repeatedly.
+    private func reconcileMotionDetector() {
+        let shouldRun = readingStyle == .motion
+            && motionPreference == .auto
+            && motionAutoConsent
+        if shouldRun {
+            // Subscribe to the detector's published flag if we
+            // haven't yet — once subscribed, we mirror the value to
+            // our own @Published `isDeviceMoving` so the render path
+            // can re-evaluate without dipping into a sub-object.
+            if motionDetectorCancellable == nil {
+                motionDetectorCancellable = motionDetector.$isMoving
+                    .receive(on: RunLoop.main)
+                    .sink { [weak self] value in
+                        self?.isDeviceMoving = value
+                    }
+            }
+            motionDetector.start(consented: motionAutoConsent)
+        } else {
+            motionDetector.stop()
+            motionDetectorCancellable?.cancel()
+            motionDetectorCancellable = nil
+            isDeviceMoving = false
+        }
+    }
+
+    /// M8 Immersive/Motion render distance — how many rows away the
+    /// segment is from the active sentence. Active row returns 0,
+    /// neighbours return 1, and so on. Used by the render path to
+    /// derive opacity + scale falloff curves.
+    func distanceFromActive(segment: TextSegment) -> Int {
+        return abs(segment.id - currentSentenceIndex)
+    }
+
+    /// Display-block variant of `distanceFromActive`. Computes the
+    /// distance between this block's anchor sentence and the
+    /// currently-active sentence. Blocks that don't carry a sentence
+    /// anchor (visual-only PDF pages) report a generous default
+    /// (effectively "far") so the falloff treats them as background.
+    func distanceFromActive(block: DisplayBlock) -> Int {
+        if isActive(block: block) { return 0 }
+        // Block-to-segment proxy: find the segment whose start offset
+        // matches the block's start; failing that, walk to the
+        // nearest segment by character offset. Unknown → far.
+        if let sentenceForBlock = segments.firstIndex(where: { $0.startOffset >= block.startOffset && $0.startOffset < block.endOffset }) {
+            return abs(sentenceForBlock - currentSentenceIndex)
+        }
+        return 8
     }
 
     func isActive(block: DisplayBlock) -> Bool {

@@ -221,7 +221,18 @@ final class ReaderViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.displayText(for: numberedBlock), "1. First numbered step keeps the sequence visible.")
     }
 
-    func testPrepareForNotesEntryPausesPlaybackAndCapturesLookbackContext() async throws {
+    func testPrepareForNotesEntryPausesPlaybackAndLeavesDraftEmpty() async throws {
+        // Behavior change 2026-05-01 (Mark's M4 device pass): the
+        // notes draft used to be auto-populated with surrounding-
+        // sentence text, but on documents whose first "sentence"
+        // jammed title/date/heading together (typical for OCR'd
+        // PDFs and some EPUBs) the draft looked like garbage. The
+        // active sentence is already shown above the TextField as
+        // readonly context — so we clear the draft on entry and
+        // let the user start typing in a clean field. The
+        // surrounding-sentence capture still goes to the
+        // clipboard so the share-with-other-app path keeps
+        // working.
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -257,6 +268,9 @@ final class ReaderViewModelTests: XCTestCase {
             playbackService: SpeechPlaybackService(mode: .simulated(stepInterval: 0.2))
         )
 
+        // Pre-seed a stale draft to confirm the entry path clears it.
+        viewModel.noteDraft = "stale text from a previous entry"
+
         viewModel.handleAppear()
         viewModel.togglePlayback()
         XCTAssertEqual(viewModel.playbackStateText, "playing")
@@ -264,8 +278,8 @@ final class ReaderViewModelTests: XCTestCase {
         viewModel.prepareForNotesEntry()
 
         XCTAssertEqual(viewModel.playbackStateText, "paused")
-        XCTAssertTrue(viewModel.noteDraft.contains(segments[0].text))
-        XCTAssertTrue(viewModel.noteDraft.contains(secondSegment.text))
+        XCTAssertEqual(viewModel.noteDraft, "",
+                       "Notes draft should be empty so the user starts with a clean field")
     }
 
     func testRestartFromBeginningStopsPlaybackAndRewindsWithoutAutoplay() async throws {

@@ -30,7 +30,15 @@ nonisolated enum AskPoseyTokenEstimator {
     /// drop logic kicks in earlier and we stay under AFM's actual
     /// limit. Combined with the larger response reserve (1024) below,
     /// this gives ~25% headroom for tokenizer disagreement.
-    static let charsPerToken: Double = 3.0
+    /// 2026-05-03: tightened 3.0 → 2.5. Mark's Task 3 Conv 7 turn 2
+    /// produced an empty bubble — AFM threw `exceededContextWindowSize`
+    /// (4089 actual tokens vs our 3072 estimate, ~33% under-count).
+    /// Dropping to 2.5 gives ~17% additional headroom on top of the
+    /// 1024-token response reserve. Combined with the
+    /// `exceededContextWindowSize` retry path that drops droppables
+    /// and re-builds (Task 4 #3), the empty-bubble case should now
+    /// be eliminated end-to-end.
+    static let charsPerToken: Double = 2.5
 
     /// Approximate token count for a string. Floors at 1 for any
     /// non-empty input so a single-character section still costs

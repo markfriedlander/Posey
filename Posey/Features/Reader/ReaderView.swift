@@ -3187,7 +3187,13 @@ private struct TOCSheet: View {
         NavigationStack {
             List {
                 Section {
-                    ForEach(viewModel.tocEntries, id: \.playOrder) { entry in
+                    // Task 8 (2026-05-03): composite id avoids the
+                    // crash some EPUBs caused when synthesized TOC
+                    // entries shared `playOrder = 0` (e.g. a nav.xhtml
+                    // and a notice.html both starting at 0). Combine
+                    // playOrder + offset + title so duplicates stay
+                    // unique even when one of them is empty.
+                    ForEach(viewModel.tocEntries, id: \.compositeID) { entry in
                         Button {
                             viewModel.jumpToTOCEntry(entry)
                             dismiss()

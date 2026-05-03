@@ -367,6 +367,13 @@ struct StoredTOCEntry {
     let title: String
     let plainTextOffset: Int
     let playOrder: Int
+
+    /// Task 8 (2026-05-03): composite identifier for SwiftUI `ForEach`
+    /// when `playOrder` alone isn't unique (some synthesized EPUBs
+    /// produce two entries with `playOrder = 0`, which crashed the
+    /// TOC sheet). Combines all three fields so duplicates can't
+    /// collide.
+    var compositeID: String { "\(playOrder)|\(plainTextOffset)|\(title)" }
 }
 
 extension DatabaseManager {

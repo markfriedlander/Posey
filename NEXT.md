@@ -10,8 +10,15 @@
 - **Q3 too-terse follow-ups (carryover).** Deferred as a model-capability ceiling.
 - **`tools/qa_battery.sh` hard-coded doc IDs (carryover).** Switch to title-based lookup via `LIST_DOCUMENTS`.
 
+**BLOCKED — Task 10 (Mac Catalyst verification).** Posey's Xcode project currently has neither `SUPPORTS_MACCATALYST` nor `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD` set. The project literally cannot run on Mac today; "verification" first requires enabling Catalyst as a target destination, which is a deliberate config change that:
+  1. Edits `project.pbxproj` (touches iOS provisioning + entitlements).
+  2. May force `#if targetEnvironment(macCatalyst)` branches for: file picker (`UIDocumentPickerViewController` works but feels native-broken on Mac), half-sheet detents (`.presentationDetents` are iOS-only — Mac needs different presentation), TTS voice list (Mac ships a different voice catalog than iPhone), local-API server bind address (Mac uses different network entitlements), window sizing, and AFM availability (FoundationModels ships on macOS too, but the Catalyst variant has its own gating).
+  3. Risks regressions on the iPhone target if entitlements and code-signing aren't carefully separated.
+
+  This is the kind of change Mark wants discussed first per CLAUDE.md ("Discussion before code… Large moves always need discussion"). Verification of "voice list differences on Mac, file picker behavior, half-sheet detents, window sizing, local API behavior on Mac" can begin once Catalyst is enabled. Awaiting Mark's go-ahead to enable + plan the verification pass.
+
 **Autonomous task sequence in flight (Mark's 2026-05-03 directive while away):**
-- Task 10 — Mac Catalyst verification.
+- Task 10 — Mac Catalyst verification (BLOCKED, see above).
 - Task 7 — Audio Export (M4A) with progress + share.
 - Task 8 — Code-only items: PDF normalizer parity check, EPUB TOC playback-skip, DOCX TOC field detection, inline images for DOCX/HTML, blank-visual-stop suppression, TOCSheet composite id, WORD-WORD space-hyphen artifact.
 - Task 13 — Code-only items: full LocalAPIServer compile-out in release, complete `#if DEBUG` guards, no debug output in release, landscape centering, go-to-page UX polish.

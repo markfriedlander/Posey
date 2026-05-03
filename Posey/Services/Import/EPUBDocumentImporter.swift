@@ -132,79 +132,112 @@ extension EPUBDocumentImporter {
             return (path, item.href)
         }
 
-        var chapterTexts: [String] = []  // displayText per chapter (may contain markers)
-        var chapterPlainLengths: [Int] = []  // plain-text char count per chapter (for TOC offsets)
-        var imageRecords: [PageImageRecord] = []
-        // Map from (normalized spine file path without fragment) → cumulative offset at start
-        var pathToPlainOffset: [String: Int] = [:]
-        // Front-matter detector input: one entry per spine item we
-        // actually loaded HTML for. We keep the raw HTML string here
-        // (rather than reading it again later) because the spine can
-        // be hundreds of items long for scanned EPUBs and a re-read
-        // is wasteful. Memory cost is bounded by the front-matter
-        // window — we only retain HTML for the first few candidates;
-        // see the populate loop below.
+        // Task 4 #5 — front-matter is now STRIPPED from the
+        // extracted text entirely (was: kept in text and skipped
+        // via playbackSkipUntilOffset). Mark's Task 3 EPUB conv
+        // showed the Internet Archive disclaimer
+        // ("This book was produced in EPUB format by the Internet
+        // Archive…") leaking into RAG chunks because the skip
+        // offset only affected the reader/playback, not RAG. Now
+        // detection runs FIRST against parsed candidates, then
+        // chapter concatenation skips any spine item identified
+        // as front matter — so plainText, displayText, RAG chunks,
+        // search index, and audio export all just don't see it.
+        struct ChapterRecord {
+            let path: String
+            let href: String
+            let bareHref: String
+            let html: String
+            let chapterText: String
+            let plainText: String
+            let images: [PageImageRecord]
+        }
+        var allChapters: [ChapterRecord] = []
         var frontMatterCandidates: [EPUBFrontMatterDetector.SpineCandidate] = []
 
+        // Pass 1 — load + parse every spine item. Cumulative-offset
+        // accounting waits for pass 2 (after front-matter filtering)
+        // so offsets reflect the FINAL plainText layout.
         for (path, href) in spineItems {
             guard let chapterData = entryLoader(path) else { continue }
             let chapterDir = (path as NSString).deletingLastPathComponent
-
-            // Record the plain-text offset at the START of this chapter.
-            // Offset = sum of all previous chapters' plain chars + separators (2 per join).
-            let cumulativeOffset = chapterPlainLengths.reduce(0, +)
-                + max(0, chapterPlainLengths.count - 1) * 2  // "\n\n" between chapters
-            // Key by the bare href (path component without fragment).
             let bareHref = (href as NSString).lastPathComponent
                 .components(separatedBy: "#").first ?? ""
-            if !bareHref.isEmpty && pathToPlainOffset[bareHref] == nil {
-                pathToPlainOffset[bareHref] = cumulativeOffset
-            }
 
-            // Front-matter detection only inspects the first few spine
-            // items. Anything later is by definition not "front" matter
-            // — keep memory bounded by capping the candidate window.
+            // Front-matter detection inspects only the first few
+            // spine items (front matter is by definition at the
+            // front). Memory cost capped by the candidate window.
+            // We use offset 0 here as a placeholder — the detector
+            // only cares about ORDER, not absolute offsets, when
+            // deciding what's front matter.
             if frontMatterCandidates.count < 5,
                let html = String(data: chapterData, encoding: .utf8)
                        ?? String(data: chapterData, encoding: .isoLatin1) {
                 frontMatterCandidates.append(EPUBFrontMatterDetector.SpineCandidate(
                     href: href,
-                    plainTextStartOffset: cumulativeOffset,
+                    plainTextStartOffset: 0,
                     html: html
                 ))
             }
 
-            // Extract inline images, replacing <img> tags with \x0c-delimited markers.
             let (processedData, chapterImages) = extractInlineImages(
                 from: chapterData,
                 chapterBasePath: chapterDir,
                 entryLoader: entryLoader
             )
-            imageRecords.append(contentsOf: chapterImages)
 
-            if let chapterText = try? htmlImporter.loadText(fromData: processedData) {
-                let plainChapter = buildPlainText(from: chapterText)
-                chapterTexts.append(chapterText)
-                chapterPlainLengths.append(plainChapter.count)
+            guard let chapterText = try? htmlImporter.loadText(fromData: processedData)
+            else { continue }
+            let plainChapter = buildPlainText(from: chapterText)
+            allChapters.append(ChapterRecord(
+                path: path,
+                href: href,
+                bareHref: bareHref,
+                html: String(data: chapterData, encoding: .utf8) ?? "",
+                chapterText: chapterText,
+                plainText: plainChapter,
+                images: chapterImages
+            ))
+        }
+
+        // Detect front matter. Strip those spine items from the
+        // chapter list entirely. Whatever remains is the document
+        // the user reads / Posey indexes / playback narrates.
+        let frontMatterResult = EPUBFrontMatterDetector.detect(
+            spineItems: frontMatterCandidates
+        )
+        let strippedChapters = allChapters.filter { record in
+            !frontMatterResult.frontMatterHrefs.contains(record.bareHref)
+        }
+        if !frontMatterResult.frontMatterHrefs.isEmpty {
+            NSLog("EPUB import: stripped %d front-matter spine items: %@",
+                  allChapters.count - strippedChapters.count,
+                  Array(frontMatterResult.frontMatterHrefs).joined(separator: ", ") as NSString)
+        }
+        guard !strippedChapters.isEmpty else { throw ImportError.emptyDocument }
+
+        // Pass 2 — build the final cumulative-offset map from
+        // the post-strip chapter list so TOC entries land at the
+        // right place in the now-shorter plainText.
+        var chapterTexts: [String] = []
+        var chapterPlainLengths: [Int] = []
+        var imageRecords: [PageImageRecord] = []
+        var pathToPlainOffset: [String: Int] = [:]
+        for record in strippedChapters {
+            let cumulativeOffset = chapterPlainLengths.reduce(0, +)
+                + max(0, chapterPlainLengths.count - 1) * 2
+            if !record.bareHref.isEmpty && pathToPlainOffset[record.bareHref] == nil {
+                pathToPlainOffset[record.bareHref] = cumulativeOffset
             }
+            chapterTexts.append(record.chapterText)
+            chapterPlainLengths.append(record.plainText.count)
+            imageRecords.append(contentsOf: record.images)
         }
 
         guard !chapterTexts.isEmpty else { throw ImportError.emptyDocument }
 
         let displayText = normalizeDisplay(chapterTexts.joined(separator: "\n\n"))
         let plainText   = buildPlainText(from: displayText)
-
-        // Detect auto-generator front matter (Internet Archive
-        // hocr-to-epub `<title>Notice</title>` paragraphs and the
-        // like) and compute the playback-skip offset the same way the
-        // PDF importer does for TOC regions. Reader's existing
-        // `playbackSkipUntilOffset` plumbing handles the rest:
-        // segments and display blocks past this offset are filtered
-        // out of the data model so the user never lands on, scrolls
-        // to, or has TTS read the disclaimer.
-        let frontMatterResult = EPUBFrontMatterDetector.detect(
-            spineItems: frontMatterCandidates
-        )
 
         // Build TOC entries from nav (EPUB 3) or skip if neither is available.
         var tocEntries = buildTOCEntries(

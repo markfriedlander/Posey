@@ -399,25 +399,45 @@ nonisolated enum AskPoseyPromptBuilder {
 
         var breakdown = AskPoseyPromptTokenBreakdown()
         var dropped: [AskPoseyPromptDroppedSection] = []
-        var sections: [String] = []
+
+        // === Task 4 #2 — user question is never truncated ===
+        // Restructured 2026-05-03 (was: question got whatever budget
+        // was left after every other section claimed its share, which
+        // truncated md_chain4's question mid-word in Task 3 testing —
+        // "Who is responsible for it?" became "Who is responsible
+        // for i" because STM + RAG + summary ate the budget).
+        //
+        // New order of operations:
+        //   1. Compute the non-droppable reserve up front:
+        //      system + anchor (if any) + surrounding (if any) +
+        //      user question — at FULL size.
+        //   2. Whatever remains becomes the droppable budget.
+        //   3. Allocate the droppable budget in keep-priority order:
+        //      STM first (most important to chain coherence), then
+        //      summary, then RAG. Drop priority is the inverse —
+        //      RAG drops first, summary second, STM last — matching
+        //      Mark's directive 2026-05-03.
+        //   4. The user question is rendered at its true size with
+        //      no truncation, ever. If the reserve alone exceeds the
+        //      ceiling, the ceiling expands to fit; we never lose
+        //      the question.
+        // ====================================================
 
         // -------- SYSTEM (instructions) --------
-        // Instructions live as a separate field on the output so they
-        // can be passed to `LanguageModelSession.init(model:instructions:)`
-        // matching the M3 classifier pattern. We still measure them
-        // against the system sub-budget so logs reflect total cost.
         let instructions = proseInstructions
         breakdown.system = AskPoseyTokenEstimator.tokens(in: instructions)
 
         // -------- ANCHOR (non-droppable when present) --------
+        var anchorBlock: String? = nil
         if let anchor = inputs.anchor,
            !anchor.trimmedDisplayText.isEmpty {
-            let anchorBlock = renderAnchorBlock(anchor: anchor)
-            breakdown.anchor = AskPoseyTokenEstimator.tokens(in: anchorBlock)
-            sections.append(anchorBlock)
+            let block = renderAnchorBlock(anchor: anchor)
+            anchorBlock = block
+            breakdown.anchor = AskPoseyTokenEstimator.tokens(in: block)
         }
 
-        // -------- SURROUNDING CONTEXT (droppable, intent-sized) --------
+        // -------- SURROUNDING CONTEXT (kept alongside anchor) --------
+        var surroundingBlock: String? = nil
         if let surrounding = inputs.surroundingContext?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !surrounding.isEmpty {
@@ -425,83 +445,84 @@ nonisolated enum AskPoseyPromptBuilder {
             let trimmed = trimToTokenCeiling(surrounding, ceiling: cap)
             if !trimmed.isEmpty {
                 let block = renderSurroundingBlock(text: trimmed)
+                surroundingBlock = block
                 breakdown.surrounding = AskPoseyTokenEstimator.tokens(in: block)
-                sections.append(block)
             }
         }
 
-        // -------- CONVERSATION SUMMARY (droppable, M6 fills) --------
-        // M5: inputs.conversationSummary is always nil so this branch
-        // is dead. Kept here so M6 has somewhere natural to land.
+        // -------- USER QUESTION (NEVER truncated) --------
+        // Render at full size. Measure cost. Reserve unconditionally.
+        let userBlock = renderUserBlock(text: inputs.currentQuestion)
+        breakdown.userQuestion = AskPoseyTokenEstimator.tokens(in: userBlock)
+
+        // -------- Compute droppable budget --------
+        let nonDroppable = breakdown.system
+            + breakdown.anchor
+            + breakdown.surrounding
+            + breakdown.userQuestion
+        let droppableBudget = max(0, budget.promptCeilingTokens - nonDroppable)
+
+        // -------- STM (highest keep priority — drops LAST) --------
+        // Allocate up to the smaller of its configured budget and
+        // whatever remains in the droppable pool.
+        var remaining = droppableBudget
+        let stmCap = min(budget.stmBudgetTokens, remaining)
+        let stmRendered = renderSTMBlock(
+            history: inputs.conversationHistory,
+            budgetTokens: stmCap,
+            droppedSink: &dropped
+        )
+        let stmTokens = AskPoseyTokenEstimator.tokens(in: stmRendered)
+        breakdown.stm = stmTokens
+        remaining -= stmTokens
+
+        // -------- CONVERSATION SUMMARY (drops second) --------
+        var summaryBlock: String? = nil
         if let summary = inputs.conversationSummary?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !summary.isEmpty {
-            let trimmed = trimToTokenCeiling(summary, ceiling: budget.summaryBudgetTokens)
-            let block = renderSummaryBlock(text: trimmed)
-            breakdown.conversationSummary = AskPoseyTokenEstimator.tokens(in: block)
-            sections.append(block)
+            let cap = min(budget.summaryBudgetTokens, max(0, remaining))
+            if cap > 0 {
+                let trimmed = trimToTokenCeiling(summary, ceiling: cap)
+                let block = renderSummaryBlock(text: trimmed)
+                let tokens = AskPoseyTokenEstimator.tokens(in: block)
+                if tokens <= remaining {
+                    summaryBlock = block
+                    breakdown.conversationSummary = tokens
+                    remaining -= tokens
+                } else {
+                    dropped.append(.init(
+                        section: .conversationSummary,
+                        identifier: "",
+                        reason: "summary dropped: \(tokens) tokens, only \(remaining) remaining after STM"
+                    ))
+                }
+            } else {
+                dropped.append(.init(
+                    section: .conversationSummary,
+                    identifier: "",
+                    reason: "summary dropped: 0 tokens available after STM"
+                ))
+            }
         }
 
-        // -------- STM (droppable, oldest-first) --------
-        // Keep the most recent turns until we hit the STM budget.
-        // `inputs.conversationHistory` is oldest-first; we walk
-        // from the back so the newest turns claim budget first, then
-        // re-reverse for chronological rendering.
-        let stmRendered = renderSTMBlock(
-            history: inputs.conversationHistory,
-            budgetTokens: budget.stmBudgetTokens,
-            droppedSink: &dropped
-        )
-        if !stmRendered.isEmpty {
-            breakdown.stm = AskPoseyTokenEstimator.tokens(in: stmRendered)
-            sections.append(stmRendered)
-        }
-
-        // -------- DOCUMENT RAG CHUNKS (droppable, oldest-first) --------
-        // M5: inputs.documentChunks is always [], so this branch is
-        // dead. The drop-priority logic is here so M6 lights up the
-        // builder unchanged when it switches retrieval on.
+        // -------- DOCUMENT RAG CHUNKS (drops FIRST when tight) --------
+        let ragCap = min(budget.ragBudgetTokens, max(0, remaining))
         let (ragRendered, chunksInjected) = renderRAGBlock(
             chunks: inputs.documentChunks,
-            budgetTokens: budget.ragBudgetTokens,
+            budgetTokens: ragCap,
             droppedSink: &dropped
         )
-        if !ragRendered.isEmpty {
-            breakdown.ragChunks = AskPoseyTokenEstimator.tokens(in: ragRendered)
-            sections.append(ragRendered)
-        }
+        breakdown.ragChunks = AskPoseyTokenEstimator.tokens(in: ragRendered)
 
-        // -------- USER QUESTION (truncated only as last resort) --------
-        // Reserved budget for the user question is whatever didn't
-        // get claimed by the other sections, capped at the configured
-        // `userQuestionBudgetTokens`. If even that doesn't fit, we
-        // truncate but never drop — the question is the entire point.
-        let claimedSoFar = breakdown.system
-            + breakdown.anchor
-            + breakdown.surrounding
-            + breakdown.conversationSummary
-            + breakdown.stm
-            + breakdown.ragChunks
-        let userBudget = max(
-            // Always preserve at least a sane floor (8 tokens ≈ 28 chars)
-            // so a misconfigured budget can't reduce the user to zero.
-            8,
-            budget.promptCeilingTokens - claimedSoFar
-        )
-        let questionTokens = AskPoseyTokenEstimator.tokens(in: inputs.currentQuestion)
-        let userBlock: String
-        if questionTokens <= userBudget {
-            userBlock = renderUserBlock(text: inputs.currentQuestion)
-        } else {
-            let truncated = trimToTokenCeiling(inputs.currentQuestion, ceiling: userBudget)
-            userBlock = renderUserBlock(text: truncated)
-            dropped.append(.init(
-                section: .userQuestionTruncated,
-                identifier: "",
-                reason: "user question truncated from \(questionTokens) to \(userBudget) tokens to fit prompt ceiling"
-            ))
-        }
-        breakdown.userQuestion = AskPoseyTokenEstimator.tokens(in: userBlock)
+        // -------- ASSEMBLE in original chronological order --------
+        // anchor → surrounding → summary → STM → RAG → user
+        var sections: [String] = []
+        if let anchorBlock { sections.append(anchorBlock) }
+        if let surroundingBlock { sections.append(surroundingBlock) }
+        if let summaryBlock { sections.append(summaryBlock) }
+        if !stmRendered.isEmpty { sections.append(stmRendered) }
+        if !ragRendered.isEmpty { sections.append(ragRendered) }
         sections.append(userBlock)
 
         // -------- ASSEMBLE --------

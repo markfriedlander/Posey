@@ -585,6 +585,79 @@ extension DatabaseManager {
         try bind(documentID.uuidString, at: 1, for: statement)
         try step(statement)
     }
+
+    // MARK: - Document entity index (Task 4 #6 B)
+
+    /// Bulk-insert entity → chunk_index rows for a document. Caller
+    /// is responsible for de-duping inputs if needed (we do an
+    /// INSERT — duplicates would inflate hit counts but not break
+    /// retrieval).
+    func insertEntities(
+        documentID: UUID,
+        entries: [(entityLower: String, chunkIndex: Int)]
+    ) throws {
+        guard !entries.isEmpty else { return }
+        let sql = """
+        INSERT INTO document_entities (document_id, entity_lower, chunk_index)
+        VALUES (?, ?, ?);
+        """
+        try execute("BEGIN TRANSACTION;")
+        do {
+            let statement = try prepareStatement(sql: sql)
+            defer { sqlite3_finalize(statement) }
+            for entry in entries {
+                sqlite3_reset(statement)
+                try bind(documentID.uuidString, at: 1, for: statement)
+                try bind(entry.entityLower, at: 2, for: statement)
+                sqlite3_bind_int(statement, 3, Int32(entry.chunkIndex))
+                try step(statement)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Drop all entity rows for a document. Called before re-index
+    /// so old entries don't accumulate.
+    func deleteEntities(for documentID: UUID) throws {
+        let sql = "DELETE FROM document_entities WHERE document_id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        try step(statement)
+    }
+
+    /// Look up the set of chunk indices that mention any of the
+    /// given entity strings (case-insensitive). Empty input → empty
+    /// result. Used by the entity-aware retrieval path: when the
+    /// user's question contains a named entity, we prefer chunks
+    /// that mention that entity over the cosine top-K.
+    func chunkIndicesMentioningEntities(
+        documentID: UUID,
+        entitiesLower: [String]
+    ) throws -> Set<Int> {
+        guard !entitiesLower.isEmpty else { return [] }
+        // Build a parameterized IN-list; each ? is one entity.
+        let placeholders = Array(repeating: "?", count: entitiesLower.count).joined(separator: ",")
+        let sql = """
+        SELECT DISTINCT chunk_index
+        FROM document_entities
+        WHERE document_id = ? AND entity_lower IN (\(placeholders));
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        for (i, entity) in entitiesLower.enumerated() {
+            try bind(entity, at: Int32(2 + i), for: statement)
+        }
+        var results: Set<Int> = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            results.insert(Int(sqlite3_column_int(statement, 0)))
+        }
+        return results
+    }
 }
 
 // ========== BLOCK 05C: DOCUMENT CHUNKS (Ask Posey M2) - END ==========
@@ -1052,6 +1125,30 @@ extension DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_document_chunks_doc
             ON document_chunks(document_id, chunk_index);
             """)
+
+        // ========== Task 4 #6 (B) — entity index ==========
+        // Maps every named entity (NLTagger.nameType: person, place,
+        // organization) found in any chunk to that chunk's index.
+        // Lets retrieval skip cosine entirely when the user's
+        // question contains a known entity — far more reliable for
+        // identity / character / place questions than sentence
+        // embedding similarity, especially on long fiction where
+        // a chunk that establishes "Joe Malik is a journalist…"
+        // doesn't lexically resemble "Who is Joe Malik?".
+        try execute("""
+            CREATE TABLE IF NOT EXISTS document_entities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                entity_lower TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_document_entities_lookup
+            ON document_entities(document_id, entity_lower);
+            """)
+        // ========== End Task 4 #6 (B) ==========
         // ========== End Ask Posey Milestone 1 schema additions ==========
     }
 

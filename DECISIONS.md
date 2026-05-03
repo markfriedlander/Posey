@@ -1,5 +1,22 @@
 # Posey Decisions
 
+## 2026-05-02 — libimobiledevice and pymobiledevice3 — Installed But Not In Active Use
+
+- Status: Accepted (informational)
+- Decision: During Task 1 setup we attempted to enable autonomous device screenshots so Claude Code could capture verification artifacts from Mark's iPhone without manual intervention. Two tools were installed during that attempt; neither is in active use. We are documenting them so a future contributor (or a future Claude Code session) can find and remove them if desired.
+- Tools installed:
+  - `libimobiledevice` — installed via `brew install libimobiledevice`. Provides `idevicescreenshot`, `ideviceinfo`, `ideviceimagemounter`, etc. Location: `/opt/homebrew/bin/`.
+  - `pymobiledevice3` — installed via `pipx install pymobiledevice3` (after `brew install pipx`). Modern Apple-aligned Python tooling for iOS 17+ device interaction. Location: `~/.local/bin/pymobiledevice3`.
+- Why neither works for our use case:
+  - `idevicescreenshot` returns "Could not start screenshotr service: Invalid service" on iOS 17+. Apple moved the screen-capture service out of the lockdown-service surface; the legacy service no longer exists on the device.
+  - `pymobiledevice3 developer dvt screenshot` requires `pymobiledevice3 remote tunneld` to be running, which itself requires `sudo` to bind privileged ports. Claude Code's bash sandbox cannot run `sudo` non-interactively, so tunneld can't be started autonomously.
+- What's currently in use instead: simulator screenshots (via the `ios-simulator` MCP) for layout verification, `qa_battery.sh` + `/ask` for AFM pipeline verification, and Mark's own eyes on the iPhone for final visual sign-off. This hybrid approach was chosen over the alternatives of (a) requiring Mark to start `sudo tunneld` interactively each session, or (b) installing tunneld as a `LaunchDaemon` for persistent root operation.
+- Inert status: neither tool started any background services, modified system files, installed launchd entries, or required keychain credentials. They sit on disk doing nothing.
+- To remove if desired:
+  - `brew uninstall libimobiledevice` (and optionally its dependencies: `libimobiledevice-glue`, `libplist`, `libusbmuxd`, `libtatsu`, `libtasn1`)
+  - `pipx uninstall pymobiledevice3` (and optionally `brew uninstall pipx` if not needed elsewhere)
+- Source: Mark's directive 2026-05-02 — "Drop the autonomous device screenshot pursuit. We're going with the hybrid approach… Document the install in DECISIONS.md."
+
 ## 2026-05-01 — Ask Posey: App Owns The Context, Not The Model
 
 - Status: Accepted

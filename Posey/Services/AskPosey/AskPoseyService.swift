@@ -439,6 +439,64 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             }
         }
 
+        // ---- Task 4 #7 — anti-fabrication entity check ----
+        // Extract named entities from the grounded answer; compare
+        // to entities present in the injected RAG chunks (and
+        // anchor + surrounding). Any answer entity NOT grounded in
+        // the prompt material is a fabrication signal.
+        //
+        // On hit: re-prompt with explicit "if the document doesn't
+        // say, say so" framing using the existing
+        // `neutralRephrasingPromptBody` helper. If the retry also
+        // fabricates (or refuses), throw `informativeRefusalFailure`
+        // so the friendly fallback bubble surfaces.
+        //
+        // Surfaced in Task 3: DOCX hallucinated "presented at AAAI
+        // Conference and ICML Conference" on a refusal-test
+        // question; EPUB hallucinated "Peter Jackson said Joe Malik
+        // wasn't on a paranoid trip" attributing a character's
+        // speech to "the author." Both had 0 citations because
+        // embedding attribution couldn't ground them — but the user
+        // saw the fabrication regardless. Now we catch it before
+        // polish runs.
+        if let ungrounded = ungroundedEntities(in: grounded, against: output, inputs: inputs),
+           !ungrounded.isEmpty {
+            NSLog("AskPosey: grounded answer contains %d ungrounded entities: %@ — retrying with explicit refusal framing",
+                  ungrounded.count,
+                  Array(ungrounded).joined(separator: ", ") as NSString)
+            let rephrased = AskPoseyPromptBuilder.neutralRephrasingPromptBody(
+                originalUserQuestion: inputs.currentQuestion,
+                originalRenderedBody: output.renderedBody
+            )
+            do {
+                let retried = try await runGroundedCall(
+                    instructions: output.instructions,
+                    body: rephrased
+                )
+                NSLog("AskPosey: anti-fabrication retry returned %d chars", retried.count)
+                // Validate the retry too. If it ALSO fabricates,
+                // the question is genuinely outside the document
+                // and the model can't be trusted on it — surface
+                // the friendly fallback.
+                if let stillUngrounded = ungroundedEntities(in: retried, against: output, inputs: inputs),
+                   !stillUngrounded.isEmpty {
+                    NSLog("AskPosey: retry still ungrounded (%@) — surfacing informative failure",
+                          Array(stillUngrounded).joined(separator: ", ") as NSString)
+                    throw AskPoseyServiceError.permanent(
+                        underlyingDescription: "informativeRefusalFailure"
+                    )
+                }
+                grounded = retried
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                NSLog("AskPosey: anti-fabrication retry threw — surfacing informative failure")
+                throw AskPoseyServiceError.permanent(
+                    underlyingDescription: "informativeRefusalFailure"
+                )
+            }
+        }
+
         // ---- Call 2: POLISH (Posey's voice, warmer temp) ----
         // Streams to user. On polish failure, fall back gracefully
         // to the grounded text so the user gets the right answer
@@ -521,6 +579,113 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             fullPromptForLogging: output.combinedForLogging,
             inferenceDuration: elapsed
         )
+    }
+
+    /// Task 4 #7 anti-fabrication helper. Returns the set of
+    /// named entities present in `answer` but NOT in any of the
+    /// excerpts the prompt builder fed AFM (anchor + surrounding
+    /// + every retrieved RAG chunk). An ungrounded entity is the
+    /// strongest local signal for fabrication: the model named
+    /// someone the document didn't.
+    ///
+    /// Returns nil when there's no way to validate (no chunks +
+    /// no anchor + no surrounding). That's effectively trust-the-
+    /// model territory; the fallback for genuinely-no-context
+    /// answers is the existing refusal-shape guard downstream.
+    private func ungroundedEntities(
+        in answer: String,
+        against output: AskPoseyPromptOutput,
+        inputs: AskPoseyPromptInputs
+    ) -> Set<String>? {
+        // Build the haystack: every text source the model legitimately
+        // saw. Anchor passage + surrounding context + each RAG chunk
+        // + conversation history (user may have mentioned a name in
+        // a prior turn we should accept).
+        var haystack = ""
+        if let anchorText = inputs.anchor?.trimmedDisplayText {
+            haystack += " "; haystack += anchorText
+        }
+        if let surrounding = inputs.surroundingContext {
+            haystack += " "; haystack += surrounding
+        }
+        for chunk in inputs.documentChunks {
+            haystack += " "; haystack += chunk.text
+        }
+        for msg in inputs.conversationHistory {
+            haystack += " "; haystack += msg.content
+        }
+        guard !haystack.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let haystackLower = haystack.lowercased()
+
+        // Three sources of candidate ungrounded entities, unioned:
+        //   (1) NLTagger named entities — best for clean person/
+        //       place names ("Joe Malik", "New York")
+        //   (2) Quoted strings — AFM tends to enclose fabricated
+        //       proper-noun names in quotes ("AI Ethics Conference",
+        //       "Law of Fives"). NLTagger misses these because the
+        //       common words throw the classifier.
+        //   (3) Title-Case multi-word capitalizations — catches
+        //       ungrounded proper-noun phrases the other two miss
+        //       ("Machine Learning Summit", "At the Mountains of
+        //       Madness"). Single capitalized words are excluded
+        //       (too noisy — sentence-initial words trip it).
+        var candidates: Set<String> = []
+        for e in DocumentEmbeddingIndex.extractEntities(from: answer) {
+            candidates.insert(e)
+        }
+        candidates.formUnion(extractQuotedStrings(from: answer))
+        candidates.formUnion(extractTitleCasePhrases(from: answer))
+
+        guard !candidates.isEmpty else { return nil }
+
+        var ungrounded: Set<String> = []
+        for entity in candidates {
+            if entity.count < 4 { continue }   // ignore "AI", "Mr"
+            if haystackLower.contains(entity) { continue }
+            ungrounded.insert(entity)
+        }
+        return ungrounded
+    }
+
+    /// Extract quoted string contents from `text`. Both straight
+    /// and curly quotes. Lowercased + trimmed for haystack
+    /// comparison.
+    private func extractQuotedStrings(from text: String) -> Set<String> {
+        var out = Set<String>()
+        let patterns = [
+            #""([^"]{3,80})""#,            // straight double quotes
+            #"'([^']{3,80})'"#,            // straight single quotes
+            "\u{201C}([^\u{201D}]{3,80})\u{201D}",  // curly double
+        ]
+        for pat in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pat) else { continue }
+            let nsText = text as NSString
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            for m in matches where m.numberOfRanges >= 2 {
+                let inner = nsText.substring(with: m.range(at: 1))
+                let lowered = inner.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                if lowered.count >= 4 { out.insert(lowered) }
+            }
+        }
+        return out
+    }
+
+    /// Extract Title Case multi-word phrases (≥ 2 capitalized
+    /// words in a row). Skips sentence-initial single words.
+    private func extractTitleCasePhrases(from text: String) -> Set<String> {
+        var out = Set<String>()
+        let pattern = #"\b([A-Z][a-zA-Z]+(?:\s+(?:[A-Z][a-zA-Z]+|of|the|and|in|on|for|to|at)){1,7}\s+[A-Z][a-zA-Z]+)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return out }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        for m in matches where m.numberOfRanges >= 2 {
+            let phrase = nsText.substring(with: m.range(at: 1))
+            let lowered = phrase.lowercased()
+            if lowered.count >= 6 { out.insert(lowered) }
+        }
+        return out
     }
 
     /// True when `error` is a `LanguageModelSession.GenerationError`

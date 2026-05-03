@@ -253,21 +253,21 @@ struct AskPoseyView: View {
             guard let n = AskPoseyCitationRenderer.chunkNumber(from: url) else {
                 return .systemAction
             }
-            // Find the assistant message that has at least N chunks.
-            // Scan newest-first so a follow-up answer's citations
-            // resolve against ITS chunks, not an older reply's.
-            for message in viewModel.messages.reversed()
-            where message.role == .assistant && n >= 1 && n <= message.chunksInjected.count {
-                let chunk = message.chunksInjected[n - 1]
-                if let onJumpToChunk {
-                    viewModel.cancelInFlight()
-                    onJumpToChunk(chunk.startOffset)
-                    dismiss()
-                }
-                return .handled
-            }
-            return .discarded
+            return dispatchCitationTap(n: n) ? .handled : .discarded
         })
+        .onReceive(
+            NotificationCenter.default.publisher(for: .remoteTapCitation)
+        ) { note in
+            // Test-driven dispatch: TAP_CITATION:<n> verb posts this
+            // notification; we resolve N → chunk on the most-recent
+            // assistant message and fire the same code path the
+            // markdown-link tap fires through OpenURLAction. Lets
+            // autonomous verification confirm the dispatch chain
+            // (URL parse → chunk lookup → onJumpToChunk → dismiss)
+            // works without synthesizing a tap on a tiny superscript.
+            guard let n = note.userInfo?["citationNumber"] as? Int else { return }
+            _ = dispatchCitationTap(n: n)
+        }
         .onAppear {
             // Auto-focus the composer when the sheet appears so the
             // user can start typing immediately. Slight delay because
@@ -280,6 +280,21 @@ struct AskPoseyView: View {
         }
     }
 
+    /// Shared dispatch for both the inline-citation OpenURLAction and
+    /// the test-only `.remoteTapCitation` notification. Returns true
+    /// when a chunk was found and onJumpToChunk fired.
+    private func dispatchCitationTap(n: Int) -> Bool {
+        for message in viewModel.messages.reversed()
+        where message.role == .assistant && n >= 1 && n <= message.chunksInjected.count {
+            let chunk = message.chunksInjected[n - 1]
+            guard let onJumpToChunk else { return false }
+            viewModel.cancelInFlight()
+            onJumpToChunk(chunk.startOffset)
+            dismiss()
+            return true
+        }
+        return false
+    }
 }
 // ========== BLOCK 01: ROOT VIEW - END ==========
 
@@ -292,6 +307,48 @@ struct AskPoseyView: View {
 /// the thread. Also keeps the `accessibilityIdentifier` on the
 /// shared base id (`askPosey.anchor` / `askPosey.documentScopeRow`)
 /// so existing UI tests / VoiceOver labels continue to work.
+/// Per-role bubble selection + copy strategy. Assistant bubbles
+/// keep textSelection OFF so single tap activates inline citation
+/// links, with `.contextMenu { Copy }` preserving the ability to
+/// copy answer text via long-press. User bubbles keep
+/// textSelection ON since they have no links and selection is
+/// the primary affordance for echoing the user's own question.
+private struct BubbleSelectionAndCopy: ViewModifier {
+    let content: String
+    let role: AskPoseyMessage.Role
+
+    func body(content viewContent: Content) -> some View {
+        Group {
+            switch role {
+            case .assistant:
+                viewContent
+                    .contextMenu {
+                        Button {
+                            UIPasteboard.general.string = stripCitationMarkup(content)
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                        }
+                    }
+            case .user:
+                viewContent.textSelection(.enabled)
+            case .anchor:
+                viewContent
+            }
+        }
+    }
+
+    /// Strip the markdown link wrappers around inline citation
+    /// markers so the copied text reads naturally — `Foo[ⁿ](posey-cite://1)`
+    /// becomes `Foo` (the superscript was UI affordance, not part
+    /// of the answer the user wants in their clipboard).
+    private func stripCitationMarkup(_ s: String) -> String {
+        let pattern = #"\[[¹²³⁴⁵⁶⁷⁸⁹⁰]+\]\(posey-cite://\d+\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return s }
+        let range = NSRange(s.startIndex..., in: s)
+        return regex.stringByReplacingMatches(in: s, range: range, withTemplate: "")
+    }
+}
+
 private struct AskPoseyAnchorRowRemoteRegister: ViewModifier {
     let message: AskPoseyMessage
     let isDocumentScope: Bool
@@ -707,13 +764,32 @@ struct AskPoseyMessageBubble: View {
         // `.environment(\\.openURL, ...)` action installed at the
         // sheet root, which dispatches `posey-cite://N` URLs to the
         // matching chunk's offset via `onJumpToChunk`.
+        //
+        // **Tap target.** `.textSelection(.enabled)` is intentionally
+        // OFF on assistant bubbles for tap-target reasons: with text
+        // selection enabled, SwiftUI captures a single tap on a
+        // markdown link as the start of a selection range — the link
+        // is reachable only via long-press → context menu, which
+        // Mark correctly reported as "the citation didn't respond
+        // when I tapped it." Without textSelection, single tap
+        // activates the link and fires the OpenURLAction directly.
+        // A `.contextMenu` with Copy preserves the ability to copy
+        // the answer text (long-press → Copy).
+        //
+        // User bubbles (the user's own question echo) keep
+        // textSelection enabled because there are no inline links
+        // in user content and copying their own question is the
+        // primary affordance.
         Text(.init(renderedMarkdown))
             .font(.body)
             .foregroundStyle(.primary)
             .tint(.accentColor)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .textSelection(.enabled)
+            .modifier(BubbleSelectionAndCopy(
+                content: renderedMarkdown,
+                role: message.role
+            ))
     }
 
     /// Rewrites the raw assistant text so each `[N]` marker that

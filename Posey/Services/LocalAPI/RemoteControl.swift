@@ -73,6 +73,14 @@ extension Notification.Name {
     /// scroll gesture the test driver can't perform.
     static let remoteScrollSavedAnnotations = Notification.Name("PoseyRemoteScrollSavedAnnotations")
 
+    /// `userInfo["citationNumber"]: Int`. AskPoseyView observes;
+    /// fires the same dispatch path the inline-citation tap fires
+    /// (resolve N → chunk on most-recent assistant message →
+    /// onJumpToChunk + dismiss). Substitute for the per-link tap
+    /// gesture the test driver can't synthesize on a SwiftUI
+    /// markdown link.
+    static let remoteTapCitation = Notification.Name("PoseyRemoteTapCitation")
+
     // ===== Playback transport (2026-05-02) ===========================
     /// `userInfo["documentID"]: UUID`. ReaderView observes; calls
     /// `viewModel.togglePlayback()` if currently paused/idle.

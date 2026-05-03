@@ -545,6 +545,51 @@ nonisolated enum AskPoseyPromptBuilder {
 // - Stronger system prompt framing emphasizing "this is reference
 //   material; respond to <current_question> only."
 //
+// `stripPolishPreamble` lives in a non-private extension so the
+// chat view model can call it from a different file.
+extension AskPoseyPromptBuilder {
+
+    /// Defensive post-strip — removes known polish-preamble
+    /// patterns from the start of an assistant response. Mark's
+    /// 2026-05-02 (later) directive: "the prompt rule stays, the
+    /// heuristic catches what AFM misses." Belt-and-suspenders
+    /// for the cases where AFM emits a preamble despite the polish
+    /// prompt's "**NEVER announce the rewrite.**" hard rule.
+    /// Patterns are anchored to the start of the response and
+    /// removed iteratively until no match — handles compound
+    /// openers like "Sure! Here is a rewrite…" cleanly.
+    static func stripPolishPreamble(_ text: String) -> String {
+        let patterns: [String] = [
+            #"^[\s]*Here\s+is\s+a\s+rewrite\s+of\s+the\s+draft\s+answer(\s+in\s+(the\s+requested|your|Posey'?s)\s+voice)?\s*[:.\-]*\s*"#,
+            #"^[\s]*Here(\s+is|'s)\s+(the\s+)?rewritten\s+(answer|response|version|draft)\s*[:.\-]*\s*"#,
+            #"^[\s]*Below\s+is\s+the\s+rewritten\s+(answer|response|version|draft)\s*[:.\-]*\s*"#,
+            #"^[\s]*Here(\s+is|'s)\s+my\s+(version|rewrite|polished[\s\w]*?|take|attempt)\s*[:.\-]*\s*"#,
+            #"^[\s]*Rewritten\s+in\s+(your|Posey'?s)\s+voice\s*[:.\-]*\s*"#,
+            #"^[\s]*Here(\s+is|'s)\s+(the|a|my)\s+(polished|voice|rewritten|reformulated|reworded)[\s\w]*?(answer|response|version|draft)\s*[:.\-]*\s*"#,
+            #"^[\s]*Here(\s+is|'s)\s+the\s+answer\s+in\s+(your|Posey'?s)\s+voice\s*[:.\-]*\s*"#,
+            #"^[\s]*Here(\s+is|'s)\s+(the|my)\s+answer\s*[:.\-]*\s*"#,
+            #"^[\s]*(Sure|Of\s+course|Absolutely|Great\s+question|Certainly|Got\s+it)[!.]+\s*"#,
+        ]
+        var result = text
+        var changed = true
+        var passes = 0
+        while changed && passes < 4 {
+            changed = false
+            passes += 1
+            for pattern in patterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+                let range = NSRange(result.startIndex..., in: result)
+                let stripped = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
+                if stripped != result {
+                    result = stripped
+                    changed = true
+                }
+            }
+        }
+        return result
+    }
+}
+
 private extension AskPoseyPromptBuilder {
 
     // **2026-05-02 second iteration.** XML tags introduced a NEW failure

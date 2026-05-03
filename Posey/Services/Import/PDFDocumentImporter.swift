@@ -153,13 +153,26 @@ extension PDFDocumentImporter {
                 if ocr.count >= 10 {
                     pageContents.append(.text(ocr))
                     readableTextPages.append(ocr)
-                } else {
-                    // Purely visual page (or near-blank) — render to PNG for inline display.
+                } else if pageHasImageXObjects(page) {
+                    // Image-only page (no text + < 10 OCR chars + has
+                    // image XObjects). Render to PNG and emit a visual
+                    // stop so the user sees the figure inline.
                     let imageID = UUID().uuidString
                     if let pngData = renderPageToPNG(page) {
                         imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))
                     }
                     pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
+                } else {
+                    // Task 8 #5 (2026-05-03 — blank-visual-stop
+                    // threshold): genuinely blank page (no text, no
+                    // OCR, no image XObjects). Section dividers in
+                    // some books look like this. Pausing TTS for a
+                    // blank page is an annoyance, not an affordance —
+                    // skip the visual stop entirely so playback flows
+                    // through. The Antifa corpus has 11 such pages
+                    // verified blank by the image-comparison harness;
+                    // they were all hitting visual stops before.
+                    NSLog("PDF import: skipping blank visual stop on page %d", index + 1)
                 }
             }
         }

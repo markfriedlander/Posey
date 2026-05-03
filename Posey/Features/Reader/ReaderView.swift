@@ -302,6 +302,21 @@ struct ReaderView: View {
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                 }
             }
+            // Task 13 (2026-05-03): catch within-orientation rotations
+            // (e.g. landscape-left → landscape-right) that don't fire
+            // a sizeClass change but still shift the safe-area
+            // insets. UIDevice.orientationDidChangeNotification
+            // observes the raw rotation event regardless of size
+            // class, giving us full coverage on top of the existing
+            // sizeClass-based hooks above.
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(60))
+                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                    try? await Task.sleep(for: .milliseconds(180))
+                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                }
+            }
             .onChange(of: scenePhase) { _, newValue in
                 if newValue == .background || newValue == .inactive {
                     viewModel.persistPosition()
@@ -3252,13 +3267,33 @@ private struct TOCSheet: View {
                     .focused($pageInputFocused)
                     .submitLabel(.go)
                     .accessibilityIdentifier("toc.pageInput")
+                    .accessibilityLabel(pageInputAccessibilityLabel)
+                    .accessibilityHint("Type a page number then tap Go")
                     .onSubmit { performJump() }
                 Button("Go") { performJump() }
                     .buttonStyle(.borderedProminent)
                     .disabled(pageInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityLabel("Go to page")
                     .remoteRegister("toc.pageGoButton") { performJump() }
                 Spacer(minLength: 0)
+                // Task 13 (2026-05-03): stepper alternative for users
+                // who prefer ±1 paging over typing. Disabled when the
+                // document has no page index. Operates on the parsed
+                // input value (defaults to the document's first page
+                // when the input is blank or non-numeric).
                 if let range = viewModel.pageMap.pageRange {
+                    Stepper(
+                        value: stepperBinding(in: range),
+                        in: range,
+                        step: 1
+                    ) {
+                        Text("of \(range.upperBound)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .labelsHidden()
+                    .accessibilityLabel("Adjust page number")
                     Text("of \(range.upperBound)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -3270,8 +3305,38 @@ private struct TOCSheet: View {
                     .font(.caption)
                     .foregroundStyle(.red)
                     .accessibilityIdentifier("toc.pageError")
+                    .accessibilityLabel("Page error: \(error)")
             }
         }
+    }
+
+    /// Task 13 (2026-05-03): accessibility label that reads the valid
+    /// page range alongside the field name. Helps VoiceOver users know
+    /// the bounds without first triggering an error.
+    private var pageInputAccessibilityLabel: String {
+        if let range = viewModel.pageMap.pageRange {
+            return "Page number, \(range.lowerBound) to \(range.upperBound)"
+        }
+        return "Page number"
+    }
+
+    /// Two-way binding the stepper drives. Reads the current
+    /// `pageInputText` (defaulting to the range's lower bound when
+    /// blank / non-numeric); writes back the stepped value clamped to
+    /// the range. The Go button still runs the actual jump — this
+    /// only adjusts the staged value.
+    private func stepperBinding(in range: ClosedRange<Int>) -> Binding<Int> {
+        Binding(
+            get: {
+                let parsed = Int(pageInputText.trimmingCharacters(in: .whitespacesAndNewlines))
+                return parsed.flatMap { range.contains($0) ? $0 : nil } ?? range.lowerBound
+            },
+            set: { newValue in
+                let clamped = max(range.lowerBound, min(range.upperBound, newValue))
+                pageInputText = String(clamped)
+                pageInputErrorMessage = nil
+            }
+        )
     }
 
     private var goToPageFooter: String {
@@ -3287,16 +3352,20 @@ private struct TOCSheet: View {
 
     private func performJump() {
         let trimmed = pageInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            pageInputErrorMessage = "Type a page number first."
+            return
+        }
         guard let page = Int(trimmed) else {
-            pageInputErrorMessage = "Enter a page number."
+            pageInputErrorMessage = "\"\(trimmed)\" isn't a page number — use digits only."
             return
         }
         guard let range = viewModel.pageMap.pageRange else {
-            pageInputErrorMessage = "This document has no page index."
+            pageInputErrorMessage = "This document doesn't have page numbers."
             return
         }
         guard range.contains(page) else {
-            pageInputErrorMessage = "Pick a page between \(range.lowerBound) and \(range.upperBound)."
+            pageInputErrorMessage = "There's no page \(page). Try \(range.lowerBound)–\(range.upperBound)."
             return
         }
         if viewModel.jumpToPage(page) {
@@ -3307,7 +3376,7 @@ private struct TOCSheet: View {
             // jumpToPage returned false despite a valid range — should
             // be unreachable given the guard above, but render a
             // generic error rather than swallowing silently.
-            pageInputErrorMessage = "Couldn't jump to that page."
+            pageInputErrorMessage = "Couldn't jump to page \(page) — please try again."
         }
     }
 }

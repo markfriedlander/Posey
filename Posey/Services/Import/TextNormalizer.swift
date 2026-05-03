@@ -170,4 +170,27 @@ enum TextNormalizer {
     }
 
     // ========== BLOCK 04: HYPHEN AND SPACED-CHARACTER PASSES - END ==========
+
+    // ========== BLOCK 05: KNOWN LIMITATIONS - START ==========
+    //
+    // **WORD - WORD (space-hyphen-space) artifact (Task 8 — 2026-05-03).**
+    // Some PDFs surface text like `"anti - fascist"` (with surrounding
+    // spaces around the hyphen) when the original text was the
+    // unhyphenated compound. We do NOT collapse this pattern because
+    // the same shape is legitimate prose:
+    //   - em-dash spacing: `"It was a long - and difficult - journey"`
+    //   - en-dash ranges: `"pages 12 - 24"` (some PDFs render en-dash this way)
+    //   - juxtaposed terms: `"Italy - the founding member"`
+    //
+    // Without surrounding font / glyph metrics (which `pdfText.string`
+    // discards) we cannot distinguish artifact from intent. A
+    // conservative collapse would corrupt prose; an aggressive one
+    // would only catch maybe 30% of artifact cases. Deferred until we
+    // have a per-PDF heuristic (e.g. count occurrences relative to
+    // legitimate em-dash usage, or use `PDFSelection` page-coordinates
+    // to detect where the surrounding word is positioned).
+    //
+    // The artifact is rare in real-world reading (we've seen it once
+    // in 47 synthetic + 28 Gutenberg + ~12 Mark-imported documents).
+    // ========== BLOCK 05: KNOWN LIMITATIONS - END ==========
 }

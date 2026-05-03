@@ -41,17 +41,16 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// the user sends them.
     @Published private(set) var messages: [AskPoseyMessage] = []
 
-    /// Index into `messages` where this opening's session starts.
-    /// Everything before this index was loaded from SQLite at sheet
-    /// open; everything from this index forward was added in the
-    /// current sheet session. The view uses this to render the
-    /// anchor row at the boundary (iMessage pattern: prior history
-    /// above, anchor as section divider, this session below).
+    /// Storage id of the anchor marker the view should scroll to on
+    /// initial appear. Defaults to the most recently appended anchor
+    /// in `messages` (the one created for this invocation), but the
+    /// Notes-tap-conversation path can override via the init param so
+    /// the sheet opens scrolled to a previous anchor in the thread.
     ///
-    /// Set after `loadHistory()` completes. Stays constant after
-    /// that — appending to `messages` grows the "this session" half
-    /// without moving the boundary.
-    @Published private(set) var historyBoundary: Int = 0
+    /// Published so the view's onAppear can read it after history
+    /// load completes (the actual anchor row may not be appended
+    /// until then).
+    @Published private(set) var initialScrollAnchorStorageID: String? = nil
 
     /// Two-way bound to the composer TextField.
     @Published var inputText: String = ""
@@ -211,11 +210,22 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// instance for all four service protocols.
     private let navigator: AskPoseyNavigating?
 
+    /// Captured reading offset at invocation. Always set for fresh
+    /// invocations regardless of scope — passage scope mirrors
+    /// `anchor.plainTextOffset`, document scope captures the active
+    /// sentence offset so the doc-scope anchor is still tappable to
+    /// jump back to where the question was asked. Nil only for the
+    /// Notes-tap-conversation navigation path, where we're NOT
+    /// creating a new anchor.
+    private let invocationReadingOffset: Int?
+
     init(
         documentID: UUID,
         documentPlainText: String,
         documentTitle: String? = nil,
         anchor: AskPoseyAnchor?,
+        invocationReadingOffset: Int? = nil,
+        initialScrollAnchorStorageID: String? = nil,
         classifier: AskPoseyClassifying? = nil,
         streamer: AskPoseyStreaming? = nil,
         summarizer: AskPoseySummarizing? = nil,
@@ -227,6 +237,11 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         self.documentPlainText = documentPlainText
         self.documentTitle = documentTitle
         self.anchor = anchor
+        // Default invocation offset: derive from passage anchor when
+        // available so passage-scoped callers don't have to pass it
+        // twice. Document-scoped callers must pass it explicitly.
+        self.invocationReadingOffset = invocationReadingOffset ?? anchor?.plainTextOffset
+        self.initialScrollAnchorStorageID = initialScrollAnchorStorageID
         self.classifier = classifier
         self.streamer = streamer
         self.summarizer = summarizer
@@ -359,7 +374,10 @@ private extension AskPoseyChatViewModel {
         defer { isLoadingHistory = false }
 
         guard let db = databaseManager else {
-            // Preview/test paths without a DB just start empty.
+            // Preview/test paths without a DB. Still append the
+            // in-memory anchor marker for the current invocation so
+            // the sheet renders the same shape as production.
+            appendCurrentInvocationAnchorMarkerIfNeeded(persist: false)
             return
         }
 
@@ -373,19 +391,16 @@ private extension AskPoseyChatViewModel {
                 summaryCoveredThrough = summary.summaryOfTurnsThrough
             }
 
-            let count = try db.askPoseyTurnCount(for: documentID)
-            guard count > 0 else { return }
+            // Load every non-summary row (anchor + user + assistant)
+            // so the thread renders chronologically with anchor
+            // markers inline. Prompt builder gets a separately-
+            // filtered slice so anchor markers don't pollute STM.
             let stored = try db.askPoseyTurns(for: documentID, limit: historyFetchLimit)
             let translated = stored.compactMap(translateStoredTurn)
             messages = translated
-            // Mark the boundary between prior-session history and
-            // this-session additions. The view renders the anchor row
-            // at this index.
-            historyBoundary = translated.count
-            // Populate the prompt-builder cache from the same
-            // history; the cache is what the live send path passes
-            // to the builder.
-            historyForPromptBuilder = translated
+            historyForPromptBuilder = translated.filter {
+                $0.role == .user || $0.role == .assistant
+            }
         } catch {
             // History load failure is non-fatal — we just start
             // with an empty conversation rather than blocking the
@@ -393,26 +408,99 @@ private extension AskPoseyChatViewModel {
             // don't gate the UI on it.
             NSLog("AskPosey history load failed: \(error)")
         }
+
+        // Append the anchor marker for THIS invocation (unless we're
+        // navigating to an existing one via Notes-tap-conversation).
+        // Persist to SQLite so future opens see the full thread.
+        appendCurrentInvocationAnchorMarkerIfNeeded(persist: true)
+    }
+
+    /// Build + append (and optionally persist) an anchor marker for
+    /// the current invocation. Skipped when the caller passed an
+    /// `initialScrollAnchorStorageID` — that signals navigation to an
+    /// existing anchor row, not a fresh invocation.
+    func appendCurrentInvocationAnchorMarkerIfNeeded(persist: Bool) {
+        guard initialScrollAnchorStorageID == nil else { return }
+
+        // Determine display text + scope for the marker. Passage
+        // scope = full passage text. Document scope = document title
+        // (fallback to "this document" if no title is available).
+        let scope: String = (anchor != nil) ? "passage" : "document"
+        let displayText: String
+        if let anchor, !anchor.trimmedDisplayText.isEmpty {
+            displayText = anchor.text
+        } else if let title = documentTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty {
+            displayText = title
+        } else {
+            displayText = "this document"
+        }
+
+        // Captured reading offset at invocation — always populated
+        // (passage scope mirrors anchor.plainTextOffset; doc scope
+        // gets the active sentence offset from the caller).
+        let offset = invocationReadingOffset ?? 0
+
+        let storageID = UUID().uuidString
+        let marker = AskPoseyMessage(
+            role: .anchor,
+            content: displayText,
+            timestamp: Date(),
+            anchorOffset: offset,
+            anchorScope: scope,
+            storageID: storageID
+        )
+        messages.append(marker)
+        // Surface the storage id so the view's initial scroll lands
+        // on the marker we just appended (default behavior — Notes
+        // tap-conversation overrides via the init param).
+        initialScrollAnchorStorageID = storageID
+
+        guard persist, let db = databaseManager else { return }
+        let stored = StoredAskPoseyTurn(
+            id: storageID,
+            documentID: documentID,
+            timestamp: marker.timestamp,
+            role: AskPoseyMessage.Role.anchor.rawValue,
+            content: displayText,
+            invocation: scope,
+            anchorOffset: offset,
+            intent: nil,
+            chunksInjectedJSON: "[]",
+            fullPromptForLogging: nil,
+            summaryOfTurnsThrough: 0,
+            isSummary: false
+        )
+        do {
+            try db.appendAskPoseyTurn(stored)
+        } catch {
+            NSLog("AskPosey anchor marker persist failed: \(error)")
+        }
     }
 
     /// Translate a stored row into the in-memory message type. Returns
     /// nil for rows whose role string doesn't match (defensive — we
-    /// haven't shipped non-user/assistant rows yet but defensive
+    /// haven't shipped non-user/assistant/anchor rows yet but defensive
     /// decoding is cheap).
     func translateStoredTurn(_ stored: StoredAskPoseyTurn) -> AskPoseyMessage? {
         guard let role = AskPoseyMessage.Role(rawValue: stored.role) else {
             return nil
         }
-        // We don't reconstruct UUIDs from the stored row id (those
-        // are textual, not UUIDs in our schema). Generate fresh —
-        // the SwiftUI Identifiable contract just needs uniqueness
-        // within the current view's data set.
+        // Reconstruct a stable UUID from the storage id when it's
+        // UUID-shaped. Older rows without UUID-shaped ids fall back
+        // to a fresh UUID — losing the ability to cross-reference
+        // them but preserving SwiftUI Identifiable correctness.
+        let messageID = UUID(uuidString: stored.id) ?? UUID()
+        let isAnchor = (role == .anchor)
         return AskPoseyMessage(
-            id: UUID(),
+            id: messageID,
             role: role,
             content: stored.content,
             isStreaming: false,
-            timestamp: stored.timestamp
+            timestamp: stored.timestamp,
+            anchorOffset: isAnchor ? stored.anchorOffset : nil,
+            anchorScope: isAnchor ? stored.invocation : nil,
+            storageID: stored.id
         )
     }
 

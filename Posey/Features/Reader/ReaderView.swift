@@ -244,6 +244,7 @@ struct ReaderView: View {
             .onAppear {
                 viewModel.handleAppear()
                 revealChrome()
+                publishRemoteState()
                 // Defer the initial scroll past the first layout pass so the
                 // LazyVStack has time to realize rows up to the saved sentence
                 // position. Calling scrollTo before that happens silently
@@ -264,9 +265,11 @@ struct ReaderView: View {
                 chromeFadeTask?.cancel()
                 viewModel.persistPosition()
                 viewModel.stopPlayback()
+                clearRemoteStateIfOurs()
             }
             .onChange(of: viewModel.currentSentenceIndex) { _, _ in
                 viewModel.scrollToCurrentSentence(with: proxy, animated: true)
+                publishRemoteState()
             }
             .onChange(of: viewModel.focusedDisplayBlockID) { _, _ in
                 viewModel.scrollToCurrentSentence(with: proxy, animated: true)
@@ -329,7 +332,14 @@ struct ReaderView: View {
             // running after dismiss.
             .sheet(
                 item: $askPoseyChat,
-                onDismiss: { askPoseyChat = nil }
+                onDismiss: {
+                    askPoseyChat = nil
+                    // The Ask Posey sheet may have appended a new
+                    // anchor marker for this invocation — refresh
+                    // the unified Saved Annotations list so it
+                    // surfaces in the Notes sheet on next open.
+                    viewModel.rebuildSavedAnnotations()
+                }
             ) { chatVM in
                 AskPoseyView(
                     viewModel: chatVM,
@@ -357,8 +367,38 @@ struct ReaderView: View {
                 else { return }
                 let scopeStr = (info["scope"] as? String)?.lowercased() ?? "passage"
                 let scope: AskPoseyScope = (scopeStr == "document") ? .document : .passage
-                openAskPosey(scope: scope)
+                let initialAnchorStorageID = info["initialAnchorStorageID"] as? String
+                openAskPosey(
+                    scope: scope,
+                    initialAnchorStorageID: initialAnchorStorageID
+                )
             }
+            // Remote-control observers (2026-05-02) bundled into a
+            // single ViewModifier so adding 5 separate `.onReceive`
+            // calls inline doesn't blow the SwiftUI type-checker
+            // budget on this already-large body.
+            .modifier(ReaderRemoteControlObservers(
+                viewModel: viewModel,
+                isShowingNotesSheet: $isShowingNotesSheet,
+                isShowingPreferencesSheet: $isShowingPreferencesSheet,
+                isShowingTOCSheet: $isShowingTOCSheet
+            ))
+        }
+    }
+
+    /// Push the live reader snapshot into the API-visible state cache.
+    private func publishRemoteState() {
+        let segments = viewModel.segments
+        let idx = viewModel.currentSentenceIndex
+        let offset = (idx >= 0 && idx < segments.count) ? segments[idx].startOffset : 0
+        RemoteControlState.shared.visibleDocumentID = viewModel.document.id
+        RemoteControlState.shared.currentSentenceIndex = idx
+        RemoteControlState.shared.currentOffset = offset
+    }
+
+    private func clearRemoteStateIfOurs() {
+        if RemoteControlState.shared.visibleDocumentID == viewModel.document.id {
+            RemoteControlState.shared.visibleDocumentID = nil
         }
     }
 
@@ -838,11 +878,22 @@ struct ReaderView: View {
     /// chunks since there's no anchor passage to ground the answer).
     enum AskPoseyScope { case passage, document }
 
-    private func openAskPosey(scope: AskPoseyScope) {
+    private func openAskPosey(
+        scope: AskPoseyScope,
+        initialAnchorStorageID: String? = nil
+    ) {
         let segments = viewModel.segments
         let active = segments.indices.contains(viewModel.currentSentenceIndex)
             ? segments[viewModel.currentSentenceIndex]
             : segments.first
+        // Captured reading offset at invocation — populated for both
+        // scopes so the persisted anchor marker is always tappable to
+        // jump back to where the question was asked, even for
+        // document-scoped invocations. Falls back to 0 when the
+        // document has no segments yet (defensive — should never
+        // happen in production since the reader is rendering them).
+        let invocationOffset: Int = active?.startOffset ?? 0
+
         let anchor: AskPoseyAnchor?
         switch scope {
         case .passage:
@@ -855,9 +906,11 @@ struct ReaderView: View {
                 anchor = nil
             }
         case .document:
-            // Document-scoped: no anchor. The prompt builder skips
-            // the ANCHOR + SURROUNDING sections and the RAG section
-            // does the heavy lifting via M6 retrieval.
+            // Document-scoped: no AFM-side anchor (the prompt builder
+            // skips the ANCHOR + SURROUNDING sections; RAG carries
+            // the grounding). The persisted anchor MARKER row still
+            // captures `invocationOffset` so the user can jump back
+            // to where they asked the question.
             anchor = nil
         }
         // Stop playback while the sheet is open so the document
@@ -889,6 +942,8 @@ struct ReaderView: View {
             documentPlainText: document.plainText,
             documentTitle: document.title,
             anchor: anchor,
+            invocationReadingOffset: invocationOffset,
+            initialScrollAnchorStorageID: initialAnchorStorageID,
             classifier: classifier,
             streamer: streamer,
             summarizer: summarizer,
@@ -897,6 +952,219 @@ struct ReaderView: View {
         )
     }
 }
+
+// ========== BLOCK RC: REMOTE-CONTROL OBSERVERS - START ==========
+/// Bundles the local-API → ReaderView intent observers into one
+/// ViewModifier so the main body's modifier chain stays small enough
+/// for the SwiftUI type-checker. Each observer maps a notification
+/// posted by `LibraryViewModel.executeAPICommand` to a real
+/// view-model action — the same path a tap or gesture would take.
+private struct ReaderRemoteControlObservers: ViewModifier {
+    @ObservedObject var viewModel: ReaderViewModel
+    @Binding var isShowingNotesSheet: Bool
+    @Binding var isShowingPreferencesSheet: Bool
+    @Binding var isShowingTOCSheet: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(ReaderRemoteControlAnnotationObservers(
+                viewModel: viewModel,
+                isShowingNotesSheet: $isShowingNotesSheet
+            ))
+            .modifier(ReaderRemoteControlPlaybackObservers(viewModel: viewModel))
+            .modifier(ReaderRemoteControlSheetObservers(
+                viewModel: viewModel,
+                isShowingPreferencesSheet: $isShowingPreferencesSheet,
+                isShowingTOCSheet: $isShowingTOCSheet
+            ))
+            .modifier(ReaderRemoteControlPreferencesObservers(viewModel: viewModel))
+            .modifier(ReaderRemoteControlSearchObservers(viewModel: viewModel))
+    }
+}
+
+/// Annotations + jump observers — already shipped surface, kept in
+/// their own modifier to share the SwiftUI type-checker budget.
+private struct ReaderRemoteControlAnnotationObservers: ViewModifier {
+    @ObservedObject var viewModel: ReaderViewModel
+    @Binding var isShowingNotesSheet: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .remoteReaderJumpToOffset)) { note in
+                guard matches(note, viewModel: viewModel), let offset = offsetIn(note) else { return }
+                viewModel.jumpToOffset(offset)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteReaderDoubleTap)) { note in
+                guard matches(note, viewModel: viewModel), let offset = offsetIn(note) else { return }
+                viewModel.jumpToOffset(offset)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteOpenNotesSheet)) { _ in
+                isShowingNotesSheet = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteCreateBookmark)) { note in
+                guard matches(note, viewModel: viewModel), let offset = offsetIn(note) else { return }
+                viewModel.jumpToOffset(offset)
+                viewModel.addBookmarkForCurrentSentence()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteCreateNote)) { note in
+                guard matches(note, viewModel: viewModel),
+                      let offset = offsetIn(note),
+                      let body = note.userInfo?["body"] as? String else { return }
+                viewModel.jumpToOffset(offset)
+                viewModel.noteDraft = body
+                viewModel.saveDraftNoteForCurrentSentence()
+            }
+    }
+}
+
+private struct ReaderRemoteControlPlaybackObservers: ViewModifier {
+    @ObservedObject var viewModel: ReaderViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .remotePlaybackPlay)) { note in
+                guard matches(note, viewModel: viewModel) else { return }
+                if viewModel.playbackState != .playing { viewModel.togglePlayback() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remotePlaybackPause)) { note in
+                guard matches(note, viewModel: viewModel) else { return }
+                if viewModel.playbackState == .playing { viewModel.togglePlayback() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remotePlaybackNext)) { note in
+                guard matches(note, viewModel: viewModel) else { return }
+                viewModel.goToNextMarker()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remotePlaybackPrevious)) { note in
+                guard matches(note, viewModel: viewModel) else { return }
+                viewModel.goToPreviousMarker()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remotePlaybackRestart)) { note in
+                guard matches(note, viewModel: viewModel) else { return }
+                viewModel.restartFromBeginning()
+            }
+            .onReceive(viewModel.$playbackState) { newState in
+                let label: String
+                switch newState {
+                case .idle:     label = "idle"
+                case .playing:  label = "playing"
+                case .paused:   label = "paused"
+                case .finished: label = "finished"
+                }
+                RemoteControlState.shared.playbackState = label
+            }
+    }
+}
+
+private struct ReaderRemoteControlSheetObservers: ViewModifier {
+    @ObservedObject var viewModel: ReaderViewModel
+    @Binding var isShowingPreferencesSheet: Bool
+    @Binding var isShowingTOCSheet: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .remoteOpenPreferencesSheet)) { _ in
+                isShowingPreferencesSheet = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteOpenTOCSheet)) { _ in
+                isShowingTOCSheet = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteOpenAudioExportSheet)) { _ in
+                // The Audio Export sheet is a sub-sheet of the
+                // Preferences sheet — present preferences first, then
+                // flip the export flag after the preferences sheet is
+                // mounted so its `.sheet(isPresented:)` modifier is
+                // live and can react.
+                isShowingPreferencesSheet = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350))
+                    viewModel.showAudioExport = true
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteOpenSearchBar)) { _ in
+                viewModel.isSearchActive = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteJumpToPage)) { note in
+                guard matches(note, viewModel: viewModel),
+                      let page = note.userInfo?["page"] as? Int else { return }
+                _ = viewModel.jumpToPage(page)
+            }
+    }
+}
+
+private struct ReaderRemoteControlPreferencesObservers: ViewModifier {
+    @ObservedObject var viewModel: ReaderViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSetVoiceMode)) { note in
+                guard let isCustom = note.userInfo?["isCustom"] as? Bool else { return }
+                viewModel.setVoiceMode(isCustom: isCustom)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSetRate)) { note in
+                guard let pct = note.userInfo?["ratePercentage"] as? Float else { return }
+                viewModel.setCustomRate(percentage: pct)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSetFontSize)) { note in
+                guard let size = note.userInfo?["fontSize"] as? Double else { return }
+                viewModel.fontSize = CGFloat(size)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSetReadingStyle)) { note in
+                guard let raw = note.userInfo?["readingStyle"] as? String,
+                      let style = PlaybackPreferences.ReadingStyle(rawValue: raw) else { return }
+                viewModel.readingStyle = style
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSetMotionPreference)) { note in
+                guard let raw = note.userInfo?["motionPreference"] as? String,
+                      let pref = PlaybackPreferences.MotionPreference(rawValue: raw) else { return }
+                viewModel.motionPreference = pref
+            }
+    }
+}
+
+private struct ReaderRemoteControlSearchObservers: ViewModifier {
+    @ObservedObject var viewModel: ReaderViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSetSearchQuery)) { note in
+                guard let query = note.userInfo?["query"] as? String else { return }
+                viewModel.isSearchActive = true
+                viewModel.updateSearchQuery(query)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSearchNext)) { _ in
+                viewModel.goToNextSearchMatch()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSearchPrevious)) { _ in
+                viewModel.goToPreviousSearchMatch()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSearchClear)) { _ in
+                viewModel.deactivateSearch()
+            }
+            .onReceive(viewModel.$searchQuery) { newQuery in
+                RemoteControlState.shared.searchQuery = newQuery
+            }
+            .onReceive(viewModel.$isSearchActive) { active in
+                RemoteControlState.shared.isSearchActive = active
+            }
+            .onReceive(viewModel.$searchMatchIndices) { matches in
+                RemoteControlState.shared.searchMatchCount = matches.count
+            }
+            .onReceive(viewModel.$currentSearchMatchPosition) { pos in
+                RemoteControlState.shared.currentSearchMatchPosition = pos ?? 0
+            }
+    }
+}
+
+private func matches(_ note: Notification, viewModel: ReaderViewModel) -> Bool {
+    guard let docID = note.userInfo?["documentID"] as? UUID else { return false }
+    return docID == viewModel.document.id
+}
+
+private func offsetIn(_ note: Notification) -> Int? {
+    note.userInfo?["offset"] as? Int
+}
+// ========== BLOCK RC: REMOTE-CONTROL OBSERVERS - END ==========
+
 
 // ========== BLOCK P1: READER PREFERENCES SHEET - START ==========
 private struct ReaderPreferencesSheet: View {
@@ -1239,12 +1507,64 @@ private struct AudioExportSheet: View {
 }
 // ========== BLOCK P1C: AUDIO EXPORT SHEET - END ==========
 
+// ========== BLOCK NS1: SAVED ANNOTATION MODEL - START ==========
+
+/// Unified annotation entry surfaced in the Notes sheet's "Saved
+/// Annotations" list. Combines three underlying record types into a
+/// single shape so the sheet can render them in one chronological
+/// feed:
+///
+/// - `.conversation` — derived from `ask_posey_conversations` rows
+///   where `role = 'anchor'`. The anchor text or document title (for
+///   doc-scope anchors) is the row's display label. Tap → reopen the
+///   Ask Posey sheet scrolled to that anchor's position in the thread.
+/// - `.note` — derived from `notes` rows where `kind = 'note'`. Tap
+///   expands the body inline; secondary tap navigates the reader.
+/// - `.bookmark` — derived from `notes` rows where `kind = 'bookmark'`.
+///   Tap navigates the reader and dismisses.
+///
+/// `id` is composed (`"<kind>:<storage>"`) so SwiftUI can identify
+/// rows stably across re-aggregation passes without UUID collisions
+/// between the two backing tables.
+struct SavedAnnotation: Identifiable, Equatable {
+
+    enum Kind: Equatable {
+        case conversation
+        case note
+        case bookmark
+    }
+
+    let id: String
+    let kind: Kind
+    let anchorText: String   // shown as the row label
+    let offset: Int          // for jumping the reader
+    let timestamp: Date      // for sort order
+    let body: String?        // note body (inline-expandable); nil otherwise
+    /// Storage id of the anchor row in `ask_posey_conversations`.
+    /// Set only when `kind == .conversation`. Threaded into the
+    /// open-ask-posey notification's userInfo so the sheet opens
+    /// scrolled to this anchor.
+    let conversationStorageID: String?
+    /// Note row id (in the `notes` table). Set only for `.note` /
+    /// `.bookmark` entries. Used by the existing reader-jump path.
+    let noteID: UUID?
+}
+
+// ========== BLOCK NS1: SAVED ANNOTATION MODEL - END ==========
+
+
 private struct NotesSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
     @Environment(\.dismiss) private var dismiss
+    /// Per-row expansion state for `.note` entries. Keyed by the
+    /// row's id so collapsing one note doesn't affect others. Lives
+    /// in the sheet (not the view model) because it's purely UI
+    /// affordance; persisted state isn't needed.
+    @State private var expandedNoteIDs: Set<String> = []
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { listProxy in
             List {
                 Section("Current Position") {
                     Text(viewModel.currentSentencePreview)
@@ -1267,39 +1587,25 @@ private struct NotesSheet: View {
                 }
 
                 Section("Saved Annotations") {
-                    if viewModel.notes.isEmpty {
-                        Text("No notes or bookmarks yet.")
+                    if viewModel.savedAnnotations.isEmpty {
+                        Text("No notes, bookmarks, or conversations yet.")
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("notes.empty")
                     } else {
-                        ForEach(viewModel.notes) { note in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Label(note.kind == .bookmark ? "Bookmark" : "Note", systemImage: note.kind == .bookmark ? "bookmark.fill" : "note.text")
-                                        .font(.subheadline.weight(.semibold))
-                                    Spacer()
-                                    Button("Jump") {
-                                        viewModel.jump(to: note)
-                                        dismiss()
-                                    }
-                                    .accessibilityIdentifier("notes.jump.\(note.id.uuidString)")
-                                }
-
-                                if let body = note.body, body.isEmpty == false {
-                                    Text(body)
-                                        .font(.body)
-                                }
-
-                                Text(viewModel.previewText(for: note))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 4)
-                            .accessibilityIdentifier("notes.row.\(note.id.uuidString)")
+                        ForEach(viewModel.savedAnnotations) { entry in
+                            savedAnnotationRow(entry)
+                                .id(entry.id)
                         }
                     }
                 }
             }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteScrollSavedAnnotations)
+            ) { note in
+                guard let entryID = note.userInfo?["entryID"] as? String else { return }
+                withAnimation { listProxy.scrollTo(entryID, anchor: .top) }
+            }
+            } // ScrollViewReader
             .navigationTitle("Notes")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1308,6 +1614,152 @@ private struct NotesSheet: View {
                         dismiss()
                     }
                 }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteDismissPresentedSheet)
+            ) { _ in
+                dismiss()
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteTapSavedAnnotation)
+            ) { note in
+                guard let entryID = note.userInfo?["entryID"] as? String,
+                      let entry = viewModel.savedAnnotations.first(where: { $0.id == entryID })
+                else { return }
+                handleSavedAnnotationTap(entry)
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteTapJumpToNote)
+            ) { note in
+                guard let entryID = note.userInfo?["entryID"] as? String,
+                      let entry = viewModel.savedAnnotations.first(where: { $0.id == entryID })
+                else { return }
+                viewModel.jumpToOffset(entry.offset)
+                dismiss()
+            }
+            .onAppear {
+                RemoteControlState.shared.presentedSheet = "notes"
+                viewModel.rebuildSavedAnnotations()
+            }
+            .onDisappear {
+                if RemoteControlState.shared.presentedSheet == "notes" {
+                    RemoteControlState.shared.presentedSheet = nil
+                }
+            }
+        }
+    }
+
+    /// Renders one entry in the unified Saved Annotations list. Icon
+    /// + anchor text + tap-to-act behavior depend on the entry kind:
+    /// - `.bookmark` → tap jumps the reader and dismisses.
+    /// - `.note` → tap toggles inline expansion of the note body;
+    ///   "Jump" sub-button navigates the reader without auto-collapsing
+    ///   so the user can keep reading other notes after their reader
+    ///   position has moved.
+    /// - `.conversation` → tap dismisses the Notes sheet and posts a
+    ///   notification with `initialAnchorStorageID` so the Ask Posey
+    ///   sheet opens scrolled to that anchor's row in the thread.
+    @ViewBuilder
+    private func savedAnnotationRow(_ entry: SavedAnnotation) -> some View {
+        let icon: String = {
+            switch entry.kind {
+            case .conversation: return "bubble.left.fill"
+            case .note: return "note.text"
+            case .bookmark: return "bookmark.fill"
+            }
+        }()
+        let kindLabel: String = {
+            switch entry.kind {
+            case .conversation: return "Conversation"
+            case .note: return "Note"
+            case .bookmark: return "Bookmark"
+            }
+        }()
+        let isExpanded = expandedNoteIDs.contains(entry.id)
+
+        Button {
+            handleSavedAnnotationTap(entry)
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: icon)
+                        .imageScale(.medium)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(kindLabel)
+                            .font(.caption2.smallCaps())
+                            .foregroundStyle(.secondary)
+                        Text(entry.anchorText)
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                            .lineLimit(isExpanded ? nil : 3)
+                            .multilineTextAlignment(.leading)
+                    }
+                    Spacer(minLength: 0)
+                }
+                if entry.kind == .note,
+                   isExpanded,
+                   let body = entry.body, !body.isEmpty {
+                    Text(body)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .padding(.leading, 30)
+                        .multilineTextAlignment(.leading)
+                    HStack {
+                        Spacer()
+                        Button("Jump to Note") {
+                            viewModel.jumpToOffset(entry.offset)
+                            dismiss()
+                        }
+                        .font(.caption.weight(.semibold))
+                        .accessibilityIdentifier("notes.jump.\(entry.id)")
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(kindLabel): \(entry.anchorText)")
+        .accessibilityIdentifier("notes.row.\(entry.id)")
+    }
+
+    private func handleSavedAnnotationTap(_ entry: SavedAnnotation) {
+        switch entry.kind {
+        case .bookmark:
+            viewModel.jumpToOffset(entry.offset)
+            dismiss()
+        case .note:
+            withAnimation(.easeInOut(duration: 0.18)) {
+                if expandedNoteIDs.contains(entry.id) {
+                    expandedNoteIDs.remove(entry.id)
+                } else {
+                    expandedNoteIDs.insert(entry.id)
+                }
+            }
+        case .conversation:
+            // Dismiss Notes; the ReaderView's notification observer
+            // for `.openAskPoseyForDocument` constructs the Ask Posey
+            // sheet with `initialAnchorStorageID` so it opens
+            // scrolled to this specific anchor's row in the thread.
+            dismiss()
+            var info: [AnyHashable: Any] = [
+                "documentID": viewModel.document.id,
+                "scope": "passage"
+            ]
+            if let storageID = entry.conversationStorageID {
+                info["initialAnchorStorageID"] = storageID
+            }
+            // Brief delay so Notes-sheet dismiss animation completes
+            // before the Ask Posey sheet presents — back-to-back
+            // sheet transitions otherwise visibly stutter on iPhone.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                NotificationCenter.default.post(
+                    name: .openAskPoseyForDocument,
+                    object: nil,
+                    userInfo: info
+                )
             }
         }
     }
@@ -1419,6 +1871,14 @@ final class ReaderViewModel: ObservableObject {
     @Published var errorMessage = ""
     @Published var noteDraft = ""
     @Published private(set) var notes: [Note] = []
+    /// Unified Saved Annotations list for the Notes sheet — combines
+    /// notes, bookmarks, and Ask Posey conversation anchors into one
+    /// chronologically-sorted feed. Recomputed every time `notes` is
+    /// reloaded AND every time the Ask Posey sheet dismisses (so a
+    /// new anchor created during the conversation surfaces here
+    /// without the user having to do anything else). Sorted newest
+    /// first.
+    @Published private(set) var savedAnnotations: [SavedAnnotation] = []
     @Published private(set) var voiceMode: SpeechPlaybackService.VoiceMode = .bestAvailable
 
     // ========== BLOCK VM-SEARCH: SEARCH STATE - START ==========
@@ -2452,6 +2912,45 @@ final class ReaderViewModel: ObservableObject {
         } catch {
             present(error)
         }
+        rebuildSavedAnnotations()
+    }
+
+    /// Recomputes `savedAnnotations` by merging the current `notes`
+    /// list (split by kind into `.note` / `.bookmark` entries) with
+    /// the document's anchor rows from `ask_posey_conversations`
+    /// (mapped to `.conversation` entries). Sorted newest-first.
+    /// Best-effort — DB failures fall back to the notes-only subset.
+    func rebuildSavedAnnotations() {
+        var entries: [SavedAnnotation] = []
+        for note in notes {
+            entries.append(SavedAnnotation(
+                id: "note:\(note.id.uuidString)",
+                kind: note.kind == .bookmark ? .bookmark : .note,
+                anchorText: previewText(for: note),
+                offset: note.startOffset,
+                timestamp: note.createdAt,
+                body: note.body,
+                conversationStorageID: nil,
+                noteID: note.id
+            ))
+        }
+        if let anchorRows = try? databaseManager.askPoseyAnchorRows(for: document.id) {
+            for row in anchorRows {
+                let display = row.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                entries.append(SavedAnnotation(
+                    id: "conversation:\(row.id)",
+                    kind: .conversation,
+                    anchorText: display.isEmpty ? document.title : display,
+                    offset: row.anchorOffset ?? 0,
+                    timestamp: row.timestamp,
+                    body: nil,
+                    conversationStorageID: row.id,
+                    noteID: nil
+                ))
+            }
+        }
+        entries.sort { $0.timestamp > $1.timestamp }
+        savedAnnotations = entries
     }
 
     private func saveAnnotation(kind: NoteKind, body: String?, segment: TextSegment) {

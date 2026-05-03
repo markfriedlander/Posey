@@ -791,6 +791,70 @@ extension DatabaseManager {
         return count
     }
 
+    /// Return only the user/assistant rows for `documentID`, oldest-first.
+    /// Anchor marker rows (`role = 'anchor'`) and summary rows are
+    /// filtered out. Used by the prompt builder so anchor markers
+    /// don't pollute the verbatim STM budget — the anchor passage
+    /// already lives in its own ANCHOR PASSAGE prompt section.
+    func askPoseyConversationTurns(for documentID: UUID, limit: Int? = nil) throws -> [StoredAskPoseyTurn] {
+        let baseSQL = """
+        SELECT id, document_id, timestamp, role, content, invocation,
+               anchor_offset, summary_of_turns_through, is_summary,
+               intent, chunks_injected, full_prompt_for_logging
+        FROM ask_posey_conversations
+        WHERE document_id = ? AND is_summary = 0
+              AND role IN ('user', 'assistant')
+        """
+        let sql: String
+        if let limit, limit > 0 {
+            sql = """
+            SELECT * FROM (
+                \(baseSQL)
+                ORDER BY timestamp DESC
+                LIMIT \(limit)
+            ) ORDER BY timestamp ASC;
+            """
+        } else {
+            sql = "\(baseSQL) ORDER BY timestamp ASC;"
+        }
+
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+
+        var turns: [StoredAskPoseyTurn] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let turn = decodeAskPoseyTurn(statement: statement) else { continue }
+            turns.append(turn)
+        }
+        return turns
+    }
+
+    /// Return only anchor marker rows for `documentID`, newest-first.
+    /// Powers the unified Saved Annotations list in the Notes sheet —
+    /// each anchor row becomes a "conversation" entry, tappable to
+    /// re-open Ask Posey scrolled to that point in the thread.
+    func askPoseyAnchorRows(for documentID: UUID) throws -> [StoredAskPoseyTurn] {
+        let sql = """
+        SELECT id, document_id, timestamp, role, content, invocation,
+               anchor_offset, summary_of_turns_through, is_summary,
+               intent, chunks_injected, full_prompt_for_logging
+        FROM ask_posey_conversations
+        WHERE document_id = ? AND is_summary = 0 AND role = 'anchor'
+        ORDER BY timestamp DESC;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+
+        var rows: [StoredAskPoseyTurn] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let row = decodeAskPoseyTurn(statement: statement) else { continue }
+            rows.append(row)
+        }
+        return rows
+    }
+
     /// Decode the columns selected by `askPoseyTurns` / `askPoseyLatestSummary`
     /// into the value type. The two queries share the same SELECT list
     /// so they can share this decoder.

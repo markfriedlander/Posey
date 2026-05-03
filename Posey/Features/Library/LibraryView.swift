@@ -121,6 +121,26 @@ struct LibraryView: View {
                 )
             }
             .onReceive(
+                NotificationCenter.default.publisher(for: .remoteOpenDocument)
+            ) { notification in
+                guard let documentID = notification.userInfo?["documentID"] as? UUID else { return }
+                let documents = (try? viewModel.databaseManager.documents()) ?? []
+                guard let document = documents.first(where: { $0.id == documentID }) else { return }
+                if path.last?.id != documentID {
+                    path = [document]
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteLibraryNavigateBack)
+            ) { _ in
+                if !path.isEmpty { path.removeLast() }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteAntennaOff)
+            ) { _ in
+                if viewModel.localAPIEnabled { viewModel.toggleLocalAPI() }
+            }
+            .onReceive(
                 NotificationCenter.default
                     .publisher(for: .openAskPoseyForDocument)
             ) { notification in
@@ -636,6 +656,488 @@ extension LibraryViewModel {
                 }
                 return json(["documentID": idStr, "count": toc.count, "entries": arr])
 
+            // ===== Remote-control verbs (2026-05-02) ===========================
+            // Build per Mark's directive: the API must be able to do everything
+            // a human can do that isn't blocked by Apple security policies.
+            // Each verb posts a NotificationCenter event the matching SwiftUI
+            // view observes and performs as the equivalent user action — same
+            // pattern the existing /open-ask-posey path uses.
+
+            case "READER_GOTO":
+                // READER_GOTO:<docID>:<offset>
+                guard let parts = arg?.split(separator: ":", maxSplits: 1).map(String.init),
+                      parts.count == 2,
+                      let docID = UUID(uuidString: parts[0]),
+                      let offset = Int(parts[1]) else {
+                    return #"{"error":"Usage: READER_GOTO:<docID>:<offset>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteReaderJumpToOffset,
+                        object: nil,
+                        userInfo: ["documentID": docID, "offset": offset]
+                    )
+                }
+                return json(["status": "posted", "documentID": docID.uuidString, "offset": offset])
+
+            case "READER_DOUBLE_TAP":
+                // READER_DOUBLE_TAP:<docID>:<offset> — fires the same in-app
+                // handler the double-tap sentence gesture invokes.
+                guard let parts = arg?.split(separator: ":", maxSplits: 1).map(String.init),
+                      parts.count == 2,
+                      let docID = UUID(uuidString: parts[0]),
+                      let offset = Int(parts[1]) else {
+                    return #"{"error":"Usage: READER_DOUBLE_TAP:<docID>:<offset>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteReaderDoubleTap,
+                        object: nil,
+                        userInfo: ["documentID": docID, "offset": offset]
+                    )
+                }
+                return json(["status": "posted", "documentID": docID.uuidString, "offset": offset])
+
+            case "READER_STATE":
+                let snapshot = await MainActor.run { RemoteControlState.shared.snapshot() }
+                return json(snapshot)
+
+            case "OPEN_NOTES_SHEET":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteOpenNotesSheet, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "DISMISS_SHEET":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteDismissPresentedSheet, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "CREATE_BOOKMARK":
+                // CREATE_BOOKMARK:<docID>:<offset>
+                guard let parts = arg?.split(separator: ":", maxSplits: 1).map(String.init),
+                      parts.count == 2,
+                      let docID = UUID(uuidString: parts[0]),
+                      let offset = Int(parts[1]) else {
+                    return #"{"error":"Usage: CREATE_BOOKMARK:<docID>:<offset>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteCreateBookmark,
+                        object: nil,
+                        userInfo: ["documentID": docID, "offset": offset]
+                    )
+                }
+                return json(["status": "posted", "documentID": docID.uuidString, "offset": offset])
+
+            case "CREATE_NOTE":
+                // CREATE_NOTE:<docID>:<offset>:<base64-body>
+                // Body is base64 to avoid escaping the colon separator.
+                guard let parts = arg?.split(separator: ":", maxSplits: 2).map(String.init),
+                      parts.count == 3,
+                      let docID = UUID(uuidString: parts[0]),
+                      let offset = Int(parts[1]),
+                      let bodyData = Data(base64Encoded: parts[2]),
+                      let body = String(data: bodyData, encoding: .utf8) else {
+                    return #"{"error":"Usage: CREATE_NOTE:<docID>:<offset>:<base64-body>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteCreateNote,
+                        object: nil,
+                        userInfo: ["documentID": docID, "offset": offset, "body": body]
+                    )
+                }
+                return json(["status": "posted", "documentID": docID.uuidString,
+                             "offset": offset, "bodyLength": body.count])
+
+            case "TAP":
+                // TAP:<accessibilityID>
+                guard let id = arg, !id.isEmpty else {
+                    return #"{"error":"Usage: TAP:<accessibilityID>"}"#
+                }
+                let activated = await MainActor.run { RemoteControl.tap(accessibilityID: id) }
+                return json(["accessibilityID": id, "found": activated])
+
+            case "TYPE":
+                guard let text = arg else {
+                    return #"{"error":"Usage: TYPE:<text>"}"#
+                }
+                let inserted = await MainActor.run { RemoteControl.type(text: text) }
+                return json(["typed": inserted, "length": text.count])
+
+            case "READ_TREE":
+                let tree = await MainActor.run { RemoteControl.readTree() }
+                return json(tree)
+
+            case "SCREENSHOT":
+                let pngData = await MainActor.run { RemoteControl.screenshotPNG() }
+                guard let data = pngData else {
+                    return #"{"error":"Screenshot failed (no key window)"}"#
+                }
+                return json(["bytes": data.count, "base64": data.base64EncodedString()])
+
+            case "TAP_ASKPOSEY_ANCHOR":
+                guard let storageID = arg, !storageID.isEmpty else {
+                    return #"{"error":"Usage: TAP_ASKPOSEY_ANCHOR:<storageID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteTapAskPoseyAnchor,
+                        object: nil,
+                        userInfo: ["storageID": storageID]
+                    )
+                }
+                return json(["status": "posted", "storageID": storageID])
+
+            case "TAP_SAVED_ANNOTATION":
+                guard let entryID = arg, !entryID.isEmpty else {
+                    return #"{"error":"Usage: TAP_SAVED_ANNOTATION:<entryID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteTapSavedAnnotation,
+                        object: nil,
+                        userInfo: ["entryID": entryID]
+                    )
+                }
+                return json(["status": "posted", "entryID": entryID])
+
+            case "SCROLL_NOTES":
+                guard let entryID = arg, !entryID.isEmpty else {
+                    return #"{"error":"Usage: SCROLL_NOTES:<entryID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteScrollSavedAnnotations,
+                        object: nil,
+                        userInfo: ["entryID": entryID]
+                    )
+                }
+                return json(["status": "posted", "entryID": entryID])
+
+            case "TAP_JUMP_TO_NOTE":
+                guard let entryID = arg, !entryID.isEmpty else {
+                    return #"{"error":"Usage: TAP_JUMP_TO_NOTE:<entryID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteTapJumpToNote,
+                        object: nil,
+                        userInfo: ["entryID": entryID]
+                    )
+                }
+                return json(["status": "posted", "entryID": entryID])
+
+            // ===== Playback transport ==========================================
+            case "PLAYBACK_PLAY":
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: PLAYBACK_PLAY:<docID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remotePlaybackPlay, object: nil,
+                                                    userInfo: ["documentID": docID])
+                }
+                return json(["status": "posted", "documentID": idStr])
+
+            case "PLAYBACK_PAUSE":
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: PLAYBACK_PAUSE:<docID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remotePlaybackPause, object: nil,
+                                                    userInfo: ["documentID": docID])
+                }
+                return json(["status": "posted", "documentID": idStr])
+
+            case "PLAYBACK_NEXT":
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: PLAYBACK_NEXT:<docID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remotePlaybackNext, object: nil,
+                                                    userInfo: ["documentID": docID])
+                }
+                return json(["status": "posted", "documentID": idStr])
+
+            case "PLAYBACK_PREVIOUS":
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: PLAYBACK_PREVIOUS:<docID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remotePlaybackPrevious, object: nil,
+                                                    userInfo: ["documentID": docID])
+                }
+                return json(["status": "posted", "documentID": idStr])
+
+            case "PLAYBACK_RESTART":
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: PLAYBACK_RESTART:<docID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remotePlaybackRestart, object: nil,
+                                                    userInfo: ["documentID": docID])
+                }
+                return json(["status": "posted", "documentID": idStr])
+
+            case "PLAYBACK_STATE":
+                // Equivalent to READER_STATE but scoped to playback fields only.
+                let snap = await MainActor.run { RemoteControlState.shared.snapshot() }
+                return json([
+                    "playbackState": snap["playbackState"] ?? "idle",
+                    "currentSentenceIndex": snap["currentSentenceIndex"] ?? 0,
+                    "currentOffset": snap["currentOffset"] ?? 0,
+                    "visibleDocumentID": snap["visibleDocumentID"] ?? NSNull()
+                ])
+
+            // ===== Sheet opens ================================================
+            case "OPEN_PREFERENCES_SHEET":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteOpenPreferencesSheet, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "OPEN_TOC_SHEET":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteOpenTOCSheet, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "OPEN_AUDIO_EXPORT_SHEET":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteOpenAudioExportSheet, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "OPEN_SEARCH_BAR":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteOpenSearchBar, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "OPEN_DOCUMENT":
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: OPEN_DOCUMENT:<docID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteOpenDocument, object: nil,
+                                                    userInfo: ["documentID": docID])
+                }
+                return json(["status": "posted", "documentID": idStr])
+
+            // ===== Library nav ================================================
+            case "LIBRARY_NAVIGATE_BACK":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteLibraryNavigateBack, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "ANTENNA_OFF":
+                // Re-enabling the antenna is a user-consent surface (the
+                // toolbar toggle); intentionally not exposed via API.
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteAntennaOff, object: nil)
+                }
+                return json(["status": "posted"])
+
+            // ===== Preferences ================================================
+            case "SET_VOICE_MODE":
+                guard let value = arg?.lowercased(),
+                      value == "best" || value == "custom" else {
+                    return #"{"error":"Usage: SET_VOICE_MODE:<best|custom>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetVoiceMode, object: nil,
+                                                    userInfo: ["isCustom": value == "custom"])
+                }
+                return json(["status": "posted", "voiceMode": value])
+
+            case "SET_RATE":
+                // Accepts the same percentage scale the in-app rate
+                // slider uses: 50–200 (% of default speech rate). Only
+                // takes effect in Custom voice mode — Best Available
+                // honors the system Spoken Content rate, matching
+                // existing UI behavior.
+                guard let value = arg, let pct = Float(value), pct >= 50, pct <= 200 else {
+                    return #"{"error":"Usage: SET_RATE:<percentage 50..200>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetRate, object: nil,
+                                                    userInfo: ["ratePercentage": pct])
+                }
+                return json(["status": "posted", "ratePercentage": pct])
+
+            case "SET_FONT_SIZE":
+                guard let value = arg, let size = Double(value), size >= 14, size <= 44 else {
+                    return #"{"error":"Usage: SET_FONT_SIZE:<14..44>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetFontSize, object: nil,
+                                                    userInfo: ["fontSize": size])
+                }
+                return json(["status": "posted", "fontSize": size])
+
+            case "SET_READING_STYLE":
+                guard let raw = arg?.lowercased(),
+                      ["standard", "focus", "immersive", "motion"].contains(raw) else {
+                    return #"{"error":"Usage: SET_READING_STYLE:<standard|focus|immersive|motion>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetReadingStyle, object: nil,
+                                                    userInfo: ["readingStyle": raw])
+                }
+                return json(["status": "posted", "readingStyle": raw])
+
+            case "SET_MOTION_PREFERENCE":
+                guard let raw = arg?.lowercased(),
+                      ["off", "on", "auto"].contains(raw) else {
+                    return #"{"error":"Usage: SET_MOTION_PREFERENCE:<off|on|auto>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetMotionPreference, object: nil,
+                                                    userInfo: ["motionPreference": raw])
+                }
+                return json(["status": "posted", "motionPreference": raw])
+
+            // ===== TOC + search ==============================================
+            case "JUMP_TO_PAGE":
+                // JUMP_TO_PAGE:<docID>:<page>
+                guard let parts = arg?.split(separator: ":", maxSplits: 1).map(String.init),
+                      parts.count == 2,
+                      let docID = UUID(uuidString: parts[0]),
+                      let page = Int(parts[1]) else {
+                    return #"{"error":"Usage: JUMP_TO_PAGE:<docID>:<page>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteJumpToPage, object: nil,
+                                                    userInfo: ["documentID": docID, "page": page])
+                }
+                return json(["status": "posted", "documentID": parts[0], "page": page])
+
+            case "SEARCH":
+                guard let query = arg else {
+                    return #"{"error":"Usage: SEARCH:<query>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetSearchQuery, object: nil,
+                                                    userInfo: ["query": query])
+                }
+                return json(["status": "posted", "query": query])
+
+            case "SEARCH_NEXT":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSearchNext, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "SEARCH_PREVIOUS":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSearchPrevious, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "SEARCH_CLEAR":
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSearchClear, object: nil)
+                }
+                return json(["status": "posted"])
+
+            // ===== Audio export (headless) ==================================
+            case "EXPORT_AUDIO":
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: EXPORT_AUDIO:<docID>"}"#
+                }
+                let documents = (try? databaseManager.documents()) ?? []
+                guard let doc = documents.first(where: { $0.id == docID }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                let job = await MainActor.run {
+                    RemoteAudioExportRegistry.shared.create(
+                        documentID: docID, documentTitle: doc.title
+                    )
+                }
+                // Kick off the render in a detached task — return the
+                // job id immediately so the caller can poll status.
+                let plainText = doc.plainText
+                let title = doc.title
+                let jobID = job.id
+                Task.detached { @MainActor in
+                    await runHeadlessAudioExport(
+                        jobID: jobID, plainText: plainText, title: title
+                    )
+                }
+                return json(["status": "started", "jobID": jobID, "documentID": idStr])
+
+            case "AUDIO_EXPORT_STATUS":
+                guard let jobID = arg, !jobID.isEmpty else {
+                    return #"{"error":"Usage: AUDIO_EXPORT_STATUS:<jobID>"}"#
+                }
+                let snap = await MainActor.run { RemoteAudioExportRegistry.shared.get(jobID)?.snapshot() }
+                if let snap { return json(snap) }
+                return #"{"error":"Job not found"}"#
+
+            case "AUDIO_EXPORT_FETCH":
+                guard let jobID = arg, !jobID.isEmpty else {
+                    return #"{"error":"Usage: AUDIO_EXPORT_FETCH:<jobID>"}"#
+                }
+                let job = await MainActor.run { RemoteAudioExportRegistry.shared.get(jobID) }
+                guard let job else { return #"{"error":"Job not found"}"# }
+                guard job.status == .finished, let url = job.resultURL else {
+                    return json(["jobID": jobID, "status": job.status.rawValue,
+                                 "error": "Not finished"])
+                }
+                guard let data = try? Data(contentsOf: url) else {
+                    return #"{"error":"Couldn't read result file"}"#
+                }
+                return json([
+                    "jobID": jobID,
+                    "filename": url.lastPathComponent,
+                    "bytes": data.count,
+                    "base64": data.base64EncodedString()
+                ])
+
+            // ===== Discovery =================================================
+            case "LIST_REMOTE_TARGETS":
+                let ids = await MainActor.run { RemoteTargetRegistry.shared.registeredIDs() }
+                return json(["count": ids.count, "ids": ids])
+
+            case "LIST_SAVED_ANNOTATIONS":
+                // Surfaces the unified Saved Annotations list as JSON
+                // so the test driver can pick valid entryIDs to tap
+                // without parsing the SwiftUI tree.
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: LIST_SAVED_ANNOTATIONS:<docID>"}"#
+                }
+                let anchors = (try? databaseManager.askPoseyAnchorRows(for: docID)) ?? []
+                let notes = (try? databaseManager.notes(for: docID)) ?? []
+                var entries: [[String: Any]] = []
+                for row in anchors {
+                    entries.append([
+                        "kind": "conversation",
+                        "id": "conversation:\(row.id)",
+                        "storageID": row.id,
+                        "offset": row.anchorOffset ?? 0,
+                        "anchorText": row.content,
+                        "invocation": row.invocation,
+                        "timestamp": row.timestamp.timeIntervalSince1970
+                    ])
+                }
+                for n in notes {
+                    entries.append([
+                        "kind": n.kind == .bookmark ? "bookmark" : "note",
+                        "id": "note:\(n.id.uuidString)",
+                        "noteID": n.id.uuidString,
+                        "offset": n.startOffset,
+                        "body": n.body ?? "",
+                        "timestamp": n.createdAt.timeIntervalSince1970
+                    ])
+                }
+                entries.sort { ($0["timestamp"] as? Double ?? 0) < ($1["timestamp"] as? Double ?? 0) }
+                return json(["documentID": idStr, "count": entries.count, "entries": entries])
+
+            // ===== End remote-control verbs ====================================
+
             default:
                 return #"{"error":"Unknown command: \#(verb)"}"#
             }
@@ -771,11 +1273,26 @@ extension LibraryViewModel {
         }
         #endif
 
+        // The local-API /ask path is NOT a fresh user invocation —
+        // it appends Q&A to whatever conversation is in progress for
+        // this document. To prevent every /ask call from spawning a
+        // duplicate anchor marker (which would pollute Saved
+        // Annotations with one row per API call), we look up the most
+        // recent anchor row and pass its storage id as
+        // `initialScrollAnchorStorageID` — the view model treats that
+        // signal as "navigation to existing" and skips the
+        // append-on-init step. If no anchor row exists yet (truly
+        // fresh API-driven session), we leave the field nil so a
+        // single anchor still gets created.
+        let mostRecentAnchorID: String? = (try? databaseManager.askPoseyAnchorRows(for: docID))?
+            .first?.id
+
         let viewModel = AskPoseyChatViewModel(
             documentID: docID,
             documentPlainText: document.plainText,
             documentTitle: document.title,
             anchor: anchor,
+            initialScrollAnchorStorageID: mostRecentAnchorID,
             classifier: classifier,
             streamer: streamer,
             summarizer: summarizer,
@@ -895,23 +1412,38 @@ extension LibraryViewModel {
             return #"{"error":"Document not found"}"#
         }
 
+        // Optional Notes-tap-conversation path: when set, the sheet
+        // opens scrolled to a specific anchor row in the existing
+        // thread instead of appending a new one. Body field is
+        // optional so existing callers (default reader-glyph
+        // invocation) keep working unchanged.
+        let initialAnchorStorageID = body["initialAnchorStorageID"] as? String
+
         await MainActor.run {
+            var info: [AnyHashable: Any] = [
+                "documentID": docID,
+                "scope": scope
+            ]
+            if let initialAnchorStorageID {
+                info["initialAnchorStorageID"] = initialAnchorStorageID
+            }
             NotificationCenter.default.post(
                 name: .openAskPoseyForDocument,
                 object: nil,
-                userInfo: [
-                    "documentID": docID,
-                    "scope": scope
-                ]
+                userInfo: info
             )
         }
 
-        return json([
+        var response: [String: Any] = [
             "documentID": docID.uuidString,
             "scope": scope,
             "status": "opened",
             "note": "NotificationCenter post dispatched; UI will navigate + open sheet"
-        ])
+        ]
+        if let initialAnchorStorageID {
+            response["initialAnchorStorageID"] = initialAnchorStorageID
+        }
+        return json(response)
     }
 
     // MARK: — Notifications for the simulator MCP UI driver

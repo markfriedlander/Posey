@@ -473,17 +473,24 @@ def main() -> None:
     # the running app's UI layer observes.
     elif verb in ("open-ask-posey", "openask"):
         if len(args) < 2:
-            print("Usage: posey_test.py open-ask-posey <doc-id> [--scope passage|document]")
+            print("Usage: posey_test.py open-ask-posey <doc-id> "
+                  "[--scope passage|document] [--anchor-storage-id <id>]")
             sys.exit(1)
         doc_id = args[1]
         scope = "passage"
+        anchor_storage_id = None
         i = 2
         while i < len(args):
             if args[i] == "--scope" and i + 1 < len(args):
                 scope = args[i + 1].lower(); i += 2
+            elif args[i] == "--anchor-storage-id" and i + 1 < len(args):
+                anchor_storage_id = args[i + 1]; i += 2
             else:
                 print(f"Unknown open-ask-posey flag: {args[i]}"); sys.exit(1)
-        body = json.dumps({"documentID": doc_id, "scope": scope}).encode()
+        payload: dict = {"documentID": doc_id, "scope": scope}
+        if anchor_storage_id:
+            payload["initialAnchorStorageID"] = anchor_storage_id
+        body = json.dumps(payload).encode()
         status, data = _http("POST", "/open-ask-posey", body=body,
                              extra_headers={"Content-Type": "application/json"},
                              timeout=30)

@@ -50,21 +50,16 @@ struct AskPoseyView: View {
         self.onJumpToChunk = onJumpToChunk
     }
 
-    /// IDs for ScrollViewReader targets. The anchor row no longer lives
-    /// inside the ScrollView (it's pinned above it now), but we still
-    /// scroll to the latest user message after send so the user sees
-    /// their question + Posey's answer streaming below.
-    private static let priorHistoryDividerID = "askPosey.priorHistoryDivider"
+    /// ID for the typing-indicator row when no streaming bubble is in
+    /// flight yet. Used as a fallback scroll target if the
+    /// most-recent-user-message lookup fails.
     private static let typingIndicatorID = "askPosey.typingIndicator"
 
     /// Scroll the most-recently-sent user message to the top of the
     /// visible scroll area so the question stays anchored at the top
-    /// and the streaming response appears below it. Falls back to the
-    /// typing indicator (or last assistant message) when no user
-    /// message is in this session.
+    /// and the streaming response appears below it.
     private func scrollToLatestUserMessage(proxy: ScrollViewProxy) {
-        let session = viewModel.messages.suffix(from: viewModel.historyBoundary)
-        guard let target = session.last(where: { $0.role == .user }) ?? session.last else {
+        guard let target = viewModel.messages.last(where: { $0.role == .user }) else {
             return
         }
         Task { @MainActor in
@@ -78,70 +73,65 @@ struct AskPoseyView: View {
         }
     }
 
+    /// Scroll to the anchor marker the view model wants us to land on.
+    /// Default behavior = the most recent anchor (the one we just
+    /// appended for this invocation). Notes-tap-conversation overrides
+    /// via `initialScrollAnchorStorageID` so the sheet opens scrolled
+    /// to a previous anchor in the thread.
+    ///
+    /// **Three-stage scroll** to defeat lazy-realization races: the
+    /// ScrollView lazy-realizes rows as it lays out; on the first
+    /// scrollTo for a target far below the natural top, the proxy
+    /// can't find the row's frame because it isn't yet realized.
+    /// We scroll immediately (forces the lazy stack to realize the
+    /// surrounding rows), then again after 200ms (catches the case
+    /// where the first pass only partially advanced realization),
+    /// then a final animated scroll at 450ms so the user sees a
+    /// smooth land. Mirrors the ReaderView initial-scroll pattern
+    /// (60ms + 180ms) which was added for the same reason.
+    private func scrollToInitialAnchor(proxy: ScrollViewProxy) {
+        let storageID = viewModel.initialScrollAnchorStorageID
+        // Scope the search by `storageID == storageID` predicate when
+        // we have one — `messages.first(where:)` instead of `last(where:)`
+        // because the storage id is unique and `.first` short-circuits.
+        let target: AskPoseyMessage?
+        if let storageID {
+            target = viewModel.messages.first { msg in
+                msg.role == .anchor && msg.storageID == storageID
+            }
+        } else {
+            target = viewModel.messages.last { $0.role == .anchor }
+        }
+        guard let target else { return }
+        Task { @MainActor in
+            // Pass 1 — no animation, immediate. Forces the lazy stack
+            // to realize the target's enclosing region.
+            proxy.scrollTo(target.id, anchor: .top)
+            try? await Task.sleep(for: .milliseconds(200))
+            // Pass 2 — still no animation. Catches the case where
+            // pass 1 only partially advanced realization (long
+            // threads with many anchors).
+            proxy.scrollTo(target.id, anchor: .top)
+            try? await Task.sleep(for: .milliseconds(250))
+            // Pass 3 — smooth animated land for the user-visible
+            // settle.
+            withAnimation(.easeInOut(duration: 0.18)) {
+                proxy.scrollTo(target.id, anchor: .top)
+            }
+        }
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 indexingNotice
 
-                // Anchor / doc-scope row pinned ABOVE the ScrollView so
-                // it's always visible — the user always knows what
-                // passage or document they're asking about. Earlier
-                // attempts placed this inside the LazyVStack and used
-                // `.defaultScrollAnchor(.bottom)` + `proxy.scrollTo`
-                // to keep it on screen, but the two fought each other:
-                // once a message streamed in, the bottom anchor won
-                // and the anchor row scrolled off above. Pinning it
-                // outside is simpler and bulletproof.
-                if let anchor = viewModel.anchor,
-                   !anchor.trimmedDisplayText.isEmpty {
-                    anchorRow(anchor)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
-                        .padding(.bottom, 8)
-                } else {
-                    documentScopeRow
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
-                        .padding(.bottom, 8)
-                }
-
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            // Prior conversation history loaded from
-                            // ask_posey_conversations at sheet open.
-                            if viewModel.historyBoundary > 0 {
-                                ForEach(
-                                    Array(viewModel.messages.prefix(viewModel.historyBoundary))
-                                ) { message in
-                                    AskPoseyMessageBubble(message: message)
-                                }
-                                priorHistoryDivider
-                                    .id(Self.priorHistoryDividerID)
-                            }
-
-                            // This session's messages — appear as the
-                            // user sends.
-                            if viewModel.messages.count > viewModel.historyBoundary {
-                                ForEach(
-                                    Array(viewModel.messages.suffix(from: viewModel.historyBoundary).enumerated()),
-                                    id: \.element.id
-                                ) { _, message in
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        AskPoseyMessageBubble(message: message)
-                                        if message.role == .assistant,
-                                           !message.navigationCards.isEmpty {
-                                            navigationCardList(for: message)
-                                        } else if message.role == .assistant,
-                                                  !message.chunksInjected.isEmpty {
-                                            // Sources strip only when not in
-                                            // navigation-card mode — cards
-                                            // are themselves the source link.
-                                            sourcesStrip(for: message.chunksInjected)
-                                        }
-                                    }
+                            ForEach(viewModel.messages) { message in
+                                threadRow(for: message)
                                     .id(message.id)
-                                }
                             }
 
                             if viewModel.isResponding,
@@ -156,15 +146,35 @@ struct AskPoseyView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxHeight: .infinity)
-                    .onChange(of: viewModel.messages.count) { _, _ in
-                        // After every send, the most recent user
+                    .onChange(of: viewModel.messages.count) { oldValue, newValue in
+                        // After every user send, the most recent user
                         // message should land at the TOP of the visible
                         // scroll area so the user sees their question
-                        // and Posey's answer streaming in below.
-                        // Without this hook, the conversation would
-                        // accumulate at the bottom-ish and require the
-                        // user to scroll back to find what they asked.
-                        scrollToLatestUserMessage(proxy: proxy)
+                        // and Posey's answer streaming in below. Skip
+                        // the initial population pulse from
+                        // loadHistory() (oldValue == 0).
+                        if oldValue > 0,
+                           viewModel.messages.last?.role == .user {
+                            scrollToLatestUserMessage(proxy: proxy)
+                        }
+                    }
+                    .onChange(of: viewModel.isLoadingHistory) { _, newValue in
+                        // Land on the target anchor once history has
+                        // loaded and the marker for this invocation
+                        // (or the navigation target) is in `messages`.
+                        if !newValue {
+                            scrollToInitialAnchor(proxy: proxy)
+                        }
+                    }
+                    .onAppear {
+                        // Backstop for the case where loadHistory
+                        // already finished by the time the
+                        // ScrollViewReader is mounted (cached / fast
+                        // path) — `.onChange(of: isLoadingHistory)`
+                        // would never fire.
+                        if !viewModel.isLoadingHistory {
+                            scrollToInitialAnchor(proxy: proxy)
+                        }
                     }
                 }
 
@@ -183,17 +193,39 @@ struct AskPoseyView: View {
                     .accessibilityIdentifier("askPosey.done")
                 }
             }
-            .alert(
-                "Ask Posey",
-                isPresented: errorBinding,
-                presenting: viewModel.lastError
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteDismissPresentedSheet)
             ) { _ in
-                Button("OK", role: .cancel) {
-                    viewModel.lastError = nil
-                }
-            } message: { error in
-                Text(error.errorDescription ?? "An error occurred.")
+                viewModel.cancelInFlight()
+                dismiss()
             }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteTapAskPoseyAnchor)
+            ) { note in
+                guard let storageID = note.userInfo?["storageID"] as? String,
+                      let target = viewModel.messages.first(where: { $0.storageID == storageID }),
+                      let offset = target.anchorOffset else { return }
+                viewModel.cancelInFlight()
+                onJumpToChunk?(offset)
+                dismiss()
+            }
+            .onAppear {
+                RemoteControlState.shared.presentedSheet = "askPosey"
+            }
+            .onDisappear {
+                if RemoteControlState.shared.presentedSheet == "askPosey" {
+                    RemoteControlState.shared.presentedSheet = nil
+                }
+            }
+            // No user-facing error alert. AFM failures already surface
+            // as a friendly fallback bubble in the conversation thread
+            // (see AskPoseyChatViewModel.handleSendError) — that's the
+            // only UX the user should see. Earlier behavior popped a
+            // raw "Error Domain=FoundationModels…" string in front of
+            // the user; that alert path is gone. The `lastError`
+            // property is still set on the view model so the local-API
+            // tuning loop can surface error details via `/ask`, but
+            // it's never rendered as alert chrome.
         }
         // Detent strategy: on iPhone (compact horizontal size class)
         // the .medium detent leaves no visible document behind the
@@ -218,18 +250,6 @@ struct AskPoseyView: View {
         }
     }
 
-    /// Two-way binding for the alert presentation gate. SwiftUI's
-    /// `alert(isPresented:)` needs a Bool binding; the view model
-    /// exposes `lastError: AskPoseyServiceError?`. Bridge the two so
-    /// dismissing the alert clears the underlying error.
-    private var errorBinding: Binding<Bool> {
-        Binding(
-            get: { viewModel.lastError != nil },
-            set: { newValue in
-                if !newValue { viewModel.lastError = nil }
-            }
-        )
-    }
 }
 // ========== BLOCK 01: ROOT VIEW - END ==========
 
@@ -251,71 +271,99 @@ private extension AskPoseyView {
         return "Ask Posey"
     }
 
-    /// Doc-scope context row — substitutes for the anchor row when
-    /// the user invoked Ask Posey on the whole document (no anchor
-    /// passage). Communicates "you're asking about this document as
-    /// a whole" so the sheet has a clear top-of-conversation cue.
-    /// Same visual style as `anchorRow` (thin material rounded
-    /// rectangle with a leading icon) so the layout reads
-    /// consistently regardless of scope.
-    var documentScopeRow: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "doc.text")
-                .imageScale(.small)
-                .foregroundStyle(.secondary)
-                .padding(.top, 4)
+    /// Single-row dispatcher: anchor markers render as inline callout
+    /// rows; user / assistant messages render as bubbles plus optional
+    /// sources strip / navigation cards. Lives inside the LazyVStack
+    /// so the whole thread (anchors + Q&A + Q&A + new anchor + Q&A)
+    /// reads chronologically top-to-bottom.
+    @ViewBuilder
+    func threadRow(for message: AskPoseyMessage) -> some View {
+        switch message.role {
+        case .anchor:
+            anchorMarkerRow(message)
+        case .user, .assistant:
             VStack(alignment: .leading, spacing: 4) {
-                Text("ASKING ABOUT")
-                    .font(.caption2.smallCaps())
-                    .foregroundStyle(.secondary)
-                Text(navigationTitleText)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.primary.opacity(0.85))
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                Text("the whole document")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                AskPoseyMessageBubble(message: message)
+                if message.role == .assistant,
+                   !message.navigationCards.isEmpty {
+                    navigationCardList(for: message)
+                } else if message.role == .assistant,
+                          !message.chunksInjected.isEmpty {
+                    sourcesStrip(for: message.chunksInjected)
+                }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Asking about the whole document, \(navigationTitleText)")
-        .accessibilityIdentifier("askPosey.documentScopeRow")
     }
 
-    /// Anchor passage rendered as the first row in the chat list.
-    /// Lives inside the LazyVStack so it scrolls with the
-    /// conversation rather than pinning permanently to the top of
-    /// the sheet — when a long Q&A pushes it off, the user can
-    /// scroll back to it like any other message.
-    func anchorRow(_ anchor: AskPoseyAnchor) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "quote.opening")
-                .imageScale(.small)
-                .foregroundStyle(.secondary)
-                .padding(.top, 4)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("ANCHOR")
-                    .font(.caption2.smallCaps())
-                    .foregroundStyle(.secondary)
-                Text(anchor.trimmedDisplayText)
-                    .font(.callout)
-                    .italic()
-                    .foregroundStyle(.primary.opacity(0.85))
-                    .textSelection(.enabled)
+    /// Inline anchor marker — full passage text for passage scope,
+    /// `ASKING ABOUT / <doc title> / the whole document` for document
+    /// scope. Both render with the same thin-material card style and
+    /// are tappable: a tap dismisses the sheet and jumps the reader
+    /// to the captured offset (every anchor has one — passage scope
+    /// from the active sentence at invocation, document scope from
+    /// the same).
+    func anchorMarkerRow(_ message: AskPoseyMessage) -> some View {
+        let isDocumentScope = (message.anchorScope == "document")
+        let iconName = isDocumentScope ? "doc.text" : "quote.opening"
+        let trimmedContent = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = "ASKING ABOUT"
+        return Button {
+            // Capture the offset locally to avoid escaping
+            // self into the closure.
+            guard let offset = message.anchorOffset, let onJumpToChunk else {
+                return
             }
+            viewModel.cancelInFlight()
+            onJumpToChunk(offset)
+            dismiss()
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: iconName)
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(label)
+                        .font(.caption2.smallCaps())
+                        .foregroundStyle(.secondary)
+                    if isDocumentScope {
+                        Text(trimmedContent)
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(.primary.opacity(0.85))
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                            .multilineTextAlignment(.leading)
+                        Text("the whole document")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.leading)
+                    } else {
+                        Text(trimmedContent)
+                            .font(.callout)
+                            .italic()
+                            .foregroundStyle(.primary.opacity(0.85))
+                            .multilineTextAlignment(.leading)
+                            .textSelection(.enabled)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .buttonStyle(.plain)
+        .disabled(onJumpToChunk == nil || message.anchorOffset == nil)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Anchor passage: \(anchor.trimmedDisplayText)")
-        .accessibilityIdentifier("askPosey.anchor")
+        .accessibilityLabel(
+            isDocumentScope
+                ? "Asking about the whole document, \(trimmedContent). Tap to jump back."
+                : "Anchor passage: \(trimmedContent). Tap to jump."
+        )
+        .accessibilityIdentifier(
+            isDocumentScope ? "askPosey.documentScopeRow" : "askPosey.anchor"
+        )
     }
 
     /// Detent strategy keyed off horizontal size class. iPhone in
@@ -521,29 +569,7 @@ private extension AskPoseyView {
         .accessibilityElement(children: .contain)
     }
 
-    /// Visual divider between prior-session history and the anchor
-    /// row. Communicates "there's older stuff above this line, but
-    /// the conversation about THIS passage starts here." Inspired by
-    /// iMessage's date dividers — small, subtle, never gets in the
-    /// user's way.
-    var priorHistoryDivider: some View {
-        HStack(spacing: 8) {
-            Rectangle()
-                .fill(Color.secondary.opacity(0.18))
-                .frame(height: 1)
-            Text("Earlier conversation")
-                .font(.caption2.smallCaps())
-                .foregroundStyle(.secondary)
-                .layoutPriority(1)
-            Rectangle()
-                .fill(Color.secondary.opacity(0.18))
-                .frame(height: 1)
-        }
-        .padding(.vertical, 4)
-        .accessibilityHidden(true)
-    }
-
-    /// Submit the composer's content. Routes to the live `send()`
+/// Submit the composer's content. Routes to the live `send()`
     /// path when AFM is available on this platform; falls back to
     /// the M4 `sendEchoStub` for previews/tests/older OS targets.
     func submit() {
@@ -579,6 +605,12 @@ struct AskPoseyMessageBubble: View {
                     .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Spacer(minLength: 32)
+            case .anchor:
+                // Anchor markers render via AskPoseyView.anchorMarkerRow
+                // (not as bubbles). This case is unreachable in practice
+                // because threadRow dispatches anchors away from the
+                // bubble view, but the switch must be exhaustive.
+                EmptyView()
             }
         }
         .accessibilityElement(children: .combine)
@@ -595,8 +627,11 @@ struct AskPoseyMessageBubble: View {
     }
 
     private var accessibilityLabel: String {
-        let speaker = message.role == .user ? "You said" : "Posey said"
-        return "\(speaker): \(message.content)"
+        switch message.role {
+        case .user: return "You said: \(message.content)"
+        case .assistant: return "Posey said: \(message.content)"
+        case .anchor: return ""
+        }
     }
 }
 // ========== BLOCK 03: MESSAGE BUBBLE - END ==========

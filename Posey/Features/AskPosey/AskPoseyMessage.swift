@@ -25,6 +25,14 @@ struct AskPoseyMessage: Identifiable, Equatable, Sendable {
     enum Role: String, Sendable, Codable, Equatable {
         case user
         case assistant
+        /// Anchor marker — the row that records when and where Ask
+        /// Posey was invoked. For passage scope the `content` holds
+        /// the full passage text; for document scope the `content`
+        /// holds the document title. The captured reading offset is
+        /// in `anchorOffset`, the scope is in `anchorScope`. Anchor
+        /// rows are persisted in `ask_posey_conversations` with
+        /// `role = 'anchor'` and surface in the thread inline.
+        case anchor
     }
 
     let id: UUID
@@ -46,6 +54,23 @@ struct AskPoseyMessage: Identifiable, Equatable, Sendable {
     /// `.general` responses and for user messages.
     var navigationCards: [AskPoseyNavigationCard]
 
+    /// Captured reading offset at invocation time — populated for
+    /// every anchor row, regardless of scope. Tap-to-jump uses this
+    /// from both the in-thread anchor marker AND from the unified
+    /// Saved-Annotations entry in the Notes sheet. Nil for user /
+    /// assistant rows.
+    var anchorOffset: Int?
+    /// `"passage"` or `"document"`. Determines how the marker renders
+    /// in the thread (full passage text vs `ASKING ABOUT / <title>`).
+    /// Nil for user / assistant rows.
+    var anchorScope: String?
+    /// SQLite row id of the persisted ask_posey_conversations row.
+    /// Threaded through so the Notes-tap-conversation path can target
+    /// a specific anchor by id when opening the sheet (the
+    /// `initialScrollAnchorStorageID` lookup matches against this).
+    /// Nil for messages constructed in-memory before persistence.
+    var storageID: String?
+
     init(
         id: UUID = UUID(),
         role: Role,
@@ -53,7 +78,10 @@ struct AskPoseyMessage: Identifiable, Equatable, Sendable {
         isStreaming: Bool = false,
         timestamp: Date = .now,
         chunksInjected: [RetrievedChunk] = [],
-        navigationCards: [AskPoseyNavigationCard] = []
+        navigationCards: [AskPoseyNavigationCard] = [],
+        anchorOffset: Int? = nil,
+        anchorScope: String? = nil,
+        storageID: String? = nil
     ) {
         self.id = id
         self.role = role
@@ -62,7 +90,13 @@ struct AskPoseyMessage: Identifiable, Equatable, Sendable {
         self.timestamp = timestamp
         self.chunksInjected = chunksInjected
         self.navigationCards = navigationCards
+        self.anchorOffset = anchorOffset
+        self.anchorScope = anchorScope
+        self.storageID = storageID
     }
+
+    /// Convenience: true when this message is an anchor marker row.
+    var isAnchorMarker: Bool { role == .anchor }
 }
 // ========== BLOCK 01: MESSAGE - END ==========
 

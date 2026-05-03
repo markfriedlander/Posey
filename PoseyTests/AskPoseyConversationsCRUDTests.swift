@@ -239,7 +239,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
         }
     }
 
-    func testFreshDocumentStartsEmpty() async throws {
+    func testFreshDocumentStartsWithAnchorMarker() async throws {
         let vm = AskPoseyChatViewModel(
             documentID: documentID,
             documentPlainText: "Two roads diverged in a yellow wood.",
@@ -247,9 +247,19 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             databaseManager: manager
         )
         await vm.awaitHistoryLoaded()
-        XCTAssertTrue(vm.messages.isEmpty)
-        XCTAssertEqual(vm.historyBoundary, 0)
+        // Fresh document: only the just-appended anchor marker for
+        // this invocation should be in messages.
+        XCTAssertEqual(vm.messages.count, 1)
+        XCTAssertEqual(vm.messages.first?.role, .anchor)
+        XCTAssertEqual(vm.messages.first?.anchorScope, "passage")
+        XCTAssertEqual(vm.messages.first?.anchorOffset, 0)
         XCTAssertFalse(vm.isLoadingHistory)
+
+        // And the marker is persisted so it'll surface in Saved
+        // Annotations and on the next sheet open.
+        let stored = try manager.askPoseyAnchorRows(for: documentID)
+        XCTAssertEqual(stored.count, 1)
+        XCTAssertEqual(stored.first?.role, "anchor")
     }
 
     func testReturningDocumentLoadsPriorTurns() async throws {
@@ -294,13 +304,18 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
         )
         await vm.awaitHistoryLoaded()
 
-        XCTAssertEqual(vm.messages.count, 2)
+        // Two prior turns + one fresh anchor marker for this invocation.
+        XCTAssertEqual(vm.messages.count, 3)
         XCTAssertEqual(vm.messages[0].role, .user)
         XCTAssertEqual(vm.messages[0].content, "What does this poem mean?")
         XCTAssertEqual(vm.messages[1].role, .assistant)
         XCTAssertEqual(vm.messages[1].content, "The traveler is reflecting on choice.")
-        XCTAssertEqual(vm.historyBoundary, 2,
-                       "All loaded messages live above the boundary; new sends append below")
+        // The freshly-appended anchor marker for the current invocation
+        // lands at the end so the user sees their new question's
+        // context below the prior conversation when they scroll.
+        XCTAssertEqual(vm.messages[2].role, .anchor)
+        XCTAssertEqual(vm.messages[2].anchorScope, "passage")
+        XCTAssertEqual(vm.messages[2].anchorOffset, 0)
     }
 
     func testHistoryIsScopedToCorrectDocument() async throws {
@@ -357,8 +372,171 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             databaseManager: manager
         )
         await vm.awaitHistoryLoaded()
+        // 1 prior user turn for this document + 1 fresh anchor marker
+        // for this invocation. The foreign doc's turn must NOT leak
+        // into messages.
+        XCTAssertEqual(vm.messages.count, 2)
+        XCTAssertEqual(vm.messages[0].role, .user)
+        XCTAssertEqual(vm.messages[0].content, "Mine")
+        XCTAssertEqual(vm.messages[1].role, .anchor)
+    }
+
+    // MARK: — Anchor marker tests (unified annotation refactor)
+
+    func testDocumentScopeInvocationCapturesReadingOffset() async throws {
+        // Doc-scope invocation: anchor is nil but the caller passes
+        // `invocationReadingOffset` so the persisted marker is still
+        // tappable to jump back to where the question was asked.
+        let vm = AskPoseyChatViewModel(
+            documentID: documentID,
+            documentPlainText: "long document",
+            documentTitle: "The Test Document",
+            anchor: nil,
+            invocationReadingOffset: 4321,
+            databaseManager: manager
+        )
+        await vm.awaitHistoryLoaded()
         XCTAssertEqual(vm.messages.count, 1)
-        XCTAssertEqual(vm.messages.first?.content, "Mine")
+        XCTAssertEqual(vm.messages.first?.role, .anchor)
+        XCTAssertEqual(vm.messages.first?.anchorScope, "document")
+        XCTAssertEqual(vm.messages.first?.anchorOffset, 4321,
+                       "Document-scope anchor must capture the invocation reading offset")
+        XCTAssertEqual(vm.messages.first?.content, "The Test Document")
+    }
+
+    func testMultipleInvocationsAccumulateAnchors() async throws {
+        let anchor1 = AskPoseyAnchor(text: "first sentence", plainTextOffset: 100)
+        let vm1 = AskPoseyChatViewModel(
+            documentID: documentID,
+            documentPlainText: "doc",
+            anchor: anchor1,
+            databaseManager: manager
+        )
+        await vm1.awaitHistoryLoaded()
+
+        let anchor2 = AskPoseyAnchor(text: "second sentence", plainTextOffset: 200)
+        let vm2 = AskPoseyChatViewModel(
+            documentID: documentID,
+            documentPlainText: "doc",
+            anchor: anchor2,
+            databaseManager: manager
+        )
+        await vm2.awaitHistoryLoaded()
+
+        // Second invocation should see both anchors in chronological
+        // order plus its own freshly appended marker == 2 total.
+        let anchorMessages = vm2.messages.filter { $0.role == .anchor }
+        XCTAssertEqual(anchorMessages.count, 2,
+                       "Each invocation appends a new anchor marker; prior anchors persist")
+        XCTAssertEqual(anchorMessages[0].anchorOffset, 100)
+        XCTAssertEqual(anchorMessages[1].anchorOffset, 200)
+
+        // DB query also returns both rows.
+        let stored = try manager.askPoseyAnchorRows(for: documentID)
+        XCTAssertEqual(stored.count, 2)
+    }
+
+    func testNavigationCaseSkipsAnchorAppend() async throws {
+        // Seed one prior anchor row.
+        let priorAnchorID = UUID().uuidString
+        let priorAnchor = StoredAskPoseyTurn(
+            id: priorAnchorID,
+            documentID: documentID,
+            timestamp: Date(timeIntervalSince1970: 1_000),
+            role: "anchor",
+            content: "earlier passage",
+            invocation: "passage",
+            anchorOffset: 50,
+            intent: nil,
+            chunksInjectedJSON: "[]",
+            fullPromptForLogging: nil,
+            summaryOfTurnsThrough: 0,
+            isSummary: false
+        )
+        try manager.appendAskPoseyTurn(priorAnchor)
+
+        // Open the sheet via the Notes-tap-conversation path:
+        // initialScrollAnchorStorageID set, no fresh anchor should
+        // be appended.
+        let vm = AskPoseyChatViewModel(
+            documentID: documentID,
+            documentPlainText: "doc",
+            anchor: AskPoseyAnchor(text: "current sentence", plainTextOffset: 200),
+            initialScrollAnchorStorageID: priorAnchorID,
+            databaseManager: manager
+        )
+        await vm.awaitHistoryLoaded()
+
+        // Only the prior anchor — no new marker appended.
+        let anchorMessages = vm.messages.filter { $0.role == .anchor }
+        XCTAssertEqual(anchorMessages.count, 1)
+        XCTAssertEqual(anchorMessages.first?.storageID, priorAnchorID)
+        XCTAssertEqual(vm.initialScrollAnchorStorageID, priorAnchorID)
+
+        // DB still has only the seeded anchor.
+        let stored = try manager.askPoseyAnchorRows(for: documentID)
+        XCTAssertEqual(stored.count, 1)
+    }
+
+    func testPromptBuilderFilterExcludesAnchorRows() async throws {
+        // Insert anchor + user + assistant rows directly.
+        let now = Date().timeIntervalSince1970
+        let mark = StoredAskPoseyTurn(
+            id: UUID().uuidString,
+            documentID: documentID,
+            timestamp: Date(timeIntervalSince1970: now),
+            role: "anchor",
+            content: "anchored passage",
+            invocation: "passage",
+            anchorOffset: 0,
+            intent: nil,
+            chunksInjectedJSON: "[]",
+            fullPromptForLogging: nil,
+            summaryOfTurnsThrough: 0,
+            isSummary: false
+        )
+        let user = StoredAskPoseyTurn(
+            id: UUID().uuidString,
+            documentID: documentID,
+            timestamp: Date(timeIntervalSince1970: now + 1),
+            role: "user",
+            content: "Q",
+            invocation: "passage",
+            anchorOffset: 0,
+            intent: "immediate",
+            chunksInjectedJSON: "[]",
+            fullPromptForLogging: nil,
+            summaryOfTurnsThrough: 0,
+            isSummary: false
+        )
+        let assistant = StoredAskPoseyTurn(
+            id: UUID().uuidString,
+            documentID: documentID,
+            timestamp: Date(timeIntervalSince1970: now + 2),
+            role: "assistant",
+            content: "A",
+            invocation: "passage",
+            anchorOffset: 0,
+            intent: nil,
+            chunksInjectedJSON: "[]",
+            fullPromptForLogging: nil,
+            summaryOfTurnsThrough: 0,
+            isSummary: false
+        )
+        try manager.appendAskPoseyTurn(mark)
+        try manager.appendAskPoseyTurn(user)
+        try manager.appendAskPoseyTurn(assistant)
+
+        // Prompt-builder fetch filters anchor rows out so STM budget
+        // isn't double-charged.
+        let conversation = try manager.askPoseyConversationTurns(for: documentID)
+        XCTAssertEqual(conversation.count, 2)
+        XCTAssertEqual(Set(conversation.map(\.role)), Set(["user", "assistant"]))
+
+        // Anchor-rows fetch returns just the marker.
+        let anchorsOnly = try manager.askPoseyAnchorRows(for: documentID)
+        XCTAssertEqual(anchorsOnly.count, 1)
+        XCTAssertEqual(anchorsOnly.first?.role, "anchor")
     }
 }
 // ========== BLOCK 02: CHAT VIEW MODEL - END ==========

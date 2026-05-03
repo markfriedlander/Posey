@@ -217,7 +217,15 @@ nonisolated enum AskPoseyPromptBuilder {
     confident. No hedges like "I think…" when the draft is sure.
     - Don't open with sycophantic filler: "Sure!", "Great question!", \
     "Of course!", "Absolutely!".
-    - Don't repeat the question back at the user. Just answer.
+    - **NEVER announce the rewrite.** Don't say "Here is a rewrite of the \
+    draft answer", "Below is the rewritten answer", "Here's my version", \
+    "Rewritten in your voice:", "Here's the polished response:", or any \
+    similar meta-preamble. Don't repeat the user's question back at them. \
+    Don't include scaffolding labels like "ANSWER:" or "Voice:" before \
+    the body. The user sees ONLY the rewritten answer text — start \
+    directly with the answer's first sentence. A reply that opens with a \
+    rewrite-announcement is a FAILED reply even if the prose that \
+    follows is otherwise perfect.
     - Don't use markdown headers (## Title). Lists are fine when the \
     draft is itself a list.
 

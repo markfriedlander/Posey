@@ -580,21 +580,25 @@ private extension AskPoseyChatViewModel {
     /// quote and once as a "retrieved" chunk. Threshold is
     /// `ragDedupThreshold` (0.85), matching Hal's default.
     ///
-    /// **2026-05-02 fix — front-matter injection for document-scoped
-    /// invocations.** Real Q&A on a sample document ("Who are the
-    /// authors?" on the AI Book Collaboration Project) revealed a
-    /// systematic cosine-retrieval miss: meta-questions about a
-    /// document ("who wrote it", "what is it about", "what's the
-    /// abstract") rarely surface the title-page / front-matter
+    /// **2026-05-02 fix — front-matter injection for ALL invocations
+    /// (was: doc-scope only).** Real Q&A on a sample document
+    /// ("Who are the authors?" on the AI Book Collaboration Project)
+    /// revealed a systematic cosine-retrieval miss: meta-questions
+    /// about a document ("who wrote it", "what is it about", "what's
+    /// the abstract") rarely surface the title-page / front-matter
     /// content because the question's vocabulary
     /// ("authors / writers / abstract") doesn't share a semantic
     /// neighbourhood with how front matter is typically written
     /// ("by X with collaborators Y, Z; A Collaborative Exploration of…").
-    /// When the invocation is document-scoped (anchor nil), we now
-    /// always prepend the document's first 2 chunks as "front matter"
-    /// candidates with relevance 1.0 — the budget enforcer keeps
-    /// them by virtue of being top-of-list, and meta-questions get
-    /// reliable grounding.
+    /// The 2026-05-02 (later) threshold-tuning battery hit the same
+    /// failure on a PASSAGE-scoped invocation — the user is always
+    /// allowed to ask "who wrote this?" while sitting on any
+    /// passage; gating front-matter on `anchor == nil` left those
+    /// questions ungrounded. We now always prepend the document's
+    /// first 4 chunks as "front matter" candidates with relevance
+    /// 1.0 — the budget enforcer keeps them by virtue of being
+    /// top-of-list, and meta-questions get reliable grounding
+    /// regardless of scope. Cost is small (~1800 chars).
     func retrieveRAGChunks(for question: String) -> [RetrievedChunk] {
         guard let index = embeddingIndex else { return [] }
 
@@ -614,16 +618,16 @@ private extension AskPoseyChatViewModel {
             return []
         }
 
-        // Front-matter injection for document-scoped invocations.
-        // Always prepend the document's first 4 chunks so the prompt
-        // sees the title page + table of contents + contributor list.
-        // Two chunks (~900 chars at the default 450 char chunk size)
-        // covered only the abstract on real-world tests; bumped to 4
-        // (~1800 chars) so contributor names listed in the TOC also
-        // make it in. Deduplicates against any cosine match for the
-        // same chunk ID.
+        // Front-matter injection — runs for EVERY invocation
+        // (passage or document scope). Always prepend the document's
+        // first 4 chunks so the prompt sees the title page + table
+        // of contents + contributor list. Two chunks (~900 chars at
+        // the default 450 char chunk size) covered only the abstract
+        // on real-world tests; 4 (~1800 chars) reliably reaches
+        // contributor names listed below the abstract. Deduplicates
+        // against any cosine match for the same chunk ID.
         var frontMatter: [RetrievedChunk] = []
-        if anchor == nil, let db = databaseManager {
+        if let db = databaseManager {
             let storedFront = (try? db.frontMatterChunks(for: documentID, limit: 4)) ?? []
             for stored in storedFront {
                 let alreadyPresent = results.contains { $0.chunk.chunkIndex == stored.chunkIndex }
@@ -1070,12 +1074,12 @@ extension AskPoseyChatViewModel {
             let chunkRefs = metadata.chunksInjected.enumerated().map { (i, c) in
                 (chunkID: c.chunkID, citationNumber: i + 1, text: c.text)
             }
+            // Threshold + delta come from the named constants on
+            // DocumentEmbeddingIndex (single source of truth).
             return index.attributeCitations(
                 text: raw,
                 chunks: chunkRefs,
-                documentID: documentID,
-                threshold: 0.4,
-                secondCitationDelta: 0.05
+                documentID: documentID
             )
         }()
 

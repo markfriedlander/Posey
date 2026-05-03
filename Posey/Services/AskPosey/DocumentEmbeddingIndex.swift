@@ -557,6 +557,36 @@ nonisolated final class DocumentEmbeddingIndex {
 
     // MARK: Citation attribution (Task 2 #25)
 
+    /// Cosine-similarity threshold for inline-citation attribution.
+    /// A sentence's best-matching RAG chunk must score at least this
+    /// to attach an `[N]` marker; otherwise the sentence renders
+    /// uncited (the user can't navigate to a source the cosine
+    /// scorer wouldn't trust).
+    ///
+    /// **Set 2026-05-02 from a 15-question battery against three
+    /// documents (3 docs × 5 question types: factual, analytical,
+    /// vague, connection, out-of-doc).** At 0.40, 85% of sentences
+    /// were cited — too permissive, including borderline matches.
+    /// At 0.55, 45% — too sparse, lost legitimate factual
+    /// attributions like the Alternative Dispute Resolution title
+    /// quote (scored 0.62 → would be lost at 0.60). At 0.50, 59%
+    /// overall: factual 50%, analytical 81%, vague 30%,
+    /// connection 78%, out-of-doc 0%. The vague-question category
+    /// drops sharply between 0.40 and 0.50 (75% → 30%) — natural
+    /// inflection where conversational filler stops being cited
+    /// while in-document content still is. Mark picked 0.50.
+    ///
+    /// **Tuning.** Single-knob tunable here. Per-document-type
+    /// thresholds (factual stricter than analytical, etc.) are a
+    /// 2.0 feature logged in NEXT.md — not implemented yet.
+    static let citationCosineThreshold: Double = 0.50
+
+    /// When the second-best chunk's score is within this delta of
+    /// the best AND both clear the threshold, attribute BOTH chunks
+    /// (multi-cite as `[1][3]`). Avoids picking arbitrarily between
+    /// two near-tied matches.
+    static let citationSecondCitationDelta: Double = 0.05
+
     /// Attribute each sentence in `text` to the chunk(s) it most
     /// closely matches via cosine similarity in the embedding space,
     /// returning the same text with `[N]` markers appended where
@@ -588,8 +618,8 @@ nonisolated final class DocumentEmbeddingIndex {
         text: String,
         chunks: [(chunkID: Int, citationNumber: Int, text: String)],
         documentID: UUID,
-        threshold: Double = 0.4,
-        secondCitationDelta: Double = 0.05
+        threshold: Double = DocumentEmbeddingIndex.citationCosineThreshold,
+        secondCitationDelta: Double = DocumentEmbeddingIndex.citationSecondCitationDelta
     ) -> String {
         guard !text.isEmpty, !chunks.isEmpty else { return text }
 

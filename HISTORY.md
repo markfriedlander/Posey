@@ -1,5 +1,29 @@
 # Posey History
 
+## 2026-05-02 — Task 2: Ask Posey UI bug fixes (markdown, sources persistence, inline citations, motion)
+
+Four issues in Mark's Task 2 list, all fixed and verified on device.
+
+**#23 Markdown rendering.** AskPoseyMessageBubble used `Text(message.content)` (the plain-string init) — `**bold**` showed as literal asterisks. Switched to `Text(.init(...))` (LocalizedStringKey form) which auto-parses bold, italic, code, links. Added `.tint(.accentColor)` so links render in the accent color.
+
+**#24 Sources persistence.** `translateStoredTurn` was discarding the persisted `chunks_injected` JSON when reconstructing AskPoseyMessage from SQLite — every assistant reply lost its sources after the user dismissed and re-opened the sheet. Decode the JSON back to `[RetrievedChunk]` and pass through.
+
+**#25 Inline superscript citations (Perplexity-style).** The biggest piece. Replaced the bottom "SOURCES 1·87% 2·64%" pill strip with inline `[ⁿ]` superscripts inside the answer text. Three layers:
+
+1. **Prompt change.** Moved the "INLINE CITATIONS" instruction to the TOP of `proseInstructions` as the "MOST IMPORTANT RULE — NON-NEGOTIABLE", and added a second short reminder immediately above USER QUESTION (trailing-position rules tend to land better on AFM than rules buried mid-prompt). The grounded call now reliably emits `[N]` on factual questions. Polish call's `polishInstructions` got a "PRESERVE INLINE CITATION MARKERS" rule at the top with explicit examples.
+
+2. **Polish-skip guard for short answers.** Even with the preserve rule, polish strips markers from short factual answers at temp 0.65. So when grounded both (a) has at least one `[N]` and (b) is < 300 chars, skip polish entirely and stream grounded verbatim. Voice doesn't add much to a 60-char factual sentence anyway.
+
+3. **Embedding-based attribution fallback.** New `DocumentEmbeddingIndex.attributeCitations(text:chunks:documentID:threshold:secondCitationDelta:)` — for each sentence in the assistant response, embed the sentence into the same NLEmbedding vector space the M2 index uses, score against every chunk in `chunksInjected` via cosine similarity, append `[N]` when the best score clears 0.4. Multi-cite as `[1][3]` when the second-best is within 0.05 of the best AND also clears threshold. AFM-emitted markers take priority (no embedding attribution runs when the raw text already has any `[N]`). Per-sentence scores logged via NSLog so the threshold can be tuned without code changes. Cost: ~10–15ms per typical answer on iPhone 16 Plus, imperceptible.
+
+Renderer: new `AskPoseyCitationRenderer` regex-replaces `[N]` in the assistant body with `[ⁿ](posey-cite://N)` markdown links — unicode superscript display, custom URL scheme. The bubble computes this on every render. `.environment(\.openURL, OpenURLAction { ... })` at the AskPoseyView root intercepts `posey-cite://N`, scans messages newest-first to find an assistant turn with at least N chunks (so a follow-up's citations resolve against ITS chunks not an older reply's), then calls `onJumpToChunk` with the chunk's offset and dismisses. Old sourcesStrip removed from threadRow.
+
+Real-answer scores in testing: 0.58–0.76 against in-document chunks — plenty of headroom over the 0.4 threshold. Threshold tunable.
+
+**#26 Motion permission.** Two fixes: (a) `MotionDetector` no longer eagerly instantiates `CMMotionActivityManager` / `CMMotionManager` at init — both lazy, constructed inside `start()` AFTER the consent guard. Eliminates any path where stray instantiation could trigger the iOS permission dialog at launch. (b) `motionPreference` didSet now auto-presents the in-app consent sheet the moment the user picks Auto without prior consent — one tap not two. Default `motionPreference` is `.off` (already, confirmed).
+
+**Commits this task:** `1100a82` (markdown + sources + motion + initial citation infra), `86279b7` (citation reliability via prompt + polish-skip + string-overlap fallback), `b947682` (embedding-based attribution replacing string overlap).
+
 ## 2026-05-02 — Remote-control API surface complete + Step 7 scroll fix + Task 1 verification
 
 **Task 1 verification (all 8 steps PASS).** Drove the unified annotation system end-to-end on Mark's iPhone 16 Plus via the local API + new remote-control verbs. Anchor tap-jump (Step 4), doc-scope title marker (Step 5), Notes sheet showing 3+ conversation icons (Step 6), conversation entry → Ask Posey (Step 7 — see scroll fix below), note expand-inline + jump (Step 8), bookmark navigate (Step 9), all three types coexisting chronologically (Step 10), double-tap moves highlight + playback position (Step 15) — all verified with real AFM data (3 passage + 1 doc-scope conversations) created via real `/open-ask-posey` + `/ask` flows, real notes/bookmarks created via real `CREATE_NOTE` / `CREATE_BOOKMARK` flows that go through `ReaderViewModel.saveDraftNoteForCurrentSentence` / `addBookmarkForCurrentSentence`.

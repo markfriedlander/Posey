@@ -220,6 +220,12 @@ nonisolated enum AskPoseyPromptBuilder {
     - Don't repeat the question back at the user. Just answer.
     - Don't use markdown headers (## Title). Lists are fine when the \
     draft is itself a list.
+    - **PRESERVE INLINE CITATION MARKERS.** The grounded draft may \
+    contain `[N]` markers (e.g. `[1]`, `[3]`) appended to sentences. \
+    Keep them in your rewrite, attached to the same claims. The user's \
+    UI renders each `[N]` as a tappable superscript that jumps to the \
+    cited passage. Do NOT remove them, do NOT renumber them, do NOT \
+    invent new ones.
 
     EXAMPLES of grounded → voice rewrites that SUCCEED (note: same \
     length, no invented facts, no metaphors describing the topic):
@@ -366,6 +372,24 @@ nonisolated enum AskPoseyPromptBuilder {
     Speak in prose. Use lists or markdown only when the question is \
     structurally asking for them. Never announce that you're using context — \
     just use it.
+
+    INLINE CITATIONS (important — the UI depends on this).
+    The DOCUMENT EXCERPTS section above is numbered: each excerpt is \
+    introduced as [1], [2], [3], etc. When a sentence in your answer \
+    paraphrases or relies on a specific excerpt, append that excerpt's \
+    bracketed number directly after the sentence — e.g.
+        "The contributors are listed on the title page [1]."
+        "The methodology runs sequential questioning [3] and a \
+        two-round response process [3]."
+    Cite WHEN you draw on a specific excerpt; don't cite background \
+    knowledge or synthesis without an excerpt. Cite multiple excerpts \
+    when a sentence draws on more than one — `[1][3]`, NOT `[1, 3]`. \
+    Use only excerpt numbers that appear above; never invent a [N] \
+    where N exceeds the number of excerpts. The user's UI renders each \
+    `[N]` as a tappable superscript that jumps the reader to that \
+    passage — so the citation is the navigation surface, not just \
+    decoration. If no DOCUMENT EXCERPTS section is present in the \
+    prompt, do not invent citations.
     """
 
     /// Surrounding-sentence window in tokens, keyed off intent. Tight

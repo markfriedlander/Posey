@@ -1859,6 +1859,16 @@ final class ReaderViewModel: ObservableObject {
         didSet {
             PlaybackPreferences.shared.motionPreference = motionPreference
             reconcileMotionDetector()
+            // Task 2 #26 — when the user picks Auto without prior
+            // consent, surface the in-app consent sheet immediately
+            // (one tap, not two). Previously the user had to pick
+            // Auto, see a "Tap to review" warning, then tap that to
+            // open the sheet — Mark called this out as feeling like
+            // the app was "asking on launch" the moment the prefs
+            // sheet was opened.
+            if motionPreference == .auto && !motionAutoConsent {
+                showMotionConsent = true
+            }
         }
     }
 

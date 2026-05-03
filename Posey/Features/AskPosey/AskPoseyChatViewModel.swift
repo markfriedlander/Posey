@@ -1068,16 +1068,23 @@ extension AskPoseyChatViewModel {
         // Per-sentence scores logged via NSLog so the threshold can
         // be tuned on real answers without code changes.
         let attributedFinalText: String = {
-            let raw = metadata.finalText
+            // Defensive post-strip — removes polish-preamble patterns
+            // ("Here is a rewrite of the draft answer in the
+            // requested voice:", "Sure! Here's…", etc.) that AFM
+            // sometimes emits despite the polish prompt's
+            // "**NEVER announce the rewrite.**" hard rule. Per
+            // Mark's 2026-05-02 (later) directive: "the prompt rule
+            // stays, the heuristic catches what AFM misses."
+            let stripped = AskPoseyPromptBuilder.stripPolishPreamble(metadata.finalText)
             guard let index = embeddingIndex,
-                  !metadata.chunksInjected.isEmpty else { return raw }
+                  !metadata.chunksInjected.isEmpty else { return stripped }
             let chunkRefs = metadata.chunksInjected.enumerated().map { (i, c) in
                 (chunkID: c.chunkID, citationNumber: i + 1, text: c.text)
             }
             // Threshold + delta come from the named constants on
             // DocumentEmbeddingIndex (single source of truth).
             return index.attributeCitations(
-                text: raw,
+                text: stripped,
                 chunks: chunkRefs,
                 documentID: documentID
             )

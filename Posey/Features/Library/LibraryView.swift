@@ -797,6 +797,19 @@ extension LibraryViewModel {
                 }
                 return json(["bytes": data.count, "base64": data.base64EncodedString()])
 
+            case "TAP_CITATION":
+                guard let raw = arg, let n = Int(raw), n >= 1 else {
+                    return #"{"error":"Usage: TAP_CITATION:<n>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteTapCitation,
+                        object: nil,
+                        userInfo: ["citationNumber": n]
+                    )
+                }
+                return json(["status": "posted", "citationNumber": n])
+
             case "TAP_ASKPOSEY_ANCHOR":
                 guard let storageID = arg, !storageID.isEmpty else {
                     return #"{"error":"Usage: TAP_ASKPOSEY_ANCHOR:<storageID>"}"#

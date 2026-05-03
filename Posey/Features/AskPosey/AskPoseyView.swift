@@ -241,6 +241,33 @@ struct AskPoseyView: View {
         .presentationDetents(detentsForCurrentDevice)
         .presentationContentInteraction(.scrolls)
         .interactiveDismissDisabled(viewModel.isResponding)
+        // Inline-citation tap dispatcher (Task 2 #25). Each `[N]`
+        // marker in an assistant response is rendered as a markdown
+        // link `[ⁿ](posey-cite://N)`; tapping it invokes this
+        // OpenURLAction with that URL. We resolve N back to the
+        // matching chunk on the latest assistant message that has at
+        // least N chunks, dispatch via `onJumpToChunk`, dismiss. Any
+        // non-citation URL (regular http(s) link) returns
+        // `.systemAction` so SwiftUI hands it to the system handler.
+        .environment(\.openURL, OpenURLAction { url in
+            guard let n = AskPoseyCitationRenderer.chunkNumber(from: url) else {
+                return .systemAction
+            }
+            // Find the assistant message that has at least N chunks.
+            // Scan newest-first so a follow-up answer's citations
+            // resolve against ITS chunks, not an older reply's.
+            for message in viewModel.messages.reversed()
+            where message.role == .assistant && n >= 1 && n <= message.chunksInjected.count {
+                let chunk = message.chunksInjected[n - 1]
+                if let onJumpToChunk {
+                    viewModel.cancelInFlight()
+                    onJumpToChunk(chunk.startOffset)
+                    dismiss()
+                }
+                return .handled
+            }
+            return .discarded
+        })
         .onAppear {
             // Auto-focus the composer when the sheet appears so the
             // user can start typing immediately. Slight delay because
@@ -331,12 +358,15 @@ private extension AskPoseyView {
         case .user, .assistant:
             VStack(alignment: .leading, spacing: 4) {
                 AskPoseyMessageBubble(message: message)
+                // Navigation cards (.search intent results) are still
+                // rendered as a separate strip — they're a structurally
+                // different surface from text + inline citations. The
+                // old "SOURCES N · 87%" pill strip is gone; sources
+                // are now inline `[ⁿ]` superscripts inside the bubble
+                // text (Task 2 #25).
                 if message.role == .assistant,
                    !message.navigationCards.isEmpty {
                     navigationCardList(for: message)
-                } else if message.role == .assistant,
-                          !message.chunksInjected.isEmpty {
-                    sourcesStrip(for: message.chunksInjected)
                 }
             }
         }
@@ -669,12 +699,38 @@ struct AskPoseyMessageBubble: View {
     }
 
     private var bubble: some View {
-        Text(message.content)
+        // Renders the message body via SwiftUI's markdown
+        // initializer so AFM responses like **bold** / *italic* /
+        // `code` show as formatted text instead of literal markdown.
+        // Inline citation links of the shape `[¹](posey-cite://1)`
+        // are tappable — handled by the
+        // `.environment(\\.openURL, ...)` action installed at the
+        // sheet root, which dispatches `posey-cite://N` URLs to the
+        // matching chunk's offset via `onJumpToChunk`.
+        Text(.init(renderedMarkdown))
             .font(.body)
             .foregroundStyle(.primary)
+            .tint(.accentColor)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .textSelection(.enabled)
+    }
+
+    /// Rewrites the raw assistant text so each `[N]` marker that
+    /// resolves to a known chunk becomes a markdown link with a
+    /// unicode-superscript label and a `posey-cite://N` URL. The
+    /// AskPoseyView root installs an `OpenURLAction` that intercepts
+    /// `posey-cite://` URLs and dispatches them to `onJumpToChunk`.
+    /// Markers without a matching chunk (e.g. AFM hallucinated
+    /// `[12]` when only 4 chunks were injected) fall through
+    /// unchanged so they're visible but inert.
+    private var renderedMarkdown: String {
+        guard message.role == .assistant,
+              !message.chunksInjected.isEmpty else { return message.content }
+        return AskPoseyCitationRenderer.render(
+            text: message.content,
+            chunkCount: message.chunksInjected.count
+        )
     }
 
     private var accessibilityLabel: String {
@@ -683,6 +739,54 @@ struct AskPoseyMessageBubble: View {
         case .assistant: return "Posey said: \(message.content)"
         case .anchor: return ""
         }
+    }
+}
+
+/// Maps `[N]` inline citation markers in an assistant response to
+/// SwiftUI markdown links pointing at `posey-cite://N`, with the
+/// link's display text rendered as unicode-superscript digits so
+/// they read like Perplexity-style superscript citations.
+enum AskPoseyCitationRenderer {
+    static let citationURLScheme = "posey-cite"
+
+    static func render(text: String, chunkCount: Int) -> String {
+        guard chunkCount > 0 else { return text }
+        let pattern = #"\[(\d{1,2})\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let nsRange = NSRange(text.startIndex..., in: text)
+        var result = ""
+        var lastEnd = text.startIndex
+        regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
+            guard let match,
+                  let fullRange = Range(match.range, in: text),
+                  let numRange = Range(match.range(at: 1), in: text),
+                  let n = Int(text[numRange]),
+                  n >= 1, n <= chunkCount else { return }
+            result += text[lastEnd..<fullRange.lowerBound]
+            result += "[\(superscript(for: n))](\(citationURLScheme)://\(n))"
+            lastEnd = fullRange.upperBound
+        }
+        result += text[lastEnd..<text.endIndex]
+        return result
+    }
+
+    /// Resolve the chunk number out of a `posey-cite://N` URL.
+    /// Returns nil for any other URL shape so the global URL handler
+    /// can defer to the system for non-citation links.
+    static func chunkNumber(from url: URL) -> Int? {
+        guard url.scheme == citationURLScheme,
+              let host = url.host,
+              let n = Int(host) else { return nil }
+        return n
+    }
+
+    private static let superscriptDigits: [Character: Character] = [
+        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+        "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹"
+    ]
+
+    private static func superscript(for n: Int) -> String {
+        String(String(n).map { superscriptDigits[$0] ?? $0 })
     }
 }
 // ========== BLOCK 03: MESSAGE BUBBLE - END ==========

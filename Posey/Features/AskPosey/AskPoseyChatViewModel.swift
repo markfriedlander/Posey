@@ -492,12 +492,26 @@ private extension AskPoseyChatViewModel {
         // them but preserving SwiftUI Identifiable correctness.
         let messageID = UUID(uuidString: stored.id) ?? UUID()
         let isAnchor = (role == .anchor)
+        // Restore the source chunks from the persisted JSON so the
+        // sources strip / inline citations re-appear when the sheet
+        // re-opens. Without this, every assistant reply would lose
+        // its sources after the user dismisses + re-opens the sheet
+        // (or after a tap-jump dismisses + re-opens via the Notes
+        // entry — Issue 2 in Mark's Task 2 list).
+        let restoredChunks: [RetrievedChunk] = {
+            guard role == .assistant,
+                  let data = stored.chunksInjectedJSON.data(using: .utf8),
+                  let chunks = try? JSONDecoder().decode([RetrievedChunk].self, from: data)
+            else { return [] }
+            return chunks
+        }()
         return AskPoseyMessage(
             id: messageID,
             role: role,
             content: stored.content,
             isStreaming: false,
             timestamp: stored.timestamp,
+            chunksInjected: restoredChunks,
             anchorOffset: isAnchor ? stored.anchorOffset : nil,
             anchorScope: isAnchor ? stored.invocation : nil,
             storageID: stored.id

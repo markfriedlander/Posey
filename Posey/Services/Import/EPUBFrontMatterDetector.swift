@@ -60,17 +60,25 @@ struct EPUBFrontMatterDetector {
         var skipUntilOffset = 0
         var hrefs: Set<String> = []
 
+        // Task 4 #5 — scan ALL candidates rather than break-on-first-
+        // non-match. The Illuminatus IA-pipeline EPUB has
+        // `nav.xhtml` as spine[0] (the EPUB nav document leaked into
+        // the spine — unusual but not wrong) and `notice.html` as
+        // spine[1] (the IA disclaimer). The old break-on-first
+        // behavior failed at nav.xhtml and never inspected
+        // notice.html, leaving the disclaimer in the extracted
+        // plainText. Scanning all candidates collects every match;
+        // the importer's `frontMatterHrefs.contains(href)` filter
+        // strips them by href, so order doesn't matter.
         for (index, candidate) in spineItems.enumerated() {
-            guard isFrontMatter(html: candidate.html) else { break }
-            hrefs.insert(bareHref(candidate.href))
-            // The skip offset advances to the START of the next spine
-            // item — i.e., where the front matter ends and real content
-            // begins. If this is the last spine item (rare: a doc that
-            // is only front matter) we leave skipUntilOffset at the
-            // last known body start, which means "skip nothing" — better
-            // to read aloud than to silence the document entirely.
-            if index + 1 < spineItems.count {
-                skipUntilOffset = spineItems[index + 1].plainTextStartOffset
+            if isFrontMatter(html: candidate.html) {
+                hrefs.insert(bareHref(candidate.href))
+                // Maintain the legacy skip-offset value for any
+                // caller still reading it (none today after #5,
+                // but kept for forward compat).
+                if index + 1 < spineItems.count {
+                    skipUntilOffset = spineItems[index + 1].plainTextStartOffset
+                }
             }
         }
 
@@ -107,6 +115,18 @@ struct EPUBFrontMatterDetector {
         // a content paragraph that happens to contain the word "notice"
         // is not flagged.
         if lower.contains("<title>notice</title>") {
+            return true
+        }
+
+        // EPUB nav document — these sometimes leak into the spine
+        // (Illuminatus's IA-built EPUB does exactly this). The nav
+        // document is structural metadata for the TOC, not user-
+        // facing prose. Detect via the EPUB 3 nav-doc signature:
+        // either an `epub:type="toc"` attribute or the conventional
+        // unhinted `<nav epub:type="toc">` opener.
+        if lower.contains("epub:type=\"toc\"")
+            || lower.contains("<nav epub:type=\"toc\"")
+            || lower.contains("epub:type='toc'") {
             return true
         }
 

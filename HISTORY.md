@@ -1,5 +1,9 @@
 # Posey History
 
+## 2026-05-02 — Autonomous device screenshot evaluation: deferred, hybrid approach kept
+
+During Task 1 setup attempted to enable autonomous device screenshots so verification artifacts from Mark's iPhone wouldn't require Mark's manual intervention. Installed `libimobiledevice` (brew) and `pymobiledevice3` (pipx). Neither works for our use case: `idevicescreenshot` is broken on iOS 17+ (Apple moved screen capture out of the lockdown surface), and `pymobiledevice3 developer dvt screenshot` requires a sudo'd `tunneld` that the bash sandbox can't start non-interactively. Deferred via Mark's directive — sticking with the hybrid approach: simulator screenshots for layout verification (same SwiftUI source as device), `qa_battery.sh` + `/ask` for AFM pipeline verification, Mark's eyes on the iPhone for final visual sign-off. Both tools are inert on disk; removal instructions captured in DECISIONS 2026-05-02.
+
 ## 2026-05-02 — Integrated UI QA pass on real device + voice polish v2 + doc-scope orphan fix
 
 Mark called out that the previous Three Hats QA pass had been API-only — `/ask` round-trips evaluated against the persisted-text response, never opening the actual sheet, never looking at a screenshot, never driving the integrated UI experience the way a user would. He'd just spent an hour testing manually on device and found scroll bugs, missing anchors, flat voice responses, and UI issues that should have been caught before he picked up the phone. Per his note: I had every tool needed (`/ask`, `/open-ask-posey`, simulator MCP) and didn't use them.

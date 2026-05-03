@@ -210,7 +210,7 @@ extension EPUBDocumentImporter {
             !frontMatterResult.frontMatterHrefs.contains(record.bareHref)
         }
         if !frontMatterResult.frontMatterHrefs.isEmpty {
-            NSLog("EPUB import: stripped %d front-matter spine items: %@",
+            dbgLog("EPUB import: stripped %d front-matter spine items: %@",
                   allChapters.count - strippedChapters.count,
                   Array(frontMatterResult.frontMatterHrefs).joined(separator: ", ") as NSString)
         }

@@ -153,26 +153,29 @@ extension PDFDocumentImporter {
                 if ocr.count >= 10 {
                     pageContents.append(.text(ocr))
                     readableTextPages.append(ocr)
-                } else if pageHasImageXObjects(page) {
-                    // Image-only page (no text + < 10 OCR chars + has
-                    // image XObjects). Render to PNG and emit a visual
-                    // stop so the user sees the figure inline.
+                } else {
+                    // Task 8 #5 (deferred 2026-05-03): a smarter
+                    // blank-page detector would suppress visual
+                    // stops for genuinely empty section-divider
+                    // pages (Antifa corpus has 11 such pages). My
+                    // first attempt — gating on
+                    // `pageHasImageXObjects(page)` — was wrong:
+                    // pages drawn entirely with vector primitives
+                    // (CGContext fill paths, no XObject) have no
+                    // image XObject but are NOT blank. Test
+                    // `testLoadDocumentPreservesVisualOnlyPagesInDisplayText`
+                    // has a `fillEllipse` page that proved the
+                    // point. Real fix needs PNG-pixel-uniformity
+                    // scoring (sample N pixels of the rendered
+                    // image, score colour variance, suppress when
+                    // ≥99% match a single colour cluster within a
+                    // tight delta). Documented in NEXT.md; left
+                    // as-is here so we don't over-suppress.
                     let imageID = UUID().uuidString
                     if let pngData = renderPageToPNG(page) {
                         imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))
                     }
                     pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
-                } else {
-                    // Task 8 #5 (2026-05-03 — blank-visual-stop
-                    // threshold): genuinely blank page (no text, no
-                    // OCR, no image XObjects). Section dividers in
-                    // some books look like this. Pausing TTS for a
-                    // blank page is an annoyance, not an affordance —
-                    // skip the visual stop entirely so playback flows
-                    // through. The Antifa corpus has 11 such pages
-                    // verified blank by the image-comparison harness;
-                    // they were all hitting visual stops before.
-                    NSLog("PDF import: skipping blank visual stop on page %d", index + 1)
                 }
             }
         }

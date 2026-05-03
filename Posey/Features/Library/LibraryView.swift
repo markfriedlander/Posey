@@ -375,7 +375,13 @@ final class LibraryViewModel: ObservableObject {
     private lazy var htmlLibraryImporter     = HTMLLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
     private lazy var epubLibraryImporter     = EPUBLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
     private lazy var pdfLibraryImporter      = PDFLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
+    // Task 13 #1 (2026-05-03): the LocalAPIServer type and instance
+    // exist only in DEBUG builds. Release binaries do not ship the
+    // HTTP listener, the bearer-token handling, or any port-bind
+    // code. All call sites are guarded by `#if DEBUG`.
+    #if DEBUG
     let localAPIServer = LocalAPIServer()
+    #endif
 
     init(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
@@ -523,6 +529,7 @@ extension LibraryViewModel {
     /// last reading silently fails to restore. Suppressing the alert at
     /// auto-start lets the restore push land cleanly.
     func toggleLocalAPI(showConnectionInfo: Bool = true) {
+        #if DEBUG
         if localAPIServer.isRunning {
             localAPIServer.stop()
             localAPIEnabled = false
@@ -552,6 +559,10 @@ extension LibraryViewModel {
                 apiConnectionInfo = info
             }
         }
+        #else
+        // Release builds: no-op. The HTTP server type doesn't ship.
+        _ = showConnectionInfo
+        #endif
     }
 
     // MARK: — Command handler
@@ -1221,11 +1232,14 @@ extension LibraryViewModel {
 
     func apiState() async -> String {
         let docs = (try? databaseManager.documents()) ?? []
-        return json([
+        var payload: [String: Any] = [
             "apiEnabled": true,
-            "documentCount": docs.count,
-            "connectionInfo": localAPIServer.connectionInfo
-        ])
+            "documentCount": docs.count
+        ]
+        #if DEBUG
+        payload["connectionInfo"] = localAPIServer.connectionInfo
+        #endif
+        return json(payload)
     }
 
     // MARK: — Ask Posey backend handler (M6 test infrastructure)

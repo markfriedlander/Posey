@@ -1374,8 +1374,19 @@ private struct ReaderPreferencesSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteDismissPresentedSheet)
+            ) { _ in
+                dismiss()
+            }
             .onAppear {
                 draftRatePercentage = viewModel.customRatePercentage
+                RemoteControlState.shared.presentedSheet = "preferences"
+            }
+            .onDisappear {
+                if RemoteControlState.shared.presentedSheet == "preferences" {
+                    RemoteControlState.shared.presentedSheet = nil
+                }
             }
             .onChange(of: viewModel.voiceMode) { _, _ in
                 draftRatePercentage = viewModel.customRatePercentage
@@ -3195,6 +3206,19 @@ private struct TOCSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteDismissPresentedSheet)
+            ) { _ in
+                dismiss()
+            }
+            .onAppear {
+                RemoteControlState.shared.presentedSheet = "toc"
+            }
+            .onDisappear {
+                if RemoteControlState.shared.presentedSheet == "toc" {
+                    RemoteControlState.shared.presentedSheet = nil
                 }
             }
         }

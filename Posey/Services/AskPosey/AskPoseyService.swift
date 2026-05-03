@@ -391,6 +391,39 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                     }
                     throw AskPoseyServiceError.permanent(underlyingDescription: "\(retryError)")
                 }
+            } else if isContextWindowOverflow(originalError) {
+                // Task 4 #3 — exceeded-context-window retry. Our
+                // chars-per-token estimator under-counts AFM's actual
+                // tokenization by ~10–30% in pathological cases. When
+                // we hit AFM's hard ceiling, rebuild the prompt with
+                // every droppable section emptied (drop ALL RAG,
+                // drop summary, drop STM) and retry once. The user
+                // question + anchor + system + surrounding survive
+                // — same drop-priority spirit as #2, just more
+                // aggressive when AFM tells us we overshot.
+                NSLog("AskPosey: grounded call exceeded context window — retrying with droppables stripped")
+                let strippedInputs = AskPoseyPromptInputs(
+                    intent: inputs.intent,
+                    anchor: inputs.anchor,
+                    surroundingContext: inputs.surroundingContext,
+                    conversationHistory: [],
+                    conversationSummary: nil,
+                    documentChunks: [],
+                    currentQuestion: inputs.currentQuestion
+                )
+                let strippedOutput = AskPoseyPromptBuilder.build(strippedInputs, budget: budget)
+                do {
+                    grounded = try await runGroundedCall(
+                        instructions: strippedOutput.instructions,
+                        body: strippedOutput.renderedBody
+                    )
+                    NSLog("AskPosey: stripped-prompt retry succeeded (%d chars)", grounded.count)
+                } catch {
+                    NSLog("AskPosey: stripped-prompt retry also failed; surfacing informative failure")
+                    throw AskPoseyServiceError.permanent(
+                        underlyingDescription: "informativeRefusalFailure"
+                    )
+                }
             } else {
                 // Debug marker so we can see which path threw when
                 // the user-facing error appears.
@@ -488,6 +521,24 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             fullPromptForLogging: output.combinedForLogging,
             inferenceDuration: elapsed
         )
+    }
+
+    /// True when `error` is a `LanguageModelSession.GenerationError`
+    /// of case `.exceededContextWindowSize` (the AFM hard ceiling).
+    /// Belt-and-suspenders: typed pattern match plus stringified
+    /// fallback because AFM's macro-generated enum cases have been
+    /// unreliable to pattern-match in this Swift toolchain.
+    private func isContextWindowOverflow(_ error: Error) -> Bool {
+        if let g = error as? LanguageModelSession.GenerationError {
+            switch g {
+            case .exceededContextWindowSize: return true
+            default: break
+            }
+            let s = "\(g)".lowercased()
+            return s.contains("exceededcontextwindowsize")
+                || s.contains("exceeds the maximum allowed context size")
+        }
+        return "\(error)".lowercased().contains("exceededcontextwindowsize")
     }
 
     /// Single grounded-call helper — low-temp, no streaming, returns

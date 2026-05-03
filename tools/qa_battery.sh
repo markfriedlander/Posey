@@ -86,11 +86,41 @@ clear_doc() {
     --max-time 10 > /dev/null
 }
 
-# Document IDs from Mark's iPhone — pinned for repeatability.
-# Update these if the docs are re-imported or replaced.
-AI_BOOK=E5C815A6-52BC-4221-B02B-1F02F0B7403E
-COPYRIGHT=9C500458-0DE9-4659-9758-233A9104D8AF
-INTERNET_STEPS=DAE62045-DC03-48A4-A520-2F050F8FB3BE
+# Resolve document IDs by title via LIST_DOCUMENTS so a re-import
+# (which assigns a new UUID) doesn't break this script. Match is
+# case-insensitive substring on the document title.
+DOCS_JSON=$(curl -s -X POST "$BASE/command" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"LIST_DOCUMENTS"}' \
+  --max-time 10)
+
+resolve_doc_id() {
+  local needle="$1"
+  python3 - "$needle" <<EOF
+import json, sys
+needle = sys.argv[1].lower()
+data = json.loads('''$DOCS_JSON''')
+docs = data.get('raw') if isinstance(data, dict) else data
+if not isinstance(docs, list):
+    print("", end=""); sys.exit(0)
+for d in docs:
+    if needle in (d.get('title') or '').lower():
+        print(d.get('id', ''), end=""); sys.exit(0)
+print("", end="")
+EOF
+}
+
+AI_BOOK=$(resolve_doc_id "AI Book Collaboration")
+COPYRIGHT=$(resolve_doc_id "Clouds Of High-tech Copyright")
+INTERNET_STEPS=$(resolve_doc_id "Internet Steps")
+
+for var in AI_BOOK COPYRIGHT INTERNET_STEPS; do
+  if [ -z "${!var}" ]; then
+    echo "Could not resolve doc ID for $var via LIST_DOCUMENTS — is it imported?" >&2
+    exit 1
+  fi
+done
 
 echo "===== AI BOOK ====="
 clear_doc $AI_BOOK

@@ -34,11 +34,6 @@ struct AskPoseyView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @FocusState private var composerFocused: Bool
-    /// Per-sheet view-state tracking for the M7 auto-save-to-notes
-    /// button. Lives in the view (not the view model) because it's
-    /// purely UI feedback — once the sheet dismisses, the persisted
-    /// note is the source of truth and the in-memory flag is gone.
-    @State private var savedAssistantMessageIDs: Set<UUID> = []
 
     /// Closure invoked when the user taps a Sources-strip pill below
     /// an assistant bubble. Owned by the host (ReaderView) which
@@ -55,26 +50,66 @@ struct AskPoseyView: View {
         self.onJumpToChunk = onJumpToChunk
     }
 
-    /// Stable id for the anchor row so ScrollViewReader can scroll to
-    /// it on initial appear. Anchor row sits at the boundary between
-    /// prior-session history (above) and this-session additions
-    /// (below) — same iMessage layout pattern Mark called for.
-    private static let anchorRowID = "askPosey.anchorRowID"
+    /// IDs for ScrollViewReader targets. The anchor row no longer lives
+    /// inside the ScrollView (it's pinned above it now), but we still
+    /// scroll to the latest user message after send so the user sees
+    /// their question + Posey's answer streaming below.
+    private static let priorHistoryDividerID = "askPosey.priorHistoryDivider"
+    private static let typingIndicatorID = "askPosey.typingIndicator"
+
+    /// Scroll the most-recently-sent user message to the top of the
+    /// visible scroll area so the question stays anchored at the top
+    /// and the streaming response appears below it. Falls back to the
+    /// typing indicator (or last assistant message) when no user
+    /// message is in this session.
+    private func scrollToLatestUserMessage(proxy: ScrollViewProxy) {
+        let session = viewModel.messages.suffix(from: viewModel.historyBoundary)
+        guard let target = session.last(where: { $0.role == .user }) ?? session.last else {
+            return
+        }
+        Task { @MainActor in
+            // Brief delay so the LazyVStack realises the new row
+            // before scrollTo runs — otherwise the proxy can't find
+            // the id.
+            try? await Task.sleep(for: .milliseconds(60))
+            withAnimation(.easeInOut(duration: 0.18)) {
+                proxy.scrollTo(target.id, anchor: .top)
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 indexingNotice
+
+                // Anchor / doc-scope row pinned ABOVE the ScrollView so
+                // it's always visible — the user always knows what
+                // passage or document they're asking about. Earlier
+                // attempts placed this inside the LazyVStack and used
+                // `.defaultScrollAnchor(.bottom)` + `proxy.scrollTo`
+                // to keep it on screen, but the two fought each other:
+                // once a message streamed in, the bottom anchor won
+                // and the anchor row scrolled off above. Pinning it
+                // outside is simpler and bulletproof.
+                if let anchor = viewModel.anchor,
+                   !anchor.trimmedDisplayText.isEmpty {
+                    anchorRow(anchor)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+                        .padding(.bottom, 8)
+                } else {
+                    documentScopeRow
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+                        .padding(.bottom, 8)
+                }
+
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             // Prior conversation history loaded from
                             // ask_posey_conversations at sheet open.
-                            // Renders above the anchor so the user
-                            // can scroll up to find what was discussed
-                            // before. Per Mark (2026-05-01):
-                            // "invisible unless you look for it,
-                            // always there if you want it."
                             if viewModel.historyBoundary > 0 {
                                 ForEach(
                                     Array(viewModel.messages.prefix(viewModel.historyBoundary))
@@ -82,37 +117,16 @@ struct AskPoseyView: View {
                                     AskPoseyMessageBubble(message: message)
                                 }
                                 priorHistoryDivider
+                                    .id(Self.priorHistoryDividerID)
                             }
 
-                            // Anchor row: the passage the user
-                            // invoked Ask Posey from. Sits at the
-                            // boundary so scroll-to-this on initial
-                            // appear lands the user looking at the
-                            // anchor with prior history above
-                            // (off-screen, scroll up to see).
-                            //
-                            // **2026-05-02 fix.** When anchor is nil
-                            // (document-scoped invocation), we render
-                            // a doc-scope context row instead so the
-                            // sheet doesn't feel orphaned (just "Ask
-                            // Posey" with no doc connection). Both
-                            // share `anchorRowID` so the scroll-to
-                            // logic below works either way.
-                            if let anchor = viewModel.anchor,
-                               !anchor.trimmedDisplayText.isEmpty {
-                                anchorRow(anchor)
-                                    .id(Self.anchorRowID)
-                            } else {
-                                documentScopeRow
-                                    .id(Self.anchorRowID)
-                            }
-
-                            // This session's messages — appear below
-                            // the anchor as the user sends.
+                            // This session's messages — appear as the
+                            // user sends.
                             if viewModel.messages.count > viewModel.historyBoundary {
                                 ForEach(
-                                    Array(viewModel.messages.suffix(from: viewModel.historyBoundary))
-                                ) { message in
+                                    Array(viewModel.messages.suffix(from: viewModel.historyBoundary).enumerated()),
+                                    id: \.element.id
+                                ) { _, message in
                                     VStack(alignment: .leading, spacing: 4) {
                                         AskPoseyMessageBubble(message: message)
                                         if message.role == .assistant,
@@ -125,18 +139,15 @@ struct AskPoseyView: View {
                                             // are themselves the source link.
                                             sourcesStrip(for: message.chunksInjected)
                                         }
-                                        if message.role == .assistant,
-                                           !message.isStreaming,
-                                           !message.content.isEmpty {
-                                            saveToNotesButton(for: message)
-                                        }
                                     }
+                                    .id(message.id)
                                 }
                             }
 
                             if viewModel.isResponding,
                                !viewModel.messages.contains(where: { $0.isStreaming }) {
                                 typingIndicator
+                                    .id(Self.typingIndicatorID)
                                     .transition(.opacity)
                             }
                         }
@@ -144,27 +155,16 @@ struct AskPoseyView: View {
                         .padding(.vertical, 12)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .defaultScrollAnchor(.bottom)
                     .frame(maxHeight: .infinity)
-                    .onAppear {
-                        // Programmatically scroll to the anchor row
-                        // on initial appear so the user lands looking
-                        // at the passage that opened Ask Posey, with
-                        // prior history above the fold (invisible
-                        // unless they scroll up). Brief delay because
-                        // SwiftUI's layout pass must finish before
-                        // the proxy can find the row id. The delay
-                        // also lets `historyBoundary` settle if the
-                        // history-load Task is still in flight.
-                        Task { @MainActor in
-                            try? await Task.sleep(for: .milliseconds(180))
-                            // Both passage scope (anchor row) and
-                            // document scope (doc-scope row) share
-                            // `anchorRowID` so this works either way.
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                proxy.scrollTo(Self.anchorRowID, anchor: .top)
-                            }
-                        }
+                    .onChange(of: viewModel.messages.count) { _, _ in
+                        // After every send, the most recent user
+                        // message should land at the TOP of the visible
+                        // scroll area so the user sees their question
+                        // and Posey's answer streaming in below.
+                        // Without this hook, the conversation would
+                        // accumulate at the bottom-ish and require the
+                        // user to scroll back to find what they asked.
+                        scrollToLatestUserMessage(proxy: proxy)
                     }
                 }
 
@@ -365,7 +365,7 @@ private extension AskPoseyView {
     var composer: some View {
         HStack(spacing: 10) {
             TextField(
-                "Ask about this passage…",
+                "Ask Posey…",
                 text: $viewModel.inputText,
                 axis: .vertical
             )
@@ -430,42 +430,7 @@ private extension AskPoseyView {
         }
     }
 
-    /// M7 auto-save to notes — small "Save to Notes" button below
-    /// each finalised assistant bubble. Tapping persists the Q + A
-    /// pair as a Note on the document, anchored to the conversation's
-    /// anchor offset (or first cited chunk for document-scoped). The
-    /// per-message saved-state lives in `savedAssistantMessageIDs` so
-    /// the button can flip to a "Saved" state after success without
-    /// the view model needing to track it.
-    func saveToNotesButton(for message: AskPoseyMessage) -> some View {
-        let isSaved = savedAssistantMessageIDs.contains(message.id)
-        return HStack {
-            Spacer().frame(maxWidth: .infinity, alignment: .leading)
-            Button {
-                guard !isSaved else { return }
-                if viewModel.saveAssistantTurnToNotes(message) {
-                    savedAssistantMessageIDs.insert(message.id)
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: isSaved ? "checkmark.circle.fill" : "square.and.pencil")
-                        .imageScale(.small)
-                    Text(isSaved ? "Saved" : "Save to Notes")
-                        .font(.caption2)
-                }
-                .foregroundStyle(isSaved ? Color.secondary : Color.accentColor)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-            }
-            .buttonStyle(.plain)
-            .disabled(isSaved)
-            .accessibilityLabel(isSaved ? "Saved to notes" : "Save this answer to notes")
-            .accessibilityIdentifier("askPosey.saveToNotes")
-        }
-        .padding(.trailing, 8)
-    }
-
-    /// M7 navigation cards — vertical list of tappable destinations
+/// M7 navigation cards — vertical list of tappable destinations
     /// that replace prose for `.search` intent responses. Each card
     /// shows the title + reason; tapping cancels any in-flight stream,
     /// dismisses the sheet, and jumps the reader to the card's offset

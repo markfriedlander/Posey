@@ -2,6 +2,20 @@
 
 ## Current Target
 
+**2026-05-03 — Task 4 complete (#1–#10).** All ten fixes from Mark's Task 4 list are implemented and pushed. The verbatim STM pipeline is unchanged (production default); the new pairwise STM pipeline ships as an opt-in for testing. Both modes are fully exercisable via `/ask` with `summarizationMode: "verbatim"` (default) or `"pairwise"`. Per Mark's directive, default selection is deferred until Mark reviews the comparison data.
+
+**Awaiting Mark's review when he returns:**
+- **Pairwise vs. verbatim STM comparison.** Run the Three Hats QA battery against the same conversation scenarios in both modes and compare coherence. The `/ask` response now carries `pairwiseStats` (pairs total/cached/summarized/rewritten, sentences produced/flagged/dropped) so cost and verification quality are quantified per call. Once Mark sees the data, we promote one mode to default.
+- **Anchor-scroll fix (carryover from 2026-05-02 afternoon).** Still awaiting Mark's screenshot to confirm symptom + decide sticky-pin design before touching scroll behavior.
+- **Q3 too-terse follow-ups (carryover).** Deferred as a model-capability ceiling.
+- **`tools/qa_battery.sh` hard-coded doc IDs (carryover).** Switch to title-based lookup via `LIST_DOCUMENTS`.
+
+**Autonomous task sequence in flight (Mark's 2026-05-03 directive while away):**
+- Task 10 — Mac Catalyst verification.
+- Task 7 — Audio Export (M4A) with progress + share.
+- Task 8 — Code-only items: PDF normalizer parity check, EPUB TOC playback-skip, DOCX TOC field detection, inline images for DOCX/HTML, blank-visual-stop suppression, TOCSheet composite id, WORD-WORD space-hyphen artifact.
+- Task 13 — Code-only items: full LocalAPIServer compile-out in release, complete `#if DEBUG` guards, no debug output in release, landscape centering, go-to-page UX polish.
+
 **Open follow-ups for Ask Posey 2.0:**
 - **Per-document-type citation thresholds.** The single global cosine threshold (`DocumentEmbeddingIndex.citationCosineThreshold = 0.50`, set 2026-05-02 from a 15-question battery) applies uniformly. Real data showed factual answers concentrate around 0.62–0.77, analytical 0.45–0.70, vague 0.27–0.51 — a per-type threshold (factual stricter, analytical looser, vague looser still) would be more selective without losing legitimate attributions. Deferred until we have larger ground-truth data on what user expectations are by question type. The constant + delta sit in one place (`DocumentEmbeddingIndex.swift` BLOCK 03) so a per-type table replaces them cleanly when we revisit.
 

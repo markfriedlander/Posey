@@ -255,8 +255,16 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
         XCTAssertEqual(vm.messages.first?.anchorOffset, 0)
         XCTAssertFalse(vm.isLoadingHistory)
 
-        // And the marker is persisted so it'll surface in Saved
-        // Annotations and on the next sheet open.
+        // Task 4 #4 (2026-05-03): anchor DB persistence is now
+        // deferred until the first user send so dismiss-without-send
+        // doesn't pollute Saved Annotations. Pre-flush, no row exists.
+        let preFlush = try manager.askPoseyAnchorRows(for: documentID)
+        XCTAssertEqual(preFlush.count, 0,
+                       "Anchor row should NOT be persisted until first user send")
+
+        // After flushing (simulating the first user send), the row
+        // surfaces in Saved Annotations / next-open history.
+        vm.flushPendingAnchorPersistIfAny()
         let stored = try manager.askPoseyAnchorRows(for: documentID)
         XCTAssertEqual(stored.count, 1)
         XCTAssertEqual(stored.first?.role, "anchor")
@@ -413,6 +421,10 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             databaseManager: manager
         )
         await vm1.awaitHistoryLoaded()
+        // Task 4 #4 deferred anchor DB-persistence until the first
+        // user send. This test exercises persistence directly; flush
+        // explicitly so vm2 can see the prior anchor row.
+        vm1.flushPendingAnchorPersistIfAny()
 
         let anchor2 = AskPoseyAnchor(text: "second sentence", plainTextOffset: 200)
         let vm2 = AskPoseyChatViewModel(
@@ -422,6 +434,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             databaseManager: manager
         )
         await vm2.awaitHistoryLoaded()
+        vm2.flushPendingAnchorPersistIfAny()
 
         // Second invocation should see both anchors in chronological
         // order plus its own freshly appended marker == 2 total.

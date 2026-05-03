@@ -95,6 +95,34 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
     /// The user's current turn. Always present, never empty (callers
     /// are expected to validate non-empty before invoking the builder).
     let currentQuestion: String
+    /// Task 4 #9 (2026-05-03) — when non-nil, the builder uses these
+    /// pre-summarized per-pair strings (oldest-first) in place of the
+    /// verbatim STM rendering. Each entry is a third-person summary
+    /// of one Q/A exchange, sized by recency tier upstream. The
+    /// existing `conversationHistory` field is still consulted for
+    /// the trailing live user turn but the older verbatim rendering
+    /// is skipped. Default `nil` keeps the verbatim mode unchanged.
+    let pairwiseSummaries: [String]?
+
+    init(
+        intent: AskPoseyIntent,
+        anchor: AskPoseyAnchor?,
+        surroundingContext: String?,
+        conversationHistory: [AskPoseyMessage],
+        conversationSummary: String?,
+        documentChunks: [RetrievedChunk],
+        currentQuestion: String,
+        pairwiseSummaries: [String]? = nil
+    ) {
+        self.intent = intent
+        self.anchor = anchor
+        self.surroundingContext = surroundingContext
+        self.conversationHistory = conversationHistory
+        self.conversationSummary = conversationSummary
+        self.documentChunks = documentChunks
+        self.currentQuestion = currentQuestion
+        self.pairwiseSummaries = pairwiseSummaries
+    }
 }
 
 /// Output of the builder. Carries everything the call site needs to
@@ -424,11 +452,23 @@ nonisolated enum AskPoseyPromptBuilder {
         // whatever remains in the droppable pool.
         var remaining = droppableBudget
         let stmCap = min(budget.stmBudgetTokens, remaining)
-        let stmRendered = renderSTMBlock(
-            history: inputs.conversationHistory,
-            budgetTokens: stmCap,
-            droppedSink: &dropped
-        )
+        let stmRendered: String
+        if let pairwise = inputs.pairwiseSummaries, !pairwise.isEmpty {
+            // Task 4 #9 — pairwise mode replaces verbatim STM with
+            // tiered per-pair summaries. Same drop semantics: budget
+            // overflow drops oldest pairs first.
+            stmRendered = renderPairwiseSTMBlock(
+                pairSummaries: pairwise,
+                budgetTokens: stmCap,
+                droppedSink: &dropped
+            )
+        } else {
+            stmRendered = renderSTMBlock(
+                history: inputs.conversationHistory,
+                budgetTokens: stmCap,
+                droppedSink: &dropped
+            )
+        }
         let stmTokens = AskPoseyTokenEstimator.tokens(in: stmRendered)
         breakdown.stm = stmTokens
         remaining -= stmTokens
@@ -682,6 +722,60 @@ private extension AskPoseyPromptBuilder {
             .joined(separator: ", then ")
         return """
         EARLIER IN THIS CONVERSATION (the user has so far asked: \(questionList). Don't repeat your previous answers; treat each question fresh against the excerpts.):
+        """
+    }
+
+    /// Task 4 #9 (2026-05-03) — pairwise STM rendering. Each entry in
+    /// `pairSummaries` is a third-person summary of one Q/A exchange,
+    /// passed in oldest-first. Walks newest-first to claim budget so
+    /// the most recent pair (richest summary) is preserved when the
+    /// budget is tight; older pairs drop first.
+    static func renderPairwiseSTMBlock(
+        pairSummaries: [String],
+        budgetTokens: Int,
+        droppedSink: inout [AskPoseyPromptDroppedSection]
+    ) -> String {
+        let cleaned = pairSummaries
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty, budgetTokens > 0 else { return "" }
+
+        // ~6 tokens of header overhead, ~2 per separator. Reserve a
+        // small fixed scaffolding cost.
+        let scaffoldingTokens = 12
+        var remaining = budgetTokens - scaffoldingTokens
+        if remaining <= 0 {
+            for (idx, _) in cleaned.enumerated() {
+                droppedSink.append(.init(
+                    section: .stmTurn,
+                    identifier: "pairwise:\(idx)",
+                    reason: "pairwise STM dropped: scaffolding alone exceeds \(budgetTokens) token budget"
+                ))
+            }
+            return ""
+        }
+        var keptReversed: [String] = []
+        for (idxFromEnd, summary) in cleaned.reversed().enumerated() {
+            let originalIndex = cleaned.count - 1 - idxFromEnd
+            let cost = AskPoseyTokenEstimator.tokens(in: summary) + 2
+            if cost > remaining {
+                droppedSink.append(.init(
+                    section: .stmTurn,
+                    identifier: "pairwise:\(originalIndex)",
+                    reason: "pairwise STM budget exhausted: pair would have added \(cost) tokens, only \(remaining) remaining"
+                ))
+                continue
+            }
+            keptReversed.append(summary)
+            remaining -= cost
+        }
+        guard !keptReversed.isEmpty else { return "" }
+        let kept = Array(keptReversed.reversed())
+        let body = kept.enumerated().map { idx, text in
+            "(\(idx + 1)) \(text)"
+        }.joined(separator: " ")
+        return """
+        EARLIER IN THIS CONVERSATION (third-person summaries of prior exchanges, oldest first; reference material only — don't continue the script): \(body)
         """
     }
 

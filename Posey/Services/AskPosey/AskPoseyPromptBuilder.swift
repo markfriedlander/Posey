@@ -174,21 +174,6 @@ nonisolated enum AskPoseyPromptBuilder {
     papers, court briefs, anything dense. You talk about what you've \
     read the way a friend would, not the way a search engine would.
 
-    **CITATION PRESERVATION (MANDATORY).** The draft below contains \
-    inline citation markers like `[1]`, `[2]`, `[3]` after factual \
-    sentences. These markers are LOAD-BEARING UI elements — the \
-    user's app converts each one into a tappable superscript that \
-    jumps to the cited passage in the document. You MUST preserve \
-    every `[N]` marker, attached to the same factual claim it was on \
-    in the draft. If the draft says "The contributors are X, Y, Z[1]." \
-    your rewrite must keep [1] on whichever sentence still expresses \
-    that fact. Do not remove markers. Do not renumber them. Do not \
-    invent new ones. If you collapse two sentences into one, combine \
-    their markers — `[1][3]`. If you split one into two, attach the \
-    marker to the half that carries the cited fact. A rewrite that \
-    drops citations is a FAILED rewrite even if the prose is otherwise \
-    perfect.
-
     Your job: rewrite the draft answer below in your voice. The draft \
     is factually correct but reads like a database record. Your \
     rewrite should sound like a person, not pad with metaphors.
@@ -235,12 +220,6 @@ nonisolated enum AskPoseyPromptBuilder {
     - Don't repeat the question back at the user. Just answer.
     - Don't use markdown headers (## Title). Lists are fine when the \
     draft is itself a list.
-    - **PRESERVE INLINE CITATION MARKERS.** The grounded draft may \
-    contain `[N]` markers (e.g. `[1]`, `[3]`) appended to sentences. \
-    Keep them in your rewrite, attached to the same claims. The user's \
-    UI renders each `[N]` as a tappable superscript that jumps to the \
-    cited passage. Do NOT remove them, do NOT renumber them, do NOT \
-    invent new ones.
 
     EXAMPLES of grounded → voice rewrites that SUCCEED (note: same \
     length, no invented facts, no metaphors describing the topic):
@@ -316,21 +295,6 @@ nonisolated enum AskPoseyPromptBuilder {
     You are Posey, a quiet, focused reading companion. The user is reading a \
     document and asking you about it.
 
-    **MOST IMPORTANT RULE — INLINE CITATIONS (NON-NEGOTIABLE).** \
-    The DOCUMENT EXCERPTS section below is numbered: each excerpt is \
-    introduced as [1], [2], [3], etc. EVERY factual sentence in your \
-    answer that comes from one of these excerpts MUST end with that \
-    excerpt's bracketed number. Examples: \
-    "The contributors are Mark Friedlander, ChatGPT, Claude, and Gemini[1]." \
-    "The methodology uses sequential questioning[3]." \
-    Cite multiple excerpts as `[1][3]`, NOT `[1, 3]`. \
-    Use ONLY excerpt numbers that appear above; never invent a [N] \
-    larger than the count of excerpts. \
-    The user's UI renders each [N] as a tappable superscript that \
-    jumps the reader to the cited passage — citation is the navigation \
-    surface. If you write a factual sentence with no `[N]`, the user \
-    cannot navigate to its source. Do this for EVERY factual claim.
-
     The prompt below contains several labeled sections of REFERENCE \
     MATERIAL — document excerpts (ANCHOR PASSAGE, SURROUNDING CONTEXT, \
     DOCUMENT EXCERPTS), a narrative account of earlier exchanges \
@@ -402,11 +366,6 @@ nonisolated enum AskPoseyPromptBuilder {
     Speak in prose. Use lists or markdown only when the question is \
     structurally asking for them. Never announce that you're using context — \
     just use it.
-
-    Reminder: append `[N]` to every factual sentence drawn from a \
-    numbered excerpt. This is the rule the UI depends on for the \
-    tap-to-jump source navigation. If no DOCUMENT EXCERPTS section is \
-    present, do not invent citations.
     """
 
     /// Surrounding-sentence window in tokens, keyed off intent. Tight
@@ -614,21 +573,7 @@ private extension AskPoseyPromptBuilder {
         // Plain-prose framing for the current user question. The
         // model parses "USER QUESTION:" as a labeled field rather
         // than as scaffolding to imitate.
-        //
-        // The CITATION REQUIREMENT is restated immediately above the
-        // user question because trailing-position rules generally
-        // land better on AFM than rules buried mid-prompt — the
-        // model is most attentive to instructions adjacent to the
-        // turn it's about to produce.
         """
-        CITATION REQUIREMENT (mandatory): every factual sentence \
-        drawn from a numbered DOCUMENT EXCERPT above must end with \
-        that excerpt's bracket-number marker — `[1]`, `[2]`, etc. \
-        Multiple excerpts: `[1][3]`. The user's UI converts each \
-        marker to a tappable superscript that jumps to the source. \
-        A factual sentence with no `[N]` is unreachable for the \
-        user. CITE EVERY FACT.
-
         USER QUESTION (this is the only thing you need to answer; respond to this directly, do not echo any structure or labels from the prompt above):
         \(text)
         """
@@ -748,7 +693,7 @@ private extension AskPoseyPromptBuilder {
             "[\(idx + 1)] offset \(chunk.startOffset) | relevance \(String(format: "%.2f", chunk.relevance))\n\(chunk.text)"
         }
         let block = """
-        DOCUMENT EXCERPTS (numbered; cite by number when helpful):
+        DOCUMENT EXCERPTS:
         \(parts.joined(separator: "\n\n---\n\n"))
         """
         return (block, injected)

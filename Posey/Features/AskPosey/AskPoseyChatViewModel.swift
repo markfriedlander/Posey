@@ -1054,18 +1054,17 @@ extension AskPoseyChatViewModel {
         placeholderID: UUID,
         intent: AskPoseyIntent
     ) {
-        // Task 2 #25 — embedding-based citation attribution.
-        // If the model already emitted any `[N]` markers, trust them
-        // (AFM did the work explicitly). Otherwise fall back to
-        // cosine-similarity attribution: each sentence is matched
-        // to its best chunk in the same NLEmbedding vector space
-        // the M2 index uses. Threshold + multi-cite delta logged
-        // per-sentence so the threshold can be tuned on real
-        // answers without code changes.
+        // Task 2 — embedding-based citation attribution. Always runs
+        // on every answer. AFM does not emit citations; the model's
+        // job is the answer text in voice, the embedding's job is
+        // the citations. Clean separation. Each sentence in the
+        // polished answer is matched to its best chunk in the same
+        // NLEmbedding vector space the M2 index uses, and `[N]`
+        // markers are appended where cosine clears the threshold.
+        // Per-sentence scores logged via NSLog so the threshold can
+        // be tuned on real answers without code changes.
         let attributedFinalText: String = {
             let raw = metadata.finalText
-            let alreadyHasMarkers = raw.range(of: #"\[\d+\]"#, options: .regularExpression) != nil
-            if alreadyHasMarkers { return raw }
             guard let index = embeddingIndex,
                   !metadata.chunksInjected.isEmpty else { return raw }
             let chunkRefs = metadata.chunksInjected.enumerated().map { (i, c) in

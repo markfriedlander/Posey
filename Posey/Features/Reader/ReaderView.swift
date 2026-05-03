@@ -103,6 +103,10 @@ struct ReaderView: View {
                             )
                             .id(block.id)
                             .accessibilityIdentifier("reader.segment.\(block.id)")
+                            .onTapGesture(count: 2) {
+                                viewModel.jumpToOffset(block.startOffset)
+                                revealChrome()
+                            }
                         }
                     } else {
                         ForEach(viewModel.segments) { segment in
@@ -122,6 +126,10 @@ struct ReaderView: View {
                             )
                             .id(segment.id)
                             .accessibilityIdentifier("reader.segment.\(segment.id)")
+                            .onTapGesture(count: 2) {
+                                viewModel.jumpToOffset(segment.startOffset)
+                                revealChrome()
+                            }
                         }
                     }
                 }
@@ -541,19 +549,15 @@ struct ReaderView: View {
             // existing transport HStack — no collision with
             // Previous / Play / Next / Restart spacing.
             if AskPoseyAvailability.isAvailable {
-                Menu {
-                    Button {
-                        revealChrome()
-                        openAskPosey(scope: .passage)
-                    } label: {
-                        Label("Ask about this passage", systemImage: "quote.bubble")
-                    }
-                    Button {
-                        revealChrome()
-                        openAskPosey(scope: .document)
-                    } label: {
-                        Label("Ask about this document", systemImage: "books.vertical")
-                    }
+                // Single entry point — the AFM intent classifier
+                // routes invisibly between passage / document /
+                // navigation behaviors. Anchor is always the active
+                // sentence; document-scoped queries still work because
+                // the prompt builder + RAG pipeline ground answers
+                // across the whole document regardless of anchor.
+                Button {
+                    revealChrome()
+                    openAskPosey(scope: .passage)
                 } label: {
                     Image(systemName: "sparkle")
                         .font(.title3)

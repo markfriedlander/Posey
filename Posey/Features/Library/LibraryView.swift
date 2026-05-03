@@ -760,11 +760,24 @@ extension LibraryViewModel {
 
             case "TAP":
                 // TAP:<accessibilityID>
+                // Tries the registry first (works reliably for SwiftUI
+                // controls); falls back to UIView accessibility-tree
+                // search for any UIKit elements that registered via
+                // raw `.accessibilityIdentifier(_:)` without
+                // `.remoteRegister`.
                 guard let id = arg, !id.isEmpty else {
                     return #"{"error":"Usage: TAP:<accessibilityID>"}"#
                 }
-                let activated = await MainActor.run { RemoteControl.tap(accessibilityID: id) }
-                return json(["accessibilityID": id, "found": activated])
+                let outcome = await MainActor.run { () -> [String: Any] in
+                    if RemoteTargetRegistry.shared.fire(id) {
+                        return ["accessibilityID": id, "found": true, "via": "registry"]
+                    }
+                    if RemoteControl.tap(accessibilityID: id) {
+                        return ["accessibilityID": id, "found": true, "via": "uiview-tree"]
+                    }
+                    return ["accessibilityID": id, "found": false]
+                }
+                return json(outcome)
 
             case "TYPE":
                 guard let text = arg else {

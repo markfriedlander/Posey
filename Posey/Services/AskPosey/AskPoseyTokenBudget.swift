@@ -134,8 +134,23 @@ nonisolated struct AskPoseyTokenBudget: Sendable, Equatable {
     /// Retrieved document chunks (RAG). 2026-05-02: 1800 → 1400 to
     /// fit the tightened response-reserve. Front-matter chunks
     /// (relevance 1.0) still survive; cosine-ranked chunks lower in
-    /// the list drop sooner under the smaller cap.
+    /// the list drop sooner under the smaller cap. **2026-05-03:
+    /// callers using long-doc chunking (Task 4 #6 A) should bump
+    /// this via `forLongDocument()` so 2000-char chunks aren't
+    /// limited to a single chunk per turn.**
     var ragBudgetTokens: Int = 1400
+
+    /// Long-document budget — used when chunks are 2000-char
+    /// scenes rather than 500-char fragments. Doubles the RAG
+    /// allowance so 3-4 scene chunks fit per turn instead of 1.
+    /// Other section budgets stay the same; the larger RAG slice
+    /// comes out of headroom that smaller-chunk docs leave on the
+    /// table.
+    static func forLongDocument() -> AskPoseyTokenBudget {
+        var b = AskPoseyTokenBudget()
+        b.ragBudgetTokens = 2800
+        return b
+    }
 
     // MARK: - Derived
 

@@ -255,7 +255,19 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         self.summarizer = summarizer
         self.navigator = navigator
         self.databaseManager = databaseManager
-        self.budget = budget
+        // Task 4 #6 — pick the long-document budget when the
+        // document is over the long-doc threshold. The chunks
+        // were indexed at 2000 chars apiece, so the RAG budget
+        // needs to be doubled (2800 vs 1400) to fit 3-4 chunks
+        // per turn instead of just 1. Caller-supplied budget
+        // wins (tests pass explicit budgets); only the default
+        // gets the adaptive swap.
+        if budget == .afmDefault,
+           documentPlainText.count >= DocumentEmbeddingIndexConfiguration.longDocumentThresholdChars {
+            self.budget = .forLongDocument()
+        } else {
+            self.budget = budget
+        }
 
         // Kick off history load. UI shows isLoadingHistory until
         // this completes; on a fresh-document open it returns
@@ -695,9 +707,21 @@ private extension AskPoseyChatViewModel {
         // on real-world tests; 4 (~1800 chars) reliably reaches
         // contributor names listed below the abstract. Deduplicates
         // against any cosine match for the same chunk ID.
+        // Long documents (1.6M-char books) use 2000-char chunks
+        // (Task 4 #6 A) which means each front-matter chunk costs
+        // ~800 tokens. 4 of them × 800 = 3200 tokens — that's more
+        // than the entire RAG budget for long-doc mode and crowds
+        // out the entity-index hits that actually answer
+        // mid-book questions. Drop to 1 front-matter chunk for
+        // long docs (titles + author + abstract still fit in
+        // 2000 chars at the start of the document); short docs
+        // keep all 4.
+        let frontMatterLimit: Int = documentPlainText.count
+            >= DocumentEmbeddingIndexConfiguration.longDocumentThresholdChars
+            ? 1 : 4
         var frontMatter: [RetrievedChunk] = []
         if let db = databaseManager {
-            let storedFront = (try? db.frontMatterChunks(for: documentID, limit: 4)) ?? []
+            let storedFront = (try? db.frontMatterChunks(for: documentID, limit: frontMatterLimit)) ?? []
             for stored in storedFront {
                 let alreadyPresent = results.contains { $0.chunk.chunkIndex == stored.chunkIndex }
                 if alreadyPresent { continue }

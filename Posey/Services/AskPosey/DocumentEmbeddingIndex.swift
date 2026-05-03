@@ -68,6 +68,35 @@ nonisolated struct DocumentEmbeddingIndexConfiguration: Sendable {
         chunkSize: 500,
         chunkOverlap: 50
     )
+
+    /// Task 4 #6 (A) — long-document config. Used for documents
+    /// whose plainText length exceeds `longDocumentThresholdChars`.
+    /// Initially set to 2000 chars per chunk; testing on
+    /// Illuminatus showed that 2000-char chunks (~800 tokens
+    /// each) crowd out the RAG budget — only 1 chunk fit per
+    /// turn, defeating the entire point of retrieval. Settled at
+    /// 1000 chars per chunk: ~400 tokens, allowing 3-4 chunks
+    /// per turn within the long-doc 2800-token RAG budget. Still
+    /// 2× the short-doc chunk size, so character/identity
+    /// questions get more context per chunk than the original
+    /// 500-char fragments while leaving headroom for multiple
+    /// retrieval hits.
+    static let longDocument = DocumentEmbeddingIndexConfiguration(
+        chunkSize: 1000,
+        chunkOverlap: 100
+    )
+
+    /// Documents over this length use the `longDocument` config
+    /// (larger chunks). Threshold picked at 200K chars — covers
+    /// typical book-length content (Illuminatus is 1.6M, novels
+    /// are ~250K-1M, novellas/short books still get the precise
+    /// 500-char chunking that suits short-form material).
+    static let longDocumentThresholdChars: Int = 200_000
+
+    /// Pick the right config for a document by length.
+    static func adaptive(forCharacterCount count: Int) -> DocumentEmbeddingIndexConfiguration {
+        count >= longDocumentThresholdChars ? .longDocument : .default
+    }
 }
 // ========== BLOCK 02: CONFIG - END ==========
 
@@ -191,7 +220,13 @@ nonisolated final class DocumentEmbeddingIndex {
         // them; the database write is dispatched back to main with
         // an explicit weak self capture, where the access is safe.
         let database = self.database
-        let configuration = self.configuration
+        // Task 4 #6 (A) — adaptive chunk size by document length.
+        // Override the instance config when the document is long.
+        // The instance default still wins for short docs (essays,
+        // papers, articles); long-form fiction / books get the
+        // larger chunks that carry scene-level context.
+        let configuration = DocumentEmbeddingIndexConfiguration
+            .adaptive(forCharacterCount: plainText.count)
 
         DispatchQueue.main.async {
             NotificationCenter.default.post(
@@ -239,6 +274,10 @@ nonisolated final class DocumentEmbeddingIndex {
             let progressBatchSize = 50
             var stored: [StoredDocumentChunk] = []
             stored.reserveCapacity(totalChunks)
+            // Task 4 #6 (B) — entity index. Collect (entityLower,
+            // chunkIndex) pairs as we walk the chunks; persist them
+            // alongside the chunk vectors at the end.
+            var entityRows: [(entityLower: String, chunkIndex: Int)] = []
             for (index, chunk) in chunks.enumerated() {
                 let vector = Self.embed(chunk.text, with: embedder)
                 stored.append(StoredDocumentChunk(
@@ -249,6 +288,15 @@ nonisolated final class DocumentEmbeddingIndex {
                     embedding: vector,
                     embeddingKind: kind
                 ))
+                // Extract named entities from this chunk via the
+                // same NLTagger plumbing the entity-boost search
+                // already uses. Lowercased + de-duped per chunk so
+                // an entity mentioned 5 times in one chunk doesn't
+                // create 5 rows.
+                let chunkEntities = Self.extractEntities(from: chunk.text)
+                for entity in chunkEntities {
+                    entityRows.append((entityLower: entity, chunkIndex: chunk.chunkIndex))
+                }
                 let processed = index + 1
                 if processed % progressBatchSize == 0 && processed < totalChunks {
                     let snapshot = processed
@@ -271,6 +319,24 @@ nonisolated final class DocumentEmbeddingIndex {
             DispatchQueue.main.async {
                 do {
                     try database.replaceChunks(stored, for: documentID)
+                    // Task 4 #6 (B) — replace any prior entities
+                    // (from an older index) and bulk-insert the new
+                    // ones in a single transaction. Failure here is
+                    // non-fatal: chunks succeeded, the entity-aware
+                    // retrieval just degrades to plain cosine for
+                    // this document.
+                    do {
+                        try database.deleteEntities(for: documentID)
+                        if !entityRows.isEmpty {
+                            try database.insertEntities(documentID: documentID, entries: entityRows)
+                        }
+                    } catch {
+                        NSLog(
+                            "[POSEY_ASK_POSEY] entity index failed for %@: %@",
+                            documentTitle,
+                            "\(error)"
+                        )
+                    }
                     NotificationCenter.default.post(
                         name: .documentIndexingDidComplete,
                         object: nil,
@@ -404,14 +470,52 @@ nonisolated final class DocumentEmbeddingIndex {
         guard !query.isEmpty else { return [] }
         let widerLimit = max(limit * 3, limit)
         let candidates = try search(documentID: documentID, query: query, limit: widerLimit)
-        guard !candidates.isEmpty else { return [] }
 
+        // Task 4 #6 (B) — entity-index lookup. When the question
+        // contains named entities AND the document has an entity
+        // index, fetch every chunk that mentions those entities
+        // (case-insensitive). These get UNCONDITIONALLY mixed into
+        // the candidate pool — they may not have ranked top-K on
+        // pure cosine but they're guaranteed to mention what the
+        // user asked about. Empty entity set → degrade to pure
+        // cosine, same as before.
         let queryEntities = Self.extractEntities(from: query)
+        let queryEntitiesArray = Array(queryEntities)
+
+        var entityChunks: [DocumentEmbeddingSearchResult] = []
+        if !queryEntitiesArray.isEmpty {
+            do {
+                let mentionedIndices = try database.chunkIndicesMentioningEntities(
+                    documentID: documentID,
+                    entitiesLower: queryEntitiesArray
+                )
+                if !mentionedIndices.isEmpty {
+                    let stored = try database.chunks(for: documentID)
+                    let storedByIndex = Dictionary(uniqueKeysWithValues: stored.map { ($0.chunkIndex, $0) })
+                    let candidateIndexSet = Set(candidates.map { $0.chunk.chunkIndex })
+                    for idx in mentionedIndices where !candidateIndexSet.contains(idx) {
+                        guard let chunk = storedByIndex[idx] else { continue }
+                        // Synthetic similarity 0.99 — high enough
+                        // to land at the top of re-ranked results
+                        // but not 1.0 (reserved for exact-match
+                        // sentinel uses elsewhere).
+                        entityChunks.append(DocumentEmbeddingSearchResult(chunk: chunk, similarity: 0.99))
+                    }
+                }
+            } catch {
+                NSLog("[POSEY_ASK_POSEY] entity-index lookup failed: %@", "\(error)")
+            }
+        }
+
+        let pool = candidates + entityChunks
+        guard !pool.isEmpty else { return [] }
 
         // Score every candidate; the multi-factor formula clamps
         // into a stable range so downstream UI (relevance pills)
-        // stays sensible.
-        let rescored: [DocumentEmbeddingSearchResult] = candidates.map { candidate in
+        // stays sensible. Entity-index chunks already start at
+        // 0.99 + 2.0 × full-overlap so they reliably land near
+        // the top.
+        let rescored: [DocumentEmbeddingSearchResult] = pool.map { candidate in
             let chunkEntities = Self.extractEntities(from: candidate.chunk.text)
             let overlap = Self.jaccardOverlap(queryEntities, chunkEntities)
             let raw = candidate.similarity + 2.0 * overlap

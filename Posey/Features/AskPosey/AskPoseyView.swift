@@ -724,12 +724,17 @@ struct AskPoseyMessageBubble: View {
     /// Markers without a matching chunk (e.g. AFM hallucinated
     /// `[12]` when only 4 chunks were injected) fall through
     /// unchanged so they're visible but inert.
+    /// When AFM didn't emit any markers (it's inconsistent about
+    /// following the citation instruction even with the rule
+    /// repeated three times in the prompt), the renderer falls
+    /// back to auto-attributing each sentence to its best-match
+    /// chunk by unique-keyword overlap.
     private var renderedMarkdown: String {
         guard message.role == .assistant,
               !message.chunksInjected.isEmpty else { return message.content }
         return AskPoseyCitationRenderer.render(
             text: message.content,
-            chunkCount: message.chunksInjected.count
+            chunks: message.chunksInjected
         )
     }
 
@@ -749,7 +754,26 @@ struct AskPoseyMessageBubble: View {
 enum AskPoseyCitationRenderer {
     static let citationURLScheme = "posey-cite"
 
+    /// Render AFM-emitted `[N]` markers to tappable superscripts.
+    /// When the model didn't emit any markers but chunks ARE
+    /// available, fall back to auto-attribution via
+    /// `autoAttribute(_:chunks:)`.
+    static func render(text: String, chunks: [RetrievedChunk]) -> String {
+        guard !chunks.isEmpty else { return text }
+        let withMarkers = text.range(of: #"\[\d+\]"#, options: .regularExpression) != nil
+            ? text
+            : autoAttribute(text, chunks: chunks)
+        return convertMarkersToLinks(withMarkers, chunkCount: chunks.count)
+    }
+
+    /// Test seam — the original `chunkCount`-only signature kept
+    /// for the unit tests that already exercised the marker→link
+    /// path without auto-attribution.
     static func render(text: String, chunkCount: Int) -> String {
+        convertMarkersToLinks(text, chunkCount: chunkCount)
+    }
+
+    private static func convertMarkersToLinks(_ text: String, chunkCount: Int) -> String {
         guard chunkCount > 0 else { return text }
         let pattern = #"\[(\d{1,2})\]"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
@@ -768,6 +792,86 @@ enum AskPoseyCitationRenderer {
         }
         result += text[lastEnd..<text.endIndex]
         return result
+    }
+
+    /// Append `[N]` to each sentence whose unique-keyword overlap
+    /// with chunk N is highest among all chunks AND meets the
+    /// minimum threshold (≥2 distinct shared content words). Words
+    /// shorter than 4 characters or in the small stoplist are
+    /// ignored to avoid attributing on "the / and / of / for". A
+    /// sentence with no match keeps no marker — the user simply
+    /// can't navigate to a source for that claim.
+    static func autoAttribute(_ text: String, chunks: [RetrievedChunk]) -> String {
+        guard !chunks.isEmpty else { return text }
+        // Per-chunk unique content-word sets.
+        let chunkSets: [Set<String>] = chunks.map { contentWords(in: $0.text) }
+        // Walk sentences. Naive splitter — period / question / exclamation
+        // followed by whitespace. Good enough for assistant prose; doesn't
+        // need to be perfect.
+        let nsText = text as NSString
+        guard let sentenceRegex = try? NSRegularExpression(pattern: #"[^.!?]+[.!?]+(?=\s|$)|[^.!?]+$"#)
+        else { return text }
+        let matches = sentenceRegex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        guard !matches.isEmpty else { return text }
+        var result = ""
+        var cursor = 0
+        for match in matches {
+            let sentenceRange = match.range
+            // Append any whitespace / leading text between matches verbatim.
+            if sentenceRange.location > cursor {
+                result += nsText.substring(with: NSRange(location: cursor, length: sentenceRange.location - cursor))
+            }
+            let sentence = nsText.substring(with: sentenceRange)
+            let words = contentWords(in: sentence)
+            // Score each chunk: |words ∩ chunkSet|.
+            let scores = chunkSets.enumerated().map { idx, set in
+                (idx + 1, words.intersection(set).count)
+            }
+            let best = scores.max(by: { $0.1 < $1.1 })
+            if let (n, score) = best, score >= 2 {
+                // Append the marker before any trailing whitespace
+                // that might be part of the sentence run.
+                let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trailingWS = sentence.dropFirst(trimmed.count)
+                result += "\(trimmed)[\(n)]\(trailingWS)"
+            } else {
+                result += sentence
+            }
+            cursor = sentenceRange.location + sentenceRange.length
+        }
+        if cursor < nsText.length {
+            result += nsText.substring(from: cursor)
+        }
+        return result
+    }
+
+    private static let citationStopwords: Set<String> = [
+        "this", "that", "with", "from", "they", "their", "them",
+        "what", "when", "which", "where", "have", "been", "were",
+        "into", "than", "then", "your", "also", "only", "like",
+        "just", "make", "made", "much", "more", "some", "such",
+        "very", "well", "will", "would", "should", "could", "about",
+        "there", "these", "those", "other", "first", "second", "third",
+        "here", "still"
+    ]
+
+    private static func contentWords(in s: String) -> Set<String> {
+        var words = Set<String>()
+        var current = ""
+        for ch in s.lowercased() {
+            if ch.isLetter || ch.isNumber {
+                current.append(ch)
+            } else {
+                if current.count >= 4, !citationStopwords.contains(current) {
+                    words.insert(current)
+                }
+                current = ""
+            }
+        }
+        if current.count >= 4, !citationStopwords.contains(current) {
+            words.insert(current)
+        }
+        return words
     }
 
     /// Resolve the chunk number out of a `posey-cite://N` URL.

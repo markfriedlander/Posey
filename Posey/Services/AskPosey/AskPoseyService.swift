@@ -306,6 +306,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                 body: output.renderedBody
             )
             NSLog("AskPosey: grounded call returned %d chars", grounded.count)
+            NSLog("AskPosey: grounded text: %@", grounded as NSString)
         } catch is CancellationError {
             throw CancellationError()
         } catch let originalError {
@@ -436,11 +437,27 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             "doesn't specify"
         ].contains(where: { groundedLower.contains($0) })
 
+        // Task 2 #25 — citation preservation guard. The polish call
+        // demonstrably strips inline `[N]` citation markers from the
+        // grounded draft despite a "PRESERVE INLINE CITATION MARKERS"
+        // hard rule in its instructions. For SHORT factual answers
+        // that already carry citations, polishing isn't worth the
+        // citation loss — the grounded text is already concise. So
+        // when the grounded text contains at least one `[N]` AND is
+        // short enough that polish wouldn't add much, skip polish and
+        // stream grounded verbatim.
+        let groundedHasCitations = grounded.range(of: #"\[\d+\]"#, options: .regularExpression) != nil
+        let groundedIsShort = grounded.count < 300
+
         var accumulated = ""
         if refusalShape {
             // Stream the grounded text through verbatim. The
             // grounded call's wording is already short and clean
             // ("The document doesn't say.") — no polish needed.
+            accumulated = grounded
+            onSnapshot(grounded)
+        } else if groundedHasCitations && groundedIsShort {
+            NSLog("AskPosey: skipping polish — grounded has citations and is short")
             accumulated = grounded
             onSnapshot(grounded)
         } else {

@@ -48,7 +48,7 @@ struct SearchBarView: View {
                         .frame(width: 44, height: 44)
                 }
                 .disabled(matchCount == 0)
-                .accessibilityIdentifier("search.previous")
+                .remoteRegister("search.previous", action: onPrevious)
                 .accessibilityLabel("Previous match")
 
                 Button(action: onNext) {
@@ -57,7 +57,7 @@ struct SearchBarView: View {
                         .frame(width: 44, height: 44)
                 }
                 .disabled(matchCount == 0)
-                .accessibilityIdentifier("search.next")
+                .remoteRegister("search.next", action: onNext)
                 .accessibilityLabel("Next match")
 
                 Button {
@@ -67,13 +67,13 @@ struct SearchBarView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 44, height: 44)
                 }
-                .accessibilityIdentifier("search.clearQuery")
+                .remoteRegister("search.clearQuery") { query = "" }
                 .accessibilityLabel("Clear search")
             }
 
             Button("Done") { onDismiss() }
                 .font(.footnote)
-                .accessibilityIdentifier("search.done")
+                .remoteRegister("search.done", action: onDismiss)
         }
         .tint(.primary)
         .padding(.horizontal, 16)

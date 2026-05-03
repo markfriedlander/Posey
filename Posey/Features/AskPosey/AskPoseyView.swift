@@ -190,7 +190,10 @@ struct AskPoseyView: View {
                         viewModel.cancelInFlight()
                         dismiss()
                     }
-                    .accessibilityIdentifier("askPosey.done")
+                    .remoteRegister("askPosey.done") {
+                        viewModel.cancelInFlight()
+                        dismiss()
+                    }
                 }
             }
             .onReceive(
@@ -252,6 +255,50 @@ struct AskPoseyView: View {
 
 }
 // ========== BLOCK 01: ROOT VIEW - END ==========
+
+
+// ========== BLOCK 01B: ANCHOR ROW REMOTE REGISTRATION - START ==========
+/// Registers each anchor row with `RemoteTargetRegistry` under a
+/// per-row id (`askPosey.anchor.<storageID>` /
+/// `askPosey.documentScopeRow.<storageID>`) so a TAP API call can
+/// drive a specific anchor's tap action regardless of position in
+/// the thread. Also keeps the `accessibilityIdentifier` on the
+/// shared base id (`askPosey.anchor` / `askPosey.documentScopeRow`)
+/// so existing UI tests / VoiceOver labels continue to work.
+private struct AskPoseyAnchorRowRemoteRegister: ViewModifier {
+    let message: AskPoseyMessage
+    let isDocumentScope: Bool
+    let onJumpToChunk: ((Int) -> Void)?
+    let dismiss: DismissAction
+    let cancelInFlight: () -> Void
+
+    func body(content: Content) -> some View {
+        let baseID = isDocumentScope ? "askPosey.documentScopeRow" : "askPosey.anchor"
+        let storageID = message.storageID ?? message.id.uuidString
+        let scopedID = "\(baseID).\(storageID)"
+        return content
+            .accessibilityIdentifier(baseID)
+            .onAppear {
+                let action: () -> Void = {
+                    guard let offset = message.anchorOffset, let onJumpToChunk else { return }
+                    cancelInFlight()
+                    onJumpToChunk(offset)
+                    dismiss()
+                }
+                RemoteTargetRegistry.shared.register(scopedID, action: action)
+                RemoteTargetRegistry.shared.register(baseID, action: action)
+            }
+            .onDisappear {
+                RemoteTargetRegistry.shared.unregister(scopedID)
+                // Only unregister the shared base id if THIS row is
+                // the one that registered it most recently. We can't
+                // tell from here, so leave it; the next row to appear
+                // will overwrite. Acceptable: the shared id always
+                // points at SOME currently-visible anchor.
+            }
+    }
+}
+// ========== BLOCK 01B: ANCHOR ROW REMOTE REGISTRATION - END ==========
 
 
 // ========== BLOCK 02: ANCHOR + PRIVACY + COMPOSER - START ==========
@@ -361,9 +408,13 @@ private extension AskPoseyView {
                 ? "Asking about the whole document, \(trimmedContent). Tap to jump back."
                 : "Anchor passage: \(trimmedContent). Tap to jump."
         )
-        .accessibilityIdentifier(
-            isDocumentScope ? "askPosey.documentScopeRow" : "askPosey.anchor"
-        )
+        .modifier(AskPoseyAnchorRowRemoteRegister(
+            message: message,
+            isDocumentScope: isDocumentScope,
+            onJumpToChunk: onJumpToChunk,
+            dismiss: dismiss,
+            cancelInFlight: { viewModel.cancelInFlight() }
+        ))
     }
 
     /// Detent strategy keyed off horizontal size class. iPhone in

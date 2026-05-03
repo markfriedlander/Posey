@@ -531,7 +531,11 @@ struct ReaderView: View {
                     .foregroundStyle(chromeTint)
                     .frame(width: 44, height: 44)
             }
-            .accessibilityIdentifier("reader.search")
+            .remoteRegister("reader.search") {
+                revealChrome()
+                viewModel.isSearchActive = true
+                chromeFadeTask?.cancel()
+            }
             .accessibilityLabel("Search in document")
 
             if !viewModel.tocEntries.isEmpty {
@@ -544,7 +548,10 @@ struct ReaderView: View {
                         .foregroundStyle(chromeTint)
                         .frame(width: 44, height: 44)
                 }
-                .accessibilityIdentifier("reader.toc")
+                .remoteRegister("reader.toc") {
+                    revealChrome()
+                    isShowingTOCSheet = true
+                }
                 .accessibilityLabel("Table of contents")
             }
 
@@ -557,7 +564,10 @@ struct ReaderView: View {
                     .foregroundStyle(chromeTint)
                     .frame(width: 44, height: 44)
             }
-            .accessibilityIdentifier("reader.preferences")
+            .remoteRegister("reader.preferences") {
+                revealChrome()
+                isShowingPreferencesSheet = true
+            }
             .accessibilityLabel("Reader preferences")
 
             Button {
@@ -570,7 +580,11 @@ struct ReaderView: View {
                     .foregroundStyle(chromeTint)
                     .frame(width: 44, height: 44)
             }
-            .accessibilityIdentifier("reader.notes")
+            .remoteRegister("reader.notes") {
+                revealChrome()
+                viewModel.prepareForNotesEntry()
+                isShowingNotesSheet = true
+            }
             .accessibilityLabel("Notes")
         }
         .padding(.horizontal, 10)
@@ -604,7 +618,10 @@ struct ReaderView: View {
                         .foregroundStyle(chromeTint)
                         .frame(width: 44, height: 44)
                 }
-                .accessibilityIdentifier("reader.askPosey")
+                .remoteRegister("reader.askPosey") {
+                    revealChrome()
+                    openAskPosey(scope: .passage)
+                }
                 .accessibilityLabel("Ask Posey")
 
                 Spacer(minLength: 24)
@@ -619,7 +636,10 @@ struct ReaderView: View {
                     .foregroundStyle(chromeTint)
                     .frame(width: 44, height: 44)
             }
-            .accessibilityIdentifier("reader.previous")
+            .remoteRegister("reader.previous") {
+                revealChrome()
+                viewModel.goToPreviousMarker()
+            }
             .accessibilityLabel("Previous sentence")
 
             Spacer(minLength: 24)
@@ -633,7 +653,10 @@ struct ReaderView: View {
                     .foregroundStyle(chromeTint)
                     .frame(width: 44, height: 44)
             }
-            .accessibilityIdentifier("reader.playPause")
+            .remoteRegister("reader.playPause") {
+                revealChrome()
+                viewModel.togglePlayback()
+            }
             .accessibilityLabel(viewModel.playbackState == .playing ? "Pause" : "Play")
 
             Spacer(minLength: 24)
@@ -647,7 +670,10 @@ struct ReaderView: View {
                     .foregroundStyle(chromeTint)
                     .frame(width: 44, height: 44)
             }
-            .accessibilityIdentifier("reader.next")
+            .remoteRegister("reader.next") {
+                revealChrome()
+                viewModel.goToNextMarker()
+            }
             .accessibilityLabel("Next sentence")
 
             Spacer(minLength: 24)
@@ -661,7 +687,10 @@ struct ReaderView: View {
                     .foregroundStyle(chromeSecondaryTint)
                     .frame(width: 44, height: 44)
             }
-            .accessibilityIdentifier("reader.restart")
+            .remoteRegister("reader.restart") {
+                revealChrome()
+                viewModel.restartFromBeginning()
+            }
             .accessibilityLabel("Restart from beginning")
         }
         .frame(maxWidth: .infinity)
@@ -1236,7 +1265,9 @@ private struct ReaderPreferencesSheet: View {
                         }
                         .foregroundStyle(.primary)
                     }
-                    .accessibilityIdentifier("preferences.exportAudio")
+                    .remoteRegister("preferences.exportAudio") {
+                        viewModel.beginAudioExport()
+                    }
                 } header: {
                     Text("Audio Export")
                 } footer: {
@@ -1266,7 +1297,9 @@ private struct ReaderPreferencesSheet: View {
                                         .foregroundStyle(.primary)
                                 }
                             }
-                            .accessibilityIdentifier("preferences.motionConsentReview")
+                            .remoteRegister("preferences.motionConsentReview") {
+                                viewModel.showMotionConsent = true
+                            }
                         } else {
                             Text(viewModel.motionPreference.description)
                                 .font(.caption)
@@ -1578,12 +1611,16 @@ private struct NotesSheet: View {
                         viewModel.saveDraftNoteForCurrentSentence()
                     }
                     .disabled(viewModel.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("notes.save")
+                    .remoteRegister("notes.save") {
+                        viewModel.saveDraftNoteForCurrentSentence()
+                    }
 
                     Button("Bookmark Here") {
                         viewModel.addBookmarkForCurrentSentence()
                     }
-                    .accessibilityIdentifier("notes.bookmark")
+                    .remoteRegister("notes.bookmark") {
+                        viewModel.addBookmarkForCurrentSentence()
+                    }
                 }
 
                 Section("Saved Annotations") {
@@ -1713,7 +1750,10 @@ private struct NotesSheet: View {
                             dismiss()
                         }
                         .font(.caption.weight(.semibold))
-                        .accessibilityIdentifier("notes.jump.\(entry.id)")
+                        .remoteRegister("notes.jump.\(entry.id)") {
+                            viewModel.jumpToOffset(entry.offset)
+                            dismiss()
+                        }
                     }
                 }
             }
@@ -1722,7 +1762,9 @@ private struct NotesSheet: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(kindLabel): \(entry.anchorText)")
-        .accessibilityIdentifier("notes.row.\(entry.id)")
+        .remoteRegister("notes.row.\(entry.id)") {
+            handleSavedAnnotationTap(entry)
+        }
     }
 
     private func handleSavedAnnotationTap(_ entry: SavedAnnotation) {
@@ -3174,7 +3216,7 @@ private struct TOCSheet: View {
                 Button("Go") { performJump() }
                     .buttonStyle(.borderedProminent)
                     .disabled(pageInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("toc.pageGoButton")
+                    .remoteRegister("toc.pageGoButton") { performJump() }
                 Spacer(minLength: 0)
                 if let range = viewModel.pageMap.pageRange {
                     Text("of \(range.upperBound)")

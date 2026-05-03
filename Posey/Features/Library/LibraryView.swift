@@ -60,7 +60,9 @@ struct LibraryView: View {
                     }
                     .padding(.vertical, 4)
                 }
-                .accessibilityIdentifier("library.document.\(document.title)")
+                .remoteRegister("library.document.\(document.title)") {
+                    if path.last?.id != document.id { path = [document] }
+                }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button(role: .destructive) {
                         documentPendingDeletion = document
@@ -96,7 +98,9 @@ struct LibraryView: View {
                                              ? Color.primary
                                              : Color.primary.opacity(0.25))
                     }
-                    .accessibilityIdentifier("library.apiToggle")
+                    .remoteRegister("library.apiToggle") {
+                        viewModel.toggleLocalAPI()
+                    }
                     .accessibilityLabel(viewModel.localAPIEnabled ? "API On" : "API Off")
                 }
                 #endif
@@ -105,7 +109,9 @@ struct LibraryView: View {
                         isImporting = true
                     }
                     .disabled(viewModel.pdfImportStatusMessage != nil)
-                    .accessibilityIdentifier("library.importTXT")
+                    .remoteRegister("library.importTXT") {
+                        isImporting = true
+                    }
                 }
             }
             .navigationDestination(for: Document.self) { document in

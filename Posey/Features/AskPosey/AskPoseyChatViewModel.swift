@@ -141,6 +141,14 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// next turn includes the just-completed exchange.
     private var historyForPromptBuilder: [AskPoseyMessage] = []
 
+    /// Task 4 #4 (b) — anchor row deferred until first user send.
+    /// `appendCurrentInvocationAnchorMarkerIfNeeded` builds the
+    /// in-memory anchor and stashes its DB row here. The first
+    /// `persistTurn(role: .user, ...)` flushes it; if the user
+    /// dismisses without sending, this stays nil and no orphan
+    /// anchor lands in the persisted thread.
+    private var pendingAnchorPersist: StoredAskPoseyTurn?
+
     /// Cap on history rows fetched from SQLite. Sized so the prompt
     /// builder has more raw rows than the STM budget can fit — extras
     /// are silently dropped at build time, which is the correct
@@ -415,16 +423,34 @@ private extension AskPoseyChatViewModel {
         appendCurrentInvocationAnchorMarkerIfNeeded(persist: true)
     }
 
-    /// Build + append (and optionally persist) an anchor marker for
-    /// the current invocation. Skipped when the caller passed an
-    /// `initialScrollAnchorStorageID` — that signals navigation to an
-    /// existing anchor row, not a fresh invocation.
+    /// Build + append an anchor marker for the current invocation,
+    /// with two suppression rules per Mark's Task 4 #4 directive:
+    ///
+    /// (a) **Reuse identical anchors.** If the most recent stored
+    ///     anchor for this document has the same `(offset, scope)`
+    ///     tuple, reuse its `storageID` instead of writing a
+    ///     duplicate. The Ask Posey sheet just scrolls to the
+    ///     existing anchor in the thread. Surfaced when Mark tapped
+    ///     the bottom-bar Ask Posey glyph twice from the same
+    ///     position and saw two identical "Demystifying the
+    ///     Machine…" anchor cards back-to-back.
+    ///
+    /// (b) **Defer DB persistence to first send.** The in-memory
+    ///     anchor still appears in the sheet immediately on open
+    ///     (good UX — the user sees what they're asking about). But
+    ///     the DB row gets written only when the user actually
+    ///     sends their first question. If the user dismisses
+    ///     without sending, no orphan anchor is left in the
+    ///     persisted thread. The first call to `persistTurn(role:
+    ///     .user, ...)` flushes the pending anchor first.
+    ///
+    /// Skipped entirely when the caller passed an
+    /// `initialScrollAnchorStorageID` — that signals navigation to
+    /// an existing anchor row, not a fresh invocation.
     func appendCurrentInvocationAnchorMarkerIfNeeded(persist: Bool) {
         guard initialScrollAnchorStorageID == nil else { return }
 
-        // Determine display text + scope for the marker. Passage
-        // scope = full passage text. Document scope = document title
-        // (fallback to "this document" if no title is available).
+        // Determine display text + scope for the marker.
         let scope: String = (anchor != nil) ? "passage" : "document"
         let displayText: String
         if let anchor, !anchor.trimmedDisplayText.isEmpty {
@@ -435,12 +461,23 @@ private extension AskPoseyChatViewModel {
         } else {
             displayText = "this document"
         }
-
-        // Captured reading offset at invocation — always populated
-        // (passage scope mirrors anchor.plainTextOffset; doc scope
-        // gets the active sentence offset from the caller).
         let offset = invocationReadingOffset ?? 0
 
+        // (a) Look up the most recent stored anchor. If same
+        //     (offset, scope) tuple, reuse — no new row, no in-
+        //     memory dupe (the existing one is already loaded into
+        //     `messages` by `loadHistory`).
+        if persist, let db = databaseManager,
+           let mostRecent = (try? db.askPoseyAnchorRows(for: documentID))?.first,
+           mostRecent.invocation == scope,
+           mostRecent.anchorOffset == offset {
+            initialScrollAnchorStorageID = mostRecent.id
+            NSLog("AskPosey: reusing anchor %@ (same offset+scope as most recent)", mostRecent.id as NSString)
+            return
+        }
+
+        // Build the in-memory marker — always shown in the sheet so
+        // the user sees what they're asking about.
         let storageID = UUID().uuidString
         let marker = AskPoseyMessage(
             role: .anchor,
@@ -451,13 +488,14 @@ private extension AskPoseyChatViewModel {
             storageID: storageID
         )
         messages.append(marker)
-        // Surface the storage id so the view's initial scroll lands
-        // on the marker we just appended (default behavior — Notes
-        // tap-conversation overrides via the init param).
         initialScrollAnchorStorageID = storageID
 
-        guard persist, let db = databaseManager else { return }
-        let stored = StoredAskPoseyTurn(
+        // (b) Defer DB persistence — stash the row to write at first
+        //     user send. If the user dismisses without sending, the
+        //     row never lands and no orphan anchor pollutes the
+        //     thread on the next sheet open.
+        guard persist, databaseManager != nil else { return }
+        pendingAnchorPersist = StoredAskPoseyTurn(
             id: storageID,
             documentID: documentID,
             timestamp: marker.timestamp,
@@ -471,11 +509,23 @@ private extension AskPoseyChatViewModel {
             summaryOfTurnsThrough: 0,
             isSummary: false
         )
+    }
+
+    /// Flush the deferred anchor persist (if any). Called from
+    /// `persistTurn` immediately before the user-turn write.
+    /// (`pendingAnchorPersist` itself lives on the main class body
+    /// so it doesn't run afoul of the no-stored-properties-in-
+    /// extensions rule.)
+    func flushPendingAnchorPersistIfAny() {
+        guard let pending = pendingAnchorPersist,
+              let db = databaseManager else { return }
         do {
-            try db.appendAskPoseyTurn(stored)
+            try db.appendAskPoseyTurn(pending)
+            NSLog("AskPosey: persisted deferred anchor %@", pending.id as NSString)
         } catch {
-            NSLog("AskPosey anchor marker persist failed: \(error)")
+            NSLog("AskPosey deferred anchor persist failed: \(error)")
         }
+        pendingAnchorPersist = nil
     }
 
     /// Translate a stored row into the in-memory message type. Returns
@@ -540,6 +590,14 @@ private extension AskPoseyChatViewModel {
         fullPromptForLogging: String?
     ) {
         guard let db = databaseManager else { return }
+
+        // Task 4 #4 (b) — flush the deferred anchor (if any) BEFORE
+        // the user turn lands. Guarantees the anchor row precedes
+        // the first user/assistant pair in the persisted thread,
+        // and never lands when the user dismisses without sending.
+        if role == .user {
+            flushPendingAnchorPersistIfAny()
+        }
 
         let chunksJSON: String
         if chunksInjected.isEmpty {

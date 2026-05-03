@@ -165,7 +165,7 @@ nonisolated final class DocumentEmbeddingIndex {
         do {
             try indexIfNeeded(document)
         } catch {
-            NSLog(
+            dbgLog(
                 "[POSEY_ASK_POSEY] embedding index failed for %@ (%@): %@",
                 document.title,
                 document.id.uuidString,
@@ -331,7 +331,7 @@ nonisolated final class DocumentEmbeddingIndex {
                             try database.insertEntities(documentID: documentID, entries: entityRows)
                         }
                     } catch {
-                        NSLog(
+                        dbgLog(
                             "[POSEY_ASK_POSEY] entity index failed for %@: %@",
                             documentTitle,
                             "\(error)"
@@ -346,7 +346,7 @@ nonisolated final class DocumentEmbeddingIndex {
                         ]
                     )
                 } catch {
-                    NSLog(
+                    dbgLog(
                         "[POSEY_ASK_POSEY] embedding index failed for %@ (%@): %@",
                         documentTitle,
                         documentID.uuidString,
@@ -503,7 +503,7 @@ nonisolated final class DocumentEmbeddingIndex {
                     }
                 }
             } catch {
-                NSLog("[POSEY_ASK_POSEY] entity-index lookup failed: %@", "\(error)")
+                dbgLog("[POSEY_ASK_POSEY] entity-index lookup failed: %@", "\(error)")
             }
         }
 
@@ -788,7 +788,7 @@ nonisolated final class DocumentEmbeddingIndex {
             if let best {
                 let secondPart = second.map { "second=[\($0.citationNumber)]:\(String(format: "%.2f", $0.score))" } ?? "second=none"
                 let snippet = trimmed.count > 60 ? String(trimmed.prefix(60)) + "…" : trimmed
-                NSLog("AskPosey citation: best=[%d]:%.2f %@ sentence='%@'",
+                dbgLog("AskPosey citation: best=[%d]:%.2f %@ sentence='%@'",
                       best.citationNumber, best.score, secondPart as NSString, snippet as NSString)
             }
             // Attach citation(s) if score clears threshold.

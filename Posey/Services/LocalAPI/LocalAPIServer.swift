@@ -2,6 +2,13 @@ import Foundation
 import Network
 import Security
 
+// Task 13 #1 (2026-05-03): the entire LocalAPIServer compiles only in
+// DEBUG builds. Release binaries do not ship the HTTP server runtime,
+// the bearer-token Keychain handling, or any port-bind code. Callers
+// that reference the server are guarded the same way (see
+// `LibraryViewModel.localAPIServer` in LibraryView).
+#if DEBUG
+
 // ========== BLOCK 01: CLASS, TOKEN, AND ADDRESS - START ==========
 
 /// Local HTTP API server — lets Claude Code interact with Posey directly
@@ -382,3 +389,5 @@ extension LocalAPIServer {
 }
 
 // ========== BLOCK 05: HTTP RESPONSE - END ==========
+
+#endif // DEBUG

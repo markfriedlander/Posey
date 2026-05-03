@@ -329,11 +329,11 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                 instructions: output.instructions,
                 body: output.renderedBody
             )
-            NSLog("AskPosey: grounded call returned %d chars", grounded.count)
+            dbgLog("AskPosey: grounded call returned %d chars", grounded.count)
         } catch is CancellationError {
             throw CancellationError()
         } catch let originalError {
-            NSLog("AskPosey: grounded call threw: type=%@ description=%@",
+            dbgLog("AskPosey: grounded call threw: type=%@ description=%@",
                   String(describing: type(of: originalError)),
                   String(describing: originalError).prefix(200) as CVarArg)
             // Refusal-retry per Mark 2026-05-02: detect refusal both
@@ -363,7 +363,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                 let stringContains = stringified.contains("refusal(")
                     || stringified.lowercased().contains("refusal")
                 isRefusal = switched || stringContains
-                NSLog("AskPosey: refusal-detection switched=%@ stringContains=%@ stringified=%@",
+                dbgLog("AskPosey: refusal-detection switched=%@ stringContains=%@ stringified=%@",
                       String(describing: switched),
                       String(describing: stringContains),
                       stringified.prefix(120) as CVarArg)
@@ -372,7 +372,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             }
 
             if isRefusal {
-                NSLog("AskPosey: grounded call refused; retrying with neutral rephrasing")
+                dbgLog("AskPosey: grounded call refused; retrying with neutral rephrasing")
                 let rephrased = AskPoseyPromptBuilder.neutralRephrasingPromptBody(
                     originalUserQuestion: inputs.currentQuestion,
                     originalRenderedBody: output.renderedBody
@@ -382,7 +382,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                         instructions: output.instructions,
                         body: rephrased
                     )
-                    NSLog("AskPosey: neutral-rephrasing retry succeeded")
+                    dbgLog("AskPosey: neutral-rephrasing retry succeeded")
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch let retryError {
@@ -397,7 +397,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                         let s = "\(r)"
                         let stringContains = s.contains("refusal(") || s.lowercased().contains("refusal")
                         isRetryRefusal = switched || stringContains
-                        NSLog("AskPosey: retry refusal-detection switched=%@ stringContains=%@ s=%@",
+                        dbgLog("AskPosey: retry refusal-detection switched=%@ stringContains=%@ s=%@",
                               String(describing: switched),
                               String(describing: stringContains),
                               s.prefix(120) as CVarArg)
@@ -405,7 +405,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                         isRetryRefusal = "\(retryError)".lowercased().contains("refusal")
                     }
                     if isRetryRefusal {
-                        NSLog("AskPosey: retry also refused; surfacing informative failure")
+                        dbgLog("AskPosey: retry also refused; surfacing informative failure")
                         throw AskPoseyServiceError.permanent(
                             underlyingDescription: "informativeRefusalFailure"
                         )
@@ -425,7 +425,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                 // question + anchor + system + surrounding survive
                 // — same drop-priority spirit as #2, just more
                 // aggressive when AFM tells us we overshot.
-                NSLog("AskPosey: grounded call exceeded context window — retrying with droppables stripped")
+                dbgLog("AskPosey: grounded call exceeded context window — retrying with droppables stripped")
                 let strippedInputs = AskPoseyPromptInputs(
                     intent: inputs.intent,
                     anchor: inputs.anchor,
@@ -441,9 +441,9 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                         instructions: strippedOutput.instructions,
                         body: strippedOutput.renderedBody
                     )
-                    NSLog("AskPosey: stripped-prompt retry succeeded (%d chars)", grounded.count)
+                    dbgLog("AskPosey: stripped-prompt retry succeeded (%d chars)", grounded.count)
                 } catch {
-                    NSLog("AskPosey: stripped-prompt retry also failed; surfacing informative failure")
+                    dbgLog("AskPosey: stripped-prompt retry also failed; surfacing informative failure")
                     throw AskPoseyServiceError.permanent(
                         underlyingDescription: "informativeRefusalFailure"
                     )
@@ -452,7 +452,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                 // Debug marker so we can see which path threw when
                 // the user-facing error appears.
                 if let g = originalError as? LanguageModelSession.GenerationError {
-                    NSLog("AskPosey: NOT classified as refusal; translating raw")
+                    dbgLog("AskPosey: NOT classified as refusal; translating raw")
                     throw AskPoseyServiceError.permanent(
                         underlyingDescription: "[NO-RETRY-PATH-typed] \(g)"
                     )
@@ -485,7 +485,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         // polish runs.
         if let ungrounded = ungroundedEntities(in: grounded, against: output, inputs: inputs),
            !ungrounded.isEmpty {
-            NSLog("AskPosey: grounded answer contains %d ungrounded entities: %@ — retrying with explicit refusal framing",
+            dbgLog("AskPosey: grounded answer contains %d ungrounded entities: %@ — retrying with explicit refusal framing",
                   ungrounded.count,
                   Array(ungrounded).joined(separator: ", ") as NSString)
             let rephrased = AskPoseyPromptBuilder.neutralRephrasingPromptBody(
@@ -497,14 +497,14 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                     instructions: output.instructions,
                     body: rephrased
                 )
-                NSLog("AskPosey: anti-fabrication retry returned %d chars", retried.count)
+                dbgLog("AskPosey: anti-fabrication retry returned %d chars", retried.count)
                 // Validate the retry too. If it ALSO fabricates,
                 // the question is genuinely outside the document
                 // and the model can't be trusted on it — surface
                 // the friendly fallback.
                 if let stillUngrounded = ungroundedEntities(in: retried, against: output, inputs: inputs),
                    !stillUngrounded.isEmpty {
-                    NSLog("AskPosey: retry still ungrounded (%@) — surfacing informative failure",
+                    dbgLog("AskPosey: retry still ungrounded (%@) — surfacing informative failure",
                           Array(stillUngrounded).joined(separator: ", ") as NSString)
                     throw AskPoseyServiceError.permanent(
                         underlyingDescription: "informativeRefusalFailure"
@@ -514,7 +514,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                NSLog("AskPosey: anti-fabrication retry threw — surfacing informative failure")
+                dbgLog("AskPosey: anti-fabrication retry threw — surfacing informative failure")
                 throw AskPoseyServiceError.permanent(
                     underlyingDescription: "informativeRefusalFailure"
                 )

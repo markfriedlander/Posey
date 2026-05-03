@@ -429,7 +429,7 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
             try db.insertNote(note)
             return true
         } catch {
-            NSLog("AskPosey saveAssistantTurnToNotes failed: \(error)")
+            dbgLog("AskPosey saveAssistantTurnToNotes failed: \(error)")
             return false
         }
     }
@@ -484,7 +484,7 @@ extension AskPoseyChatViewModel {
             // with an empty conversation rather than blocking the
             // sheet. Surface the error so it shows up in logs but
             // don't gate the UI on it.
-            NSLog("AskPosey history load failed: \(error)")
+            dbgLog("AskPosey history load failed: \(error)")
         }
 
         // Append the anchor marker for THIS invocation (unless we're
@@ -542,7 +542,7 @@ extension AskPoseyChatViewModel {
            mostRecent.invocation == scope,
            mostRecent.anchorOffset == offset {
             initialScrollAnchorStorageID = mostRecent.id
-            NSLog("AskPosey: reusing anchor %@ (same offset+scope as most recent)", mostRecent.id as NSString)
+            dbgLog("AskPosey: reusing anchor %@ (same offset+scope as most recent)", mostRecent.id as NSString)
             return
         }
 
@@ -591,10 +591,10 @@ extension AskPoseyChatViewModel {
               let db = databaseManager else { return }
         do {
             try db.appendAskPoseyTurn(pending)
-            NSLog("AskPosey: persisted deferred anchor %@", pending.id as NSString)
+            dbgLog("AskPosey: persisted deferred anchor %@", pending.id as NSString)
             postConversationDidUpdate()
         } catch {
-            NSLog("AskPosey deferred anchor persist failed: \(error)")
+            dbgLog("AskPosey deferred anchor persist failed: \(error)")
         }
         pendingAnchorPersist = nil
     }
@@ -714,7 +714,7 @@ extension AskPoseyChatViewModel {
             try db.appendAskPoseyTurn(turn)
             postConversationDidUpdate()
         } catch {
-            NSLog("AskPosey turn persist failed: \(error)")
+            dbgLog("AskPosey turn persist failed: \(error)")
         }
     }
 }
@@ -770,7 +770,7 @@ private extension AskPoseyChatViewModel {
             // Index unavailable / query failed → fall back to no RAG.
             // Better to ship a less-grounded answer than to error out
             // the whole send.
-            NSLog("AskPosey RAG search failed: \(error)")
+            dbgLog("AskPosey RAG search failed: \(error)")
             return []
         }
 
@@ -941,7 +941,7 @@ private extension AskPoseyChatViewModel {
                 // ships without an updated summary; the older verbatim
                 // turns silently roll out of the STM window. Logged
                 // for the local-API tuning loop.
-                NSLog("AskPosey summarization failed: \(error)")
+                dbgLog("AskPosey summarization failed: \(error)")
             }
         }
     }
@@ -1120,7 +1120,7 @@ extension AskPoseyChatViewModel {
                     let errorString = "\(error)"
                     let isClassifierRefusal = errorString.lowercased().contains("refusal")
                     if isClassifierRefusal {
-                        NSLog("AskPosey: classifier refused; defaulting to .general intent")
+                        dbgLog("AskPosey: classifier refused; defaulting to .general intent")
                         intent = .general
                     } else {
                         self.handleSendError(error, placeholderID: placeholderID, intent: nil)

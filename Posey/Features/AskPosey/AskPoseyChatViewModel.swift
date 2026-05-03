@@ -1054,8 +1054,34 @@ extension AskPoseyChatViewModel {
         placeholderID: UUID,
         intent: AskPoseyIntent
     ) {
+        // Task 2 #25 — embedding-based citation attribution.
+        // If the model already emitted any `[N]` markers, trust them
+        // (AFM did the work explicitly). Otherwise fall back to
+        // cosine-similarity attribution: each sentence is matched
+        // to its best chunk in the same NLEmbedding vector space
+        // the M2 index uses. Threshold + multi-cite delta logged
+        // per-sentence so the threshold can be tuned on real
+        // answers without code changes.
+        let attributedFinalText: String = {
+            let raw = metadata.finalText
+            let alreadyHasMarkers = raw.range(of: #"\[\d+\]"#, options: .regularExpression) != nil
+            if alreadyHasMarkers { return raw }
+            guard let index = embeddingIndex,
+                  !metadata.chunksInjected.isEmpty else { return raw }
+            let chunkRefs = metadata.chunksInjected.enumerated().map { (i, c) in
+                (chunkID: c.chunkID, citationNumber: i + 1, text: c.text)
+            }
+            return index.attributeCitations(
+                text: raw,
+                chunks: chunkRefs,
+                documentID: documentID,
+                threshold: 0.4,
+                secondCitationDelta: 0.05
+            )
+        }()
+
         if let index = messages.firstIndex(where: { $0.id == placeholderID }) {
-            messages[index].content = metadata.finalText
+            messages[index].content = attributedFinalText
             messages[index].isStreaming = false
             messages[index].chunksInjected = metadata.chunksInjected
             // Append BOTH the user turn (which we deliberately held
@@ -1077,7 +1103,10 @@ extension AskPoseyChatViewModel {
 
         persistTurn(
             role: .assistant,
-            content: metadata.finalText,
+            // Persist the attributed text (with `[N]` markers
+            // baked in) so the DB matches what the user saw and
+            // re-opens of the sheet show the same citations.
+            content: attributedFinalText,
             intent: intent,
             chunksInjected: metadata.chunksInjected,
             fullPromptForLogging: metadata.fullPromptForLogging

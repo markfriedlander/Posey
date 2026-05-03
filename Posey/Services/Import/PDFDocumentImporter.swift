@@ -181,7 +181,7 @@ extension PDFDocumentImporter {
                 }
             }
             .joined(separator: "\u{000C}")
-        let displayText = collapseLineBreakHyphens(joinedDisplay)
+        let displayText = TextNormalizer.stripLineBreakHyphens(joinedDisplay)
 
         let plainText = readableTextPages.joined(separator: "\n\n")
         let rawTitle = (document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?
@@ -364,76 +364,30 @@ extension PDFDocumentImporter {
     }
 
     private func normalize(_ text: String) -> String {
-        var t = text
-        t = t.replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space
-        t = t.replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen (invisible; strip entirely)
-        t = t.replacingOccurrences(of: "\r\n", with: "\n")
-        t = t.replacingOccurrences(of: "\r",   with: "\n")
-        t = t.replacingOccurrences(of: #"[ \t]+\n"#,  with: "\n", options: .regularExpression)
-        t = collapseLineBreakHyphens(t)
-        t = collapseSpacedLetters(t)
-        t = collapseSpacedDigits(t)
-        t = t.replacingOccurrences(of: #"\n(?!\n)"#,  with: " ",  options: .regularExpression)
-        t = t.replacingOccurrences(of: #"\n{3,}"#,    with: "\n\n", options: .regularExpression)
-        t = t.replacingOccurrences(of: #"[ ]{2,}"#,   with: " ",  options: .regularExpression)
+        // Task 8 (2026-05-03 — format parity): delegate the shared
+        // passes to `TextNormalizer.normalize(_:)` (BOM strip, soft
+        // hyphen + zero-width strip, line-ending normalize, trailing
+        // whitespace trim, hyphen collapse, spaced-letter/digit
+        // collapse, tab→space, blank-line collapse). Then layer
+        // PDF-specific behavior on top: single-newline → space (PDF
+        // text extraction emits soft line breaks within paragraphs
+        // that would otherwise read as hard breaks). The page-
+        // boundary `collapseLineBreakHyphens` pass still runs once
+        // more in `loadDocument` after pages are joined with `\f`.
+        var t = TextNormalizer.normalize(text)
+        t = t.replacingOccurrences(of: #"\n(?!\n)"#, with: " ", options: .regularExpression)
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Collapses PDF line-break hyphenation: "fas- cism" → "fascism".
-    /// Only fires when a lowercase continuation follows "- ", distinguishing
-    /// line-break hyphens from intentional compound words like "anti-fascist".
-    private func collapseLineBreakHyphens(_ text: String) -> String {
-        // Also catches ¬ (U+00AC) used as a line-break marker by some PDF generators.
-        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z]+)[-\u00AC][ \n\x0c] ?([a-z]+)"#) else { return text }
-        return regex.stringByReplacingMatches(
-            in: text,
-            range: NSRange(text.startIndex..., in: text),
-            withTemplate: "$1$2"
-        )
-    }
+    // 2026-05-03 (Task 8 — format parity): the PDF importer's local
+    // `collapseLineBreakHyphens`, `collapseSpacedDigits`, and
+    // `collapseSpacedLetters` helpers were removed. Their behavior
+    // moved to `TextNormalizer` (full Unicode-aware passes) and is
+    // now invoked via `TextNormalizer.normalize(_:)` inside
+    // `normalize(_:)` and via `TextNormalizer.stripLineBreakHyphens(_:)`
+    // for the page-boundary join in `loadDocument`. Every importer
+    // now reaches the same passes — TXT/MD/RTF/DOCX/HTML/EPUB/PDF.
 
-    /// Collapses PDF glyph-positioning artifacts for digit sequences: "1 9 4 5" → "1945".
-    /// Only fires on runs of 4+ single digits to avoid false positives on
-    /// legitimate list items or short numeric tokens like "1 2" or "1 2 3".
-    private func collapseSpacedDigits(_ text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"\d(?: \d){3,}"#) else { return text }
-        var rebuilt = ""
-        var lastEnd = text.startIndex
-        regex.enumerateMatches(in: text, range: NSRange(text.startIndex..., in: text)) { match, _, _ in
-            guard let match, let matchRange = Range(match.range, in: text) else { return }
-            rebuilt += text[lastEnd..<matchRange.lowerBound]
-            rebuilt += text[matchRange].replacingOccurrences(of: " ", with: "")
-            lastEnd = matchRange.upperBound
-        }
-        rebuilt += text[lastEnd...]
-        return rebuilt
-    }
-
-    /// Collapses PDF glyph-positioning artifacts: "C O N T E N T S" → "CONTENTS".
-    /// Only collapses runs of 3+ single letters that are all the same case,
-    /// so normal prose (e.g. a sentence starting with "I") is left untouched.
-    private func collapseSpacedLetters(_ text: String) -> String {
-        // Two passes: one for all-uppercase runs, one for all-lowercase runs.
-        // \p{Lu}/\p{Ll} matches Unicode upper/lowercase so accented capitals
-        // like Á in "PASAR Á N" are collapsed along with ASCII-only runs.
-        let patterns = [#"(?<!\p{Lu})\p{Lu}(?: \p{Lu}){2,}(?!\p{Lu})"#,
-                        #"(?<!\p{Ll})\p{Ll}(?: \p{Ll}){2,}(?!\p{Ll})"#]
-        var result = text
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            var rebuilt = ""
-            var lastEnd = result.startIndex
-            regex.enumerateMatches(in: result, range: NSRange(result.startIndex..., in: result)) { match, _, _ in
-                guard let match, let matchRange = Range(match.range, in: result) else { return }
-                rebuilt += result[lastEnd..<matchRange.lowerBound]
-                rebuilt += result[matchRange].replacingOccurrences(of: " ", with: "")
-                lastEnd = matchRange.upperBound
-            }
-            rebuilt += result[lastEnd...]
-            result = rebuilt
-        }
-        return result
-    }
 
     /// Returns true if the page's PDF resource dictionary contains at least one
     /// Image-type XObject — indicating the page has embedded figures, photos, or

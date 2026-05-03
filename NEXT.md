@@ -10,6 +10,11 @@
 - **Q3 too-terse follow-ups (carryover).** Deferred as a model-capability ceiling.
 - **`tools/qa_battery.sh` hard-coded doc IDs (carryover).** Switch to title-based lookup via `LIST_DOCUMENTS`.
 
+**Task 7 (Audio Export) — already complete in code; awaiting Mark's ears for final quality review.** Investigation question is already answered by the existing implementation:
+- `AVSpeechSynthesizer.write(_:toBufferCallback:)` empirically does NOT capture Best-Available / Siri-tier voices on most devices. The `AudioExporter` already detects this case (no buffers come back from the first utterance, `currentIndex == 0 && !sawBuffer`) and surfaces `AudioExportError.voiceNotCapturable` with the clear user message: *"Best Available voices can't be captured to audio files. Switch to Custom voice in Preferences and try again."*
+- M4A export is wired (`AVAudioFile` with `kAudioFormatMPEG4AAC`, medium quality), progress indicator + segment counter + cancel are in `AudioExportSheet`, ShareLink supports Save to Files + share, and the headless `RemoteAudioExportRegistry` exposes `EXPORT_AUDIO`/`AUDIO_EXPORT_STATUS`/`AUDIO_EXPORT_FETCH` for API-driven exports.
+- **Needs Mark's ears**: subjective audio quality of the rendered M4A on a real device — the simulator doesn't ship the same voice catalog, so a final pass on iPhone with both Custom voices and a long document is the only meaningful quality gate.
+
 **BLOCKED — Task 10 (Mac Catalyst verification).** Posey's Xcode project currently has neither `SUPPORTS_MACCATALYST` nor `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD` set. The project literally cannot run on Mac today; "verification" first requires enabling Catalyst as a target destination, which is a deliberate config change that:
   1. Edits `project.pbxproj` (touches iOS provisioning + entitlements).
   2. May force `#if targetEnvironment(macCatalyst)` branches for: file picker (`UIDocumentPickerViewController` works but feels native-broken on Mac), half-sheet detents (`.presentationDetents` are iOS-only — Mac needs different presentation), TTS voice list (Mac ships a different voice catalog than iPhone), local-API server bind address (Mac uses different network entitlements), window sizing, and AFM availability (FoundationModels ships on macOS too, but the Catalyst variant has its own gating).

@@ -136,6 +136,13 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// state before assertions.
     private var historyLoadTask: Task<Void, Never>?
 
+    /// Task 4 #10 — observer for cross-VM persistence notifications.
+    /// When the local-API `/ask` path runs while the sheet is open, a
+    /// separate headless VM persists turns to SQLite; this VM (the
+    /// visible one) listens and re-runs `loadHistory()` so the open
+    /// sheet updates without dismiss/reopen. Released in `deinit`.
+    private var conversationUpdateObserver: NSObjectProtocol?
+
     /// Cached recent-conversation history sized for the prompt
     /// builder's STM window. Updated on every successful send so the
     /// next turn includes the just-completed exchange.
@@ -201,6 +208,26 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// trigger fires above.
     private let keepVerbatimRecent: Int = 6
 
+    /// Task 4 #9 — when true, the prompt builder receives per-pair
+    /// summaries (tiered + embedding-verified) instead of the
+    /// verbatim user-questions-only STM rendering. Default false:
+    /// production UI keeps the existing verbatim mode unchanged.
+    /// The local-API `/ask` endpoint flips this on per-call via the
+    /// `summarizationMode: "pairwise"` body field for testing.
+    let useSummarizedSTM: Bool
+
+    /// Lazily-constructed pairwise summarizer. Created only on the
+    /// first turn that needs it (when `useSummarizedSTM == true` and
+    /// at least one prior Q/A pair exists). Owns its own cache so
+    /// stable older pairs don't re-summarize on every send.
+    var pairwiseSummarizer: AskPoseyPairwiseSummarizer?
+
+    /// Per-turn stats from the most recent pairwise summarization
+    /// pass. Surface via metadata so the local-API `/ask` response
+    /// can include cost/quality numbers in the testing loop. nil
+    /// when pairwise mode wasn't engaged this turn.
+    @Published private(set) var lastPairwiseStats: AskPoseyPairwiseStats?
+
     /// Optional summarizer for the M6 auto-summarization path.
     /// Defaulted to nil (and tolerated as nil) so M5/older code paths
     /// keep working — when nil, summarization simply doesn't fire and
@@ -239,8 +266,10 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         summarizer: AskPoseySummarizing? = nil,
         navigator: AskPoseyNavigating? = nil,
         databaseManager: DatabaseManager? = nil,
-        budget: AskPoseyTokenBudget = .afmDefault
+        budget: AskPoseyTokenBudget = .afmDefault,
+        useSummarizedSTM: Bool = false
     ) {
+        self.useSummarizedSTM = useSummarizedSTM
         self.documentID = documentID
         self.documentPlainText = documentPlainText
         self.documentTitle = documentTitle
@@ -275,6 +304,27 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         self.historyLoadTask = Task { @MainActor [weak self] in
             await self?.loadHistory()
         }
+
+        // Task 4 #10 — observe cross-VM persistence so local-API /ask
+        // calls that run while the sheet is open update the visible
+        // thread without requiring dismiss/reopen. Self-originated
+        // posts (this VM's own persistTurn) are ignored via the
+        // originator id in userInfo.
+        let myID = self.id
+        let myDoc = documentID
+        conversationUpdateObserver = NotificationCenter.default.addObserver(
+            forName: .askPoseyConversationDidUpdate,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            let info = note.userInfo ?? [:]
+            guard let docID = info["documentID"] as? UUID, docID == myDoc else { return }
+            if let originator = info["originator"] as? UUID, originator == myID { return }
+            Task { @MainActor [weak self] in
+                await self?.loadHistory()
+            }
+        }
     }
 
     deinit {
@@ -284,6 +334,9 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         // awaiting the task.
         inFlightTask?.cancel()
         historyLoadTask?.cancel()
+        if let conversationUpdateObserver {
+            NotificationCenter.default.removeObserver(conversationUpdateObserver)
+        }
     }
 
     /// Whether the composer is enabled. Disabled while a response is
@@ -385,7 +438,12 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
 
 
 // ========== BLOCK 02: HISTORY LOADING + PERSISTENCE - START ==========
-private extension AskPoseyChatViewModel {
+// 2026-05-03: this extension was `private`; relaxed to `internal` so
+// `@testable import Posey` tests can call `flushPendingAnchorPersistIfAny()`
+// directly. Task 4 #4 deferred anchor persist to the first user send,
+// which broke `testMultipleInvocationsAccumulateAnchors` — that test
+// now flushes the pending anchor explicitly to simulate "user sent".
+extension AskPoseyChatViewModel {
 
     /// Load prior conversation turns for `documentID` from SQLite.
     /// Runs on init; idempotent if called twice (overwrites
@@ -534,10 +592,26 @@ private extension AskPoseyChatViewModel {
         do {
             try db.appendAskPoseyTurn(pending)
             NSLog("AskPosey: persisted deferred anchor %@", pending.id as NSString)
+            postConversationDidUpdate()
         } catch {
             NSLog("AskPosey deferred anchor persist failed: \(error)")
         }
         pendingAnchorPersist = nil
+    }
+
+    /// Task 4 #10 — broadcast that this VM persisted a turn so any
+    /// other VM observing the same documentID can refresh its
+    /// in-memory thread. Originator id is included so the posting
+    /// VM ignores its own broadcast.
+    func postConversationDidUpdate() {
+        NotificationCenter.default.post(
+            name: .askPoseyConversationDidUpdate,
+            object: nil,
+            userInfo: [
+                "documentID": documentID,
+                "originator": id
+            ]
+        )
     }
 
     /// Translate a stored row into the in-memory message type. Returns
@@ -638,6 +712,7 @@ private extension AskPoseyChatViewModel {
 
         do {
             try db.appendAskPoseyTurn(turn)
+            postConversationDidUpdate()
         } catch {
             NSLog("AskPosey turn persist failed: \(error)")
         }
@@ -1096,6 +1171,33 @@ extension AskPoseyChatViewModel {
                     chunks = self.retrieveRAGChunks(for: trimmedInput)
                 }
 
+                // Task 4 #9 — pairwise STM mode (parallel; opt-in).
+                // When enabled, compress prior verbatim Q/A pairs into
+                // tiered, embedding-verified per-pair summaries and
+                // pass to the builder via `pairwiseSummaries`. The
+                // builder swaps STM rendering accordingly. Stats are
+                // captured for the local-API tuning loop.
+                var pairwiseSummaries: [String]? = nil
+                var pairwiseStatsThisTurn: AskPoseyPairwiseStats? = nil
+                #if canImport(FoundationModels)
+                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *),
+                   self.useSummarizedSTM,
+                   let summarizer = self.summarizer {
+                    let pairs = AskPoseyConversationPairExtractor.pairs(from: self.historyForPromptBuilder)
+                    if !pairs.isEmpty {
+                        if self.pairwiseSummarizer == nil {
+                            self.pairwiseSummarizer = AskPoseyPairwiseSummarizer(summarizer: summarizer)
+                        }
+                        if let sum = self.pairwiseSummarizer {
+                            let result = await sum.summarize(pairs: pairs)
+                            pairwiseSummaries = result.summaries
+                            pairwiseStatsThisTurn = result.stats
+                        }
+                    }
+                }
+                #endif
+                self.lastPairwiseStats = pairwiseStatsThisTurn
+
                 // Call 2: prompt build + stream.
                 let inputs = AskPoseyPromptInputs(
                     intent: intent,
@@ -1104,7 +1206,8 @@ extension AskPoseyChatViewModel {
                     conversationHistory: self.historyForPromptBuilder,
                     conversationSummary: self.cachedConversationSummary,
                     documentChunks: chunks,
-                    currentQuestion: trimmedInput
+                    currentQuestion: trimmedInput,
+                    pairwiseSummaries: pairwiseSummaries
                 )
 
                 do {

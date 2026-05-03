@@ -1319,6 +1319,13 @@ extension LibraryViewModel {
         let mostRecentAnchorID: String? = (try? databaseManager.askPoseyAnchorRows(for: docID))?
             .first?.id
 
+        // Task 4 #9 — opt-in pairwise STM mode. Body field
+        // `summarizationMode: "pairwise"` flips the flag for this
+        // call. Default ("verbatim" or absent) keeps the existing
+        // user-questions-only narrative STM rendering.
+        let summarizationModeStr = (body["summarizationMode"] as? String)?.lowercased()
+        let useSummarizedSTM = (summarizationModeStr == "pairwise")
+
         let viewModel = AskPoseyChatViewModel(
             documentID: docID,
             documentPlainText: document.plainText,
@@ -1328,7 +1335,8 @@ extension LibraryViewModel {
             classifier: classifier,
             streamer: streamer,
             summarizer: summarizer,
-            databaseManager: databaseManager
+            databaseManager: databaseManager,
+            useSummarizedSTM: useSummarizedSTM
         )
         await viewModel.awaitHistoryLoaded()
 
@@ -1354,8 +1362,20 @@ extension LibraryViewModel {
         var payload: [String: Any] = [
             "documentID": docID.uuidString,
             "question": question,
-            "response": response
+            "response": response,
+            "summarizationMode": useSummarizedSTM ? "pairwise" : "verbatim"
         ]
+        if let stats = viewModel.lastPairwiseStats {
+            payload["pairwiseStats"] = [
+                "pairsTotal": stats.pairsTotal,
+                "pairsCached": stats.pairsCached,
+                "pairsSummarized": stats.pairsSummarized,
+                "pairsRewritten": stats.pairsRewritten,
+                "sentencesProduced": stats.sentencesProduced,
+                "sentencesFlagged": stats.sentencesFlagged,
+                "sentencesDropped": stats.sentencesDropped
+            ]
+        }
         if let intent = viewModel.lastIntent {
             payload["intent"] = intent.rawValue
         }

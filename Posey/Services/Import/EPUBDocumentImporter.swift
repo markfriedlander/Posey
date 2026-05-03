@@ -254,8 +254,18 @@ extension EPUBDocumentImporter {
         // visible button position regardless of how rich the entries
         // turn out to be.
         if tocEntries.isEmpty {
+            // Task 4 #5 (2026-05-03): filter front-matter spine items
+            // OUT before synthesis so the resulting TOC doesn't surface
+            // "Notice" — the offset-based filter below can't catch
+            // synthesized entries when frontMatterCandidates were
+            // passed at offset 0 (which is the importer's design).
+            let filteredSpineItems = spineItems.filter { spine in
+                let bare = (spine.href as NSString).lastPathComponent
+                    .components(separatedBy: "#").first ?? ""
+                return !frontMatterResult.frontMatterHrefs.contains(bare)
+            }
             tocEntries = synthesizeTOCFromSpine(
-                spineItems: spineItems,
+                spineItems: filteredSpineItems,
                 entryLoader: entryLoader,
                 pathToPlainOffset: pathToPlainOffset
             )

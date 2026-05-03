@@ -1,5 +1,32 @@
 # Posey History
 
+## 2026-05-03 — Task 4 #9 + #10: parallel pairwise STM mode + live sheet updates
+
+Completes Mark's Task 4 punch list. #1–#8 landed earlier (commits `121479b`…`cdf2584`); this entry covers #9 and #10 plus the test-suite repair the prior fixes left behind.
+
+**#10 Live sheet updates.** When the local-API `/ask` ran while the Ask Posey sheet was open, the sheet's separate (visible) view model didn't see the new Q/A — the user had to dismiss and reopen. Added `Notification.Name.askPoseyConversationDidUpdate`, posted by every `persistTurn` and `flushPendingAnchorPersistIfAny` call, with `documentID` + `originator` (the posting VM's `id`) in userInfo. Every `AskPoseyChatViewModel` observes; matching documents whose originator differs reload via `loadHistory()`. Self-originated posts are ignored via the originator check.
+
+**#9 Parallel pairwise STM mode.** Implemented as an opt-in alternative to the existing verbatim STM rendering. New file `AskPoseyPairwiseSummarizer.swift`:
+- Per Q/A pair → tiered third-person summary (4 sentences for the most recent pair, 2 for the next, 1 for older).
+- New protocol method `AskPoseySummarizing.summarizePair(...)` driven by AFM at temp 0.2 with explicit faithfulness rules.
+- Embedding verification: every summary sentence's max cosine vs. the verbatim Q+A reference set must clear `verificationThreshold = 0.45`. Failing sentences trigger a one-shot AFM rewrite with the worst-failing sentence quoted back as guidance. Sentences that still fail are dropped — Posey would rather lose a sentence than ship a hallucinated one.
+- Memoized cache keyed by `pairKey + targetSentences` so stable older pairs don't re-summarize.
+- Per-call stats (`AskPoseyPairwiseStats`) cover pairs total/cached/summarized/rewritten and sentences produced/flagged/dropped — surfaced via the local-API `/ask` response (`pairwiseStats` field) for direct comparison.
+
+**Mode selection.** `AskPoseyChatViewModel.useSummarizedSTM` defaults to `false` (production UI keeps verbatim mode). Local-API `/ask` body field `summarizationMode: "pairwise"` flips it for one call. Both pipelines stay in place per Mark's directive — comparison data review happens when Mark returns; default selection deferred to that review.
+
+**Prompt-builder integration.** `AskPoseyPromptInputs` gains `pairwiseSummaries: [String]?`. When non-nil, `renderPairwiseSTMBlock` swaps in for `renderSTMBlock` with the same drop semantics (oldest pair drops first under budget pressure). Verbatim path untouched.
+
+**Test repair.** Earlier Task 4 fixes (`#2`, `#3`, `#4`, `#5`) shipped without updating their unit tests; caught when running the full suite for #9/#10. Repaired:
+- `AskPoseyTokenEstimatorTests` — chars/token = 2.5 (was 3.0) per #3.
+- `AskPoseyConversationsCRUDTests.testFreshDocumentStartsWithAnchorMarker` and `testMultipleInvocationsAccumulateAnchors` — anchor persistence is now deferred to first user send per #4; tests call `flushPendingAnchorPersistIfAny()` to simulate.
+- `AskPoseyPromptBuilderDropTests.testSTMOverflow_DropsOldestTurnsFirst` — STM rendering is user-questions-only since #2's third iteration; assertion checks the most-recent USER turn survives and oldest USER turn drops.
+- `AskPoseyPromptBuilderDropTests` (renamed `testUserQuestionTruncation_LastResort` → `testUserQuestionNeverTruncated`) — #2 made the user question non-droppable; assertion inverted.
+- `EPUBFrontMatterDetectorTests.testStopsAtFirstNonMatchingItem` renamed/rewritten to `testFlagsAllFrontMatterCandidatesEvenWhenInterleaved` per #5's "scan all candidates" change.
+- `EPUBImportFrontMatterIntegrationTests` — front matter is now stripped from `plainText` per #5; checks the disclaimer body is absent and the synthesized TOC excludes the notice. Required a real fix in `EPUBDocumentImporter`: the synthesized-TOC filter previously relied on `skipUntilOffset > 0` (always 0 because front-matter candidates are passed at offset 0); now filters spine items by `frontMatterHrefs` before synthesis.
+
+Verified: `xcodebuild test` (iPhone 17 sim) — TEST SUCCEEDED. Device tests deferred until Mark returns.
+
 ## 2026-05-02 — Task 2: Ask Posey UI bug fixes (markdown, sources persistence, inline citations, motion)
 
 Four issues in Mark's Task 2 list, all fixed and verified on device.

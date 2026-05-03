@@ -42,20 +42,25 @@ final class EPUBFrontMatterDetectorTests: XCTestCase {
         XCTAssertEqual(result.frontMatterHrefs, ["notice.html"])
     }
 
-    func testStopsAtFirstNonMatchingItem() {
-        // notice → real → another notice-like item → real
-        // The trailing notice-like item should NOT be flagged because
-        // by-definition front matter is at the front. The detector
-        // stops at the first non-match.
+    func testFlagsAllFrontMatterCandidatesEvenWhenInterleaved() {
+        // Task 4 #5 (2026-05-03): the detector now scans ALL
+        // candidates rather than break-on-first-non-match. The
+        // Illuminatus IA-pipeline EPUB has nav.xhtml at spine[0]
+        // (not front matter) and notice.html at spine[1] (real
+        // disclaimer); the old break-on-first behavior missed
+        // notice.html entirely. Flagging by href lets the importer
+        // strip every match regardless of position.
         let result = EPUBFrontMatterDetector.detect(spineItems: [
             .init(href: "notice.html", plainTextStartOffset: 0, html: verbatimIANotice),
             .init(href: "page_0.html", plainTextStartOffset: 1500, html: realBookContent),
             .init(href: "second_notice.html", plainTextStartOffset: 2000, html: verbatimIANotice),
             .init(href: "page_1.html", plainTextStartOffset: 2500, html: realBookContent)
         ])
-        XCTAssertEqual(result.skipUntilOffset, 1500)
-        XCTAssertEqual(result.frontMatterHrefs, ["notice.html"],
-                       "Front matter detection must stop at the first non-matching item")
+        XCTAssertEqual(
+            result.frontMatterHrefs,
+            ["notice.html", "second_notice.html"],
+            "All front-matter-shaped items must be flagged; importer strips them by href"
+        )
     }
 
     func testReturnsZeroSkipOnAllRealContent() {
@@ -140,7 +145,15 @@ final class EPUBImportFrontMatterIntegrationTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempDir)
     }
 
-    func testIAStyleEPUBSetsSkipOffsetAndFiltersTOC() throws {
+    func testIAStyleEPUBStripsFrontMatterFromExtractedText() throws {
+        // Task 4 #5 (2026-05-03): front matter is now STRIPPED from
+        // extracted plainText entirely (was: kept-with-skip-offset).
+        // Contract:
+        //   - plainText does not contain the disclaimer body
+        //   - synthesized TOC does not include the notice entry
+        //   - first surviving TOC entry is the first real body page
+        // playbackSkipUntilOffset is no longer the load-bearing field
+        // (front matter is gone, so there's nothing to skip past).
         try writeContainerXML()
         try writePackageOPF(spineHrefs: ["notice.html", "page_0.html", "page_1.html"])
         try writeEmptyNav()
@@ -153,21 +166,18 @@ final class EPUBImportFrontMatterIntegrationTests: XCTestCase {
 
         let parsed = try EPUBDocumentImporter().loadDocument(from: tempDir)
 
-        XCTAssertGreaterThan(parsed.playbackSkipUntilOffset, 0,
-                             "Front-matter detector should set a non-zero skip offset")
-        // The skip offset should land somewhere inside the plainText
-        // (positive, less than total length).
-        XCTAssertLessThan(parsed.playbackSkipUntilOffset, parsed.plainText.count)
-
-        // Synthesized TOC should NOT include the "Notice" entry —
-        // pointing at it would let the user navigate back into front
-        // matter the playback model has already filtered out.
+        XCTAssertFalse(
+            parsed.plainText.contains("Internet Archive"),
+            "IA disclaimer body must be removed from extracted plainText"
+        )
+        XCTAssertTrue(
+            parsed.plainText.contains("Real content begins here"),
+            "Real body content must remain after front-matter strip"
+        )
         XCTAssertFalse(
             parsed.tocEntries.contains { $0.title.lowercased() == "notice" },
             "Synthesized TOC must exclude IA notice entry. Got titles: \(parsed.tocEntries.map { $0.title })"
         )
-        // The first surviving TOC entry should correspond to the first
-        // body page.
         XCTAssertEqual(parsed.tocEntries.first?.title, "Page 0")
     }
 

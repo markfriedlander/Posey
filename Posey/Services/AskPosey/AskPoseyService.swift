@@ -91,6 +91,30 @@ protocol AskPoseySummarizing: Sendable {
     /// caller can decide whether to retry or fall back to no-summary.
     @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
     func summarizeConversation(turns: [AskPoseyMessage]) async throws -> String
+
+    /// Task 4 #9 (2026-05-03) — pairwise summarization mode.
+    /// Compresses a single Q&A exchange into a third-person prose
+    /// summary sized to `targetSentences`. Used by
+    /// `AskPoseyPairwiseSummarizer` to build tiered per-pair
+    /// summaries that replace verbatim STM in the parallel
+    /// summarization mode.
+    ///
+    /// - `targetSentences`: 1 (older pair, terse), 2–3 (mid),
+    ///   4–5 (most recent pair, fuller). Caller picks tier;
+    ///   summarizer obeys.
+    /// - `failingSentence`: when non-nil, the caller has flagged a
+    ///   prior summary attempt as not embedding-supported by the
+    ///   verbatim exchange. The model is prompted to RE-SUMMARIZE
+    ///   with explicit faithfulness reinforcement; the failing
+    ///   sentence text is included so the model can avoid the
+    ///   unsupported claim.
+    @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+    func summarizePair(
+        question: String,
+        answer: String,
+        targetSentences: Int,
+        failingSentence: String?
+    ) async throws -> String
 }
 
 // AskPoseyNavigating is declared in AskPoseyNavigationCards.swift; the
@@ -785,6 +809,89 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         }
         return accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    // ========== BLOCK 09B: PAIRWISE SUMMARIZATION (Task 4 #9) - START ==========
+    /// Task 4 #9 — single-pair summarizer for the parallel summarization
+    /// mode. Same fresh-session-per-call lifecycle as the prose path;
+    /// temperature 0.2 (faithfulness over creativity).
+    func summarizePair(
+        question: String,
+        answer: String,
+        targetSentences: Int,
+        failingSentence: String?
+    ) async throws -> String {
+        guard model.availability == .available else {
+            throw AskPoseyServiceError.afmUnavailable
+        }
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let a = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty || !a.isEmpty else { return "" }
+
+        let target = max(1, min(targetSentences, 6))
+        let lengthGuidance: String = {
+            switch target {
+            case 1: return "ONE short sentence (≤ 20 words)."
+            case 2: return "TWO sentences."
+            case 3: return "THREE sentences."
+            case 4: return "FOUR sentences."
+            default: return "\(target) sentences."
+            }
+        }()
+
+        var instructions = """
+        You compress one user/Posey exchange from a reading-companion \
+        conversation into a brief, faithful third-person summary so a \
+        future turn has shared context without re-reading the verbatim \
+        exchange.
+
+        HARD RULES:
+        1. Length: \(lengthGuidance) Do not exceed this.
+        2. Third person ("the user asked …", "Posey explained …"). \
+        Never use first or second person.
+        3. Faithful only — never invent specifics not in the exchange. \
+        Better to drop a detail than to hallucinate one.
+        4. No greetings, meta-talk, or quoting. Plain prose.
+        5. Capture WHAT was asked and WHAT Posey said in response. \
+        Skip filler.
+        """
+        if let failingSentence, !failingSentence.isEmpty {
+            instructions += """
+
+
+            REWRITE NOTICE: a previous attempt produced a sentence that \
+            was not supported by the verbatim exchange:
+            "\(failingSentence)"
+            Avoid claims of that shape. Stick to what the exchange \
+            literally says.
+            """
+        }
+
+        let body = """
+        EXCHANGE:
+        User: \(q)
+
+        Posey: \(a)
+        """
+
+        let session = LanguageModelSession(model: model, instructions: instructions)
+        var accumulated = ""
+        do {
+            let stream = session.streamResponse(
+                options: GenerationOptions(temperature: 0.2)
+            ) { Prompt(body) }
+            for try await snapshot in stream {
+                accumulated = snapshot.content
+            }
+        } catch let g as LanguageModelSession.GenerationError {
+            throw Self.translate(g)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
+        }
+        return accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    // ========== BLOCK 09B: PAIRWISE SUMMARIZATION - END ==========
 
     /// M7 navigation cards — Call-2 path for `.search` intent.
     /// AFM is constrained via `@Generable` to pick 3–6 cards from

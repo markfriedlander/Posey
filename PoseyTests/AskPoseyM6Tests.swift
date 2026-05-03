@@ -97,6 +97,10 @@ final class AskPoseySummarizationTriggerTests: XCTestCase {
             callCount += 1
             return responseText
         }
+        @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
+        func summarizePair(question: String, answer: String, targetSentences: Int, failingSentence: String?) async throws -> String {
+            return "stub pair summary"
+        }
     }
 
     private final class StubClassifier: AskPoseyClassifying {

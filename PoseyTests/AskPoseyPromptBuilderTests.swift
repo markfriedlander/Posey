@@ -16,14 +16,16 @@ final class AskPoseyTokenEstimatorTests: XCTestCase {
     }
 
     func testRoughRatio() {
-        // 30 chars / 3.0 = 10 tokens (2026-05-02 ratio change).
-        let s = String(repeating: "a", count: 30)
+        // 25 chars / 2.5 = 10 tokens (2026-05-03 ratio tightened
+        // 3.0 → 2.5 in Task 4 #3 to add headroom for AFM tokenizer
+        // disagreement that surfaced as `exceededContextWindowSize`).
+        let s = String(repeating: "a", count: 25)
         XCTAssertEqual(AskPoseyTokenEstimator.tokens(in: s), 10)
     }
 
     func testCharsRoundtrip() {
-        // 10 tokens * 3.0 = 30 chars (2026-05-02 ratio change).
-        XCTAssertEqual(AskPoseyTokenEstimator.chars(in: 10), 30)
+        // 10 tokens * 2.5 = 25 chars (2026-05-03 ratio tightened).
+        XCTAssertEqual(AskPoseyTokenEstimator.chars(in: 10), 25)
     }
 
     func testZeroTokensZeroChars() {
@@ -217,13 +219,19 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
     }
 
     func testSTMOverflow_DropsOldestTurnsFirst() {
+        // 2026-05-03 (Task 4 #2 third iteration): STM rendering only
+        // includes USER turns ("the user has so far asked: …") to
+        // prevent format imitation from prior assistant replies.
+        // Even-numbered turns are assistants and are filtered before
+        // rendering; budget claim still happens for both. Verify the
+        // most recent USER turn (#19) survives and the oldest USER
+        // turn (#1) drops when STM budget is tight.
         let history: [AskPoseyMessage] = (1...20).map { i in
             AskPoseyMessage(
                 role: i % 2 == 1 ? .user : .assistant,
                 content: "Turn \(i): " + String(repeating: "x", count: 200)
             )
         }
-        // Tighten STM budget so only a few turns can fit.
         var budget = AskPoseyTokenBudget.afmDefault
         budget.stmBudgetTokens = 200
 
@@ -238,14 +246,15 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
         )
         let out = AskPoseyPromptBuilder.build(inputs, budget: budget)
 
-        // Some STM turns should have been dropped.
         let stmDrops = out.droppedSections.filter { $0.section == .stmTurn }
         XCTAssertFalse(stmDrops.isEmpty, "Expected STM overflow to drop turns")
 
-        // Most recent turn (Turn 20) should still be in the prompt.
-        XCTAssertTrue(out.renderedBody.contains("Turn 20"))
-        // Oldest turn (Turn 1) should NOT be in the prompt.
-        XCTAssertFalse(out.renderedBody.contains("Turn 1:"))
+        // Most recent USER turn (Turn 19) must survive.
+        XCTAssertTrue(out.renderedBody.contains("Turn 19"),
+                      "Most recent user turn must remain in the prompt")
+        // Oldest USER turn (Turn 1) must be dropped.
+        XCTAssertFalse(out.renderedBody.contains("Turn 1:"),
+                       "Oldest user turn must drop first under budget pressure")
     }
 
     func testRAGOverflow_DropsExcessChunks() {
@@ -276,10 +285,12 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
         XCTAssertFalse(ragDrops.isEmpty, "Expected RAG drops when budget is tight")
     }
 
-    func testUserQuestionTruncation_LastResort() {
-        // Make the prompt ceiling so tight that even the user question
-        // can't fit at full size. The question gets truncated, never
-        // dropped.
+    func testUserQuestionNeverTruncated() {
+        // 2026-05-03 (Task 4 #2): user question is reserved up-front
+        // and is never truncated, even when the prompt ceiling is
+        // tight. Replaces the prior "last-resort truncation" contract
+        // that produced "Who is responsible for i" mid-word cuts in
+        // Task 3 testing.
         var budget = AskPoseyTokenBudget()
         budget.contextWindowTokens = 600
         budget.responseReserveTokens = 100
@@ -288,8 +299,6 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
         budget.stmBudgetTokens = 100
         budget.summaryBudgetTokens = 50
         budget.ragBudgetTokens = 50
-        // userQuestionBudgetTokens computes from remainder; with tight
-        // ceiling we'll have very little for the user.
 
         let longQuestion = String(repeating: "z", count: 5000)
         let inputs = AskPoseyPromptInputs(
@@ -303,9 +312,10 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
         )
         let out = AskPoseyPromptBuilder.build(inputs, budget: budget)
         let truncations = out.droppedSections.filter { $0.section == .userQuestionTruncated }
-        XCTAssertFalse(truncations.isEmpty, "Long user question should be truncated to fit")
-        XCTAssertTrue(out.renderedBody.contains("USER QUESTION"),
-                      "User section must still render even after truncation")
+        XCTAssertTrue(truncations.isEmpty,
+                      "User question must never be truncated, even with a tight ceiling")
+        XCTAssertTrue(out.renderedBody.contains(longQuestion),
+                      "Full user question text must appear in the prompt verbatim")
     }
 }
 // ========== BLOCK 04: PROMPT BUILDER - DROP PRIORITY - END ==========

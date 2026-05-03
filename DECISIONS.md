@@ -1,5 +1,36 @@
 # Posey Decisions
 
+## 2026-05-02 — Local API Is The Full Remote-Control Surface
+
+- Status: Accepted
+- Decision: The local API exposed by `LocalAPIServer` and dispatched by `LibraryViewModel.executeAPICommand` must be able to do anything a human user can do that isn't blocked by Apple security policies. This is a standing standard, not a one-time goal — every new user-visible action ships with a corresponding API verb the same session it lands.
+- Rationale: Mark's directive 2026-05-02 — "The API must be able to do everything a human can do that isn't blocked by Apple security policies. That includes moving the reader to a specific position, scrolling, tapping any button, and reading the screen. If those endpoints don't exist, build them. That is your first job before any verification. Do not work around missing API capability — fix it." Without this standard, autonomous verification (the testing infrastructure that lets Claude Code drive end-to-end checks instead of asking Mark to tap things) silently degrades into "verified what was easy, deferred what wasn't." The API surface IS the verification surface.
+- Surface (current verbs):
+  - Reader navigation: `READER_GOTO`, `READER_DOUBLE_TAP`, `READER_STATE`, `JUMP_TO_PAGE`, `OPEN_DOCUMENT`, `LIBRARY_NAVIGATE_BACK`
+  - Playback transport: `PLAYBACK_PLAY`, `PLAYBACK_PAUSE`, `PLAYBACK_NEXT`, `PLAYBACK_PREVIOUS`, `PLAYBACK_RESTART`, `PLAYBACK_STATE`
+  - Sheet opens: `OPEN_NOTES_SHEET`, `OPEN_PREFERENCES_SHEET`, `OPEN_TOC_SHEET`, `OPEN_AUDIO_EXPORT_SHEET`, `OPEN_SEARCH_BAR`, `DISMISS_SHEET`
+  - Annotations: `CREATE_NOTE`, `CREATE_BOOKMARK`, `LIST_SAVED_ANNOTATIONS`, `TAP_SAVED_ANNOTATION`, `TAP_JUMP_TO_NOTE`, `SCROLL_NOTES`
+  - Ask Posey: `/ask`, `/open-ask-posey`, `TAP_ASKPOSEY_ANCHOR`, `CLEAR_ASK_POSEY_CONVERSATION`
+  - Preferences: `SET_VOICE_MODE`, `SET_RATE`, `SET_FONT_SIZE`, `SET_READING_STYLE`, `SET_MOTION_PREFERENCE`
+  - Search: `SEARCH`, `SEARCH_NEXT`, `SEARCH_PREVIOUS`, `SEARCH_CLEAR`
+  - Audio export: `EXPORT_AUDIO`, `AUDIO_EXPORT_STATUS`, `AUDIO_EXPORT_FETCH` (all headless — no UI surface required)
+  - Discovery / observability: `LIST_DOCUMENTS`, `GET_TEXT`, `GET_PLAIN_TEXT`, `LIST_TOC`, `LIST_IMAGES`, `GET_IMAGE`, `LIST_REMOTE_TARGETS`, `READ_TREE`, `SCREENSHOT`, `DB_STATS`, `state`
+  - Generic interaction: `TAP`, `TYPE`
+  - Lifecycle: `RESET_ALL`, `DELETE_DOCUMENT`, `ANTENNA_OFF` (re-enable is user-consent-only)
+- Architecture: every verb posts a `NotificationCenter` intent with a documented `userInfo` shape. The matching SwiftUI view observes the intent via `.onReceive` and performs the equivalent of the user action — same path a tap would take. Notification names live in `RemoteControl.swift`. State (`READER_STATE`, `PLAYBACK_STATE`) reads from `RemoteControlState.shared`, a `@MainActor` cache that observed views write into.
+- Standing rule: every PR adding a user-visible button, gesture, slider, or sheet must include the matching verb. "Tested manually" is not a substitute. The audit gate (CLAUDE.md "Three Hats") is satisfied only when API verification passes alongside on-device verification.
+
+## 2026-05-02 — RemoteTargetRegistry For Generic Tap Dispatch (Option C)
+
+- Status: Accepted
+- Decision: A central `@MainActor` registry (`RemoteTargetRegistry.shared`) maps stable string ids to `() -> Void` action closures. The SwiftUI view modifier `.remoteRegister(_:action:)` registers on `.onAppear`, unregisters on `.onDisappear`, and sets `.accessibilityIdentifier(_:)` for VoiceOver / UI-test parity. The `TAP:<id>` API verb fires the registered closure first; falls back to UIView-tree accessibility-id walk for any UIKit-level elements that didn't register through the modifier.
+- Rationale: SwiftUI's `.accessibilityIdentifier(_:)` does not reliably bridge through to either the underlying UIView's `accessibilityIdentifier` property or the `accessibilityElements` chain on iOS 26 — empirically the live UIView tree returns 0 surfaced ids despite 304 nodes walked. Walking the tree to find views by identifier therefore can't drive SwiftUI buttons. Three options were considered:
+  - **(A) Keep building intent-specific verbs forever.** Works for known actions but doesn't scale — the API ends up needing a new verb every time a button ships, and "every button" is the standard.
+  - **(B) Use UIAccessibilityCustomActions.** Heavier, requires per-view setup, doesn't expose action discoverability.
+  - **(C) Custom registry where each tappable view registers itself with a stable id.** Decouples the dispatch surface from SwiftUI's accessibility plumbing entirely. Discoverable via `LIST_REMOTE_TARGETS`. Selected.
+- Implementation: every Button replaces `.accessibilityIdentifier("foo")` with `.remoteRegister("foo") { sameClosureTheButtonFires() }` — same closure, same semantics, registered under the same id the accessibility identifier used to be. Non-tap controls (sliders, pickers, text fields, status labels) keep `.accessibilityIdentifier` because they have dedicated SET_* / TYPE / READ_TREE verbs for value changes; registering a tap closure for them would be semantically wrong.
+- Standing rule: every interactive control ships with `.remoteRegister` matching its accessibility id. New buttons: registry-first.
+
 ## 2026-05-02 — libimobiledevice and pymobiledevice3 — Installed But Not In Active Use
 
 - Status: Accepted (informational)

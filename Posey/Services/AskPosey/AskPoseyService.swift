@@ -267,7 +267,15 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         model: SystemLanguageModel = .default,
         instructions: String = AskPoseyPrompts.classifierInstructions,
         groundedTemperature: Double = 0.1,
-        polishTemperature: Double = 0.65
+        // 2026-05-04: dropped 0.65 → 0.35. Polish at 0.65 was
+        // ignoring the prompt's HARD RULES half the time —
+        // metaphors, slang, recommendations leaking despite
+        // explicit "FAILED:" examples. Lower temperature should
+        // make AFM more rule-following at the cost of less voice
+        // variation. Per Task 3 v2 QA, we'd rather have a
+        // slightly more robotic Posey than a Posey that ignores
+        // the rules and recommends the book.
+        polishTemperature: Double = 0.35
     ) {
         self.model = model
         self.instructions = instructions
@@ -600,48 +608,61 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             groundedFinal = grounded
         }
         let refusalShapeFinal = refusalShape || afmSafetyRefusal
+        _ = refusalShapeFinal  // referenced in restoration comment below; unused at runtime
 
-        // Task 2 — clean separation of concerns: polish ALWAYS runs.
-        // No special cases. Voice is polish's job; citations are
-        // embedding attribution's job (downstream in the chat view
-        // model's `finalizeAssistantTurn`). Refusal-shape responses
-        // are the one structural exception — there's nothing to
-        // polish into voice when the grounded answer is "the
-        // document doesn't say."
-        var accumulated = ""
-        if refusalShapeFinal {
-            // Stream the grounded text through verbatim. The
-            // grounded call's wording is already short and clean
-            // ("The document doesn't say.") — no polish needed.
-            accumulated = groundedFinal
-            onSnapshot(groundedFinal)
-        } else {
-            do {
-                let polishSession = LanguageModelSession(
-                    model: model,
-                    instructions: AskPoseyPromptBuilder.polishInstructions
-                )
-                let polishBody = AskPoseyPromptBuilder.polishPromptBody(
-                    question: inputs.currentQuestion,
-                    groundedDraft: groundedFinal
-                )
-                let stream = polishSession.streamResponse(
-                    options: GenerationOptions(temperature: polishTemperature)
-                ) { Prompt(polishBody) }
-                for try await snapshot in stream {
-                    accumulated = snapshot.content
-                    onSnapshot(accumulated)
-                }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                // Polish failed (refusal, transient, anything). Fall
-                // back to the grounded answer — better to ship a
-                // robotic-but-correct reply than nothing.
-                accumulated = groundedFinal
-                onSnapshot(groundedFinal)
-            }
-        }
+        // 2026-05-04 — Polish call REMOVED (temporary). See DECISIONS.md
+        // entry of the same date for the full reasoning, the voice
+        // vision we're stepping back from, the failure modes
+        // observed, both prompts preserved verbatim, the pipeline
+        // architecture, and the revisit conditions. Short version:
+        // AFM does not consistently honor the polish prompt's HARD
+        // RULES (recommendations, metaphors, sycophant openers,
+        // preamble announcements still leak in roughly half of
+        // answers despite six rounds of iteration). Grounded is
+        // reliable; polish is a coin flip. Net negative on quality.
+        // Restore by re-enabling the polish branch below when AFM
+        // (or its successor) can carry voice cleanly.
+        //
+        // The grounded call now streams to the user verbatim,
+        // regardless of refusal shape. `polishTemperature`,
+        // `AskPoseyPromptBuilder.polishInstructions`,
+        // `AskPoseyPromptBuilder.polishPromptBody`, and the
+        // `stripPolishPreamble` chain remain in the codebase as
+        // inert reference for restoration.
+        let accumulated = groundedFinal
+        onSnapshot(groundedFinal)
+        _ = polishTemperature  // silence unused-property warning; kept for restoration
+        // RESTORATION REFERENCE — do not delete. To restore the
+        // two-call pipeline, replace the two lines above with:
+        //
+        //     var accumulated = ""
+        //     if refusalShapeFinal {
+        //         accumulated = groundedFinal
+        //         onSnapshot(groundedFinal)
+        //     } else {
+        //         do {
+        //             let polishSession = LanguageModelSession(
+        //                 model: model,
+        //                 instructions: AskPoseyPromptBuilder.polishInstructions
+        //             )
+        //             let polishBody = AskPoseyPromptBuilder.polishPromptBody(
+        //                 question: inputs.currentQuestion,
+        //                 groundedDraft: groundedFinal
+        //             )
+        //             let stream = polishSession.streamResponse(
+        //                 options: GenerationOptions(temperature: polishTemperature)
+        //             ) { Prompt(polishBody) }
+        //             for try await snapshot in stream {
+        //                 accumulated = snapshot.content
+        //                 onSnapshot(accumulated)
+        //             }
+        //         } catch is CancellationError {
+        //             throw CancellationError()
+        //         } catch {
+        //             accumulated = groundedFinal
+        //             onSnapshot(groundedFinal)
+        //         }
+        //     }
 
         let elapsed = Date().timeIntervalSince(started)
         return AskPoseyResponseMetadata(

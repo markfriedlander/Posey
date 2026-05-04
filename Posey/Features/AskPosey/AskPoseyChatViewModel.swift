@@ -1004,6 +1004,80 @@ private extension AskPoseyChatViewModel {
 // ========== BLOCK 04: ECHO STUB (preview/test) - START ==========
 extension AskPoseyChatViewModel {
 
+    /// Detects "should I read this?" / "is this worth reading?" /
+    /// "would you recommend?" question shapes. The polish prompt
+    /// forbids recommendations as HARD RULE 4 (FAILED: "Yeah, I'd
+    /// definitely recommend this book."). AFM ignores the rule
+    /// frequently enough that detecting these questions and
+    /// returning the canonical SUCCEEDED form directly is the
+    /// only reliable path. Surfaced 2026-05-04 in Task 3 v2 QA.
+    static func isRecommendationQuestion(_ question: String) -> Bool {
+        let q = question.lowercased()
+        // Patterns that are clear recommendation requests.
+        let triggers = [
+            "should i read",
+            "should i get",
+            "should i buy",
+            "should i pick up",
+            "is this worth reading",
+            "is this worth your time",
+            "is it worth reading",
+            "is it worth my time",
+            "would you recommend this",
+            "would you recommend that",
+            "do you recommend this",
+            "do you recommend that",
+            "is this a good read",
+            "is this any good",
+            "should i bother",
+            "do i need to read",
+        ]
+        for t in triggers {
+            if q.contains(t) { return true }
+        }
+        return false
+    }
+
+    /// Short-circuit response for recommendation questions. Builds
+    /// a clean refusal in Posey's voice that follows the polish
+    /// prompt's SUCCEEDED example: "The document doesn't make a
+    /// recommendation. It does cover X, Y, Z if those interest you."
+    /// The X/Y/Z list is empty here — we don't have time to extract
+    /// chunks for this branch and using a generic phrasing is
+    /// safer than risking a hallucinated topic list.
+    func handleRecommendationShortCircuit(question: String) async {
+        let userMessage = AskPoseyMessage(role: .user, content: question)
+        messages.append(userMessage)
+        inputText = ""
+        isResponding = true
+        lastError = nil
+
+        persistTurn(
+            role: .user,
+            content: question,
+            intent: nil,
+            chunksInjected: [],
+            fullPromptForLogging: nil
+        )
+
+        let answer = "The document doesn't make a recommendation about itself, and I won't either — that's your call. If you'd like, I can summarise what the document actually covers so you can decide."
+        let assistantMessage = AskPoseyMessage(
+            role: .assistant,
+            content: answer,
+            isStreaming: false,
+            timestamp: Date()
+        )
+        messages.append(assistantMessage)
+        persistTurn(
+            role: .assistant,
+            content: answer,
+            intent: nil,
+            chunksInjected: [],
+            fullPromptForLogging: "[recommendation-short-circuit]"
+        )
+        isResponding = false
+    }
+
     /// M4 stub send path retained for previews and the M3-M4 test
     /// canvases. Appends a user message, then after a short async
     /// delay appends an assistant message that echoes the question.
@@ -1057,6 +1131,20 @@ extension AskPoseyChatViewModel {
             // No live deps — degrade to echo so previews/tests keep
             // working.
             await sendEchoStub()
+            return
+        }
+
+        // Recommendation-question short-circuit. Polish HARD RULE 4
+        // and grounded HARD RULE 5 forbid recommendations, but AFM
+        // ignores both ~half the time on questions of the shape
+        // "should I read this?" / "is this worth reading?". Five
+        // rounds of regex strips on the answer didn't catch every
+        // variant either. The robust fix is to detect the question
+        // pattern BEFORE calling AFM and return the canonical
+        // refusal directly. The user gets the polish prompt's own
+        // SUCCEEDED-form answer without any model variance.
+        if Self.isRecommendationQuestion(trimmedInput) {
+            await handleRecommendationShortCircuit(question: trimmedInput)
             return
         }
 

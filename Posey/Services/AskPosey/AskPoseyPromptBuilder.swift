@@ -369,6 +369,18 @@ nonisolated enum AskPoseyPromptBuilder {
     4. **DON'T ECHO THE PROMPT.** No section labels in the \
     output. No "ANSWER:" tags. Just the answer.
 
+    5. **NEVER RECOMMEND.** If the user asks "should I read this?" \
+    or "is this worth reading?" or "would you recommend this?" — \
+    you cannot answer that. The document doesn't make a \
+    recommendation about itself, and neither can you. Don't say \
+    "you should read this", "this is a fantastic introduction", \
+    "great companion for X", "perfect for beginners", "worth your \
+    time". REQUIRED form: "The document doesn't make a \
+    recommendation. It does cover [X, Y, Z from the actual text] \
+    if those interest you." — list real topics from the excerpts. \
+    This rule overrides any urge to be helpful — being honest is \
+    more helpful here.
+
     Reply in plain prose. The user's question may use different \
     vocabulary from the document (e.g. "authors" when the \
     document says "contributors") — map to the closest concept \
@@ -635,6 +647,15 @@ extension AskPoseyPromptBuilder {
             #"^[\s]*Here(\s+is|'s)\s+(the|my)\s+answer\s*[:.\-]*\s*"#,
             // "Here's the rewrite in (your|my|Posey's) style/voice/tone..."
             #"^[\s]*Here(\s+is|'s)\s+(the|a|my)\s+rewrite\s+in\s+(your|my|Posey'?s)\s+(style|voice|tone)\s*[:.\-]*\s*"#,
+            // Bare "Here's the rewrite:" / "Here is a rewrite." with no "of"
+            #"^[\s]*Here(\s+is|'s)\s+(the|a|my)\s+rewrite\s*[:.\-]*\s*"#,
+            // Markdown-decorated preamble: "### **Here's the answer in Posey's voice:**"
+            // Strip leading #/_/* fence chars before re-running patterns.
+            #"^[\s#*_>]+(?=\w)"#,
+            // The above is run FIRST so subsequent patterns match the
+            // un-fenced text. Add the fenced rewrite-announce
+            // sentence too in case the iteration didn't converge.
+            #"^[\s#*_>]*Here(\s+is|'s)\s+(the\s+)?(answer|rewrite|version|response)\s+in\s+(your|my|Posey'?s)\s+voice[:.\s*_]*\s*"#,
             // "Here's a rewrite in the (requested|your|my|Posey's) style..."
             #"^[\s]*Here(\s+is|'s)\s+a\s+rewrite\s+in\s+(the\s+requested|your|my|Posey'?s)\s+(style|voice|tone)\s*[:.\-]*\s*"#,
             // "Rewritten in (the requested|your|my|Posey's) (style|tone)..."
@@ -786,6 +807,17 @@ extension AskPoseyPromptBuilder {
             #"(?i)\bmust[-\s]read\b"#,
             #"(?i)\bI'?d\s+(highly|definitely|strongly)\s+recommend\b"#,
             #"(?i)\bhighly\s+recommend(ed)?\b"#,
+            // Round 5 (qa Task 3 v2): "you should dive into this book"
+            // / "fantastic introduction" / "great companion for your X
+            // journey". HARD RULE 4 violations the polish prompt
+            // doesn't reliably suppress.
+            #"(?i)\byou\s+should\s+(dive|jump)\s+into\b"#,
+            #"(?i)\bfantastic\s+introduction\b"#,
+            #"(?i)\bgreat\s+companion\s+for\s+your\b"#,
+            #"(?i)\bgreat\s+for\s+anyone\s+(curious|interested|new)\b"#,
+            #"(?i)\bperfect\s+for\s+(beginners|those|anyone)\b"#,
+            #"(?i)\bdefinitely\s+a\s+good\s+read\b"#,
+            #"(?i)\bworth\s+(your\s+)?(time|reading)\b"#,
         ]
         for pattern in recommendationPatterns {
             if let regex = try? NSRegularExpression(pattern: pattern),

@@ -1,5 +1,44 @@
 # Posey History
 
+## 2026-05-04 — Ask Posey: Polish call removed (temporary)
+
+Removed the second AFM call from the Ask Posey two-call pipeline. The grounded call (factual, low temp) now streams to the user verbatim. The polish call (voice, higher temp) is no longer invoked at runtime.
+
+**Why.** Six rounds of polish-prompt iteration and five rounds of regex post-strips never closed the voice-failure rate below ~50%. AFM does not consistently honor the polish prompt's HARD RULES — recommendations leak past HARD RULE 4, "X is like Y" metaphors leak past HARD RULE 5, sycophant openers ("Sure!", "Of course!") and preamble announcements ("Here is a rewrite of…") leak past HARD RULE 3. Length inflation against HARD RULE 6 is roughly 1-in-5. In rare cases (~3%) the polish prompt's FAILED:/SUCCEEDED: example tokens leak into output.
+
+Polish was net-negative on quality: grounded was reliable, polish was a coin flip. Removing polish eliminated an entire class of failures cleanly. Verified across 7-format Three Hats QA — see Three Hats Polish-Off Sweep below.
+
+**Tradeoff.** Posey's tone is now more clinical. The earlier position ("a robotic Posey is a failed Posey", 2026-05-02) is explicitly walked back. Correctness > warmth when AFM can't carry voice consistently. Restore when AFM (or its successor) can honor a voice prompt at >90% on the same Three Hats sweep.
+
+**What changed.**
+- `AskPoseyService.streamProseResponse` — replaced the `if refusalShapeFinal { stream grounded } else { polish }` block with unconditional verbatim stream of `groundedFinal`. Restoration recipe preserved as inline comment block at the call site.
+- `polishTemperature`, `AskPoseyPromptBuilder.polishInstructions`, `polishPromptBody`, and the `stripPolishPreamble` chain remain in the codebase as inert reference. Nothing to rebuild on restoration.
+- DECISIONS.md got a full entry documenting reasoning, voice vision, every observed failure mode, both prompts verbatim, the full pipeline architecture, and revisit conditions.
+
+**Three Hats Polish-Off Sweep (28 questions across 7 formats).** Real natural conversations with follow-ups, not a matrix script. Per-format clean/partial/broken counts:
+- TXT (AI Book): 3/1/0
+- MD (Hal Agenda): 2/0/2 — RAG miss + AFM filled in fake section names
+- RTF (AI Book): 4/0/0
+- DOCX (AI Book): 3/0/1 — RAG miss on "job displacement" (verbatim in doc at offset 37021)
+- HTML (AI Book): 3/1/0
+- EPUB (Illuminatus, 1.6M chars): 2/0/2 — incoherent grounded ("accused of being a doctor"); Law of Fives RAG miss
+- PDF (Internet Steps): 3/1/0 — concatenated "Anonymous Mark Friedlander" (source layout artifact)
+
+Total: **20 clean / 4 partial / 4 broken = 71% clean rate**. Compare to Task 3 v1 (polish ON, six rounds of iteration): 4/29 = 14%. Net improvement: ~5×.
+
+**Voice failure modes ELIMINATED (zero observations across 28 questions):** sycophant openers, outside-of-document recommendations, "X is like Y" metaphors, slang, preamble announcements, length inflation, HARD RULE example-token leaks, "I think…" hedging in confident answers.
+
+**Remaining failure modes (all in the grounded path, NOT polish-related):**
+1. **RAG misses on long/dense docs.** Specific keyword questions on >100K char docs miss when the embedding doesn't surface the relevant chunk. "Job displacement" is in the DOCX at offset 37021; AFM said "doesn't mention." "Law of Fives" appears dozens of times in the 1.6M char EPUB; AFM said "doesn't mention." Retrieval problem, not prompt problem.
+2. **Hallucinated structure.** When asked to list things, AFM sometimes invents items beyond what RAG returned (MD Q2 listed 5 sections, 2 of them ("MLX HelPML Output Quality", "Design a Robust Parser") don't exist).
+3. **Incoherent grounded output on dense narrative.** EPUB Q1 "accused of being a doctor" — word salad. Polish was masking grounded fragility on literary text.
+4. **Source-layout concatenation.** PDF Q2 "Anonymous Mark Friedlander" — the doc has "Information wants to be free.… - Anonymous Mark Friedlander Telecommunications Law…" with no delimiter; AFM concatenated.
+5. **Mild over-interpretation.** TXT Q3 extended slightly beyond the TOC excerpt; HTML Q2 understated consciousness coverage when the doc explicitly raises it.
+
+These remaining issues need separate workstreams (retrieval improvements; possibly a "DON'T FILL IN STRUCTURE" addition to the grounded prompt; source-cleanup for PDF byline parsing). Logged in NEXT.md. Not blockers for App Store submission — quality issues with honest mitigations (refusals are honest, not invented), not correctness regressions vs. polish-on.
+
+**Source.** Mark's directive 2026-05-04 — "Remove the polish call entirely. The voice layer is not consistently achievable with the current model and is actively harming answer quality. This is not a permanent decision — it's the right call for now."
+
 ## 2026-05-03 — Task 4 #9 + #10: parallel pairwise STM mode + live sheet updates
 
 Completes Mark's Task 4 punch list. #1–#8 landed earlier (commits `121479b`…`cdf2584`); this entry covers #9 and #10 plus the test-suite repair the prior fixes left behind.

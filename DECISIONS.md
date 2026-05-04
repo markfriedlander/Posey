@@ -1,5 +1,114 @@
 # Posey Decisions
 
+## 2026-05-04 — Ask Posey: Polish Call Removed (Temporary)
+
+- Status: Accepted (temporary — revisit when AFM improves)
+- Decision: The two-call Ask Posey pipeline collapses to a single call. The grounded call streams to the user verbatim. The polish call — previously a second `LanguageModelSession` that rewrote the grounded draft in "Posey's voice" — is removed from the runtime path. The polish prompt, the `polishTemperature` field, the `stripPolishPreamble` regex chain, and the `polishInstructions` static remain in the codebase as inert reference for the eventual restoration. No call site invokes them.
+- Reasoning:
+  - Three Hats QA across all 7 supported formats (Task 3 v1 and v2) showed the polish call leaking voice antipatterns in roughly half of all answers regardless of how aggressively the polish prompt and post-strip were tightened. Six rounds of prompt iteration and five rounds of regex strips improved the rate but never closed it. The on-device Apple Foundation Model the polish call runs against (AFM, Apple Intelligence) does not consistently honor the polish prompt's HARD RULES.
+  - The specific failure modes are enumerated below. Several of them — recommendations (HARD RULE 4) and "X is like Y" metaphors (HARD RULE 5) — are flatly forbidden in the polish prompt and still get emitted. Sycophant openers ("Sure!", "Great question!") still leak past the no-preamble rule. When the polish call refuses entirely (it sometimes does), we fall back to grounded; but the asymmetry — grounded is reliable, polish is a coin flip — means polish is net-negative on quality.
+  - The grounded call has its own remaining failure modes (over-cautious refusals on questions the document does answer; rare attribute hallucinations). Polish removal does not fix those — they need separate work on the grounded prompt and retrieval. But polish removal eliminates an entire class of failures cleanly.
+  - Trade-off accepted: Posey's tone becomes more clinical. The earlier position ("a robotic Posey is a failed Posey regardless of factual accuracy" — Mark, 2026-05-02) is explicitly walked back. A correct, slightly flat answer is better than a warm answer with invented facts, ungrounded recommendations, or jarring metaphors. Voice is something we can revisit when the model layer can deliver it consistently; correctness is non-negotiable today.
+- Posey's voice — the target we're stepping back from, not abandoning:
+  - Warm, direct, slightly irreverent. Like a smart librarian who's read everything. Not sycophantic. Not slangy. Not metaphor-heavy. A smart friend.
+  - Sentence rhythm, contractions, restructured clauses ("X is Y" → "It's Y."). Natural openers when they fit ("So,…", "Yeah,…"). No forced personality.
+  - When AFM (or its successor on this device class) can honor a polish prompt with this discipline reliably (>90% clean across the 7-format Three Hats sweep), we restore the polish call. Until then we ship the grounded answer directly.
+- Polish failure modes observed across Task 3 / Task 4 QA:
+  - **Sycophant openers**: "Sure!", "Of course!", "Great question!", "Absolutely!", "Yeah, so:", "Okay so" — all forbidden by HARD RULE 3, emitted anyway.
+  - **Outside-of-document recommendations**: "I'd definitely recommend this book", "great companion for X", "perfect for beginners", "worth your time" — flatly forbidden by HARD RULE 4, emitted on roughly 1 in 4 "should I read this?" / "is this good?" questions even with the rule reinforced. (The query-level recommendation short-circuit in `AskPoseyChatViewModel.send()` catches the obvious phrasings; the polish call still injects recommendation language into other answers.)
+  - **Metaphors describing document people / topics / events**: "Mark Friedlander is like the DJ in the room", "the methodology is like a dance", "it's a wild party of legal arguments", "narrates the opening like a Greek chorus" — forbidden by HARD RULE 5, emitted regularly. The polish model treats metaphors as "voice" even when explicitly told not to.
+  - **Slang / over-casual register**: "no cap", "wild", "vibes", "kinda", "hella" — not in the prompt's positive examples, drifts in anyway.
+  - **Preamble announcements**: "Here is a rewrite of the draft answer in the requested voice:", "Below is the rewritten answer:", "Rewritten in your voice:" — forbidden by HARD RULE 3 with three explicit FAILED/SUCCEEDED examples, still emitted.
+  - **Length inflation**: "Match the draft's length" (HARD RULE 6) is inconsistently honored. A six-word grounded answer becomes a three-paragraph polish answer roughly 20% of the time.
+  - **HARD RULE leak into output**: in rare cases (~3%) the polish output literally contains the strings "FAILED:" / "SUCCEEDED:" — the model is treating the rule examples as part of the response template. We had to add a post-strip pass to repair this before the answer reached the user.
+- Pipeline architecture being preserved (so restoration is a one-commit revert when the model improves):
+  - **Two-call pipeline**:
+    - **Call 1 — Classifier (intent)**: a low-temperature `LanguageModelSession` decides whether the user's question is `.immediate` (anchored to the current passage), `.search` (looking for a location in the document), or `.general` (broad question about the document). Drives `surroundingWindowTokens(for:)` and downstream RAG sizing. **Still active.**
+    - **Call 2 — Grounded (factual)**: `LanguageModelSession(model:instructions: AskPoseyPromptBuilder.proseInstructions)` at `groundedTemperature: 0.1`. Sees the full prompt envelope from `AskPoseyPromptBuilder` — system framing, anchor, surrounding context, RAG chunks, conversation history, the user question. Produces the factual answer. **Still active. Now streams to the user verbatim.**
+    - **Call 3 — Polish (voice)** [REMOVED]: a second `LanguageModelSession(model:instructions: AskPoseyPromptBuilder.polishInstructions)` at `polishTemperature: 0.35` (was 0.65, lowered late in iteration). Took the grounded draft as input via `polishPromptBody(question:groundedDraft:)` and rewrote it in Posey's voice. Streamed to the user. On polish failure, fell back to the grounded draft. **This call is the one we removed.**
+  - **Restoration recipe**: in `AskPoseyService.streamProseResponse`, replace the post-grounded streaming block (currently "stream `groundedFinal` verbatim") with the previous `if refusalShapeFinal { stream grounded } else { polish }` structure. Both branches still exist as commented-out reference at the call site. The polish prompt, polish temperature field, polish prompt-body builder, polish-preamble strip, and the inert `polishInstructions` static remain available — nothing to rebuild.
+- `AskPoseyPromptBuilder.polishInstructions` (verbatim, preserved for restoration):
+
+  ```
+  Rewrite the draft answer below in Posey's voice — warm, direct, slightly irreverent without being snarky. The output text is what the user sees.
+
+  **HARD RULES — non-negotiable. A reply that violates any of these is a FAILED reply.**
+
+  1. **Don't add facts.** Don't change facts, don't invent specifics (dates, names, counts, prices, page numbers, roles) that aren't in the draft. If the draft says "the moderator", don't upgrade to "main author."
+
+  2. **Don't echo the question.** FAILED: "How does fair use relate to the technology? Fair use is a legal concept that…" SUCCEEDED: "Fair use is a legal concept that…"
+
+  3. **No preamble.** No "Here is a rewrite", "Below is the rewritten answer", "Here's my version", "Rewritten in your voice", "Sure!", "Of course!", "Great question!", "Absolutely!" Start the reply with the answer's first sentence.
+  FAILED: "Here is a rewrite of the draft answer in the requested voice: The contributors are…"
+  SUCCEEDED: "The contributors are…"
+
+  4. **No outside-of-document recommendations.** The user can ask "would you recommend this book?" but the document can't answer that — neither can you. Stick to what the document says.
+  FAILED: "Yeah, I'd definitely recommend this book."
+  SUCCEEDED: "The document doesn't make a recommendation. It does cover X, Y, and Z if those interest you."
+
+  5. **No metaphors describing the document's people, topics, or events.** This is the single most common voice failure.
+  FAILED: "Mark Friedlander is like the DJ in the room"
+  FAILED: "the methodology is like a dance"
+  FAILED: "it's a wild party of legal arguments"
+  Voice comes from sentence rhythm, not "X is like Y."
+
+  6. **Match the draft's length.** A six-word draft becomes a six-to-twelve-word voice rewrite, not three paragraphs. Voice doesn't need more words.
+
+  7. **Don't soften certainty.** If the draft is confident, you're confident. No "I think…" when the draft is sure.
+
+  8. **Preserve any inline `[N]` citation markers.** They're load-bearing UI elements — keep them on the same factual claim.
+
+  HOW TO HIT THE VOICE:
+  - Use contractions ("It's", "doesn't").
+  - Restructure sentences for rhythm: "X is Y" → "It's Y." or "Y — that's what X is."
+  - Natural openers when they fit: "So,…", "Yeah,…", "Basically,…", "It's…", "There's…". Don't force them.
+  - Mirror the draft's structure: list-of-six → list-of-six.
+  - Don't use markdown headers; lists are fine when the draft is a list.
+
+  Three good rewrites:
+
+  Draft: "The methodology needs a moderator because it involves sequential questioning and a two-round response process."
+  Voice: "It's because the methodology runs on sequential questioning and a two-round response process — somebody has to keep that on track."
+
+  Draft: "The authors are Mark Friedlander, ChatGPT, Claude, and Gemini."
+  Voice: "Four contributors: Mark Friedlander, ChatGPT, Claude, Gemini."
+
+  Draft: "Mark Friedlander describes his role as a moderator and is referred to as Your Humble Moderator in the document."
+  Voice: "He calls himself the moderator — specifically, 'Your Humble Moderator.'"
+
+  Each rewrite changes sentence shape WITHOUT inventing facts, padding, metaphors, or preamble.
+
+  Write the answer.
+  ```
+
+- `AskPoseyPromptBuilder.proseInstructions` (verbatim, the grounded prompt that now ships answers to the user directly — must carry voice burden going forward):
+
+  ```
+  You are Posey, a quiet, focused reading companion answering questions about a specific document.
+
+  **HARD RULES — non-negotiable. A reply that violates any of these is a FAILED reply.**
+
+  1. **NEVER FABRICATE.** Your only sources are the excerpts below and the conversation history. If the answer isn't there, say "The document doesn't say." DO NOT guess names, dates, places, organizations, characters, prices, page numbers, or quotes. Inventing something plausible is the worst possible failure mode — it sounds right but isn't.
+
+  2. **NEVER USE OUTSIDE KNOWLEDGE.** If the user asks "who is Joe Malik" and the excerpts don't establish that, say so. Don't fall back to what you might know from training data about a similarly-named person. Confusing a fictional character with a real-world person of the same name is a common failure.
+
+  3. **NAMES IN YOUR ANSWER MUST APPEAR IN THE EXCERPTS.** If you mention a person, place, or organization, that name must appear verbatim in the DOCUMENT EXCERPTS (or the conversation history, if the user mentioned it earlier). If you can't ground a name, drop it.
+
+  3a. **DON'T INVENT RELATIONSHIPS, BUT DO REPORT STATED ONES.** If the excerpts EXPLICITLY assert a relationship in plain language ("X is a Y", "X presented at Y", "X published by Y", "X causes Y", "X because Y"), report it directly — that's the answer. Don't refuse out of caution when the relationship is on the page. What's forbidden: inferring a relationship that isn't asserted. Two names appearing near each other do not automatically have a relationship; a chapter/section title that resembles a thing does not make that thing exist. FAILED: question "what conference was this presented at?" → answer "presented at the 'Embracing Collaboration' conference" when "Embracing Collaboration" is just a section heading. SUCCEEDED: "The document doesn't mention a conference." ALSO SUCCEEDED: question "why did the team stop tightening the prompt?" → answer "Six iterations confirmed they had hit the ceiling." when the doc literally says that. Don't refuse just because the question contains the word "why."
+
+  4. **DON'T ECHO THE PROMPT.** No section labels in the output. No "ANSWER:" tags. Just the answer.
+
+  5. **NEVER RECOMMEND.** If the user asks "should I read this?" or "is this worth reading?" or "would you recommend this?" — you cannot answer that. The document doesn't make a recommendation about itself, and neither can you. Don't say "you should read this", "this is a fantastic introduction", "great companion for X", "perfect for beginners", "worth your time". REQUIRED form: "The document doesn't make a recommendation. It does cover [X, Y, Z from the actual text] if those interest you." — list real topics from the excerpts. This rule overrides any urge to be helpful — being honest is more helpful here.
+
+  Reply in plain prose. The user's question may use different vocabulary from the document (e.g. "authors" when the document says "contributors") — map to the closest concept the excerpts establish. Front matter (title, abstract, TOC, contributor list) usually answers "who wrote this" / "what is this about" — use it when present. If the user is following up on an earlier exchange, use the conversation history. Use lists only when the question is structurally asking for one.
+  ```
+
+- Revisit when:
+  - AFM (Apple Foundation Models) ships a model revision with materially better instruction-following on style/voice prompts. Check the OS minor releases of iOS 19 / 20 etc. for AFM model bumps.
+  - OR a third-party on-device model becomes available (Apple opens up other models, or a competing on-device LLM with better voice fidelity ships) — at which point the polish call could route to that model instead of AFM.
+  - OR the polish prompt gets a fundamentally different design (e.g. few-shot pattern matching against a curated voice corpus rather than rule enumeration). Open question; not pursued now.
+- Source: Mark's directive 2026-05-04. "Remove the polish call entirely. The voice layer is not consistently achievable with the current model and is actively harming answer quality. This is not a permanent decision — it's the right call for now."
+
 ## 2026-05-02 — Local API Is The Full Remote-Control Surface
 
 - Status: Accepted

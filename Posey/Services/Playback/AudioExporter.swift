@@ -65,6 +65,14 @@ final class AudioExporter: NSObject, ObservableObject {
 
     @Published private(set) var state: AudioExportState = .idle
 
+    /// Task 7 (2026-05-03): voice mode the current render is using.
+    /// Surfaced via the AudioExportSheet so the user can see which
+    /// voice the .m4a will be rendered with — especially useful
+    /// when their playback voice is Best Available and the export
+    /// auto-falls-back to a capturable Custom voice.
+    var exportingVoiceMode: SpeechPlaybackService.VoiceMode? { voiceModeOptional }
+    private var voiceModeOptional: SpeechPlaybackService.VoiceMode?
+
     private let synthesizer = AVSpeechSynthesizer()
     private var audioFile: AVAudioFile?
     private var segments: [TextSegment] = []
@@ -93,6 +101,7 @@ final class AudioExporter: NSObject, ObservableObject {
         self.totalSegments = segments.count
         self.currentIndex = 0
         self.voiceMode = voiceMode
+        self.voiceModeOptional = voiceMode
         self.receivedAnyBuffer = false
         self.didFinish = false
 
@@ -171,11 +180,16 @@ final class AudioExporter: NSObject, ObservableObject {
                 // Use the buffer's format as the file's native
                 // format. M4A wraps AAC; AVAudioFile picks the
                 // right codec from the .m4a extension.
+                // Task 7 (2026-05-03): bumped quality medium → high.
+                // Spoken-word AAC at native rate is small even at
+                // high quality (~1 MB / 8 minutes); the perceptual
+                // gain on premium voices is real. medium left
+                // sibilants harsh on long exports.
                 let settings: [String: Any] = [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
                     AVSampleRateKey: buffer.format.sampleRate,
                     AVNumberOfChannelsKey: buffer.format.channelCount,
-                    AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
+                    AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
                 ]
                 audioFile = try AVAudioFile(
                     forWriting: url,

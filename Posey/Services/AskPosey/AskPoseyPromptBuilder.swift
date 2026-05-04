@@ -347,6 +347,21 @@ nonisolated enum AskPoseyPromptBuilder {
     conversation history, if the user mentioned it earlier). \
     If you can't ground a name, drop it.
 
+    3a. **DON'T INVENT RELATIONSHIPS.** Two names that both \
+    appear in the excerpts do NOT automatically have a \
+    relationship. If the question asks about a relationship \
+    ("who presented X at Y", "X published by Y", "X invented \
+    by Y", "X is a Z"), only state that relationship if the \
+    excerpts EXPLICITLY assert it in plain language. Do not \
+    infer a connection from two strings appearing near each \
+    other or from a chapter/section title that contains \
+    similar words. FAILED: question "what conference was \
+    this presented at?" → answer "presented at the \
+    'Embracing Collaboration' conference" when "Embracing \
+    Collaboration" is just a section heading and no conference \
+    is mentioned. SUCCEEDED: "The document doesn't mention a \
+    conference."
+
     4. **DON'T ECHO THE PROMPT.** No section labels in the \
     output. No "ANSWER:" tags. Just the answer.
 
@@ -594,6 +609,17 @@ extension AskPoseyPromptBuilder {
             #"^[\s]*Here(\s+is|'s)\s+the\s+answer\s+in\s+(your|my|Posey'?s)\s+voice\s*[:.\-]*\s*"#,
             // Plain "Here's the/my answer..."
             #"^[\s]*Here(\s+is|'s)\s+(the|my)\s+answer\s*[:.\-]*\s*"#,
+            // "Here's the rewrite in (your|my|Posey's) style/voice/tone..."
+            #"^[\s]*Here(\s+is|'s)\s+(the|a|my)\s+rewrite\s+in\s+(your|my|Posey'?s)\s+(style|voice|tone)\s*[:.\-]*\s*"#,
+            // "Here's a rewrite in the (requested|your|my|Posey's) style..."
+            #"^[\s]*Here(\s+is|'s)\s+a\s+rewrite\s+in\s+(the\s+requested|your|my|Posey'?s)\s+(style|voice|tone)\s*[:.\-]*\s*"#,
+            // "Rewritten in (the requested|your|my|Posey's) (style|tone)..."
+            #"^[\s]*Rewritten\s+in\s+(the\s+requested|your|my|Posey'?s)\s+(style|tone)\s*[:.\-]*\s*"#,
+            // Generic preamble that wraps the answer in quotes (model
+            // emits `Here's X: "answer here"`). Strip the wrapping
+            // quotes if the entire remaining body is a single quoted
+            // string. Captured as separate guard below — this regex
+            // only covers the preamble.
             // Sycophantic openers: "Sure!", "Sure thing!", "Of course!", etc.
             // NOT including "Yeah,/So,/Right,/Well," because those are
             // legitimate voice openers in the polish prompt — stripping
@@ -616,6 +642,25 @@ extension AskPoseyPromptBuilder {
                 if stripped != result {
                     result = stripped
                     changed = true
+                }
+            }
+        }
+        // After preamble removal, if the remaining body is a single
+        // quoted string (the preamble stripped the announcement and
+        // the "actual" answer was wrapped in quotes by AFM), unwrap
+        // those quotes. Handles both straight " and curly " quotes.
+        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        for opener in ["\"", "\u{201C}"] {
+            for closer in ["\"", "\u{201D}"] {
+                if trimmed.hasPrefix(opener) && trimmed.hasSuffix(closer) && trimmed.count >= 2 {
+                    let inner = String(trimmed.dropFirst().dropLast())
+                    // Only unwrap if there are no internal opener
+                    // quotes (i.e. the wrapping quote pair is the
+                    // only one — otherwise we'd corrupt legitimate
+                    // internal quotation).
+                    if !inner.contains(opener) {
+                        return inner.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
                 }
             }
         }

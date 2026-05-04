@@ -191,7 +191,7 @@ struct ReaderView: View {
                             revealChrome()
                         }
                     )
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
                 }
             }
             .overlay(alignment: .topTrailing) {
@@ -1790,6 +1790,7 @@ struct SavedAnnotation: Identifiable, Equatable {
 private struct NotesSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Per-row expansion state for `.note` entries. Keyed by the
     /// row's id so collapsing one note doesn't affect others. Lives
     /// in the sheet (not the view model) because it's purely UI
@@ -2009,7 +2010,7 @@ private struct NotesSheet: View {
             viewModel.jumpToOffset(entry.offset)
             dismiss()
         case .note:
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                 if expandedNoteIDs.contains(entry.id) {
                     expandedNoteIDs.remove(entry.id)
                 } else {

@@ -33,6 +33,7 @@ struct AskPoseyView: View {
     @StateObject private var indexingTracker = IndexingTracker()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var composerFocused: Bool
 
     /// Closure invoked when the user taps a Sources-strip pill below
@@ -67,7 +68,7 @@ struct AskPoseyView: View {
             // before scrollTo runs — otherwise the proxy can't find
             // the id.
             try? await Task.sleep(for: .milliseconds(60))
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                 proxy.scrollTo(target.id, anchor: .top)
             }
         }
@@ -115,7 +116,7 @@ struct AskPoseyView: View {
             try? await Task.sleep(for: .milliseconds(250))
             // Pass 3 — smooth animated land for the user-visible
             // settle.
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                 proxy.scrollTo(target.id, anchor: .top)
             }
         }

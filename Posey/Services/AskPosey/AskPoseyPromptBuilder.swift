@@ -651,7 +651,24 @@ extension AskPoseyPromptBuilder {
             // "Sure thing! Here's a rewrite…" are still cleared
             // because the iterative loop removes the sycophantic head
             // first, then the rewrite-announce preamble.
-            #"^[\s]*(Sure(\s+thing)?|Of\s+course|Absolutely|Great\s+question|Certainly|Got\s+it|Alright|All\s+right)[!.,]+\s*"#,
+            #"^[\s]*(Sure(\s+thing)?|Of\s+course|Absolutely|Great\s+question|Certainly|Got\s+it|Alright|All\s+right)[!.,]+(\s+(buddy|friend|pal))?[!.,]*\s*"#,
+            // 2026-05-04 qa_battery additions:
+            // "here's a rewrite of the answer in Posey's voice:"
+            #"^[\s]*here(\s+is|'s)\s+a\s+rewrite\s+of\s+the\s+answer\s+in\s+(your|my|Posey'?s)\s+voice\s*[:.\-]*\s*"#,
+            // Markdown-fenced sycophant: "**Sure thing, buddy!**"
+            #"^[\s]*\*+\s*(Sure(\s+thing)?|Of\s+course|Absolutely|Certainly)[!,.]?(\s+(buddy|friend|pal))?[!,.]*\s*\*+\s*"#,
+            // "Let me tell ya, …" / "Let me tell you, …"
+            #"^[\s]*Let\s+me\s+tell\s+(ya|you)[,.]?\s*"#,
+            // "Well, buckle up, because we're going to …"
+            #"^[\s]*Well[,]?\s+buckle\s+up[,.][^.!?]{0,80}[.!?]\s*"#,
+            // "Ah, X. So you're curious about …, are you?"
+            #"^[\s]*Ah[,]?\s+\w[^.!?]{0,40}[.!?]\s*So\s+you'?re\s+curious[^.!?]{0,80}[.!?]\s*"#,
+            // "Here's a rewrite in the style of Posey:"
+            #"^[\s]*here(\s+is|'s)\s+a\s+rewrite\s+in\s+the\s+style\s+of\s+Posey\s*[:.\-]*\s*"#,
+            // "Hey there! So, here's the deal with X:"
+            #"^[\s]*hey\s+there[!,.]+\s*"#,
+            // "So, here's the deal:"
+            #"^[\s]*so[,]?\s+here(\s+is|'s)\s+the\s+deal\s*[:.\-]*\s*"#,
         ]
         var result = text
         var changed = true
@@ -714,6 +731,24 @@ extension AskPoseyPromptBuilder {
             #"\bthrows?\s+(some\s+)?(serious\s+)?shade\b"#,
             #"\bshaking\s+things?\s+up\b"#,
             #"\bpulling\s+the\s+strings\b"#,
+            // 2026-05-04 qa_battery additions:
+            #"\bgives?\s+you\s+the\s+lowdown\b"#,
+            #"\bdives?\s+right\s+in\b"#,
+            #"\bbuckle\s+up\b"#,
+            #"\bSo,?\s+there\s+you\s+have\s+it\b"#,
+            #"\bthe\s+ones\s+where\s+someone\s+\w+\s+a\s+\w+\b"#,
+            // "And let's not forget about …" — meta narration
+            #"\bAnd\s+let'?s\s+not\s+forget\s+about\b"#,
+            // "But that's not all\." — infomercial filler
+            #"\bbut\s+that'?s\s+not\s+all\b"#,
+            // 2026-05-04 round 3:
+            #"\bcooked\s+up\b"#,                            // "this paper was cooked up"
+            #"\bya\s+know\?"#,                              // "..., ya know?"
+            #"\bwild\s+world\s+of\b"#,                      // "wild world of copyright"
+            #"\bkind\s+of\s+like\s+a\b"#,                    // "ADR is kind of like a last resort"
+            #"\bIn\s+the\s+end[,.]?\s+it'?s\s+usually\b"#,  // "In the end, it's usually safer"
+            #"\bso[,]?\s+if\s+you'?re\s+dealing\s+with\b"#, // "So, if you're dealing with"
+            #"\bSo[,]?\s+yeah[,.]?\s+it'?s\s+(there|here|in\s+there)\b"#, // "So, yeah, it's there"
         ]
         var sentenceArray = splitIntoSentences(result)
         var keptSentences: [String] = []

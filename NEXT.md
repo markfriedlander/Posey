@@ -2,6 +2,18 @@
 
 ## Current Target
 
+**2026-05-04 — Polish call removed; Task 5 next.** The Ask Posey two-call pipeline is collapsed to one call per Mark's directive. Voice-failure modes (recommendations, metaphors, sycophant openers, preamble announcements) are eliminated. Clean rate jumped from 14% (polish ON, six rounds of iteration) to 71% (polish OFF, no iteration). See HISTORY.md 2026-05-04 entry and DECISIONS.md polish-removal entry for full reasoning, sweep results, and restoration recipe.
+
+**Grounded-path follow-ups surfaced by the polish-off sweep — defer until after Task 5 unless Mark prioritizes:**
+- **RAG retrieval gaps on long/dense docs.** "Job displacement" appears verbatim in the DOCX at offset 37021 but RAG didn't surface that chunk; AFM said "doesn't mention." "Law of Fives" appears dozens of times in the 1.6M char Illuminatus EPUB; AFM said "doesn't mention." Likely fixes: hybrid keyword+embedding retrieval; larger RAG token budget for short questions; second-pass retrieval that reuses question keywords as exact-match probes when the embedding pass produces a refusal-shape grounded answer.
+- **Hallucinated structure when RAG is partial.** MD Q2 listed 5 sections, 2 of them ("MLX HelPML Output Quality", "Design a Robust Parser") don't exist in the doc — actual sections are different. AFM "fills in" plausible structure when the chunks are partial. Possible mitigation: add a HARD RULE 6 to the grounded prompt ("If asked to list items, only list items whose names appear verbatim in the excerpts. If you can only see N of what looks like a longer list, say so explicitly.").
+- **Incoherent grounded output on dense narrative text.** EPUB Q1 produced "Joseph Malik...accused of being a doctor" — word salad. Polish was masking grounded fragility on literary prose. Probably an AFM ceiling on dense narrative grounding; not a prompt fix.
+- **Source-layout concatenation.** PDF Q2 "Anonymous Mark Friedlander" — the doc has "Information wants to be free.… - Anonymous Mark Friedlander Telecommunications Law…" with no delimiter between the quote attribution and the byline. Could be addressed in the import path (PDF byline detection) rather than the prompt.
+
+**Original Task 4 / pairwise STM section follows below — unchanged from 2026-05-03 review.**
+
+
+
 **2026-05-03 — Task 4 complete (#1–#10).** All ten fixes from Mark's Task 4 list are implemented and pushed. The verbatim STM pipeline is unchanged (production default); the new pairwise STM pipeline ships as an opt-in for testing. Both modes are fully exercisable via `/ask` with `summarizationMode: "verbatim"` (default) or `"pairwise"`. Per Mark's directive, default selection is deferred until Mark reviews the comparison data.
 
 **Pairwise vs. verbatim STM — RECOMMENDATION 2026-05-03: KEEP VERBATIM AS DEFAULT.**

@@ -792,25 +792,34 @@ nonisolated final class DocumentEmbeddingIndex {
             let lower = text.index(text.startIndex, offsetBy: start)
             let upper = text.index(text.startIndex, offsetBy: end)
             let slice = String(text[lower..<upper])
-            // 2026-05-04 — RAG audit: skip TOC-dominant chunks at
-            // index time. Multi-page formats (TXT/RTF/DOCX/HTML/PDF)
-            // put a Table of Contents at the top — every chunk in
-            // that region is "ChatGPT Round 1: 17 / Claude Round 1: 19
-            // / ..." which shares vocabulary with content questions
-            // (matches retrieval) but contains zero answer text
-            // (poisons retrieval). Detection is conservative — only
-            // chunks that are STRONGLY TOC-shaped get skipped, so
-            // false positives in real prose are rare. See
-            // `chunkIsMostlyTOC` for the heuristic.
-            if !Self.chunkIsMostlyTOC(slice) {
-                chunks.append(DocumentEmbeddingChunk(
-                    chunkIndex: index,
-                    startOffset: start,
-                    endOffset: end,
-                    text: slice
-                ))
-                index += 1
-            }
+            // 2026-05-04 — RAG audit Layer 1. Two-stage cleanup:
+            // (a) Strip Wayback Machine print headers from the chunk
+            //     text. The normalize pass already strips them at
+            //     import time but stale imports + chunk-boundary
+            //     straddles still leak through.
+            // (b) Strip TOC artifacts: trailing page numbers from
+            //     short lines, dot-leader runs ("...."), nothing
+            //     else. Preserves the actual chapter / section /
+            //     role text — "Mark Friedlander: Your Humble
+            //     Moderator 6" becomes "Mark Friedlander: Your
+            //     Humble Moderator", which is exactly what the
+            //     "Who's the moderator?" question needs.
+            // We chose to CLEAN chunks rather than SKIP them after
+            // an initial skip-only pass measured at 61% (vs. 71%
+            // pre-fix) — the skip dropped real structural content
+            // (chapter listings, role assignments, EPUB title page)
+            // alongside the page-number noise. Cleaning keeps the
+            // structural content; the no-noise TOC text is a
+            // first-class retrieval surface for "what chapter
+            // covers X?" questions.
+            let cleaned = Self.sanitizeChunkText(slice)
+            chunks.append(DocumentEmbeddingChunk(
+                chunkIndex: index,
+                startOffset: start,
+                endOffset: end,
+                text: cleaned
+            ))
+            index += 1
             // chunkIndex is the index of *kept* chunks; startOffset
             // continues to advance with the sliding window so we
             // don't re-process the same region. Skipped TOC chunks
@@ -824,13 +833,72 @@ nonisolated final class DocumentEmbeddingIndex {
         return chunks
     }
 
-    /// Heuristic: is this chunk dominated by Table-of-Contents text?
-    /// True when at least two of three TOC signals are strong:
-    /// (a) high digit-to-letter ratio (TOC has many page numbers),
-    /// (b) high line-break density (TOC entries are short lines),
-    /// (c) presence of dot leaders or trailing-page-number patterns
-    /// (e.g. "Chapter 1: What is AI? 10" or "A. Internet ...... 6").
-    /// Conservative — real prose rarely trips two of three signals.
+    /// Per-chunk sanitization run at index time.
+    /// - Strips Wayback Machine print-header artifacts.
+    /// - Strips TOC noise (trailing page numbers from short lines,
+    ///   dot-leader runs of 2+ consecutive periods).
+    /// - Leaves prose untouched.
+    /// The trailing-page-number strip is intentionally narrow: only
+    /// fires on lines ≤ 100 chars whose last token is purely digits
+    /// preceded by a content word. Prose ending with a year ("…in
+    /// 2024.") doesn't trip because the period after the digits is
+    /// a sentence terminator, not a page marker.
+    static func sanitizeChunkText(_ text: String) -> String {
+        var result = text
+        // (a) Wayback Machine print headers.
+        if result.contains("Wayback") || result.contains("web.archive.org") {
+            result = TextNormalizer.stripWaybackPrintHeaders(result)
+        }
+        // (b) Dot-leader runs: replace "...." (2+ consecutive periods)
+        //     with a single space. Done before page-number strip so
+        //     "Section 1: Watch App Bugs.... 17" → "Section 1: Watch
+        //     App Bugs 17" → "Section 1: Watch App Bugs".
+        if result.contains("..") {
+            if let regex = try? NSRegularExpression(pattern: #"\.{2,}"#, options: []) {
+                let range = NSRange(result.startIndex..., in: result)
+                result = regex.stringByReplacingMatches(
+                    in: result, range: range, withTemplate: " ")
+            }
+        }
+        // (c) Trailing page numbers on short lines. Process line-by-
+        //     line so multi-paragraph prose isn't touched.
+        if result.contains("\n") {
+            let lines = result.split(separator: "\n", omittingEmptySubsequences: false)
+            let cleanedLines: [Substring] = lines.map { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.count <= 100 else { return line }
+                guard let last = trimmed.last, last.isNumber else { return line }
+                // Walk back through trailing digits + tab/spaces.
+                var i = trimmed.endIndex
+                while i > trimmed.startIndex {
+                    let prev = trimmed.index(before: i)
+                    if trimmed[prev].isNumber || trimmed[prev] == " " || trimmed[prev] == "\t" {
+                        i = prev
+                    } else {
+                        break
+                    }
+                }
+                let prefix = trimmed[..<i].trimmingCharacters(in: CharacterSet(charactersIn: " .\t-—"))
+                let prefixLetters = prefix.filter { $0.isLetter }.count
+                // Only strip if there's substantive prose before the
+                // page number (avoid stripping legitimate "Total: 5"
+                // style lines that happen to end with a number).
+                guard prefixLetters >= 4 else { return line }
+                // Recover original whitespace-prefix of the line.
+                let leading = String(line.prefix(while: { $0 == " " || $0 == "\t" }))
+                return Substring(leading + prefix)
+            }
+            result = cleanedLines.joined(separator: "\n")
+        }
+        return result
+    }
+
+    /// Heuristic: is this chunk dominated by Table-of-Contents text,
+    /// appendix listings, or other non-prose artifacts that should
+    /// not be embedded for retrieval? Multi-signal — real prose rarely
+    /// trips ≥2 signals, and very strong single signals (dense
+    /// dot-leaders, dense lettered lists, near-pure digit/short-token
+    /// content) can trip on their own.
     static func chunkIsMostlyTOC(_ text: String) -> Bool {
         let n = text.count
         guard n >= 120 else { return false } // too small to judge
@@ -851,37 +919,111 @@ nonisolated final class DocumentEmbeddingIndex {
         let signalA = digitRatio > 0.06
         // Signal B: lots of newlines (short TOC entries).
         let signalB = linesPerKChar > 12.0
-        // Signal C: trailing-page-number patterns or dot leaders.
-        // "Some Heading 17", "A. Section .... 6", "I. Introduction.... 3"
+        // Signal C: trailing-page-number patterns line by line.
         let signalC: Bool = {
-            // Count lines ending with "<word> <number>" or
-            // ".. <number>". Five+ such lines in a chunk → TOC.
             let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
             var hits = 0
             for raw in lines {
                 let line = raw.trimmingCharacters(in: .whitespaces)
                 if line.isEmpty { continue }
-                // Trailing digits preceded by a non-digit: "Foo 17", "Bar .. 9"
-                // Length cap on the line so we don't trip on long prose
-                // ending with a year ("…in 2024.").
                 guard line.count <= 100 else { continue }
                 guard let last = line.last, last.isNumber else { continue }
-                // Strip trailing digits and check there's letters before them.
                 var i = line.endIndex
                 while i > line.startIndex {
                     let prev = line.index(before: i)
                     if line[prev].isNumber { i = prev } else { break }
                 }
                 let prefix = line[..<i].trimmingCharacters(in: CharacterSet(charactersIn: " .\t-—"))
-                // Prefix should be mostly letters (a real section/chapter title).
                 let prefixLetters = prefix.filter { $0.isLetter }.count
                 if prefixLetters >= 3 { hits += 1 }
             }
             return hits >= 5
         }()
+        // Signal D: dense dot-leader runs (PDF inline TOC like
+        // "C. my.mp3.com.. 11 D. Beam-it™. 12 E. User Identification 13").
+        // Count runs of 2+ consecutive dots.
+        let signalD: Bool = {
+            var runs = 0
+            var i = text.startIndex
+            while i < text.endIndex {
+                if text[i] == "." {
+                    var j = text.index(after: i)
+                    var runLen = 1
+                    while j < text.endIndex, text[j] == "." {
+                        runLen += 1
+                        j = text.index(after: j)
+                    }
+                    if runLen >= 2 { runs += 1 }
+                    i = j
+                } else {
+                    i = text.index(after: i)
+                }
+            }
+            return runs >= 4
+        }()
+        // Signal E: dense lettered/numbered-list density — patterns
+        // like "A. Internet 6 B. mp3 9 C. my.mp3.com .. 11" or
+        // "I. Introduction... 3 II. Technology...".
+        // Count "<single uppercase letter or 1-3 roman numeral>."
+        // followed by space.
+        let signalE: Bool = {
+            var hits = 0
+            let chars = Array(text)
+            var i = 0
+            while i < chars.count - 2 {
+                let c = chars[i]
+                let isUpper = c.isUppercase && c.isLetter
+                let isRoman = "IVXLCDM".contains(c)
+                if (isUpper || isRoman),
+                   chars[i+1] == "." {
+                    let after = chars[i+2]
+                    if after == " " || after == "\t" {
+                        // Confirm we're at a token boundary (preceded by
+                        // start, space, newline, or another item separator).
+                        let isBoundary: Bool = {
+                            if i == 0 { return true }
+                            let p = chars[i-1]
+                            return p == " " || p == "\t" || p.isNewline || p == "."
+                        }()
+                        if isBoundary { hits += 1 }
+                    }
+                }
+                i += 1
+            }
+            return hits >= 5
+        }()
+        // Signal F: appendix-listing pattern (EPUB front-matter).
+        // "Appendix Heth: Property and Priviledge Appendix Cheth: ..."
+        // — same word repeating at short intervals.
+        let signalF: Bool = {
+            let lower = text.lowercased() as NSString
+            // Common front-matter listing prefixes.
+            let prefixes = ["appendix ", "chapter ", "part ", "book ", "section "]
+            for prefix in prefixes {
+                var count = 0
+                var searchRange = NSRange(location: 0, length: lower.length)
+                while searchRange.length > 0 {
+                    let r = lower.range(of: prefix, options: [.literal], range: searchRange)
+                    if r.location == NSNotFound { break }
+                    count += 1
+                    if count >= 4 { return true }
+                    let next = r.location + r.length
+                    searchRange = NSRange(location: next, length: lower.length - next)
+                }
+            }
+            return false
+        }()
 
-        let strongSignals = (signalA ? 1 : 0) + (signalB ? 1 : 0) + (signalC ? 1 : 0)
-        return strongSignals >= 2
+        let strongSignals = (signalA ? 1 : 0) + (signalB ? 1 : 0)
+            + (signalC ? 1 : 0) + (signalD ? 1 : 0)
+            + (signalE ? 1 : 0) + (signalF ? 1 : 0)
+        if strongSignals >= 2 { return true }
+        // Very-strong single signals (catch single-line PDF TOCs and
+        // dense lettered lists that don't trip newline-based signals).
+        if digitRatio > 0.12 && (signalD || signalE) { return true }
+        if signalE && signalD { return true }
+        if signalF { return true }   // appendix-listing alone is enough
+        return false
     }
 
     // MARK: Citation attribution (Task 2 #25)

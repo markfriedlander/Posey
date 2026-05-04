@@ -803,7 +803,15 @@ private extension AskPoseyChatViewModel {
                 frontMatter.append(RetrievedChunk(
                     chunkID: stored.chunkIndex,
                     startOffset: stored.startOffset,
-                    text: stored.text,
+                    // Strip Wayback Machine print-header artifacts at
+                    // chunk-fetch time so existing imports get the
+                    // benefit without re-indexing. The embedding
+                    // vector still scores against un-stripped text
+                    // (cosine retrieval was good enough to surface
+                    // this chunk for "what's this paper about");
+                    // AFM gets the cleaned text so it doesn't choke
+                    // on dozens of repeated URLs.
+                    text: TextNormalizer.stripWaybackPrintHeaders(stored.text),
                     relevance: 1.0
                 ))
             }
@@ -838,7 +846,7 @@ private extension AskPoseyChatViewModel {
             translated.append(RetrievedChunk(
                 chunkID: result.chunk.chunkIndex,
                 startOffset: result.chunk.startOffset,
-                text: result.chunk.text,
+                text: TextNormalizer.stripWaybackPrintHeaders(result.chunk.text),
                 relevance: result.similarity
             ))
         }

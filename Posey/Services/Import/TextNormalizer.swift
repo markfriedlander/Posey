@@ -29,6 +29,7 @@ enum TextNormalizer {
         t = normalizeLineEndings(t)
         t = stripTrailingWhitespacePerLine(t)
         t = stripLineBreakHyphens(t)        // catches both - and ¬ as line-break markers
+        t = stripWaybackPrintHeaders(t)     // PDF-from-Wayback artifacts
         t = collapseSpacedLetters(t)
         t = collapseSpacedDigits(t)
         t = normalizeTabsAndSpaces(t)
@@ -148,6 +149,34 @@ enum TextNormalizer {
             }
             rebuilt += result[lastEnd...]
             result = rebuilt
+        }
+        return result
+    }
+
+    /// Strip Wayback Machine print-header artifacts that appear at
+    /// the top of every page when a PDF was generated from a
+    /// Wayback-archived web page (browser print-to-PDF inserts a
+    /// header on each page). The pattern is:
+    ///   `<MM/DD/YY>, <HH:MM> <AM|PM> The Wayback Machine - https://web.archive.org/web/<digits>/...`
+    /// repeated dozens of times. Posey's RAG retrieval pulls these
+    /// headers as the dominant content of front-matter chunks,
+    /// confusing AFM and producing `informativeRefusalFailure` on
+    /// vague document-scope questions (Internet Steps PDF in
+    /// qa_battery — surfaced 2026-05-04).
+    static func stripWaybackPrintHeaders(_ text: String) -> String {
+        guard text.contains("Wayback Machine") || text.contains("web.archive.org") else { return text }
+        // Two patterns: with leading timestamp ("9/11/25, 1:33 PM ...")
+        // and without. Both end at the first whitespace-bounded token
+        // that doesn't fit the URL.
+        let patterns = [
+            #"\d{1,2}/\d{1,2}/\d{2,4},?\s+\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?\s+The\s+Wayback\s+Machine\s+-\s+https?://[^\s]+"#,
+            #"The\s+Wayback\s+Machine\s+-\s+https?://web\.archive\.org/[^\s]+"#,
+        ]
+        var result = text
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: " ")
         }
         return result
     }

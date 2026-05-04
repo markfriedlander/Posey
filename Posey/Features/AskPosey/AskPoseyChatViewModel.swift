@@ -760,12 +760,15 @@ private extension AskPoseyChatViewModel {
 
         let results: [DocumentEmbeddingSearchResult]
         do {
-            // M8 entity-boosted ranking — re-ranks by cosine + Jaccard
-            // entity overlap so chunks that share named entities with
-            // the question (people, places, organizations) get a
-            // relevance bump. Falls back to pure cosine when neither
-            // side has named entities.
-            results = try index.searchWithEntityBoost(documentID: documentID, query: question, limit: ragTopK)
+            // 2026-05-04 — Hybrid retrieval (cosine + lexical as
+            // peers). Replaces the entity-boost-only ranking. NLEmbedding
+            // can't reliably surface IR queries on its own; lexical
+            // scoring catches verbatim-phrase matches (and most "find
+            // information about X" queries) that cosine misses. Entity-
+            // index hits still get folded in. See DocumentEmbeddingIndex
+            // .searchHybrid for the algorithm and the RAG audit findings
+            // in DECISIONS.md (2026-05-04).
+            results = try index.searchHybrid(documentID: documentID, query: question, limit: ragTopK)
         } catch {
             // Index unavailable / query failed → fall back to no RAG.
             // Better to ship a less-grounded answer than to error out
@@ -850,36 +853,19 @@ private extension AskPoseyChatViewModel {
                 relevance: result.similarity
             ))
         }
-        // 2026-05-04 — Verbatim phrase fallback. The Three Hats
-        // Polish-Off Sweep surfaced two consistent failure modes
-        // where embedding retrieval missed content the user knew
-        // was in the document: "What is the Law of Fives?" against
-        // the 1.6M-char Illuminatus EPUB (the phrase appears dozens
-        // of times) and "Does it mention job displacement?" against
-        // a 148K-char DOCX (the phrase appears verbatim at offset
-        // 37021). The pattern: short, specific noun-phrase questions
-        // on long documents, where the question's vocabulary is
-        // semantically narrow enough that the cosine score doesn't
-        // surface the chunks that contain the literal phrase.
-        // Mitigation: extract content phrases from the question and
-        // do a direct case-insensitive substring scan over the
-        // document text. Any chunks containing the phrase get
-        // injected into the candidate pool with high relevance.
-        // Cost: O(N) string scan per phrase × document size — sub-
-        // 100ms on the largest doc tested. Runs alongside the
-        // entity-boost pass (different mechanism, complementary
-        // coverage).
-        let verbatimMatches = verbatimPhraseChunks(for: question, excluding: Set(translated.map { $0.chunkID }).union(frontMatter.map { $0.chunkID }))
-
-        // Front matter goes first — its synthetic relevance 1.0
-        // makes it a budget-survivor by virtue of position-in-list
-        // (the prompt builder iterates top-of-list and drops from
-        // the bottom on overflow). Verbatim phrase matches go
-        // second — they're the strongest "this chunk actually
-        // contains what the user asked about" signal we have.
-        return frontMatter + verbatimMatches + translated
+        // 2026-05-04 — Verbatim phrase fallback REMOVED. The hybrid
+        // retrieval (cosine + lexical, see searchHybrid) now subsumes
+        // it as a first-class ranking signal — chunks containing
+        // verbatim query phrases get a high lexical score and rank
+        // alongside (often above) cosine matches. The fallback is
+        // no longer needed.
+        return frontMatter + translated
     }
 
+    /// 2026-05-04 — DEPRECATED. Kept temporarily so any test code
+    /// or future restoration has a reference; not called by the
+    /// runtime path anymore. Hybrid retrieval (DocumentEmbeddingIndex
+    /// .searchHybrid) now does this as a first-class ranking signal.
     /// Verbatim noun-phrase fallback retrieval. See call site for
     /// the failure modes this addresses. Approach:
     /// 1. Tokenize the question, drop stopwords, keep tokens ≥3 chars.

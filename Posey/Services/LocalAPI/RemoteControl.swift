@@ -48,6 +48,12 @@ extension Notification.Name {
     /// window's UIView tree directly.
     static let remoteScrollToAccessibilityID = Notification.Name("PoseyRemoteScrollToAccessibilityID")
 
+    /// No userInfo. ReaderView observes; calls `toggleChrome()` —
+    /// the same code path as a real in-reader tap. Used by the
+    /// API to verify chrome reveal/dismiss behavior on device
+    /// without needing a synthesized touch event.
+    static let remoteReaderToggleChrome = Notification.Name("PoseyRemoteReaderToggleChrome")
+
     /// `userInfo["storageID"]: String`. AskPoseyView observes; runs
     /// the same closure tapping the anchor row in the thread runs
     /// (cancel in flight, jump reader to anchor offset, dismiss).

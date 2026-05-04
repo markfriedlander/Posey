@@ -347,20 +347,24 @@ nonisolated enum AskPoseyPromptBuilder {
     conversation history, if the user mentioned it earlier). \
     If you can't ground a name, drop it.
 
-    3a. **DON'T INVENT RELATIONSHIPS.** Two names that both \
-    appear in the excerpts do NOT automatically have a \
-    relationship. If the question asks about a relationship \
-    ("who presented X at Y", "X published by Y", "X invented \
-    by Y", "X is a Z"), only state that relationship if the \
-    excerpts EXPLICITLY assert it in plain language. Do not \
-    infer a connection from two strings appearing near each \
-    other or from a chapter/section title that contains \
-    similar words. FAILED: question "what conference was \
-    this presented at?" → answer "presented at the \
-    'Embracing Collaboration' conference" when "Embracing \
-    Collaboration" is just a section heading and no conference \
-    is mentioned. SUCCEEDED: "The document doesn't mention a \
-    conference."
+    3a. **DON'T INVENT RELATIONSHIPS, BUT DO REPORT STATED ONES.** \
+    If the excerpts EXPLICITLY assert a relationship in plain \
+    language ("X is a Y", "X presented at Y", "X published by Y", \
+    "X causes Y", "X because Y"), report it directly — that's the \
+    answer. Don't refuse out of caution when the relationship is \
+    on the page. \
+    What's forbidden: inferring a relationship that isn't asserted. \
+    Two names appearing near each other do not automatically \
+    have a relationship; a chapter/section title that resembles \
+    a thing does not make that thing exist. \
+    FAILED: question "what conference was this presented at?" → \
+    answer "presented at the 'Embracing Collaboration' conference" \
+    when "Embracing Collaboration" is just a section heading. \
+    SUCCEEDED: "The document doesn't mention a conference." \
+    ALSO SUCCEEDED: question "why did the team stop tightening the \
+    prompt?" → answer "Six iterations confirmed they had hit the \
+    ceiling." when the doc literally says that. Don't refuse \
+    just because the question contains the word "why."
 
     4. **DON'T ECHO THE PROMPT.** No section labels in the \
     output. No "ANSWER:" tags. Just the answer.
@@ -582,6 +586,26 @@ nonisolated enum AskPoseyPromptBuilder {
 // chat view model can call it from a different file.
 extension AskPoseyPromptBuilder {
 
+    /// Sentence splitter — naive but adequate for the metaphor /
+    /// recommendation strips. Splits on `.`, `!`, `?` followed by
+    /// a space or end-of-string. Keeps the terminating punctuation
+    /// with the preceding sentence so re-joins read correctly.
+    static func splitIntoSentences(_ text: String) -> [String] {
+        var sentences: [String] = []
+        var current = ""
+        for ch in text {
+            current.append(ch)
+            if ch == "." || ch == "!" || ch == "?" {
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { sentences.append(trimmed) }
+                current = ""
+            }
+        }
+        let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { sentences.append(tail) }
+        return sentences
+    }
+
     /// Defensive post-strip — removes known polish-preamble
     /// patterns from the start of an assistant response. Mark's
     /// 2026-05-02 (later) directive: "the prompt rule stays, the
@@ -645,6 +669,93 @@ extension AskPoseyPromptBuilder {
                 }
             }
         }
+        // Voice antipattern strip — Task 3 QA surfaced these
+        // patterns leaking past the polish prompt's explicit
+        // FAILED examples. AFM ignores the prompt rules ~50 % of
+        // the time. We strip the worst offenders defensively here.
+
+        // Sycophantic openers that survived BLOCK above.
+        // "Oh, the X Trilogy, huh? Let me break it down for you."
+        let sycoPatterns = [
+            #"^[\s]*(Oh|Ah|Well|Hmm)[!,]?\s+(the|that|let)\s+[^.!?]{0,80}[.!?]\s*Let\s+me\s+(break\s+it\s+down|dive\s+in)[^.!?]{0,40}[.!?]\s*"#,
+            #"^[\s]*Let\s+me\s+(break\s+it\s+down|dive\s+in|explain)[^.!?]{0,40}[.!?]\s*"#,
+            #"^[\s]*(So|Alright|Right)[,]?\s+here'?s\s+(the\s+)?(scoop|deal|lowdown|takeaway)\s*[:.\-]?\s*"#,
+            #"^[\s]*Quick\s+takeaway:\s*"#,  // mostly fine but inconsistent
+            #"^[\s]*(So|Yeah|Yo|Look|Listen),?\s+(here'?s|we\s+gotta|let\s+me)[^.!?]{0,40}[.!?]\s*"#,
+        ]
+        for pattern in sycoPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
+        }
+
+        // Mid-sentence metaphor strip — Task 3 QA showed AFM
+        // ignores the polish prompt's "no metaphors" rule
+        // ~50 % of the time. Detect sentences containing "It's
+        // like X" / "X is like Y" / "It's a Y" decorative
+        // similes and drop those sentences. Preserves substance
+        // sentences before/after the metaphor.
+        let metaphorTriggers = [
+            // Catch "It's like X" / "It is like X" with any continuation —
+            // this is the dominant pattern (Q4 hat: every other answer
+            // included one). The polish prompt explicitly forbids
+            // "X is like Y."
+            #"\bit'?s\s+like\s+\w+"#,
+            #"\bit\s+is\s+like\s+\w+"#,
+            // "X is like Y" / "X are like Y"
+            #"\b\w+\s+(is|are|was|were)\s+like\s+(a|an|having|the|trying|asking|reaching)\b"#,
+            // "they are the ultimate puppeteers"
+            #"\bare\s+the\s+ultimate\s+\w+s?\b"#,
+            // Fixed-phrase clichés
+            #"\bit'?s\s+a\s+(wild\s+ride|fascinating|mind[-\s]bender|classic\s+clash)\b"#,
+            // Common analogy openers
+            #"\blike\s+(having|using|owning)\s+a\s+(swiss\s+army\s+knife|magic\s+wand|silver\s+bullet)\b"#,
+            // "throws shade" / "shaking things up" / "pulling the strings"
+            #"\bthrows?\s+(some\s+)?(serious\s+)?shade\b"#,
+            #"\bshaking\s+things?\s+up\b"#,
+            #"\bpulling\s+the\s+strings\b"#,
+        ]
+        var sentenceArray = splitIntoSentences(result)
+        var keptSentences: [String] = []
+        for sent in sentenceArray {
+            let lower = sent.lowercased()
+            var hasMetaphor = false
+            for pat in metaphorTriggers {
+                if let regex = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]),
+                   regex.firstMatch(in: sent, range: NSRange(sent.startIndex..., in: sent)) != nil {
+                    hasMetaphor = true
+                    break
+                }
+                _ = lower
+            }
+            if !hasMetaphor {
+                keptSentences.append(sent)
+            }
+        }
+        if !keptSentences.isEmpty && keptSentences.count != sentenceArray.count {
+            // Lost at least one sentence to metaphor strip; rebuild.
+            result = keptSentences.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        sentenceArray.removeAll()  // free
+
+        // Recommendation strip — polish HARD RULE 4 forbids these.
+        // If the answer makes a personal recommendation, replace the
+        // whole answer with the FAILED-→-SUCCEEDED form from the
+        // prompt's own example.
+        let recommendationPatterns = [
+            #"(?i)\b(absolutely|definitely)\s+worth\s+reading\b"#,
+            #"(?i)\bmust[-\s]read\b"#,
+            #"(?i)\bI'?d\s+(highly|definitely|strongly)\s+recommend\b"#,
+            #"(?i)\bhighly\s+recommend(ed)?\b"#,
+        ]
+        for pattern in recommendationPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern),
+               regex.firstMatch(in: result, range: NSRange(result.startIndex..., in: result)) != nil {
+                result = "The document doesn't make a recommendation. It does cover the topics laid out above if those interest you."
+                break
+            }
+        }
+
         // Strip leaked prompt example tokens. AFM occasionally
         // echoes the literal `FAILED:` / `SUCCEEDED:` markers from
         // the polish prompt's example list. When that happens, the

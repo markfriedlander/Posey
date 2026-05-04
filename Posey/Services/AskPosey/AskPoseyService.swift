@@ -145,10 +145,31 @@ enum AskPoseyServiceError: LocalizedError, Sendable {
         switch self {
         case .afmUnavailable:
             return "Ask Posey isn't available on this device."
-        case .transient(let underlying):
-            return "Ask Posey hit a temporary issue: \(underlying)"
+        case .transient:
+            return "Posey ran into a temporary issue. Try again in a moment."
         case .permanent(let underlying):
-            return "Ask Posey couldn't process this request: \(underlying)"
+            // Friendly user-facing wording for known internal codes.
+            // Surfaced in the local-API /ask response and in the chat
+            // bubble error path. Task 3 QA verified the prior raw
+            // "informativeRefusalFailure" string was leaking to users.
+            if underlying.contains("informativeRefusalFailure") {
+                return "Posey couldn't find a clear answer to that in the document. Try rephrasing or asking about a more specific section."
+            }
+            return "Posey couldn't answer that one. Try rephrasing the question or asking about a specific passage."
+        }
+    }
+
+    /// Internal diagnostic detail for logs, NOT the user-facing string.
+    /// Keep raw underlying codes here so debug builds can inspect them
+    /// while production users see `errorDescription`.
+    var diagnosticDetail: String {
+        switch self {
+        case .afmUnavailable:
+            return "afmUnavailable"
+        case .transient(let underlying):
+            return "transient: \(underlying)"
+        case .permanent(let underlying):
+            return "permanent: \(underlying)"
         }
     }
 }

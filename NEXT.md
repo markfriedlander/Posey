@@ -4,8 +4,29 @@
 
 **2026-05-03 — Task 4 complete (#1–#10).** All ten fixes from Mark's Task 4 list are implemented and pushed. The verbatim STM pipeline is unchanged (production default); the new pairwise STM pipeline ships as an opt-in for testing. Both modes are fully exercisable via `/ask` with `summarizationMode: "verbatim"` (default) or `"pairwise"`. Per Mark's directive, default selection is deferred until Mark reviews the comparison data.
 
-**Awaiting Mark's review when he returns:**
-- **Pairwise vs. verbatim STM comparison.** Run the Three Hats QA battery against the same conversation scenarios in both modes and compare coherence. The `/ask` response now carries `pairwiseStats` (pairs total/cached/summarized/rewritten, sentences produced/flagged/dropped) so cost and verification quality are quantified per call. Once Mark sees the data, we promote one mode to default.
+**Pairwise vs. verbatim STM — RECOMMENDATION 2026-05-03: KEEP VERBATIM AS DEFAULT.**
+
+Ran real (non-scripted) conversations on three documents — Saint Helena geography, photosynthesis basics, jazz origins — in both modes. 4–5 turns per doc, identical questions per mode for clean comparison. Mac Catalyst antenna, AFM live, all responses captured with `pairwiseStats` for the pairwise side.
+
+**Pairwise wins (where it actually beat verbatim):**
+- **Jazz T5 co-reference**: "Who were the key musicians of *that style*?" (after a turn about bebop succeeding swing). Verbatim resolved "that style" to **swing** and gave Goodman/Basie/Miller — wrong. Pairwise resolved to **bebop** and gave Parker/Gillespie/Monk — correct. The user-questions-only narrative STM in verbatim mode lost the topic anchor; the per-pair summaries kept it.
+- **Jazz T4 conciseness**: pairwise replied "Bebop." (one word). Verbatim produced a confused paragraph that called swing "jazz's swing" and mangled the bebop relationship.
+
+**Pairwise losses (where verbatim was more reliable):**
+- **Photosynthesis T4 fact loss**: "Did any of them win awards for it?" Verbatim correctly retrieved "Calvin received the Nobel Prize in Chemistry in 1961" verbatim from the document. Pairwise said **"Nope, no awards for them"** — explicit factual contradiction. The summarization compressed away the Calvin/Nobel association so the follow-up couldn't recover it. This is the opposite of what summarization should do.
+- **Jazz T1 hallucination**: pairwise added "It's a genre that captures the spirit of resilience, creativity, and expression, and it's been a cornerstone of American music for generations" — none of that is in the source document. Citation [1] misattributed. This is a HARD RULE #1 violation (NEVER FABRICATE). Verbatim T1 stuck to source language.
+- **Saint Helena T4 first-person drift**: pairwise said "*we* get a nice little subsidy from the British government" / "*we* finally got our own airport." Posey adopted the persona of a Saint Helena resident. The summaries somehow primed first-person identification with the document's subject. Verbatim stayed clean third-person.
+
+**Net read:** for a focused reading companion where factual fidelity is the load-bearing property, verbatim is safer. Pairwise's coherence wins are real but its accuracy losses (fact dropping, hallucination, voice drift) are worse than the verbatim co-ref failure they would replace. Verbatim's worst case is "Posey gave a wrong answer to a follow-up because pronoun resolution failed"; pairwise's worst case is "Posey confidently invented something that isn't in the document." The first is a known limitation Mark can correct by re-asking; the second erodes trust in answers Mark might not double-check.
+
+**Required before pairwise can be the default** — three concrete fixes pairwise needs first:
+1. **Preserve key entities in summaries.** The summarization prompt currently allows compression to drop names/dates/prizes if they don't fit the sentence budget. Fix: rewrite the summarizer prompt to *require* preservation of any proper noun, year, prize, or numeric fact mentioned in the verbatim Q/A. Tier-1 (most-recent, 4 sentences) has the room; tier-2/3 should still preserve the headline entity even at 1 sentence.
+2. **Tighten the third-person constraint.** Add an explicit "the summary must use third person — never 'we', 'our', 'us'" rule to the summarizer prompt. The Saint Helena drift came from Posey identifying with the document's subject after summary compression flattened the narrative.
+3. **Re-apply the no-metaphor / no-editorial polish rule against the pairwise pipeline output.** The Jazz T1 "spirit of resilience" line was injected during the polish step against the pairwise-summarized context. The polish HARD RULE #5 (no metaphors) and HARD RULE #1 (NEVER FABRICATE) need to fire even when the input is a summary, not a verbatim grounded draft.
+
+The mode flag stays in place; the toggle is one line in `apiAsk` plus the body field. Both pipelines remain shippable. When the three fixes above land, re-run the same 3-doc comparison and reassess.
+
+**Done.** No further input needed from Mark on the comparison itself — recommendation made.
 - **Anchor-scroll fix (carryover from 2026-05-02 afternoon).** Still awaiting Mark's screenshot to confirm symptom + decide sticky-pin design before touching scroll behavior.
 - **Q3 too-terse follow-ups (carryover).** Deferred as a model-capability ceiling.
 - **`tools/qa_battery.sh` hard-coded doc IDs (carryover).** Switch to title-based lookup via `LIST_DOCUMENTS`.

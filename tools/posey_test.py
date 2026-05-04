@@ -441,6 +441,7 @@ def main() -> None:
         scope = "passage"
         anchor_text = None
         anchor_offset = None
+        summarization_mode = None
         i = 3
         while i < len(args):
             if args[i] == "--scope" and i + 1 < len(args):
@@ -449,6 +450,15 @@ def main() -> None:
                 anchor_text = args[i + 1]; i += 2
             elif args[i] == "--anchor-offset" and i + 1 < len(args):
                 anchor_offset = int(args[i + 1]); i += 2
+            elif args[i] == "--mode" and i + 1 < len(args):
+                # Task 4 #9 (2026-05-03): pairwise summarization mode.
+                # `--mode pairwise` flips the visible-VM into the
+                # tiered embedding-verified pair-summary STM
+                # rendering. Default ("verbatim" or omitted) uses
+                # the existing user-questions-only narrative STM.
+                summarization_mode = args[i + 1].lower(); i += 2
+                if summarization_mode not in ("verbatim", "pairwise"):
+                    print(f"--mode must be 'verbatim' or 'pairwise', got '{summarization_mode}'"); sys.exit(1)
             else:
                 print(f"Unknown ask flag: {args[i]}"); sys.exit(1)
         body_dict = {"documentID": doc_id, "question": question, "scope": scope}
@@ -456,6 +466,8 @@ def main() -> None:
             body_dict["anchorText"] = anchor_text
         if anchor_offset is not None:
             body_dict["anchorOffset"] = anchor_offset
+        if summarization_mode is not None:
+            body_dict["summarizationMode"] = summarization_mode
         body = json.dumps(body_dict).encode()
         # API politeness — cool AFM off before slamming it again.
         # See module docstring "API POLITENESS" for the rationale.

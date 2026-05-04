@@ -307,3 +307,100 @@ final class EPUBImportFrontMatterIntegrationTests: XCTestCase {
     }
 }
 // ========== BLOCK 02: END-TO-END EPUB IMPORT WITH FRONT MATTER - END ==========
+
+
+// ========== BLOCK 03: EMBEDDED TOC STRIP (Task 8 #2) - START ==========
+/// Tests for the spine-embedded TOC stripper added 2026-05-03 so TTS
+/// doesn't read the navigation list aloud. Three patterns we observed
+/// in real-world EPUBs: Project Gutenberg's `<p class="toc">`,
+/// Calibre's `<div class="toc">`, and the EPUB 3 ARIA
+/// `<nav epub:type="toc">`.
+final class EPUBEmbeddedTOCStripTests: XCTestCase {
+
+    func testStripsProjectGutenbergPClassTOC() throws {
+        // Real-world shape pulled from Pride and Prejudice (Gutenberg
+        // EPUB) — `<p class="toc">` containing chapter anchors.
+        let html = """
+        <html><body>
+          <h1>Pride and Prejudice</h1>
+          <p>Real prose follows the table of contents.</p>
+          <p class="toc">
+            <a href="#CHAPTER_I">I.</a>, <a href="#CHAPTER_II">II.</a>,
+            <a href="#CHAPTER_III">III.</a>
+          </p>
+          <p>This paragraph survives the strip.</p>
+        </body></html>
+        """
+        let stripped = String(
+            data: EPUBDocumentImporter.stripEmbeddedTOC(from: Data(html.utf8)),
+            encoding: .utf8
+        )!
+        XCTAssertFalse(stripped.contains("CHAPTER_I"),
+                       "TOC anchors must be stripped from spine HTML")
+        XCTAssertFalse(stripped.contains("II."),
+                       "TOC chapter labels must be stripped")
+        XCTAssertTrue(stripped.contains("This paragraph survives"),
+                      "Surrounding prose must be preserved")
+        XCTAssertTrue(stripped.contains("Pride and Prejudice"),
+                      "Title above the TOC must be preserved")
+    }
+
+    func testStripsCalibreDivClassTOC() throws {
+        let html = """
+        <html><body>
+          <div class="toc">
+            <p><a>Foreword</a></p>
+            <p><a>Chapter 1</a></p>
+          </div>
+          <p>Body content.</p>
+        </body></html>
+        """
+        let stripped = String(
+            data: EPUBDocumentImporter.stripEmbeddedTOC(from: Data(html.utf8)),
+            encoding: .utf8
+        )!
+        XCTAssertFalse(stripped.contains("Foreword"))
+        XCTAssertFalse(stripped.contains("Chapter 1"))
+        XCTAssertTrue(stripped.contains("Body content"))
+    }
+
+    func testStripsEPUB3ARIANavTOC() throws {
+        let html = """
+        <html><body>
+          <nav epub:type="toc">
+            <ol><li><a>One</a></li><li><a>Two</a></li></ol>
+          </nav>
+          <h1>Chapter 1</h1>
+          <p>The story begins.</p>
+        </body></html>
+        """
+        let stripped = String(
+            data: EPUBDocumentImporter.stripEmbeddedTOC(from: Data(html.utf8)),
+            encoding: .utf8
+        )!
+        XCTAssertFalse(stripped.contains("<ol>"),
+                       "<nav epub:type=toc> body must be stripped")
+        XCTAssertTrue(stripped.contains("Chapter 1"),
+                      "Real chapter heading must survive")
+        XCTAssertTrue(stripped.contains("The story begins"))
+    }
+
+    func testDoesNotStripUnrelatedClasses() throws {
+        // Defensive: classes that happen to contain "toc" as a
+        // substring (stockton, photocopy) must not match. The strip
+        // requires "toc" as a distinct word-boundary-anchored token.
+        let html = """
+        <html><body>
+          <p class="stockton">This stockton text must survive.</p>
+          <p class="photocopy">Photocopy too.</p>
+        </body></html>
+        """
+        let stripped = String(
+            data: EPUBDocumentImporter.stripEmbeddedTOC(from: Data(html.utf8)),
+            encoding: .utf8
+        )!
+        XCTAssertTrue(stripped.contains("stockton text"))
+        XCTAssertTrue(stripped.contains("Photocopy too"))
+    }
+}
+// ========== BLOCK 03: EMBEDDED TOC STRIP (Task 8 #2) - END ==========

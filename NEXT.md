@@ -15,7 +15,25 @@
 - M4A export is wired (`AVAudioFile` with `kAudioFormatMPEG4AAC`, medium quality), progress indicator + segment counter + cancel are in `AudioExportSheet`, ShareLink supports Save to Files + share, and the headless `RemoteAudioExportRegistry` exposes `EXPORT_AUDIO`/`AUDIO_EXPORT_STATUS`/`AUDIO_EXPORT_FETCH` for API-driven exports.
 - **Needs Mark's ears**: subjective audio quality of the rendered M4A on a real device — the simulator doesn't ship the same voice catalog, so a final pass on iPhone with both Custom voices and a long document is the only meaningful quality gate.
 
-**BLOCKED — Task 10 (Mac Catalyst verification).** Posey's Xcode project currently has neither `SUPPORTS_MACCATALYST` nor `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD` set. The project literally cannot run on Mac today; "verification" first requires enabling Catalyst as a target destination, which is a deliberate config change that:
+**Task 10 (Mac Catalyst) — ENABLED + verified launch 2026-05-03.** `SUPPORTS_MACCATALYST = YES` added to both Debug and Release configurations of the main Posey app target via direct `project.pbxproj` patch. Catalyst destination now appears in `xcodebuild -showdestinations`. First Catalyst build succeeded on the first attempt with zero source-code changes required — Posey's iOS-only code paths (UIDocumentPicker via `.fileImporter`, AVSpeechSynthesizer voice list, AVAudioFile export, NWListener for the local API, AFM availability check) all compile and link clean against the Mac Catalyst SDK.
+
+Launched and verified running on Mac (PID survived 30s + log shows no Posey-code errors — only benign Catalyst lifecycle warnings: `QuartzCore: cannot add handler to 4 from 1` is a known Catalyst noise; LaunchServices `_LSOpenExtractBackgroundLaunchReasonFromAppleEvent` is normal). The local-API antenna binds to port 8765 successfully on Mac (confirmed by collision when re-launching with the previous instance still alive).
+
+Polish landed for Mac windowing: `WindowGroup` gets `frame(minWidth: 480, minHeight: 600)` and `defaultSize(width: 720, height: 900)` under `#if targetEnvironment(macCatalyst)` so the layout has room to breathe and starts at a reasonable size on first launch (was opening at the iPhone aspect ratio before).
+
+**Findings — what works on Catalyst out of the box:**
+- File picker (`.fileImporter`) — bridges to native macOS open panel.
+- TTS voice list (`AVSpeechSynthesisVoice.speechVoices()`) — returns Mac's voice catalog. The new audio-export auto-fallback (Task 7) picks the highest-quality English voice on whatever device it runs on, so the same code works on Mac.
+- Local API server (NWListener bind on port 8765). Triggers a one-time "Local Network" privacy prompt the first time Posey wants to listen — a Mac OS X 26 behavior matching iOS.
+- Reader, Library, Notes, Ask Posey, TOC, Audio Export — all SwiftUI screens render via UIKit-on-Mac. Sheet detents (`.presentationDetents`) are silently ignored on Catalyst; sheets present full-height instead. Acceptable.
+- AFM (Apple Foundation Models) availability check works — `model.availability` reports based on macOS support.
+
+**Subjective items left for Mark's review when on a real Mac:**
+- TTS voice quality: the Mac voice catalog ships premium voices that may sound different from Mark's iPhone selection. The export auto-fallback picks the best, but he may prefer a specific voice.
+- Window resize behavior at extreme widths (>1200 px) — the reader column doesn't currently constrain to a max comfortable width; on a 27" display the text would stretch edge-to-edge.
+- Sheet detent treatment — full-height sheets on Mac are conventional but Mark may want a constrained-width sheet style for Ask Posey specifically.
+
+**BLOCKED — Task 10 (Mac Catalyst verification, OBSOLETE — kept for diff history).** Posey's Xcode project currently has neither `SUPPORTS_MACCATALYST` nor `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD` set. The project literally cannot run on Mac today; "verification" first requires enabling Catalyst as a target destination, which is a deliberate config change that:
   1. Edits `project.pbxproj` (touches iOS provisioning + entitlements).
   2. May force `#if targetEnvironment(macCatalyst)` branches for: file picker (`UIDocumentPickerViewController` works but feels native-broken on Mac), half-sheet detents (`.presentationDetents` are iOS-only — Mac needs different presentation), TTS voice list (Mac ships a different voice catalog than iPhone), local-API server bind address (Mac uses different network entitlements), window sizing, and AFM availability (FoundationModels ships on macOS too, but the Catalyst variant has its own gating).
   3. Risks regressions on the iPhone target if entitlements and code-signing aren't carefully separated.

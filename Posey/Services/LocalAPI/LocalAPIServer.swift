@@ -70,7 +70,16 @@ final class LocalAPIServer {
         return token
     }
 
-    static var apiToken: String { loadOrCreateToken() }
+    /// Process-lifetime cache of the bearer token. Was a computed
+    /// property (`var apiToken: String { loadOrCreateToken() }`),
+    /// which silently broke on Mac Catalyst: when the sandboxed
+    /// keychain rejects `SecItemAdd`, `loadOrCreateToken()` emits a
+    /// fresh UUID on every access — the start-up NSLog logged
+    /// token A, the request handler then computed token B, and
+    /// every request 401'd. Caching at first access makes the token
+    /// stable for the lifetime of the process regardless of whether
+    /// the keychain persisted it.
+    static let apiToken: String = loadOrCreateToken()
 
     // MARK: — LAN address
 
@@ -144,6 +153,17 @@ extension LocalAPIServer {
                     // token without a manual Xcode console session.
                     NSLog("PoseyAPI: Ready — %@:%d", ip, Int(port))
                     NSLog("PoseyAPI: Token — %@", token)
+                    // 2026-05-03 (Task 4 #9 comparison harness):
+                    // also write to a known temp path so a host
+                    // shell harness can read the token without
+                    // needing to grep the unified log (which
+                    // redacts NSLog args as <private> on macOS
+                    // Catalyst). DEBUG-only file; release ships
+                    // neither the antenna nor this writer.
+                    let tokenFile = NSTemporaryDirectory() + "posey-api-token.txt"
+                    try? "\(ip)\n\(port)\n\(token)\n".write(
+                        toFile: tokenFile, atomically: true, encoding: .utf8
+                    )
                 case .failed(let e):
                     NSLog("PoseyAPI: Failed — %@", "\(e)")
                 default: break

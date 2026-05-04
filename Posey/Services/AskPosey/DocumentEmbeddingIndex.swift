@@ -390,8 +390,6 @@ nonisolated final class DocumentEmbeddingIndex {
         guard !plainText.isEmpty else { throw DocumentEmbeddingError.emptyText }
 
         let language = Self.detectLanguage(in: plainText)
-        let kind = Self.embeddingKind(for: language)
-        let embedder = Self.embedder(for: language)
 
         // 2026-05-04 — Use adaptive config (matches enqueueIndexing).
         // Without this, REINDEX_DOCUMENT and any synchronous rebuild
@@ -402,11 +400,62 @@ nonisolated final class DocumentEmbeddingIndex {
         let configuration = DocumentEmbeddingIndexConfiguration
             .adaptive(forCharacterCount: plainText.count)
         let chunks = Self.chunk(plainText, configuration: configuration)
+
+        // 2026-05-04 Layer 2 — provider switch.
+        // `Self.preferredProvider` (UserDefaults-backed) selects which
+        // embedding model to use. .nlSentence is the legacy NLEmbedding
+        // path (fast, low quality for retrieval). .nlContextual is the
+        // BERT-based NLContextualEmbedding path (slower, evaluated for
+        // retrieval quality at WWDC25). .coreMLMiniLM is reserved for
+        // a bundled MiniLM CoreML model (Phase B).
+        let provider = Self.preferredProvider
+        let kind: String
+        let embedder: NLEmbedding?
+        let contextual: NLContextualEmbedding?
+        switch provider {
+        case .nlSentence:
+            kind = Self.embeddingKind(for: language)
+            embedder = Self.embedder(for: language)
+            contextual = nil
+        case .nlContextual:
+            let ctx = Self.contextualEmbedder(for: language) ?? Self.contextualEmbedder(for: .english)
+            if ctx == nil {
+                dbgLog("[POSEY_ASK_POSEY] NLContextualEmbedding unavailable; falling back to NLEmbedding")
+                kind = Self.embeddingKind(for: language)
+                embedder = Self.embedder(for: language)
+                contextual = nil
+            } else {
+                kind = "en-contextual"
+                embedder = nil
+                contextual = ctx
+            }
+        case .coreMLMiniLM:
+            kind = "en-minilm"
+            embedder = nil
+            contextual = nil
+        }
+
         var stored: [StoredDocumentChunk] = []
         stored.reserveCapacity(chunks.count)
 
         for chunk in chunks {
-            let vector = Self.embed(chunk.text, with: embedder)
+            let vector: [Double]
+            switch provider {
+            case .nlSentence:
+                vector = Self.embed(chunk.text, with: embedder)
+            case .nlContextual:
+                if let ctx = contextual {
+                    vector = Self.embedContextual(chunk.text, with: ctx) ?? Self.embed(chunk.text, with: embedder)
+                } else {
+                    vector = Self.embed(chunk.text, with: embedder)
+                }
+            case .coreMLMiniLM:
+                if let v = Self.embedMiniLMSync(chunk.text) {
+                    vector = v
+                } else {
+                    vector = Self.embed(chunk.text, with: embedder)
+                }
+            }
             stored.append(StoredDocumentChunk(
                 chunkIndex: chunk.chunkIndex,
                 startOffset: chunk.startOffset,
@@ -436,9 +485,21 @@ nonisolated final class DocumentEmbeddingIndex {
         let kindGroups = Dictionary(grouping: stored, by: { $0.embeddingKind })
         var allScored: [DocumentEmbeddingSearchResult] = []
         for (kind, group) in kindGroups {
-            let language = Self.language(forKind: kind)
-            let embedder = Self.embedder(for: language)
-            let queryVector = Self.embed(query, with: embedder)
+            let queryVector: [Double]
+            if kind == "en-contextual" {
+                if let ctx = Self.contextualEmbedder(for: .english),
+                   let v = Self.embedContextual(query, with: ctx) {
+                    queryVector = v
+                } else {
+                    queryVector = Self.hashEmbedding(for: query)
+                }
+            } else if kind == "en-minilm" {
+                queryVector = Self.embedMiniLMSync(query) ?? Self.hashEmbedding(for: query)
+            } else {
+                let language = Self.language(forKind: kind)
+                let embedder = Self.embedder(for: language)
+                queryVector = Self.embed(query, with: embedder)
+            }
             for storedChunk in group {
                 let score = Self.cosine(queryVector, storedChunk.embedding)
                 allScored.append(DocumentEmbeddingSearchResult(chunk: storedChunk, similarity: score))
@@ -568,13 +629,26 @@ nonisolated final class DocumentEmbeddingIndex {
         let stored = try database.chunks(for: documentID)
         guard !stored.isEmpty else { return [] }
 
-        // ── Embed the query once.
+        // ── Embed the query once per kind. Chunks may be a mix of
+        //   embedding kinds during a provider transition. Each kind
+        //   gets its own query vector via the matching embedder.
         let kindGroups = Dictionary(grouping: stored, by: { $0.embeddingKind })
         var queryVecByKind: [String: [Double]] = [:]
         for (kind, _) in kindGroups {
-            let language = Self.language(forKind: kind)
-            let embedder = Self.embedder(for: language)
-            queryVecByKind[kind] = Self.embed(query, with: embedder)
+            if kind == "en-contextual" {
+                if let ctx = Self.contextualEmbedder(for: .english),
+                   let v = Self.embedContextual(query, with: ctx) {
+                    queryVecByKind[kind] = v
+                } else {
+                    queryVecByKind[kind] = Self.hashEmbedding(for: query)
+                }
+            } else if kind == "en-minilm" {
+                queryVecByKind[kind] = Self.embedMiniLMSync(query) ?? Self.hashEmbedding(for: query)
+            } else {
+                let language = Self.language(forKind: kind)
+                let embedder = Self.embedder(for: language)
+                queryVecByKind[kind] = Self.embed(query, with: embedder)
+            }
         }
 
         // ── Extract content tokens (lexical query signal).
@@ -596,8 +670,7 @@ nonisolated final class DocumentEmbeddingIndex {
                 cosine = 0
             }
             // Lexical: fraction of query content tokens that appear
-            // verbatim in the chunk text. Single substring scan per
-            // chunk per token; cheap on the largest doc.
+            // verbatim in the chunk text.
             let lexical: Double
             if contentTokens.isEmpty {
                 lexical = 0
@@ -1220,6 +1293,119 @@ nonisolated extension DocumentEmbeddingIndex {
             return englishFallback
         }
         return nil
+    }
+
+    // MARK: - Embedding provider (Layer 2)
+
+    /// Selectable embedding model. UserDefaults-backed so the
+    /// running app can switch providers without a rebuild.
+    enum EmbeddingProvider: String, Sendable, CaseIterable {
+        case nlSentence    // Apple NLEmbedding (legacy, fast, weak retrieval)
+        case nlContextual  // Apple NLContextualEmbedding (BERT, slower)
+        case coreMLMiniLM  // CoreML MiniLM (Phase B — bundled .mlpackage)
+
+        static let userDefaultsKey = "Posey.AskPosey.embeddingProvider"
+    }
+
+    /// The provider used for new indexing and query embedding.
+    /// Default: .coreMLMiniLM (Phase B winner per 2026-05-04 RAG audit:
+    /// 18/24 = 75% clean rate on non-fiction vs. NLEmbedding's 16/24
+    /// = 67%; NLContextualEmbedding's 15/24 = 63%). The MiniLM model
+    /// (`MiniLML6v2.mlpackage`, 43MB fp16) ships bundled with the app.
+    static var preferredProvider: EmbeddingProvider {
+        get {
+            let raw = UserDefaults.standard.string(forKey: EmbeddingProvider.userDefaultsKey)
+                ?? EmbeddingProvider.coreMLMiniLM.rawValue
+            return EmbeddingProvider(rawValue: raw) ?? .coreMLMiniLM
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: EmbeddingProvider.userDefaultsKey)
+        }
+    }
+
+    // MARK: - NLContextualEmbedding (Layer 2)
+
+    /// Cached contextual embedder per language. NLContextualEmbedding
+    /// is BERT-based, expensive to construct, and benefits hugely
+    /// from being kept warm across queries / chunks.
+    @MainActor
+    private static var contextualCache: [String: NLContextualEmbedding] = [:]
+
+    /// 2026-05-04 — Layer 2 RAG fix.
+    /// Build (or fetch cached) `NLContextualEmbedding` for `language`.
+    /// `NLContextualEmbedding` is Apple's BERT-based contextual model
+    /// (iOS 17+). Apple recommends it over `NLEmbedding` for retrieval
+    /// per WWDC25. First call downloads the model (~500MB); subsequent
+    /// calls are cached. Returns nil if the model is unavailable or
+    /// fails to load.
+    nonisolated static func contextualEmbedder(for language: NLLanguage) -> NLContextualEmbedding? {
+        guard let model = NLContextualEmbedding(language: language) else {
+            return nil
+        }
+        if !model.hasAvailableAssets {
+            do {
+                try model.requestAssets { _, _ in }
+            } catch {
+                dbgLog("[POSEY_ASK_POSEY] NLContextualEmbedding requestAssets failed: %@", "\(error)")
+                return nil
+            }
+        }
+        if !model.hasAvailableAssets {
+            // Assets requested but not yet downloaded.
+            return nil
+        }
+        do {
+            try model.load()
+        } catch {
+            dbgLog("[POSEY_ASK_POSEY] NLContextualEmbedding.load failed: %@", "\(error)")
+            return nil
+        }
+        return model
+    }
+
+    /// Synchronous bridge to `MiniLMEmbedder.shared.embed(_:)`. The
+    /// embedder is `@MainActor`-isolated; indexing runs on a
+    /// background queue. We dispatch sync to main, accepting the
+    /// stall — chunk-level inference is fast (~5-15ms) and indexing
+    /// already serializes on a background queue per document.
+    nonisolated static func embedMiniLMSync(_ text: String) -> [Double]? {
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated { MiniLMEmbedder.shared.embed(text) }
+        }
+        return DispatchQueue.main.sync {
+            MainActor.assumeIsolated { MiniLMEmbedder.shared.embed(text) }
+        }
+    }
+
+    /// Embed `text` via NLContextualEmbedding and mean-pool the token
+    /// vectors into a single chunk-level vector. Returns nil on
+    /// failure so callers can fall back to NLEmbedding.
+    nonisolated static func embedContextual(
+        _ text: String,
+        with embedder: NLContextualEmbedding?
+    ) -> [Double]? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let embedder, !trimmed.isEmpty else { return nil }
+        do {
+            let result = try embedder.embeddingResult(for: trimmed, language: nil)
+            let dim = embedder.dimension
+            var sum = [Double](repeating: 0, count: dim)
+            var count = 0
+            result.enumerateTokenVectors(in: trimmed.startIndex..<trimmed.endIndex) { vec, _ in
+                if vec.count == dim {
+                    for i in 0..<dim { sum[i] += vec[i] }
+                    count += 1
+                }
+                return true
+            }
+            guard count > 0 else { return nil }
+            let inv = 1.0 / Double(count)
+            for i in 0..<dim { sum[i] *= inv }
+            return sum
+        } catch {
+            dbgLog("[POSEY_ASK_POSEY] embedContextual failed: %@", "\(error)")
+            return nil
+        }
     }
 
     /// Embed `text` using `embedder`, falling back to a hash-derived

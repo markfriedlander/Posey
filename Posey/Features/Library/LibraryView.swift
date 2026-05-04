@@ -1,4 +1,5 @@
 import Combine
+import NaturalLanguage
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -625,6 +626,25 @@ extension LibraryViewModel {
                 loadDocuments()
                 return json(["deleted": docs.count])
 
+            case "SET_EMBEDDING_PROVIDER":
+                // 2026-05-04 — Layer 2 benchmark verb. Args:
+                //   nlSentence | nlContextual | coreMLMiniLM
+                // Switches the provider used by future indexing AND
+                // by query embedding for chunks of the matching kind.
+                // No automatic reindex — use REINDEX_DOCUMENT after
+                // switching to actually use the new provider for
+                // existing docs.
+                let raw = arg ?? ""
+                guard let provider = DocumentEmbeddingIndex.EmbeddingProvider(rawValue: raw) else {
+                    let valid = DocumentEmbeddingIndex.EmbeddingProvider.allCases.map { $0.rawValue }.joined(separator: ", ")
+                    return #"{"error":"Usage: SET_EMBEDDING_PROVIDER:<\#(valid)>"}"#
+                }
+                DocumentEmbeddingIndex.preferredProvider = provider
+                return json(["embeddingProvider": provider.rawValue])
+
+            case "GET_EMBEDDING_PROVIDER":
+                return json(["embeddingProvider": DocumentEmbeddingIndex.preferredProvider.rawValue])
+
             case "REINDEX_DOCUMENT":
                 // 2026-05-04 — RAG fix verb. Wipes existing chunks
                 // and rebuilds the embedding index for one doc using
@@ -672,6 +692,45 @@ extension LibraryViewModel {
                 return json(["totalChunks": total, "offset": offset,
                              "returned": slice.count, "chunks": items])
 
+            case "EMBED_QUERY_CONTEXTUAL":
+                // 2026-05-04 — Layer 2 benchmark verb. Args:
+                //   <doc-id>:<query>
+                // Re-embeds `query` AND every chunk using
+                // NLContextualEmbedding, computes cosine, returns
+                // top-K. Used to A/B test contextual vs. NLEmbedding
+                // on known-failing audit cases before committing to
+                // a re-index. Slow (re-embeds every chunk per call)
+                // but only used in development.
+                let raw = arg ?? ""
+                guard let colonIdx = raw.firstIndex(of: ":") else {
+                    return #"{"error":"Usage: EMBED_QUERY_CONTEXTUAL:<doc-id>:<query>"}"#
+                }
+                let idStr = String(raw[..<colonIdx])
+                let query = String(raw[raw.index(after: colonIdx)...])
+                guard let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Invalid document ID"}"#
+                }
+                let stored = try databaseManager.chunks(for: id)
+                guard let embedder = DocumentEmbeddingIndex.contextualEmbedder(for: .english) else {
+                    return #"{"error":"NLContextualEmbedding unavailable on this device (iOS 17+ required, model assets must download)"}"#
+                }
+                guard let qVec = DocumentEmbeddingIndex.embedContextual(query, with: embedder) else {
+                    return #"{"error":"Failed to embed query contextually"}"#
+                }
+                var scored: [(Int, Int, Double, String)] = []
+                for c in stored.prefix(500) { // cap for speed
+                    if let cv = DocumentEmbeddingIndex.embedContextual(c.text, with: embedder) {
+                        let s = DocumentEmbeddingIndex.cosine(qVec, cv)
+                        scored.append((c.chunkIndex, c.startOffset, s, String(c.text.prefix(80))))
+                    }
+                }
+                let topK = scored.sorted { $0.2 > $1.2 }.prefix(15)
+                let items: [[String: Any]] = topK.map { (idx, off, sim, prev) in
+                    ["chunkIndex": idx, "startOffset": off, "similarity": sim, "preview": prev]
+                }
+                return json(["query": query, "scoredChunks": scored.count,
+                             "totalChunks": stored.count, "topMatches": items])
+
             case "EMBED_QUERY":
                 // 2026-05-04 — RAG audit verb. Args:
                 //   <doc-id>:<query>
@@ -691,9 +750,22 @@ extension LibraryViewModel {
                 }
                 let stored = try databaseManager.chunks(for: id)
                 let kind = stored.first?.embeddingKind ?? "en-sentence"
-                let language = DocumentEmbeddingIndex.language(forKind: kind)
-                let embedder = DocumentEmbeddingIndex.embedder(for: language)
-                let qVec = DocumentEmbeddingIndex.embed(query, with: embedder)
+                // Match the query embedder to the chunks' embedding kind.
+                let qVec: [Double]
+                if kind == "en-contextual" {
+                    if let ctx = DocumentEmbeddingIndex.contextualEmbedder(for: .english),
+                       let v = DocumentEmbeddingIndex.embedContextual(query, with: ctx) {
+                        qVec = v
+                    } else {
+                        qVec = [Double](repeating: 0, count: 384)
+                    }
+                } else if kind == "en-minilm" {
+                    qVec = DocumentEmbeddingIndex.embedMiniLMSync(query) ?? [Double](repeating: 0, count: 384)
+                } else {
+                    let language = DocumentEmbeddingIndex.language(forKind: kind)
+                    let embedder = DocumentEmbeddingIndex.embedder(for: language)
+                    qVec = DocumentEmbeddingIndex.embed(query, with: embedder)
+                }
                 let scored: [(Int, Int, Double, String)] = stored.map { c in
                     let s = DocumentEmbeddingIndex.cosine(qVec, c.embedding)
                     return (c.chunkIndex, c.startOffset, s, String(c.text.prefix(80)))

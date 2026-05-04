@@ -1,5 +1,43 @@
 # Posey Decisions
 
+## 2026-05-04 — Ask Posey: MiniLM (CoreML) Replaces NLEmbedding for RAG
+
+- Status: Accepted
+- Decision: Document chunks are now embedded via a bundled CoreML build of `sentence-transformers/all-MiniLM-L6-v2` (43MB fp16 .mlpackage shipped in `Posey/Resources/MiniLM/`). Replaces Apple's `NLEmbedding.sentenceEmbedding(_:)` for new indexing. Apple's `NLEmbedding` and `NLContextualEmbedding` paths remain selectable via the `EmbeddingProvider` UserDefaults flag for benchmarking and fallback.
+- Rationale: Per Mark's RAG-pipeline audit directive 2026-05-04, A/B tested all three embedders end-to-end on the same 24-question non-fiction Three Hats sweep:
+  - **NLEmbedding** (current): 16/24 = 67% clean. Cosine scores 0.07–0.30 — too uniformly low to discriminate. Apple trained NLEmbedding for clustering/classification; not for retrieval. Per WWDC25, Apple recommends NLContextualEmbedding for retrieval.
+  - **NLContextualEmbedding** (BERT, mean-pool): 15/24 = 63% clean. Higher absolute scores (0.85–0.88) but very weak discrimination — top-5 results cluster within 0.005 of each other. Vanilla BERT mean-pooling is a known-weak retrieval baseline.
+  - **MiniLM CoreML** (sentence-transformers all-MiniLM-L6-v2): 18/24 = 75% clean. Purpose-built for retrieval (MTEB-trained on query-passage pairs). Cosine scores 0.25–0.40 with meaningful spread. Surfaces correct chunks (e.g. DOCX "What chapter covers ethics?" → chunk 320 "Chapter 4: Ethical Considerations in AI" at rank 3 cosine alone, no lexical fallback needed).
+- Implementation:
+  - Bundled assets: `MiniLML6v2.mlpackage` (43MB fp16), `minilm-vocab.txt` (30,522 tokens), `minilm-tokenizer-config.json`. Auto-included via Xcode 15+ filesystem-synchronized groups; Xcode auto-compiles `.mlpackage` to `.mlmodelc` at build time.
+  - `MiniLMEmbedder` (new): `@MainActor` singleton wraps `MLModel` + tokenizer. Lazy load on first `embed(_:)` call. Mean-pools `last_hidden_state` with attention mask, L2-normalizes (matches sentence-transformers semantics), returns 384-dim `[Double]`.
+  - `BertWordPieceTokenizer` (new): hand-written WordPiece (BasicTokenizer + WordpieceTokenizer) matching `bert-base-uncased` semantics. ~280 lines, no third-party deps. Reads vocab.txt at init.
+  - `EmbeddingProvider` enum: `.nlSentence | .nlContextual | .coreMLMiniLM`. UserDefaults-backed via `Posey.AskPosey.embeddingProvider`. Default flipped to `.coreMLMiniLM`.
+  - `embeddingKind` tag: chunks store `"en-minilm"` so query-side knows which embedder to use. Mixed-kind support preserved (a doc indexed under one provider can be searched while still indexed; old NLEmbedding chunks keep working until re-indexed).
+  - Sync bridge: `embedMiniLMSync(_:)` dispatches to main actor for the `MiniLMEmbedder` singleton. Indexing runs on a background queue; the per-chunk dispatch is fast (5–15ms on Neural Engine) and serializes naturally per document.
+- Constraints respected:
+  - **No third-party Swift packages.** Tokenizer is hand-written. `swift-transformers` SPM was considered and rejected per CLAUDE.md.
+  - **On-device only.** No network. Model ships in the bundle.
+  - **iOS 17+** for `.mlpackage` runtime compilation and `MLModelConfiguration.computeUnits = .all` (Neural Engine where available).
+- Tradeoffs accepted:
+  - **+43MB app bundle.** Visible but well under App Store norms. Posey was small before; this is now the dominant footprint.
+  - **Re-index cost.** ~25s per 148K-char doc, ~75s for the 1.6M-char EPUB. Done lazily on next-open for existing docs; new imports are unaffected.
+  - **Max sequence length 128 tokens** (the bundled model's shape range). Posey's 500–1000-char chunks are 100–250 tokens; we truncate at 128. The lost tail is acceptable for retrieval — the head of each chunk carries the topic signal.
+- Restoration if MiniLM ships a regression: set provider via `SET_EMBEDDING_PROVIDER:nlSentence` (API verb) and `REINDEX_DOCUMENT` per doc. Old code paths and chunk kinds remain wired.
+- Source: Mark's directive 2026-05-04 — "test both NLContextualEmbedding and MiniLM/DistilBERT via CoreML or another like model / models, and use whichever performs better."
+
+## 2026-05-04 — Ask Posey: Optimized For Non-Fiction; Fiction Out Of Scope For 1.0
+
+- Status: Accepted
+- Decision: Ask Posey is a non-fiction reading assistant. All RAG tuning, prompt iteration, and conversation-quality testing target essays, articles, reference material, legal documents, academic papers, and similar. Fiction (novels, narrative prose) is acknowledged as a weaker case and will not be optimized for in 1.0. Existing infrastructure (importers, position memory, TTS, notes, search) continues to support fiction documents — only Ask Posey conversational quality is scoped.
+- Rationale: Three Hats sweeps across 7 formats showed Ask Posey produces clean answers ~75% of the time on non-fiction (post-MiniLM, post-Layer-1-cleanup). The same pipeline on the EPUB Illuminatus Trilogy (1.6M-char satirical fiction) hits AFM safety refusals on occult content, narrative-context failures (model can't compose facts across chapters of a novel the way it can across sections of an essay), and generally lower clean rates that don't respond to the same fixes that work on non-fiction. Optimizing fiction would require a different retrieval strategy (scene-level vs. paragraph-level chunking; character-aware retrieval; longer context windows) and likely a different prompt frame (narrative summarization rather than fact lookup). Out of scope for 1.0.
+- Surface to user:
+  - First-use notification (`AskPoseyFirstUseSheet`, shown once ever, dismissal stored in UserDefaults under `Posey.AskPosey.firstUseNoticeDismissed`) sets expectations explicitly: "I do my best work with non-fiction. Essays, articles, reference material — that's where I shine. Fiction is trickier for me, but give it a try if you're curious." One-tap "Got it" dismissal.
+  - No format-level gating — the user can still open Ask Posey on a novel; they're just informed first.
+- Test policy: the 7-format Three Hats sweep contracts to a 6-format non-fiction sweep (TXT/MD/RTF/DOCX/HTML/PDF). EPUB Illuminatus stays in the corpus for import / TTS / notes regression testing but is excluded from Ask Posey clean-rate scoring.
+- Future work: fiction-specific retrieval and prompt strategies are deferred to a post-1.0 milestone. Logged in NEXT.md.
+- Source: Mark's directive 2026-05-04.
+
 ## 2026-05-04 — Ask Posey: Polish Call Removed (Temporary)
 
 - Status: Accepted (temporary — revisit when AFM improves)

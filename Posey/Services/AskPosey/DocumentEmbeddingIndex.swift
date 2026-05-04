@@ -393,7 +393,15 @@ nonisolated final class DocumentEmbeddingIndex {
         let kind = Self.embeddingKind(for: language)
         let embedder = Self.embedder(for: language)
 
-        let chunks = chunk(plainText)
+        // 2026-05-04 — Use adaptive config (matches enqueueIndexing).
+        // Without this, REINDEX_DOCUMENT and any synchronous rebuild
+        // path silently double the chunk count on long documents
+        // (1.6M-char EPUB went from 1829 → 3657 chunks because the
+        // instance .default 500-char config was used instead of the
+        // longDocument 1000-char config).
+        let configuration = DocumentEmbeddingIndexConfiguration
+            .adaptive(forCharacterCount: plainText.count)
+        let chunks = Self.chunk(plainText, configuration: configuration)
         var stored: [StoredDocumentChunk] = []
         stored.reserveCapacity(chunks.count)
 
@@ -526,6 +534,146 @@ nonisolated final class DocumentEmbeddingIndex {
         return Array(rescored.sorted { $0.similarity > $1.similarity }.prefix(limit))
     }
 
+    /// 2026-05-04 — Hybrid retrieval. Cosine + lexical score as
+    /// peers, not fallbacks. Required because NLEmbedding's
+    /// `en-sentence` vectors do not differentiate well for
+    /// information-retrieval queries (top scores cluster in
+    /// 0.1–0.35; cosine ranking is essentially noise for short
+    /// QA queries). The RAG audit (2026-05-04, see
+    /// /tmp/posey-rag-audit/findings.md) verified this on three
+    /// known-correct questions where the right chunk did not
+    /// appear in cosine top 10.
+    ///
+    /// Approach:
+    /// 1. Tokenize the query, drop stopwords, keep ≥3-char content
+    ///    tokens.
+    /// 2. For every chunk in the document, compute:
+    ///    - cosine_score (0..1): standard embedding similarity.
+    ///    - lexical_score (0..1): fraction of query content tokens
+    ///      that appear (case-insensitive substring) in the chunk.
+    /// 3. combined = max(cosine_score, lexical_score) — promotes
+    ///    chunks where EITHER signal fires. Avoids the failure
+    ///    mode where strong lexical match (verbatim phrase) gets
+    ///    suppressed by weak cosine.
+    /// 4. Sort by combined, return top `limit`.
+    /// 5. (Inherited) Entity-index hits get folded in via the
+    ///    existing chunkIndicesMentioningEntities path before
+    ///    re-ranking.
+    func searchHybrid(
+        documentID: UUID,
+        query: String,
+        limit: Int
+    ) throws -> [DocumentEmbeddingSearchResult] {
+        guard !query.isEmpty else { return [] }
+        let stored = try database.chunks(for: documentID)
+        guard !stored.isEmpty else { return [] }
+
+        // ── Embed the query once.
+        let kindGroups = Dictionary(grouping: stored, by: { $0.embeddingKind })
+        var queryVecByKind: [String: [Double]] = [:]
+        for (kind, _) in kindGroups {
+            let language = Self.language(forKind: kind)
+            let embedder = Self.embedder(for: language)
+            queryVecByKind[kind] = Self.embed(query, with: embedder)
+        }
+
+        // ── Extract content tokens (lexical query signal).
+        let stopwords: Set<String> = Self.lexicalStopwords
+        let rawTokens = query.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        let contentTokens = rawTokens.filter { !stopwords.contains($0) && $0.count >= 3 }
+
+        // ── Score every chunk.
+        let queryEntities = Self.extractEntities(from: query)
+        var scored: [(StoredDocumentChunk, Double, Double, Double)] = []
+        scored.reserveCapacity(stored.count)
+        for chunk in stored {
+            let cosine: Double
+            if let qVec = queryVecByKind[chunk.embeddingKind] {
+                cosine = Self.cosine(qVec, chunk.embedding)
+            } else {
+                cosine = 0
+            }
+            // Lexical: fraction of query content tokens that appear
+            // verbatim in the chunk text. Single substring scan per
+            // chunk per token; cheap on the largest doc.
+            let lexical: Double
+            if contentTokens.isEmpty {
+                lexical = 0
+            } else {
+                let chunkLower = chunk.text.lowercased()
+                var hits = 0
+                for token in contentTokens {
+                    if chunkLower.contains(token) { hits += 1 }
+                }
+                lexical = Double(hits) / Double(contentTokens.count)
+            }
+            // Entity boost from existing index lookup gets folded in
+            // separately below (we don't want to re-extract entities
+            // per chunk; the index does it once at index time).
+            let combined = max(cosine, lexical)
+            scored.append((chunk, cosine, lexical, combined))
+        }
+
+        // ── Entity-index lookup for question-side entities. Boosts
+        //   chunks that contain any of those entities.
+        let queryEntitiesArray = Array(queryEntities)
+        if !queryEntitiesArray.isEmpty {
+            do {
+                let mentioned = try database.chunkIndicesMentioningEntities(
+                    documentID: documentID,
+                    entitiesLower: queryEntitiesArray
+                )
+                if !mentioned.isEmpty {
+                    let mset = Set(mentioned)
+                    for i in 0..<scored.count where mset.contains(scored[i].0.chunkIndex) {
+                        // Lift the combined score by the entity bonus
+                        // (additive, capped at 1.0).
+                        scored[i].3 = min(1.0, scored[i].3 + 0.4)
+                    }
+                }
+            } catch {
+                dbgLog("[POSEY_ASK_POSEY] entity-index lookup failed: %@", "\(error)")
+            }
+        }
+
+        // ── Sort by combined, take top `limit`. We attach the
+        //   `combined` value as `similarity` so downstream UI
+        //   (relevance pills, citation attribution thresholds)
+        //   sees a meaningful 0..1 number.
+        let sorted = scored.sorted { $0.3 > $1.3 }
+        let top = sorted.prefix(limit).map { (chunk, _, _, combined) in
+            DocumentEmbeddingSearchResult(chunk: chunk, similarity: combined)
+        }
+        return Array(top)
+    }
+
+    /// Stopwords used for lexical query tokenization. Conservative —
+    /// includes function words and common pronouns/auxiliaries plus
+    /// generic "ask about a doc" verbs that don't carry signal.
+    static let lexicalStopwords: Set<String> = [
+        "the","is","are","was","were","be","been","being",
+        "of","in","on","at","to","for","with","from","by",
+        "and","or","but","not","no","nor","so",
+        "this","that","these","those","its","their","there","here",
+        "what","who","where","when","why","how","which",
+        "does","did","doing","done","has","have","had",
+        "tell","told","say","said","ask","asked",
+        "you","your","yours","our","ours",
+        "about","please","also","too","any","some","all",
+        "can","could","would","should","will","may","might","must",
+        "mention","mentioned","mentions","discuss","discussed","discusses",
+        "explain","explains","explained","describe","describes","described",
+        "give","gave","given","show","shows","showed","shown",
+        "yes","yeah","ok","okay","thanks","thank",
+        "book","document","article","paper","text","chapter",
+        "passage","section","page","story",
+        "thing","things","stuff","kind","type","sort","way",
+        "really","very","much","many","more","less",
+        "good","bad","well","right","wrong","fine"
+    ]
+
     /// Extract person / place / organization names from `text` via
     /// `NLTagger.nameType`. Lowercased for case-insensitive overlap
     /// comparison. Returns a Set so repeated mentions don't inflate
@@ -644,19 +792,96 @@ nonisolated final class DocumentEmbeddingIndex {
             let lower = text.index(text.startIndex, offsetBy: start)
             let upper = text.index(text.startIndex, offsetBy: end)
             let slice = String(text[lower..<upper])
-            chunks.append(DocumentEmbeddingChunk(
-                chunkIndex: index,
-                startOffset: start,
-                endOffset: end,
-                text: slice
-            ))
-            index += 1
+            // 2026-05-04 — RAG audit: skip TOC-dominant chunks at
+            // index time. Multi-page formats (TXT/RTF/DOCX/HTML/PDF)
+            // put a Table of Contents at the top — every chunk in
+            // that region is "ChatGPT Round 1: 17 / Claude Round 1: 19
+            // / ..." which shares vocabulary with content questions
+            // (matches retrieval) but contains zero answer text
+            // (poisons retrieval). Detection is conservative — only
+            // chunks that are STRONGLY TOC-shaped get skipped, so
+            // false positives in real prose are rare. See
+            // `chunkIsMostlyTOC` for the heuristic.
+            if !Self.chunkIsMostlyTOC(slice) {
+                chunks.append(DocumentEmbeddingChunk(
+                    chunkIndex: index,
+                    startOffset: start,
+                    endOffset: end,
+                    text: slice
+                ))
+                index += 1
+            }
+            // chunkIndex is the index of *kept* chunks; startOffset
+            // continues to advance with the sliding window so we
+            // don't re-process the same region. Skipped TOC chunks
+            // simply leave a gap in chunkIndex (e.g. 0, 1, 5, 6, …)
+            // — front-end code already treats chunkIndex as opaque.
             if end == total { break }
             // Advance by chunkSize - overlap so each new chunk shares
             // `overlap` characters with the previous one.
             start = max(start + chunkSize - overlap, start + 1)
         }
         return chunks
+    }
+
+    /// Heuristic: is this chunk dominated by Table-of-Contents text?
+    /// True when at least two of three TOC signals are strong:
+    /// (a) high digit-to-letter ratio (TOC has many page numbers),
+    /// (b) high line-break density (TOC entries are short lines),
+    /// (c) presence of dot leaders or trailing-page-number patterns
+    /// (e.g. "Chapter 1: What is AI? 10" or "A. Internet ...... 6").
+    /// Conservative — real prose rarely trips two of three signals.
+    static func chunkIsMostlyTOC(_ text: String) -> Bool {
+        let n = text.count
+        guard n >= 120 else { return false } // too small to judge
+        // Count alpha and digit characters.
+        var letters = 0
+        var digits = 0
+        var newlines = 0
+        for ch in text {
+            if ch.isLetter { letters += 1 }
+            else if ch.isNumber { digits += 1 }
+            else if ch.isNewline { newlines += 1 }
+        }
+        guard letters > 0 else { return true } // pure numbers — definitely junk
+        let digitRatio = Double(digits) / Double(letters)
+        let linesPerKChar = Double(newlines) * 1000.0 / Double(n)
+
+        // Signal A: lots of digits relative to letters (TOC page numbers).
+        let signalA = digitRatio > 0.06
+        // Signal B: lots of newlines (short TOC entries).
+        let signalB = linesPerKChar > 12.0
+        // Signal C: trailing-page-number patterns or dot leaders.
+        // "Some Heading 17", "A. Section .... 6", "I. Introduction.... 3"
+        let signalC: Bool = {
+            // Count lines ending with "<word> <number>" or
+            // ".. <number>". Five+ such lines in a chunk → TOC.
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+            var hits = 0
+            for raw in lines {
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                if line.isEmpty { continue }
+                // Trailing digits preceded by a non-digit: "Foo 17", "Bar .. 9"
+                // Length cap on the line so we don't trip on long prose
+                // ending with a year ("…in 2024.").
+                guard line.count <= 100 else { continue }
+                guard let last = line.last, last.isNumber else { continue }
+                // Strip trailing digits and check there's letters before them.
+                var i = line.endIndex
+                while i > line.startIndex {
+                    let prev = line.index(before: i)
+                    if line[prev].isNumber { i = prev } else { break }
+                }
+                let prefix = line[..<i].trimmingCharacters(in: CharacterSet(charactersIn: " .\t-—"))
+                // Prefix should be mostly letters (a real section/chapter title).
+                let prefixLetters = prefix.filter { $0.isLetter }.count
+                if prefixLetters >= 3 { hits += 1 }
+            }
+            return hits >= 5
+        }()
+
+        let strongSignals = (signalA ? 1 : 0) + (signalB ? 1 : 0) + (signalC ? 1 : 0)
+        return strongSignals >= 2
     }
 
     // MARK: Citation attribution (Task 2 #25)

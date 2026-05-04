@@ -625,6 +625,87 @@ extension LibraryViewModel {
                 loadDocuments()
                 return json(["deleted": docs.count])
 
+            case "REINDEX_DOCUMENT":
+                // 2026-05-04 — RAG fix verb. Wipes existing chunks
+                // and rebuilds the embedding index for one doc using
+                // current chunking config (e.g. after TOC-skip
+                // landed). Args: <doc-id>.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: REINDEX_DOCUMENT:<doc-id>"}"#
+                }
+                let docs = try databaseManager.documents()
+                guard let doc = docs.first(where: { $0.id == id }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                try databaseManager.deleteChunks(for: id)
+                let count = try embeddingIndex.indexIfNeeded(doc)
+                return json(["reindexed": true, "id": id.uuidString,
+                             "chunkCount": count])
+
+            case "LIST_CHUNKS":
+                // 2026-05-04 — RAG audit verb. Args:
+                //   <doc-id>:<offset>:<limit>
+                // Returns chunk metadata + text preview for the
+                // given range. Used by the Layer 1 chunking audit
+                // to inspect what's actually in the index per format.
+                let parts = (arg ?? "").split(separator: ":", maxSplits: 2,
+                                              omittingEmptySubsequences: false)
+                guard parts.count >= 1, let id = UUID(uuidString: String(parts[0])) else {
+                    return #"{"error":"Usage: LIST_CHUNKS:<doc-id>[:offset:limit]"}"#
+                }
+                let offset: Int = parts.count >= 2 ? (Int(parts[1]) ?? 0) : 0
+                let limit: Int  = parts.count >= 3 ? (Int(parts[2]) ?? 20) : 20
+                let stored = try databaseManager.chunks(for: id)
+                let total = stored.count
+                let slice = Array(stored.dropFirst(offset).prefix(limit))
+                let items: [[String: Any]] = slice.map { c in
+                    [
+                        "chunkIndex": c.chunkIndex,
+                        "startOffset": c.startOffset,
+                        "endOffset": c.endOffset,
+                        "length": c.endOffset - c.startOffset,
+                        "embeddingKind": c.embeddingKind,
+                        "preview": String(c.text.prefix(120)),
+                        "tail": String(c.text.suffix(60))
+                    ]
+                }
+                return json(["totalChunks": total, "offset": offset,
+                             "returned": slice.count, "chunks": items])
+
+            case "EMBED_QUERY":
+                // 2026-05-04 — RAG audit verb. Args:
+                //   <doc-id>:<query>
+                // Returns the query embedding (truncated) plus the
+                // top-K cosine similarities against every chunk in
+                // the document. Used by the Layer 2 embedding-quality
+                // audit to verify that semantically similar
+                // questions and answers cluster correctly.
+                let raw = arg ?? ""
+                guard let colonIdx = raw.firstIndex(of: ":") else {
+                    return #"{"error":"Usage: EMBED_QUERY:<doc-id>:<query>"}"#
+                }
+                let idStr = String(raw[..<colonIdx])
+                let query = String(raw[raw.index(after: colonIdx)...])
+                guard let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Invalid document ID"}"#
+                }
+                let stored = try databaseManager.chunks(for: id)
+                let kind = stored.first?.embeddingKind ?? "en-sentence"
+                let language = DocumentEmbeddingIndex.language(forKind: kind)
+                let embedder = DocumentEmbeddingIndex.embedder(for: language)
+                let qVec = DocumentEmbeddingIndex.embed(query, with: embedder)
+                let scored: [(Int, Int, Double, String)] = stored.map { c in
+                    let s = DocumentEmbeddingIndex.cosine(qVec, c.embedding)
+                    return (c.chunkIndex, c.startOffset, s, String(c.text.prefix(80)))
+                }
+                let topK = scored.sorted { $0.2 > $1.2 }.prefix(20)
+                let items: [[String: Any]] = topK.map { (idx, off, sim, prev) in
+                    ["chunkIndex": idx, "startOffset": off,
+                     "similarity": sim, "preview": prev]
+                }
+                return json(["query": query, "totalChunks": stored.count,
+                             "topMatches": items])
+
             case "DB_STATS":
                 let docs = try databaseManager.documents()
                 var byType: [String: Int] = [:]

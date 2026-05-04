@@ -1644,6 +1644,20 @@ private struct NotesSheet: View {
     /// affordance; persisted state isn't needed.
     @State private var expandedNoteIDs: Set<String> = []
 
+    /// Task 12 (2026-05-03 — Data Portability): the export URL is
+    /// computed lazily inside a SwiftUI `View` body. We render it
+    /// only when the toolbar `ShareLink` needs it. The exporter
+    /// builds Markdown, writes to a temp .md file, and returns the
+    /// URL the share sheet hands to whichever extension the user
+    /// picks. nil while the database is unavailable.
+    private var annotationsExportURL: URL? {
+        let payload = AnnotationExporter.export(
+            document: viewModel.document,
+            databaseManager: viewModel.databaseManager
+        )
+        return try? payload.temporaryFileURL()
+    }
+
     var body: some View {
         NavigationStack {
             ScrollViewReader { listProxy in
@@ -1695,6 +1709,27 @@ private struct NotesSheet: View {
             .navigationTitle("Notes")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // Task 12 (2026-05-03 — Data Portability): export
+                // every annotation + Ask Posey conversation tied to
+                // this document as a single Markdown file via the
+                // standard iOS share sheet (Files / Mail / Messages /
+                // AirDrop / etc.). Built lazily on tap so opening
+                // the Notes sheet doesn't pay the rendering cost
+                // for users who never export.
+                ToolbarItem(placement: .topBarLeading) {
+                    if let exportURL = annotationsExportURL {
+                        ShareLink(item: exportURL) {
+                            Label("Export", systemImage: "square.and.arrow.up")
+                        }
+                        .accessibilityLabel("Export annotations and conversations")
+                        .remoteRegister("notes.export") {
+                            // Surface the URL via remote-control for
+                            // automation; share sheet itself is
+                            // user-driven.
+                            _ = exportURL
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
                         dismiss()

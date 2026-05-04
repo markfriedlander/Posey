@@ -153,24 +153,22 @@ extension PDFDocumentImporter {
                 if ocr.count >= 10 {
                     pageContents.append(.text(ocr))
                     readableTextPages.append(ocr)
+                } else if pageIsEffectivelyBlank(page) {
+                    // Task 8 #5 (2026-05-03 — pixel-uniformity
+                    // blank detection): genuinely blank section-
+                    // divider page (no extractable text + < 10 OCR
+                    // chars + pixel-uniformity scoring confirms
+                    // ≥99% of sampled pixels share the dominant
+                    // colour within a tight delta). Pausing TTS
+                    // for these pages is an annoyance, not an
+                    // affordance — flow through. Antifa corpus
+                    // had 11 such pages all firing visual stops
+                    // before this gate.
+                    dbgLog("PDF import: skipping blank visual stop on page %d", index + 1)
                 } else {
-                    // Task 8 #5 (deferred 2026-05-03): a smarter
-                    // blank-page detector would suppress visual
-                    // stops for genuinely empty section-divider
-                    // pages (Antifa corpus has 11 such pages). My
-                    // first attempt — gating on
-                    // `pageHasImageXObjects(page)` — was wrong:
-                    // pages drawn entirely with vector primitives
-                    // (CGContext fill paths, no XObject) have no
-                    // image XObject but are NOT blank. Test
-                    // `testLoadDocumentPreservesVisualOnlyPagesInDisplayText`
-                    // has a `fillEllipse` page that proved the
-                    // point. Real fix needs PNG-pixel-uniformity
-                    // scoring (sample N pixels of the rendered
-                    // image, score colour variance, suppress when
-                    // ≥99% match a single colour cluster within a
-                    // tight delta). Documented in NEXT.md; left
-                    // as-is here so we don't over-suppress.
+                    // Truly visual page — render to PNG and emit
+                    // a visual stop so the user sees the figure
+                    // inline.
                     let imageID = UUID().uuidString
                     if let pngData = renderPageToPNG(page) {
                         imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))
@@ -300,6 +298,88 @@ extension PDFDocumentImporter {
         guard !lines.isEmpty else { return "" }
 
         return normalize(lines.joined(separator: " "))
+    }
+
+    /// Task 8 #5 (2026-05-03): is the page effectively blank?
+    /// Renders a low-resolution grayscale snapshot, samples pixels on
+    /// a regular grid, and scores luminance variance. Returns true
+    /// when ≥99 % of samples are within a tight delta of the dominant
+    /// luminance (i.e., the page is essentially uniform — section
+    /// divider, intentional blank, or page-break filler). Conservative
+    /// thresholds prevent false positives on light watercolour /
+    /// faint-grey artwork.
+    private func pageIsEffectivelyBlank(_ page: PDFPage) -> Bool {
+        // Render at 0.25× to keep the buffer tiny (a US Letter page
+        // becomes ~153×198 px). Variance on such a small render is
+        // a robust proxy for the full page — a single dark glyph
+        // still produces detectable variance at this scale.
+        guard let cgImage = renderPageToCGImage(
+            page,
+            colorSpace: CGColorSpaceCreateDeviceGray(),
+            scale: 0.25
+        ) else {
+            return false
+        }
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else { return false }
+
+        // Pull bytes via a fresh DeviceGray context so the row stride
+        // is predictable (one byte per pixel).
+        let bytesPerRow = width
+        let totalBytes = bytesPerRow * height
+        guard let data = malloc(totalBytes) else { return false }
+        defer { free(data) }
+        let space = CGColorSpaceCreateDeviceGray()
+        guard let ctx = CGContext(
+            data: data,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: space,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return false }
+        ctx.setFillColor(gray: 1, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let buf = data.assumingMemoryBound(to: UInt8.self)
+
+        // Sample on a regular grid — 32×32 = 1024 samples. Cheap,
+        // covers the whole page, robust against gradients.
+        let sampleStride = 32
+        let stepX = max(1, width / sampleStride)
+        let stepY = max(1, height / sampleStride)
+        var samples: [UInt8] = []
+        samples.reserveCapacity(sampleStride * sampleStride)
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                samples.append(buf[y * bytesPerRow + x])
+                x += stepX
+            }
+            y += stepY
+        }
+        guard !samples.isEmpty else { return false }
+
+        // Find the dominant luminance bucket (each bucket = 8
+        // grayscale levels). Then count samples within ±deltaLuma
+        // of its center. If ≥99 % match, the page is uniform.
+        var buckets = [Int](repeating: 0, count: 32) // 256 / 8 = 32
+        for s in samples { buckets[Int(s) / 8] += 1 }
+        guard let domIdx = buckets.indices.max(by: { buckets[$0] < buckets[$1] }) else {
+            return false
+        }
+        let domCenter = domIdx * 8 + 4
+        let deltaLuma = 12 // tolerance ≈ 5 % of 0–255 range
+        var withinDelta = 0
+        for s in samples {
+            if abs(Int(s) - domCenter) <= deltaLuma { withinDelta += 1 }
+        }
+        let ratio = Double(withinDelta) / Double(samples.count)
+        return ratio >= 0.99
     }
 
     /// Renders a page to PNG data using PDFPage.thumbnail — Apple's purpose-built,

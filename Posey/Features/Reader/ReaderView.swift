@@ -136,9 +136,6 @@ struct ReaderView: View {
                 .padding(.vertical)
             }
             .contentShape(Rectangle())
-            .onTapGesture {
-                revealChrome()
-            }
             .navigationTitle(viewModel.document.title)
             .navigationBarTitleDisplayMode(.inline)
             // Centering strategy:
@@ -196,6 +193,10 @@ struct ReaderView: View {
                     .allowsHitTesting(isChromeVisible)
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
             }
+            // Task 8 #54 (2026-05-03): tap-to-reveal-chrome is
+            // disabled until the SwiftUI gesture conflict has a
+            // working fix. See `revealChrome()` for the full note.
+            // Chrome stays visible for the lifetime of the reader.
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: viewModel.isSearchActive)
             .onChange(of: viewModel.searchScrollSignal) { _, _ in
                 viewModel.scrollToSearchMatch(with: proxy)
@@ -885,15 +886,22 @@ struct ReaderView: View {
     }
 
     private func revealChrome() {
+        // Task 8 #54 (2026-05-03 — chrome auto-fade disabled):
+        // SwiftUI's gesture-resolution stack inside the reader's
+        // ScrollView consumes every variant of single-tap (verified
+        // five attempts: `.onTapGesture`, `.simultaneousGesture`,
+        // overlay+contentShape with two color variants, and a
+        // UIKit-wrapped `UITapGestureRecognizer`). The chrome that
+        // faded out had no working way to come back, leaving the
+        // reader unusable — no Ask Posey, no Notes, no playback.
+        //
+        // Until the underlying SwiftUI gesture conflict has a fix
+        // that actually works on-device, the chrome stays visible
+        // for the lifetime of the reader. Cost: the "get out of
+        // the way" design ideal is regressed to "controls always
+        // visible." Benefit: the app is usable.
         chromeFadeTask?.cancel()
         isChromeVisible = true
-        chromeFadeTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(3))
-            guard Task.isCancelled == false else { return }
-            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
-                isChromeVisible = false
-            }
-        }
     }
 
     /// Capture the active sentence as the Ask Posey anchor and open
@@ -996,6 +1004,47 @@ struct ReaderView: View {
         )
     }
 }
+
+// ========== BLOCK TC: TAP CATCHER (Task 8 #54) - START ==========
+/// UIKit-wrapped tap recogniser used by the reader's chrome-reveal
+/// overlay. SwiftUI's own gesture system (`.onTapGesture`,
+/// `.simultaneousGesture(TapGesture())`) silently loses single-tap
+/// to the text-selection + per-row-double-tap stack inside the
+/// ScrollView — verified empirically across four prior attempts on
+/// the iPhone 17 simulator. UIKit's `UITapGestureRecognizer` sits
+/// above the SwiftUI gesture system and fires reliably on a single
+/// tap.
+private struct TapCatcherView: UIViewRepresentable {
+    let onTap: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onTap: onTap) }
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.backgroundColor = .clear
+        v.isUserInteractionEnabled = true
+        let g = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handle)
+        )
+        g.numberOfTapsRequired = 1
+        g.cancelsTouchesInView = false
+        v.addGestureRecognizer(g)
+        return v
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onTap = onTap
+    }
+
+    final class Coordinator: NSObject {
+        var onTap: () -> Void
+        init(onTap: @escaping () -> Void) { self.onTap = onTap }
+        @objc func handle() { onTap() }
+    }
+}
+// ========== BLOCK TC: TAP CATCHER - END ==========
+
 
 // ========== BLOCK RC: REMOTE-CONTROL OBSERVERS - START ==========
 /// Bundles the local-API → ReaderView intent observers into one

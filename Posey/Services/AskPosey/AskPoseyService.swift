@@ -551,6 +551,35 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             "doesn't specify"
         ].contains(where: { groundedLower.contains($0) })
 
+        // AFM safety refusal — model declines to answer due to its
+        // own content policy (Illuminatus / certain topics trigger
+        // this). Phrases include "as an AI", "I cannot comply",
+        // "I can't help with", "I'm sorry, but". Rewrite the
+        // grounded answer to a neutral "doesn't say" so the user
+        // doesn't see Apple's safety boilerplate for an in-document
+        // question. Verified on EPUB Q2 ("Who is Hagbard Celine?")
+        // in Three Hats QA — AFM refused due to Illuminatus topic.
+        let afmSafetyRefusal = [
+            "as an ai",
+            "i cannot comply",
+            "i can't help with",
+            "i'm not able to help",
+            "i'm sorry, but as",
+            "i am not able to comply",
+            "i'm sorry, but i",
+            "harmful and inappropriate",
+            "promotes harmful"
+        ].contains(where: { groundedLower.contains($0) })
+
+        let groundedFinal: String
+        if afmSafetyRefusal {
+            dbgLog("AskPosey: AFM safety refusal detected — rewriting to neutral refusal")
+            groundedFinal = "The document doesn't have a clear answer to that."
+        } else {
+            groundedFinal = grounded
+        }
+        let refusalShapeFinal = refusalShape || afmSafetyRefusal
+
         // Task 2 — clean separation of concerns: polish ALWAYS runs.
         // No special cases. Voice is polish's job; citations are
         // embedding attribution's job (downstream in the chat view
@@ -559,12 +588,12 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         // polish into voice when the grounded answer is "the
         // document doesn't say."
         var accumulated = ""
-        if refusalShape {
+        if refusalShapeFinal {
             // Stream the grounded text through verbatim. The
             // grounded call's wording is already short and clean
             // ("The document doesn't say.") — no polish needed.
-            accumulated = grounded
-            onSnapshot(grounded)
+            accumulated = groundedFinal
+            onSnapshot(groundedFinal)
         } else {
             do {
                 let polishSession = LanguageModelSession(
@@ -573,7 +602,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                 )
                 let polishBody = AskPoseyPromptBuilder.polishPromptBody(
                     question: inputs.currentQuestion,
-                    groundedDraft: grounded
+                    groundedDraft: groundedFinal
                 )
                 let stream = polishSession.streamResponse(
                     options: GenerationOptions(temperature: polishTemperature)
@@ -588,8 +617,8 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                 // Polish failed (refusal, transient, anything). Fall
                 // back to the grounded answer — better to ship a
                 // robotic-but-correct reply than nothing.
-                accumulated = grounded
-                onSnapshot(grounded)
+                accumulated = groundedFinal
+                onSnapshot(groundedFinal)
             }
         }
 

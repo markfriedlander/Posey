@@ -645,6 +645,30 @@ extension AskPoseyPromptBuilder {
                 }
             }
         }
+        // Strip leaked prompt example tokens. AFM occasionally
+        // echoes the literal `FAILED:` / `SUCCEEDED:` markers from
+        // the polish prompt's example list. When that happens, the
+        // useful sentence is usually after a `SUCCEEDED:` marker —
+        // keep that. If only `FAILED:` markers appear, drop the
+        // whole answer and fall back to the original (rare; surfaced
+        // on EPUB Q3 in Three Hats QA).
+        if result.contains("FAILED:") || result.contains("SUCCEEDED:") {
+            // Try: take the text after the LAST `SUCCEEDED:` marker.
+            if let r = result.range(of: "SUCCEEDED:", options: .backwards) {
+                let after = String(result[r.upperBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !after.isEmpty {
+                    result = after
+                }
+            } else {
+                // Only FAILED markers — likely the whole reply is
+                // borked. Replace with a generic refusal so the
+                // user sees something meaningful rather than the
+                // leaked scaffolding.
+                result = "The document doesn't say."
+            }
+        }
+
         // After preamble removal, if the remaining body is a single
         // quoted string (the preamble stripped the announcement and
         // the "actual" answer was wrapped in quotes by AFM), unwrap

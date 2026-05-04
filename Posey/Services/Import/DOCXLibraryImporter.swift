@@ -12,26 +12,42 @@ struct DOCXLibraryImporter {
     }
 
     func importDocument(from url: URL) throws -> Document {
-        let plainText = try textLoader.loadText(from: url)
+        // Task 8 #3 + #4 (2026-05-03): rich import returns
+        // (displayText with inline image markers, plainText with
+        // markers stripped, image bytes for persistence). DOCX TOC
+        // fields are stripped from both display + plain text by the
+        // extractor before we get here.
+        let parsed = try textLoader.loadDocument(from: url)
         return try importNormalizedDocument(
             title: url.deletingPathExtension().lastPathComponent,
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
-            plainText: plainText
+            displayText: parsed.displayText,
+            plainText: parsed.plainText,
+            images: parsed.images
         )
     }
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "docx") throws -> Document {
-        let plainText = try textLoader.loadText(fromData: rawData)
+        let parsed = try textLoader.loadDocument(fromData: rawData)
         return try importNormalizedDocument(
             title: title,
             fileName: fileName,
             fileType: fileType,
-            plainText: plainText
+            displayText: parsed.displayText,
+            plainText: parsed.plainText,
+            images: parsed.images
         )
     }
 
-    private func importNormalizedDocument(title: String, fileName: String, fileType: String, plainText: String) throws -> Document {
+    private func importNormalizedDocument(
+        title: String,
+        fileName: String,
+        fileType: String,
+        displayText: String,
+        plainText: String,
+        images: [PageImageRecord]
+    ) throws -> Document {
         let now = Date()
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
@@ -46,12 +62,19 @@ struct DOCXLibraryImporter {
             fileType: fileType,
             importedAt: existingDocument?.importedAt ?? now,
             modifiedAt: now,
-            displayText: plainText,
+            displayText: displayText,
             plainText: plainText,
             characterCount: plainText.count
         )
 
         try databaseManager.upsertDocument(document)
+
+        // Persist inline images. Drop any prior images first so
+        // reimports don't accumulate orphans.
+        try databaseManager.deleteImages(for: document.id)
+        for image in images {
+            try databaseManager.insertImage(id: image.imageID, documentID: document.id, data: image.data)
+        }
 
         if existingDocument == nil {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))

@@ -2,6 +2,23 @@
 
 ## Current Target
 
+**2026-05-04 evening — Layer 2 RAG fix + non-fiction scope landed; Task 5 next.**
+
+Ask Posey 1.0 is now scoped to non-fiction. MiniLM (CoreML) replaces NLEmbedding as the retrieval embedder — non-fiction Three Hats clean rate **75%** (was 67% with NLEmbedding, 63% with NLContextualEmbedding). First-use notification ships explaining the strength/weakness. Fiction (EPUB Illuminatus) acknowledged as a known limitation; deferred post-1.0.
+
+**Active migration.** Existing documents on user devices were indexed with NLEmbedding. They keep working under hybrid search (chunk's `embedding_kind` tags which embedder to use for queries) but won't get MiniLM's better cosine until re-indexed. Two paths:
+- **Manual via API verb:** `REINDEX_DOCUMENT:<doc-id>` — used for the audit. Available in DEBUG builds via the antenna.
+- **Future automatic migration:** on app launch, queue any doc whose chunks are `en-sentence` for background re-index under MiniLM. Not yet implemented — drop into NEXT-actionable list. Low priority because new imports already use MiniLM.
+
+**Fiction support (post-1.0 scope):**
+- EPUB Illuminatus surfaces three failure classes Layer 1+2+3 fixes don't address:
+  1. AFM safety refusals on occult content ("What is the Law of Fives?" returns the friendly refusal error)
+  2. Narrative-context failures (composing facts across chapters of a novel needs different retrieval than across sections of an essay)
+  3. Source-layout artifacts in concatenated front matter (title page + appendix listing in same chunk)
+- Likely needs: scene-level chunking, character-aware retrieval, narrative-summarization prompt frame. Out of scope for 1.0.
+
+---
+
 **2026-05-04 — Polish call removed; Task 5 next.** The Ask Posey two-call pipeline is collapsed to one call per Mark's directive. Voice-failure modes (recommendations, metaphors, sycophant openers, preamble announcements) are eliminated. Clean rate jumped from 14% (polish ON, six rounds of iteration) to 71% (polish OFF, no iteration). See HISTORY.md 2026-05-04 entry and DECISIONS.md polish-removal entry for full reasoning, sweep results, and restoration recipe.
 
 **Grounded-path follow-ups surfaced by the polish-off sweep — defer until after Task 5 unless Mark prioritizes:**

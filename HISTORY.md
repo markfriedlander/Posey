@@ -1,5 +1,32 @@
 # Posey History
 
+## 2026-05-04 — Ask Posey RAG Layer 2: MiniLM via CoreML; non-fiction scope
+
+Two changes that ship together: (a) replaced the embedding model used for retrieval, (b) explicitly scoped Ask Posey to non-fiction in 1.0 with a first-use notification.
+
+**RAG Layer 2 — MiniLM CoreML.** Per Mark's RAG-pipeline audit directive, A/B tested three embedders on the same 24-question non-fiction Three Hats sweep:
+- NLEmbedding (Apple, current): 16/24 = 67% clean — cosine 0.07–0.30, weak discrimination.
+- NLContextualEmbedding (Apple BERT, mean-pool): 15/24 = 63% clean — cosine 0.85–0.88 but uniformly clustered, even worse discrimination.
+- **MiniLM CoreML (sentence-transformers/all-MiniLM-L6-v2)**: **18/24 = 75% clean** — cosine 0.25–0.40 with meaningful spread; surfaces correct chunks (DOCX "What chapter covers ethics?" → "Chapter 4: Ethical Considerations" at rank 3 from cosine alone).
+
+MiniLM ships bundled (43MB fp16 mlpackage in `Posey/Resources/MiniLM/`). Default flipped via `EmbeddingProvider.coreMLMiniLM`. Old NLEmbedding path remains selectable via `SET_EMBEDDING_PROVIDER` API verb for benchmarking and fallback. Per-doc re-index via `REINDEX_DOCUMENT` migrates each doc's chunks to MiniLM at user-controllable timing.
+
+New code: `MiniLMEmbedder.swift` (CoreML wrapper) + `BertWordPieceTokenizer` (~280 lines, hand-written, no third-party deps per CLAUDE.md). Sync-bridge from background indexing queue to `@MainActor` model singleton.
+
+Tradeoffs: +43MB bundle, ~25s reindex per 148K-char doc, max seq 128 tokens (truncation at chunk tail accepted). See DECISIONS.md "MiniLM (CoreML) Replaces NLEmbedding" for full rationale, alternatives considered, and restoration recipe.
+
+**Non-fiction scope.** Ask Posey is now explicitly a non-fiction reading assistant in 1.0. Fiction (Illuminatus EPUB) hits AFM safety refusals + narrative-context failures that don't respond to the same fixes that work for non-fiction. Optimizing fiction would require different retrieval (scene-level chunking, character-aware retrieval) and prompt framing (narrative summarization). Deferred to post-1.0.
+
+User-facing: `AskPoseyFirstUseSheet` shown once on first Ask Posey open, dismissal stored in `UserDefaults` under `Posey.AskPosey.firstUseNoticeDismissed`. Voice: warm and direct ("I do my best work with non-fiction. Essays, articles, reference material — that's where I shine. Fiction is trickier for me, but give it a try if you're curious."). One tap to dismiss, never shown again. No format-level gating — user can still open Ask Posey on a novel; they're just informed first.
+
+Test policy: Three Hats sweep contracts to 6-format non-fiction (TXT/MD/RTF/DOCX/HTML/PDF). EPUB stays in corpus for import / TTS / notes regression testing but excluded from Ask Posey clean-rate scoring.
+
+**Layer 1 cleanup (earlier in same session).** Sanitize chunks at index time: strip Wayback Machine print headers, dot-leader runs, trailing page numbers from short lines. Preserves structural info (chapter listings, role assignments) while removing TOC noise. Initial skip-only approach measured 61% (regression from 71% pre-fix because chunk-skip nuked structural info); clean-not-skip recovered to 67% baseline. Then MiniLM lifted to 75%.
+
+**Layer 2 (NLContextualEmbedding) tested but not adopted.** Documented as a measured negative result. Selectable for future experimentation via the same provider switch.
+
+**API verbs added (development-only):** `LIST_CHUNKS`, `EMBED_QUERY`, `EMBED_QUERY_CONTEXTUAL`, `REINDEX_DOCUMENT`, `SET_EMBEDDING_PROVIDER`, `GET_EMBEDDING_PROVIDER`. The first three are read-only; the latter three drive the audit + comparison loop.
+
 ## 2026-05-04 — Ask Posey: Polish call removed (temporary)
 
 Removed the second AFM call from the Ask Posey two-call pipeline. The grounded call (factual, low temp) now streams to the user verbatim. The polish call (voice, higher temp) is no longer invoked at runtime.

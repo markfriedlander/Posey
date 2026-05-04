@@ -36,6 +36,14 @@ struct AskPoseyView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var composerFocused: Bool
 
+    /// 2026-05-04 — First-use notification per Mark's directive.
+    /// Posey is optimized for non-fiction; show this once (ever, across
+    /// all documents) so the user understands the strength/weakness
+    /// before they form expectations on a novel. Stored in UserDefaults
+    /// so the dismissal persists across launches and devices.
+    @AppStorage("Posey.AskPosey.firstUseNoticeDismissed") private var firstUseDismissed: Bool = false
+    @State private var showFirstUseSheet: Bool = false
+
     /// Closure invoked when the user taps a Sources-strip pill below
     /// an assistant bubble. Owned by the host (ReaderView) which
     /// dismisses the sheet and calls `ReaderViewModel.jumpToOffset`.
@@ -215,6 +223,23 @@ struct AskPoseyView: View {
             }
             .onAppear {
                 RemoteControlState.shared.presentedSheet = "askPosey"
+                if !firstUseDismissed {
+                    // Brief delay so the sheet finishes presenting
+                    // before we layer another sheet on top — iOS gets
+                    // grumpy about same-frame nested presentations.
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(350))
+                        showFirstUseSheet = true
+                    }
+                }
+            }
+            .sheet(isPresented: $showFirstUseSheet) {
+                AskPoseyFirstUseSheet(onDismiss: {
+                    firstUseDismissed = true
+                    showFirstUseSheet = false
+                })
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
             }
             .onDisappear {
                 if RemoteControlState.shared.presentedSheet == "askPosey" {

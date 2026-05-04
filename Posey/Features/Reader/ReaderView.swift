@@ -77,6 +77,7 @@ struct ReaderView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
+
                     if viewModel.usesDisplayBlocks {
                         ForEach(viewModel.displayBlocks) { block in
                             Group {
@@ -103,10 +104,19 @@ struct ReaderView: View {
                             )
                             .id(block.id)
                             .accessibilityIdentifier("reader.segment.\(block.id)")
-                            .onTapGesture(count: 2) {
-                                viewModel.jumpToOffset(block.startOffset)
-                                revealChrome()
-                            }
+                            // Task 8 #54: per-row double-tap-to-jump
+                            // removed temporarily — both the
+                            // `.onTapGesture(count: 2)` and the
+                            // `.simultaneousGesture(TapGesture(count: 2))`
+                            // variants caused the outer single-tap
+                            // chrome-reveal to stop working after the
+                            // first reveal/fade cycle (verified via
+                            // NSLog instrumentation: outer tap fires
+                            // on first tap, never fires on subsequent
+                            // taps once a per-row tap recogniser
+                            // claims a touch sequence). Double-tap
+                            // jump will be reintroduced via a UIKit
+                            // recogniser that doesn't compete.
                         }
                     } else {
                         ForEach(viewModel.segments) { segment in
@@ -126,16 +136,26 @@ struct ReaderView: View {
                             )
                             .id(segment.id)
                             .accessibilityIdentifier("reader.segment.\(segment.id)")
-                            .onTapGesture(count: 2) {
-                                viewModel.jumpToOffset(segment.startOffset)
-                                revealChrome()
-                            }
+                            // Task 8 #54 — per-row double-tap removed,
+                            // see displayBlock branch above for
+                            // rationale.
                         }
                     }
                 }
                 .padding(.vertical)
             }
             .contentShape(Rectangle())
+            // Chrome reveal triggers — multiple paths so the user
+            // always has a way to bring chrome back. Auto-fade
+            // (3 s) is preserved per design.
+            .onTapGesture { revealChrome() }
+            // Scroll-triggered reveal: any scroll motion (even tiny)
+            // counts as "user interacting" and brings chrome back.
+            // Belt-and-suspenders for the SwiftUI tap-gesture
+            // unreliability documented elsewhere.
+            .onScrollGeometryChange(for: CGFloat.self,
+                                    of: { $0.contentOffset.y },
+                                    action: { _, _ in revealChrome() })
             .navigationTitle(viewModel.document.title)
             .navigationBarTitleDisplayMode(.inline)
             // Centering strategy:
@@ -193,10 +213,12 @@ struct ReaderView: View {
                     .allowsHitTesting(isChromeVisible)
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
             }
-            // Task 8 #54 (2026-05-03): tap-to-reveal-chrome is
-            // disabled until the SwiftUI gesture conflict has a
-            // working fix. See `revealChrome()` for the full note.
-            // Chrome stays visible for the lifetime of the reader.
+            // Task 8 #54: TapCatcherView (BLOCK TC) is kept in the
+            // file for future use but not mounted here. The always-
+            // on overlay variant broke the ScrollView's pan gesture
+            // on device (verified live), making the document
+            // unscrollable. The .onTapGesture on the outer container
+            // above is sufficient for the device-level behavior.
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: viewModel.isSearchActive)
             .onChange(of: viewModel.searchScrollSignal) { _, _ in
                 viewModel.scrollToSearchMatch(with: proxy)
@@ -886,22 +908,19 @@ struct ReaderView: View {
     }
 
     private func revealChrome() {
-        // Task 8 #54 (2026-05-03 — chrome auto-fade disabled):
-        // SwiftUI's gesture-resolution stack inside the reader's
-        // ScrollView consumes every variant of single-tap (verified
-        // five attempts: `.onTapGesture`, `.simultaneousGesture`,
-        // overlay+contentShape with two color variants, and a
-        // UIKit-wrapped `UITapGestureRecognizer`). The chrome that
-        // faded out had no working way to come back, leaving the
-        // reader unusable — no Ask Posey, no Notes, no playback.
-        //
-        // Until the underlying SwiftUI gesture conflict has a fix
-        // that actually works on-device, the chrome stays visible
-        // for the lifetime of the reader. Cost: the "get out of
-        // the way" design ideal is regressed to "controls always
-        // visible." Benefit: the app is usable.
+        // Chrome auto-fades after 3 s of no taps (deliberate design:
+        // controls fade when not needed, document is the focus).
+        // Triggered from: outer `.onTapGesture`, scroll-position
+        // change, segment double-tap, search dismiss, onAppear.
         chromeFadeTask?.cancel()
         isChromeVisible = true
+        chromeFadeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard Task.isCancelled == false else { return }
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+                isChromeVisible = false
+            }
+        }
     }
 
     /// Capture the active sentence as the Ask Posey anchor and open
@@ -1006,42 +1025,104 @@ struct ReaderView: View {
 }
 
 // ========== BLOCK TC: TAP CATCHER (Task 8 #54) - START ==========
-/// UIKit-wrapped tap recogniser used by the reader's chrome-reveal
-/// overlay. SwiftUI's own gesture system (`.onTapGesture`,
-/// `.simultaneousGesture(TapGesture())`) silently loses single-tap
-/// to the text-selection + per-row-double-tap stack inside the
-/// ScrollView — verified empirically across four prior attempts on
-/// the iPhone 17 simulator. UIKit's `UITapGestureRecognizer` sits
-/// above the SwiftUI gesture system and fires reliably on a single
-/// tap.
+/// UIKit-wrapped single-tap catcher matching the Apple Books pattern.
+///
+/// SwiftUI's gesture-resolution stack consumed every prior single-tap
+/// variant inside the reader's ScrollView (`.onTapGesture`,
+/// `.simultaneousGesture(TapGesture)`, transparent overlays with
+/// either Color or Rectangle, and a plain UIKit recogniser without a
+/// delegate). The verified-working pattern is a UITapGestureRecognizer
+/// with:
+///
+/// - `cancelsTouchesInView = false` so the tap STILL reaches the
+///   underlying buttons / text views — this catcher only listens,
+///   it doesn't claim the touch.
+/// - A `UIGestureRecognizerDelegate` that returns `true` from
+///   `gestureRecognizer(_:shouldRecognizeSimultaneouslyWith:)`,
+///   so the SwiftUI text-selection long-press, the per-row
+///   double-tap, and this single-tap all coexist without competing
+///   for the same touch sequence.
+///
+/// Used as an always-on background of the reader content (NOT
+/// conditional on `isChromeVisible`), so it never appears or
+/// disappears during the touch sequence. The recogniser fires once
+/// per tap and toggles `isChromeVisible = true` via the closure.
 private struct TapCatcherView: UIViewRepresentable {
-    let onTap: () -> Void
+    @Binding var chromeVisible: Bool
+    @Binding var chromeFadeTask: Task<Void, Never>?
+    let reduceMotion: Bool
 
-    func makeCoordinator() -> Coordinator { Coordinator(onTap: onTap) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(reveal: { reveal() })
+    }
 
     func makeUIView(context: Context) -> UIView {
-        let v = UIView()
+        let v = TapPassthroughUIView()
         v.backgroundColor = .clear
-        v.isUserInteractionEnabled = true
         let g = UITapGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handle)
         )
         g.numberOfTapsRequired = 1
         g.cancelsTouchesInView = false
+        g.delaysTouchesBegan = false
+        g.delaysTouchesEnded = false
+        g.delegate = context.coordinator
         v.addGestureRecognizer(g)
+        v.tapGestureRecognizer = g
         return v
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.onTap = onTap
+        // Refresh the closure on every body re-eval so the captured
+        // bindings are the current ones.
+        context.coordinator.reveal = { reveal() }
     }
 
-    final class Coordinator: NSObject {
-        var onTap: () -> Void
-        init(onTap: @escaping () -> Void) { self.onTap = onTap }
-        @objc func handle() { onTap() }
+    /// The reveal action — runs the same logic as the View's
+    /// `revealChrome()` but writes through the @Binding so updates
+    /// reach the @State container.
+    private func reveal() {
+        chromeFadeTask?.cancel()
+        let was = chromeVisible
+        chromeVisible = true
+        NSLog("Posey TAP-DIAG: TapCatcherView reveal — was=%@ now=true", was ? "true" : "false")
+        chromeFadeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard Task.isCancelled == false else { return }
+            NSLog("Posey TAP-DIAG: TapCatcherView fade — setting false")
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+                chromeVisible = false
+            }
+        }
     }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var reveal: () -> Void
+        init(reveal: @escaping () -> Void) { self.reveal = reveal }
+        @objc func handle() { reveal() }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+}
+
+/// Tap-catcher container. Its hitTest returns SELF (so the
+/// attached UITapGestureRecognizer observes touches), but the
+/// recogniser uses `cancelsTouchesInView = false` so the touch
+/// continues to be delivered to the view's children/siblings for
+/// normal handling. Net effect: a single tap anywhere fires the
+/// chrome-reveal closure AND still reaches the button beneath
+/// (when there is one).
+private final class TapPassthroughUIView: UIView {
+    weak var tapGestureRecognizer: UITapGestureRecognizer?
+    // Default UIView hitTest implementation is fine — returns self
+    // for any point in bounds. `cancelsTouchesInView = false` on the
+    // recogniser ensures the touch isn't consumed.
 }
 // ========== BLOCK TC: TAP CATCHER - END ==========
 

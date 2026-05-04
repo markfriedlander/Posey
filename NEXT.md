@@ -31,6 +31,15 @@ The mode flag stays in place; the toggle is one line in `apiAsk` plus the body f
 - **Q3 too-terse follow-ups (carryover).** Deferred as a model-capability ceiling.
 - **`tools/qa_battery.sh` hard-coded doc IDs (carryover).** Switch to title-based lookup via `LIST_DOCUMENTS`.
 
+**Task 13 (release-build hygiene) — fully complete 2026-05-03.** Final audit:
+- **13.1** `LocalAPIServer.swift` wrapped top-to-bottom in `#if DEBUG` (lines 10–413). Release ships zero HTTP server runtime.
+- **13.2** Eight `#if DEBUG` guards in `LibraryView.swift` covering the property declaration + every call site (`toggleLocalAPI`, the auto-start in `body.onAppear`, `apiState`'s `connectionInfo`).
+- **13.3** Three `NSLog` calls remain in the codebase — all inside `LocalAPIServer.swift` (which is itself `#if DEBUG`-only). Every other prior `NSLog` (31 of them) was converted to `dbgLog`, an `@inlinable` no-op in release. Release binary ships zero diagnostic output.
+- **13.4** `UIDevice.orientationDidChangeNotification` observer in `ReaderView.swift:312` covers within-orientation rotations (landscape-left → landscape-right) that don't fire a sizeClass change. Existing sizeClass hooks remain.
+- **13.5** Go-to-page UX polish landed in `ReaderView.swift:~3380–3460`: specific error wording (per-failure-type), accessibility labels reading the valid page range alongside the field name, Stepper alternative for users who prefer ±1 paging over typing.
+
+Nothing in Task 13 requires Mark's input. All five sub-items are code-only and complete.
+
 **Task 7 (Audio Export) — already complete in code; awaiting Mark's ears for final quality review.** Investigation question is already answered by the existing implementation:
 - `AVSpeechSynthesizer.write(_:toBufferCallback:)` empirically does NOT capture Best-Available / Siri-tier voices on most devices. The `AudioExporter` already detects this case (no buffers come back from the first utterance, `currentIndex == 0 && !sawBuffer`) and surfaces `AudioExportError.voiceNotCapturable` with the clear user message: *"Best Available voices can't be captured to audio files. Switch to Custom voice in Preferences and try again."*
 - M4A export is wired (`AVAudioFile` with `kAudioFormatMPEG4AAC`, medium quality), progress indicator + segment counter + cancel are in `AudioExportSheet`, ShareLink supports Save to Files + share, and the headless `RemoteAudioExportRegistry` exposes `EXPORT_AUDIO`/`AUDIO_EXPORT_STATUS`/`AUDIO_EXPORT_FETCH` for API-driven exports.

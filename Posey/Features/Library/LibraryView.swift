@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 
 struct LibraryView: View {
     @StateObject private var viewModel: LibraryViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isImporting = false
     @State private var path: [Document] = []
     @State private var documentPendingDeletion: Document? = nil
@@ -292,8 +293,8 @@ struct LibraryView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(.regularMaterial)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-        .animation(.easeInOut(duration: 0.2), value: message)
+        .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: message)
     }
 
     private func maybeOpenFirstDocument() {

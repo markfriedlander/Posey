@@ -715,6 +715,19 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted", "documentID": docID.uuidString, "offset": offset])
 
+            case "READER_TAP":
+                // Drive the same toggle-chrome code path the in-app
+                // single tap invokes. No coords required — the tap
+                // semantics are "toggle chrome visibility."
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteReaderToggleChrome, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "READER_CHROME_STATE":
+                let visible = await MainActor.run { ReaderChromeState.shared.isVisible }
+                return json(["isChromeVisible": visible])
+
             case "READER_STATE":
                 let snapshot = await MainActor.run { RemoteControlState.shared.snapshot() }
                 return json(snapshot)

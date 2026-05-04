@@ -145,10 +145,11 @@ struct ReaderView: View {
                 .padding(.vertical)
             }
             .contentShape(Rectangle())
-            // Chrome reveal triggers — multiple paths so the user
-            // always has a way to bring chrome back. Auto-fade
-            // (3 s) is preserved per design.
-            .onTapGesture { revealChrome() }
+            // Chrome behavior — tap-to-TOGGLE per Mark's spec:
+            //   - chrome hidden + tap → reveal (auto-fades after 3 s)
+            //   - chrome visible + tap → dismiss immediately
+            // Auto-fade (3 s) is preserved per design.
+            .onTapGesture { toggleChrome() }
             // Scroll-triggered reveal: any scroll motion (even tiny)
             // counts as "user interacting" and brings chrome back.
             // Belt-and-suspenders for the SwiftUI tap-gesture
@@ -268,6 +269,7 @@ struct ReaderView: View {
                 viewModel.handleAppear()
                 revealChrome()
                 publishRemoteState()
+                ReaderChromeState.shared.isVisible = isChromeVisible
                 // Defer the initial scroll past the first layout pass so the
                 // LazyVStack has time to realize rows up to the saved sentence
                 // position. Calling scrollTo before that happens silently
@@ -283,6 +285,12 @@ struct ReaderView: View {
                     try? await Task.sleep(for: .milliseconds(180))
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                 }
+            }
+            .onChange(of: isChromeVisible) { _, newValue in
+                ReaderChromeState.shared.isVisible = newValue
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteReaderToggleChrome)) { _ in
+                toggleChrome()
             }
             .onDisappear {
                 chromeFadeTask?.cancel()
@@ -910,8 +918,8 @@ struct ReaderView: View {
     private func revealChrome() {
         // Chrome auto-fades after 3 s of no taps (deliberate design:
         // controls fade when not needed, document is the focus).
-        // Triggered from: outer `.onTapGesture`, scroll-position
-        // change, segment double-tap, search dismiss, onAppear.
+        // Triggered from: scroll-position change, segment double-tap,
+        // search dismiss, onAppear, and the toggle path below.
         chromeFadeTask?.cancel()
         isChromeVisible = true
         chromeFadeTask = Task { @MainActor in
@@ -920,6 +928,20 @@ struct ReaderView: View {
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
                 isChromeVisible = false
             }
+        }
+    }
+
+    /// Tap-to-toggle: if chrome is visible, dismiss it immediately;
+    /// otherwise reveal it (with the standard auto-fade timer).
+    private func toggleChrome() {
+        if isChromeVisible {
+            chromeFadeTask?.cancel()
+            chromeFadeTask = nil
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+                isChromeVisible = false
+            }
+        } else {
+            revealChrome()
         }
     }
 

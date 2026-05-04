@@ -19,6 +19,13 @@ struct PoseyApp: App {
 
     var body: some Scene {
         WindowGroup {
+            // Task 10 (2026-05-03 — Mac Catalyst): on macOS, the
+            // window can be resized arbitrarily by the user. Posey's
+            // reader was designed for a phone-shaped portrait
+            // viewport; below ~360 wide the chrome starts overlapping
+            // and below ~480 tall the playback strip clips into the
+            // text. Apply a sensible minimum so the layout always
+            // has room to breathe.
             Group {
                 if let databaseManager {
                     LibraryView(
@@ -66,7 +73,13 @@ struct PoseyApp: App {
                 // without UIKit window scenes.
                 applyForcedOrientationIfNeeded()
             }
+            #if targetEnvironment(macCatalyst)
+            .frame(minWidth: 480, minHeight: 600)
+            #endif
         }
+        #if targetEnvironment(macCatalyst)
+        .defaultSize(width: 720, height: 900)
+        #endif
     }
 
     @MainActor

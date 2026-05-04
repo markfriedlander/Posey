@@ -850,11 +850,137 @@ private extension AskPoseyChatViewModel {
                 relevance: result.similarity
             ))
         }
+        // 2026-05-04 — Verbatim phrase fallback. The Three Hats
+        // Polish-Off Sweep surfaced two consistent failure modes
+        // where embedding retrieval missed content the user knew
+        // was in the document: "What is the Law of Fives?" against
+        // the 1.6M-char Illuminatus EPUB (the phrase appears dozens
+        // of times) and "Does it mention job displacement?" against
+        // a 148K-char DOCX (the phrase appears verbatim at offset
+        // 37021). The pattern: short, specific noun-phrase questions
+        // on long documents, where the question's vocabulary is
+        // semantically narrow enough that the cosine score doesn't
+        // surface the chunks that contain the literal phrase.
+        // Mitigation: extract content phrases from the question and
+        // do a direct case-insensitive substring scan over the
+        // document text. Any chunks containing the phrase get
+        // injected into the candidate pool with high relevance.
+        // Cost: O(N) string scan per phrase × document size — sub-
+        // 100ms on the largest doc tested. Runs alongside the
+        // entity-boost pass (different mechanism, complementary
+        // coverage).
+        let verbatimMatches = verbatimPhraseChunks(for: question, excluding: Set(translated.map { $0.chunkID }).union(frontMatter.map { $0.chunkID }))
+
         // Front matter goes first — its synthetic relevance 1.0
         // makes it a budget-survivor by virtue of position-in-list
         // (the prompt builder iterates top-of-list and drops from
-        // the bottom on overflow).
-        return frontMatter + translated
+        // the bottom on overflow). Verbatim phrase matches go
+        // second — they're the strongest "this chunk actually
+        // contains what the user asked about" signal we have.
+        return frontMatter + verbatimMatches + translated
+    }
+
+    /// Verbatim noun-phrase fallback retrieval. See call site for
+    /// the failure modes this addresses. Approach:
+    /// 1. Tokenize the question, drop stopwords, keep tokens ≥3 chars.
+    /// 2. Build candidate phrases from longest (most specific) down
+    ///    to single words. Stop at the first window size that hits.
+    /// 3. For each phrase, scan the document plain text for
+    ///    case-insensitive substring matches.
+    /// 4. Map each match offset to its containing chunk via
+    ///    startOffset / endOffset. Return up to `maxMatches` distinct
+    ///    chunks that aren't already in the candidate pool.
+    /// Empty return when nothing matches — caller falls back to the
+    /// embedding-only result, same as before.
+    func verbatimPhraseChunks(for question: String, excluding alreadyHave: Set<Int>, maxMatches: Int = 3) -> [RetrievedChunk] {
+        // Common-word stoplist. Conservative — better to miss a
+        // hit than to scan the doc for "the" or "is" and inject
+        // chunks that everywhere mention common words.
+        let stopwords: Set<String> = [
+            "the", "is", "are", "was", "were", "be", "been", "being",
+            "of", "in", "on", "at", "to", "for", "with", "from", "by",
+            "and", "or", "but", "not", "no", "nor", "so",
+            "a", "an", "this", "that", "these", "those", "it", "its",
+            "they", "them", "their", "there", "here",
+            "what", "who", "where", "when", "why", "how", "which",
+            "does", "do", "did", "doing", "done", "has", "have", "had",
+            "tell", "told", "say", "said", "ask", "asked",
+            "me", "my", "mine", "you", "your", "yours", "i", "we", "us", "our",
+            "about", "please", "also", "too", "any", "some", "all",
+            "can", "could", "would", "should", "will", "may", "might", "must",
+            "mention", "mentioned", "mentions", "discuss", "discussed", "discusses",
+            "explain", "explains", "explained", "describe", "describes", "described",
+            "give", "gave", "given", "show", "shows", "showed", "shown",
+            "yes", "yeah", "ok", "okay", "thanks", "thank",
+            "book", "document", "article", "paper", "text", "chapter",
+            "passage", "section", "page", "story",
+            "thing", "things", "stuff", "kind", "type", "sort", "way",
+            "really", "very", "much", "many", "more", "less",
+            "good", "bad", "well", "right", "wrong", "fine"
+        ]
+        let rawTokens = question
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        let contentTokens = rawTokens.filter { !stopwords.contains($0) && $0.count >= 3 }
+        guard !contentTokens.isEmpty else { return [] }
+
+        guard let db = databaseManager else { return [] }
+        let stored: [StoredDocumentChunk] = (try? db.chunks(for: documentID)) ?? []
+        guard !stored.isEmpty else { return [] }
+
+        // Use NSString for fast substring search. We keep ranges in
+        // UTF-16 units, which match the (NSString-backed) startOffset
+        // / endOffset coordinates the rest of the indexing pipeline
+        // uses (chunks(for:) writes startOffset/endOffset that come
+        // from `(text as NSString).length`-style math at chunk time).
+        let docNS = documentPlainText as NSString
+        let docLowerNS = (documentPlainText as NSString).lowercased as NSString
+
+        var matchedChunkIds = Set<Int>(alreadyHave)
+        var matched: [RetrievedChunk] = []
+
+        // Longest content phrase first (most specific). Multi-word
+        // phrases only — single-word matches on common content terms
+        // ("editor", "year", "title") pull too much noise into the
+        // candidate pool and crowd out the embedding-best chunks.
+        // Exception: if the question itself only has one content
+        // token, single-word search is the only option.
+        let maxWindow = min(contentTokens.count, 4)
+        let minWindow = contentTokens.count == 1 ? 1 : 2
+        outer: for windowSize in stride(from: maxWindow, through: minWindow, by: -1) {
+            for start in 0...(contentTokens.count - windowSize) {
+                let phrase = contentTokens[start..<(start + windowSize)].joined(separator: " ")
+                let phraseNS = phrase as NSString
+                guard phraseNS.length >= 3 else { continue }
+                var searchRange = NSRange(location: 0, length: docLowerNS.length)
+                while searchRange.length > 0 {
+                    let found = docLowerNS.range(of: phrase as String, options: [.literal], range: searchRange)
+                    if found.location == NSNotFound { break }
+                    // Map UTF-16 offset to chunk via startOffset bounds.
+                    let offset = found.location
+                    if let chunk = stored.first(where: { offset >= $0.startOffset && offset < $0.endOffset }),
+                       !matchedChunkIds.contains(chunk.chunkIndex) {
+                        matchedChunkIds.insert(chunk.chunkIndex)
+                        matched.append(RetrievedChunk(
+                            chunkID: chunk.chunkIndex,
+                            startOffset: chunk.startOffset,
+                            // High relevance but distinguishable from
+                            // 1.0 front-matter sentinel.
+                            text: TextNormalizer.stripWaybackPrintHeaders(chunk.text),
+                            relevance: 0.97
+                        ))
+                        if matched.count >= maxMatches { break outer }
+                    }
+                    let next = found.location + found.length
+                    if next >= docLowerNS.length { break }
+                    searchRange = NSRange(location: next, length: docLowerNS.length - next)
+                }
+            }
+            if !matched.isEmpty { break }
+        }
+        _ = docNS  // silence unused warning; kept for symmetry / future use
+        return matched
     }
 
     /// Concatenate anchor + recent verbatim STM into a single string
@@ -1078,6 +1204,108 @@ extension AskPoseyChatViewModel {
         isResponding = false
     }
 
+    /// 2026-05-04 — Role-question short-circuit. AFM has a strong
+    /// "give-an-answer" tendency: when the user asks "Who's the
+    /// editor?" and the document doesn't identify one, AFM will
+    /// promote whoever's name is in the front matter (typically a
+    /// moderator/contributor) into the asked-about role. HARD RULE
+    /// 1a in the grounded prompt explicitly forbids this with
+    /// FAILED/SUCCEEDED examples and AFM still does it. So we
+    /// validate at query time: if the user's question is asking
+    /// for a specific named role and that role term doesn't appear
+    /// ANYWHERE in the document, we return an honest refusal
+    /// directly — the model never sees the question. Same pattern
+    /// as `isRecommendationQuestion` short-circuit. Returns the
+    /// matched role term (lowercased) when triggered, otherwise nil.
+    static func roleAskedFor(in question: String) -> String? {
+        let q = question.lowercased()
+        // Role terms users might ask about. Only includes roles that
+        // are typically explicit document metadata — not vague terms
+        // like "leader" or "person responsible." If the role term is
+        // ambiguous in normal English, leave it out (AFM might give
+        // a useful answer).
+        let roleTerms: [String] = [
+            "editor", "publisher", "illustrator", "translator",
+            "narrator", "co-author", "co author", "ghostwriter",
+            "typesetter", "designer", "photographer", "screenwriter",
+            "director", "producer"
+        ]
+        // Trigger patterns asking who fills a role.
+        let prefixes = [
+            "who is the ", "who's the ", "who was the ",
+            "whos the ", "name the ", "who are the ",
+            "who edited ", "who published ",
+            "who illustrated ", "who translated ", "who narrated ",
+            "who directed ", "who produced "
+        ]
+        for prefix in prefixes {
+            guard q.contains(prefix) else { continue }
+            for term in roleTerms {
+                // "who is the editor", "who edited", etc.
+                if q.contains(prefix + term) { return term }
+                // verb form: "who edited", "who published"
+                let verb = prefix.replacingOccurrences(of: "who ", with: "").trimmingCharacters(in: .whitespaces)
+                if verb.hasSuffix("ed ") || verb.hasSuffix("ed") {
+                    // already a verb form; the prefix itself encodes the role
+                    if q.contains(prefix) {
+                        // map verb back to role term
+                        let roleFromVerb = String(verb.dropLast(verb.hasSuffix("ed ") ? 3 : 2))
+                        if !roleFromVerb.isEmpty { return roleFromVerb }
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Returns true if the role term doesn't appear anywhere in the
+    /// document plain text (case-insensitive). Single-word substring
+    /// check — fast on the largest doc tested (~1.6M chars, sub-ms).
+    func documentLacksRoleTerm(_ role: String) -> Bool {
+        guard !role.isEmpty else { return true }
+        return !documentPlainText.lowercased().contains(role.lowercased())
+    }
+
+    /// Short-circuit response for role questions when the role term
+    /// isn't in the document. Posts the user turn + a clean refusal,
+    /// persists both, no AFM call. Mirror of
+    /// `handleRecommendationShortCircuit`.
+    func handleRoleShortCircuit(question: String, role: String) async {
+        let userMessage = AskPoseyMessage(role: .user, content: question)
+        messages.append(userMessage)
+        inputText = ""
+        isResponding = true
+        lastError = nil
+
+        persistTurn(
+            role: .user,
+            content: question,
+            intent: nil,
+            chunksInjected: [],
+            fullPromptForLogging: nil
+        )
+
+        // Pick "a" or "an" based on the role term's first sound.
+        let firstChar = role.first.map(String.init)?.lowercased() ?? ""
+        let article = ["a","e","i","o","u"].contains(firstChar) ? "an" : "a"
+        let answer = "The document doesn't identify \(article) \(role). If you're looking for a specific name, try asking about the role the document does mention (author, contributor, moderator, etc.)."
+        let assistantMessage = AskPoseyMessage(
+            role: .assistant,
+            content: answer,
+            isStreaming: false,
+            timestamp: Date()
+        )
+        messages.append(assistantMessage)
+        persistTurn(
+            role: .assistant,
+            content: answer,
+            intent: nil,
+            chunksInjected: [],
+            fullPromptForLogging: "[role-short-circuit:\(role)]"
+        )
+        isResponding = false
+    }
+
     /// M4 stub send path retained for previews and the M3-M4 test
     /// canvases. Appends a user message, then after a short async
     /// delay appends an assistant message that echoes the question.
@@ -1145,6 +1373,18 @@ extension AskPoseyChatViewModel {
         // SUCCEEDED-form answer without any model variance.
         if Self.isRecommendationQuestion(trimmedInput) {
             await handleRecommendationShortCircuit(question: trimmedInput)
+            return
+        }
+
+        // Role-question short-circuit. If the user is asking who fills
+        // a specific role (editor, publisher, narrator, etc.) and that
+        // role term doesn't appear anywhere in the document, AFM has a
+        // strong tendency to promote a moderator/contributor into that
+        // role. Validate at query time rather than rely on AFM honoring
+        // HARD RULE 1a. See `roleAskedFor(in:)` for the trigger logic.
+        if let role = Self.roleAskedFor(in: trimmedInput),
+           documentLacksRoleTerm(role) {
+            await handleRoleShortCircuit(question: trimmedInput, role: role)
             return
         }
 

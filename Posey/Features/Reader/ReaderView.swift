@@ -1103,16 +1103,16 @@ private struct TapCatcherView: UIViewRepresentable {
 
     /// The reveal action — runs the same logic as the View's
     /// `revealChrome()` but writes through the @Binding so updates
-    /// reach the @State container.
+    /// reach the @State container. Kept here as the proven-working
+    /// fallback path; the live build uses the SwiftUI
+    /// `.onTapGesture` + `.onScrollGeometryChange` reveal triggers
+    /// (verified live on device).
     private func reveal() {
         chromeFadeTask?.cancel()
-        let was = chromeVisible
         chromeVisible = true
-        NSLog("Posey TAP-DIAG: TapCatcherView reveal — was=%@ now=true", was ? "true" : "false")
         chromeFadeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             guard Task.isCancelled == false else { return }
-            NSLog("Posey TAP-DIAG: TapCatcherView fade — setting false")
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
                 chromeVisible = false
             }

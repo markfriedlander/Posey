@@ -1487,6 +1487,24 @@ private struct AudioExportSheet: View {
     @State private var isShowingShare: Bool = false
     @State private var shareURL: URL? = nil
 
+    /// Display name of the voice the export is currently rendering
+    /// with — surfaced in the progress UI so the user knows which
+    /// voice the .m4a will use (especially useful when their
+    /// playback voice was Best Available and we auto-fell-back to a
+    /// Custom voice for capture).
+    private var exportingVoiceName: String? {
+        guard let exporter = viewModel.audioExporter else { return nil }
+        let mode = exporter.exportingVoiceMode
+        switch mode {
+        case .bestAvailable:
+            return "Best Available (system)"
+        case .custom(let id, _):
+            return AVSpeechSynthesisVoice(identifier: id)?.name ?? id
+        case .none:
+            return nil
+        }
+    }
+
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 18) {
@@ -1536,6 +1554,11 @@ private struct AudioExportSheet: View {
                 Text("Rendering segment \(i) of \(total) — \(Int(progress * 100))%")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let voiceName = exportingVoiceName {
+                    Text("Voice: \(voiceName)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
                 Button("Cancel", role: .destructive) {
                     exporter.cancel()
                 }
@@ -1922,18 +1945,29 @@ final class ReaderViewModel: ObservableObject {
     /// presents the export sheet, and starts rendering on a
     /// background Task. The sheet observes the exporter's state
     /// directly.
+    ///
+    /// Task 7 (2026-05-03 — sensible defaults): when the user's
+    /// current playback voice is `.bestAvailable`, the export
+    /// auto-falls-back to the highest-quality non-novelty English
+    /// Custom voice on the device. Best Available voices are not
+    /// `AVSpeechSynthesizer.write(_:toBufferCallback:)`-capturable
+    /// (Apple gates Siri-tier voices from third-party file
+    /// rendering). Surfacing "switch your playback voice to use
+    /// export" is hostile UX — the export should just work with the
+    /// best capturable voice on the device. The user's reading
+    /// experience is unchanged.
     func beginAudioExport() {
         let exporter = AudioExporter()
         audioExporter = exporter
         showAudioExport = true
         let segmentsCopy = segments
-        let voiceModeCopy = voiceMode
+        let exportVoiceMode = Self.audioExportVoiceMode(for: voiceMode)
         let title = document.title
         Task { @MainActor in
             do {
                 _ = try await exporter.render(
                     segments: segmentsCopy,
-                    voiceMode: voiceModeCopy,
+                    voiceMode: exportVoiceMode,
                     documentTitle: title
                 )
             } catch {
@@ -1941,6 +1975,54 @@ final class ReaderViewModel: ObservableObject {
                 // sheet renders that. Nothing else to do here.
             }
         }
+    }
+
+    /// Pick the voice mode the export should actually run with.
+    /// - If the user's current mode is `.custom`, honour it directly.
+    /// - If the user's current mode is `.bestAvailable`, pick the
+    ///   highest-quality English voice available on the device,
+    ///   defaulting rate to `AVSpeechUtteranceDefaultSpeechRate`
+    ///   (natural reading pace).
+    static func audioExportVoiceMode(
+        for currentMode: SpeechPlaybackService.VoiceMode
+    ) -> SpeechPlaybackService.VoiceMode {
+        if case .custom = currentMode { return currentMode }
+
+        // Rank candidates: enhanced > premium > default; then prefer
+        // English; then prefer voices marked as not-novelty (Apple's
+        // VoiceQuality.enhanced is the highest tier we can access for
+        // capture). Stable tiebreak by identifier so the default is
+        // deterministic across launches.
+        let voices = AVSpeechSynthesisVoice.speechVoices().filter {
+            $0.language.hasPrefix("en")
+        }
+        let ranked = voices.sorted { lhs, rhs in
+            // .premium (3) > .enhanced (2) > .default (1) — higher
+            // raw value = better. Tie-break on identifier ascending.
+            let lq = lhs.quality.rawValue
+            let rq = rhs.quality.rawValue
+            if lq != rq { return lq > rq }
+            return lhs.identifier < rhs.identifier
+        }
+        // Apple's identifiers `com.apple.voice.enhanced.en-US.*` and
+        // `com.apple.voice.premium.en-US.*` are the high-quality
+        // tiers. If none are present (rare on a fresh device), fall
+        // back to the first English voice; if even that's missing,
+        // fall back to the system-resolved en-US (Samantha, Daniel,
+        // etc.).
+        let pick = ranked.first
+                ?? AVSpeechSynthesisVoice(language: "en-US")
+                ?? AVSpeechSynthesisVoice.speechVoices().first
+        guard let chosen = pick else {
+            // No voices at all — return what was passed in. Export
+            // will fail with .voiceNotCapturable and the sheet's
+            // existing error path surfaces a clear message.
+            return currentMode
+        }
+        return .custom(
+            voiceIdentifier: chosen.identifier,
+            rate: AVSpeechUtteranceDefaultSpeechRate
+        )
     }
     @Published private(set) var currentSentenceIndex: Int = 0
     @Published private(set) var playbackState: SpeechPlaybackService.PlaybackState = .idle

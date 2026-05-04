@@ -180,8 +180,18 @@ extension EPUBDocumentImporter {
                 ))
             }
 
+            // Task 8 #2 (2026-05-03): strip embedded TOC blocks from
+            // spine HTML before text extraction. Project Gutenberg's
+            // EPUB pipeline puts the rendered chapter list inside
+            // `<p class="toc">` (sometimes `<div class="toc">`) in
+            // the spine item right after the PG header. Without this
+            // strip, TTS reads "Chapter: I., II., III., IV., V., …"
+            // aloud — annoying. Also catches Calibre's `<nav id="toc">`
+            // and ARIA `<nav epub:type="toc">` patterns.
+            let tocStripped = Self.stripEmbeddedTOC(from: chapterData)
+
             let (processedData, chapterImages) = extractInlineImages(
-                from: chapterData,
+                from: tocStripped,
                 chapterBasePath: chapterDir,
                 entryLoader: entryLoader
             )
@@ -497,6 +507,55 @@ extension EPUBDocumentImporter {
     /// typically populate `<title>` (e.g. "Page 1") even when no
     /// `<h*>` headings are present, so the title fallback is what
     /// makes the synthesized TOC useful for scanned books.
+    /// Task 8 #2 (2026-05-03): strip embedded TOC blocks from spine
+    /// HTML so TTS doesn't read the navigation list aloud.
+    ///
+    /// Catches three patterns:
+    ///   - `<p class="…toc…">…</p>` — Project Gutenberg's
+    ///     ebookmaker convention (P&P, Crime and Punishment, etc.).
+    ///   - `<div class="…toc…">…</div>` — Calibre + ebookmaker
+    ///     wrap variants. Includes the multi-paragraph "table of
+    ///     contents" container.
+    ///   - `<nav epub:type="toc">…</nav>` and `<nav id="toc">…</nav>`
+    ///     — EPUB 3 ARIA convention occasionally embedded in spine
+    ///     items (vs the separate nav document).
+    ///
+    /// Conservative on the `class` match: requires `toc` as a
+    /// distinct token (not "stockton" → "toc" substring). Anchored
+    /// to attribute-value boundaries via the regex.
+    static func stripEmbeddedTOC(from data: Data) -> Data {
+        guard var html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) else {
+            return data
+        }
+
+        // Patterns are case-insensitive, allow whitespace/attrs in any
+        // order, and use non-greedy bodies so the strip stays tight to
+        // the matched tag rather than swallowing trailing content.
+        let patterns: [String] = [
+            // <p class="…toc…">…</p>  — class token "toc"
+            #"(?si)<p[^>]*\bclass\s*=\s*"[^"]*\btoc\b[^"]*"[^>]*>.*?</p\s*>"#,
+            #"(?si)<p[^>]*\bclass\s*=\s*'[^']*\btoc\b[^']*'[^>]*>.*?</p\s*>"#,
+            // <div class="…toc…">…</div>
+            #"(?si)<div[^>]*\bclass\s*=\s*"[^"]*\btoc\b[^"]*"[^>]*>.*?</div\s*>"#,
+            #"(?si)<div[^>]*\bclass\s*=\s*'[^']*\btoc\b[^']*'[^>]*>.*?</div\s*>"#,
+            // <nav epub:type="toc">…</nav>
+            #"(?si)<nav[^>]*\bepub:type\s*=\s*"toc"[^>]*>.*?</nav\s*>"#,
+            // <nav id="toc">…</nav>
+            #"(?si)<nav[^>]*\bid\s*=\s*"toc"[^>]*>.*?</nav\s*>"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            html = regex.stringByReplacingMatches(
+                in: html,
+                range: NSRange(html.startIndex..., in: html),
+                withTemplate: " "
+            )
+        }
+        return html.data(using: .utf8) ?? data
+    }
+
     fileprivate static func extractFirstHeadingTitle(from data: Data) -> String? {
         guard let html = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1) else {

@@ -23,6 +23,31 @@ struct HTMLDocumentImporter {
 // ========== BLOCK 1: ERROR TYPES - END ==========
 
 // ========== BLOCK 2: IMPORT ENTRY POINTS - START ==========
+
+    /// Task 8 #4 (2026-05-03): rich import that extracts inline
+    /// images alongside text. Used by `HTMLLibraryImporter` for
+    /// URL-based imports where we can resolve relative `<img src=...>`
+    /// paths against the file's containing directory.
+    ///
+    /// Returns:
+    ///   - `displayText` — the rendered text with embedded
+    ///     `[[POSEY_VISUAL_PAGE:0:<uuid>]]` markers at each successfully-
+    ///     extracted `<img>` position. Reader UI parses these markers
+    ///     and shows the inline image.
+    ///   - `plainText` — `displayText` with the markers stripped.
+    ///     This is what TTS reads aloud and what the embedding index
+    ///     ingests.
+    ///   - `images` — collected `PageImageRecord` values, one per
+    ///     successfully-extracted image, ready for `databaseManager.insertImage`.
+    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord]) {
+        let data = try Data(contentsOf: url)
+        let baseDirectory = url.deletingLastPathComponent()
+        let (markedData, images) = extractInlineImages(from: data, baseDirectory: baseDirectory)
+        let displayText = try loadText(fromData: markedData)
+        let plainText = stripVisualPageMarkers(from: displayText)
+        return (displayText, plainText, images)
+    }
+
     func loadText(from url: URL) throws -> String {
         let data = try Data(contentsOf: url)
         return try loadText(fromData: data)
@@ -109,5 +134,100 @@ struct HTMLDocumentImporter {
             withTemplate: "$1$2"
         )
     }
-}
 // ========== BLOCK 3: TEXT NORMALIZATION - END ==========
+
+
+// ========== BLOCK 4: INLINE IMAGE EXTRACTION (Task 8 #4) - START ==========
+
+    /// Replace `<img src="...">` tags with `[[POSEY_VISUAL_PAGE:0:<uuid>]]`
+    /// markers and return the loaded image bytes alongside the rewritten
+    /// HTML. Resolves three source forms:
+    ///
+    /// 1. `data:image/...;base64,...` — decoded inline.
+    /// 2. Relative paths (`figure.png`, `images/photo.jpg`) — resolved
+    ///    against `baseDirectory` and read from disk.
+    /// 3. Absolute file URLs (`file:///...`) — read directly.
+    ///
+    /// Skips:
+    /// - `http://` / `https://` / `//` URLs (we don't fetch over the
+    ///   network during import — Posey is offline-first per
+    ///   CLAUDE.md "the app must work fully offline").
+    /// - SVG (UIImage cannot render SVG without WebKit; the user is
+    ///   better served seeing the alt text).
+    private func extractInlineImages(
+        from data: Data,
+        baseDirectory: URL
+    ) -> (Data, [PageImageRecord]) {
+        guard var html = String(data: data, encoding: .utf8) ??
+                         String(data: data, encoding: .isoLatin1) else {
+            return (data, [])
+        }
+        let pattern = #"<img[^>]+src=["']([^"']+)["'][^>]*\/?>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return (data, [])
+        }
+
+        var images: [PageImageRecord] = []
+        let matches = regex.matches(in: html, range: NSRange(html.startIndex..., in: html))
+        var replacements: [(range: Range<String.Index>, marker: String)] = []
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range, in: html),
+                  let srcRange = Range(match.range(at: 1), in: html) else { continue }
+            let src = String(html[srcRange])
+            let lower = src.lowercased()
+            // Skip network refs and SVG.
+            if lower.hasPrefix("http") || lower.hasPrefix("//") || lower.hasSuffix(".svg") { continue }
+
+            let imageData: Data?
+            if lower.hasPrefix("data:") {
+                imageData = decodeDataURI(src)
+            } else if lower.hasPrefix("file:") {
+                imageData = URL(string: src).flatMap { try? Data(contentsOf: $0) }
+            } else {
+                let resolved = baseDirectory.appendingPathComponent(src).standardizedFileURL
+                imageData = try? Data(contentsOf: resolved)
+            }
+            guard let bytes = imageData, !bytes.isEmpty else { continue }
+
+            let imageID = UUID().uuidString
+            images.append(PageImageRecord(imageID: imageID, data: bytes))
+            // Wrap in form-feed separators so downstream block-splitters
+            // see a clean break around the marker.
+            let marker = "\u{000C}[[POSEY_VISUAL_PAGE:0:\(imageID)]]\u{000C}"
+            replacements.append((fullRange, marker))
+        }
+
+        for (range, marker) in replacements {
+            html.replaceSubrange(range, with: marker)
+        }
+        images.reverse()
+        return (html.data(using: .utf8) ?? data, images)
+    }
+
+    /// Decode a `data:image/...;base64,xxx` URI into raw bytes.
+    /// Returns nil for malformed URIs or non-base64 payloads.
+    private func decodeDataURI(_ src: String) -> Data? {
+        guard let commaIdx = src.firstIndex(of: ",") else { return nil }
+        let header = src[..<commaIdx]
+        let payload = src[src.index(after: commaIdx)...]
+        if header.contains(";base64") {
+            return Data(base64Encoded: String(payload))
+        }
+        // URL-encoded text payload — decode percent-escapes.
+        return String(payload).removingPercentEncoding?.data(using: .utf8)
+    }
+
+    /// Strip `[[POSEY_VISUAL_PAGE:0:<uuid>]]` markers (and any
+    /// surrounding form-feed separators) from extracted text so
+    /// `plainText` is suitable for TTS + embeddings.
+    private func stripVisualPageMarkers(from text: String) -> String {
+        let pattern = #"\u{000C}?\[\[POSEY_VISUAL_PAGE:[^\]]+\]\]\u{000C}?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: " "
+        )
+    }
+}
+// ========== BLOCK 4: INLINE IMAGE EXTRACTION - END ==========

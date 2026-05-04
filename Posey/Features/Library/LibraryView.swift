@@ -715,6 +715,30 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted", "documentID": docID.uuidString, "offset": offset])
 
+            case "EXPORT_ANNOTATIONS":
+                // EXPORT_ANNOTATIONS:<docID> — returns the Markdown
+                // payload's filename + bytes + base64 so automation
+                // can verify Task 12's export end-to-end without
+                // tapping the share sheet.
+                guard let docID = arg.flatMap({ UUID(uuidString: $0) }) else {
+                    return #"{"error":"Usage: EXPORT_ANNOTATIONS:<docID>"}"#
+                }
+                let documents: [Document]
+                do { documents = try databaseManager.documents() }
+                catch { return #"{"error":"document lookup failed: \#(error)"}"# }
+                guard let doc = documents.first(where: { $0.id == docID }) else {
+                    return #"{"error":"document not found"}"#
+                }
+                let payload = await MainActor.run {
+                    AnnotationExporter.export(document: doc, databaseManager: databaseManager)
+                }
+                return json([
+                    "suggestedFilename": payload.suggestedFilename,
+                    "mimeType": payload.mimeType,
+                    "bytes": payload.bytes.count,
+                    "base64": payload.bytes.base64EncodedString()
+                ])
+
             case "READER_TAP":
                 // Drive the same toggle-chrome code path the in-app
                 // single tap invokes. No coords required — the tap

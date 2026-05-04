@@ -692,13 +692,17 @@ extension AskPoseyPromptBuilder {
         // the time. We strip the worst offenders defensively here.
 
         // Sycophantic openers that survived BLOCK above.
-        // "Oh, the X Trilogy, huh? Let me break it down for you."
+        // Compound: "Oh, the X, huh? Let me break it down for you."
         let sycoPatterns = [
             #"^[\s]*(Oh|Ah|Well|Hmm)[!,]?\s+(the|that|let)\s+[^.!?]{0,80}[.!?]\s*Let\s+me\s+(break\s+it\s+down|dive\s+in)[^.!?]{0,40}[.!?]\s*"#,
             #"^[\s]*Let\s+me\s+(break\s+it\s+down|dive\s+in|explain)[^.!?]{0,40}[.!?]\s*"#,
             #"^[\s]*(So|Alright|Right)[,]?\s+here'?s\s+(the\s+)?(scoop|deal|lowdown|takeaway)\s*[:.\-]?\s*"#,
             #"^[\s]*Quick\s+takeaway:\s*"#,  // mostly fine but inconsistent
             #"^[\s]*(So|Yeah|Yo|Look|Listen),?\s+(here'?s|we\s+gotta|let\s+me)[^.!?]{0,40}[.!?]\s*"#,
+            // Bare sycophant openers: "Oh, the X, huh?" / "Ah, X, huh?"
+            // — these stand alone without a "Let me break it down"
+            // follow-up. Surfaced 2026-05-04 qa_battery round 4.
+            #"^[\s]*(Oh|Ah)[!,]?\s+(the|that|those|these)\s+[^.!?]{0,120}\bhuh\??[!.,]*\s*"#,
         ]
         for pattern in sycoPatterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }

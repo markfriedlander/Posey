@@ -305,6 +305,15 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         guard model.availability == .available else {
             throw AskPoseyServiceError.afmUnavailable
         }
+        // 2026-05-05 — Phase B: bracket every user-driven AFM call
+        // with begin/end notifications so BackgroundEnhancementScheduler
+        // yields AFM bandwidth to the user. AFM is effectively
+        // single-stream on-device; without this, a user question can
+        // wait up to ~2s behind a chunk-context-note generation.
+        NotificationCenter.default.post(name: .askPoseyAFMDidBegin, object: nil)
+        defer {
+            NotificationCenter.default.post(name: .askPoseyAFMDidEnd, object: nil)
+        }
         let session = LanguageModelSession(
             model: model,
             instructions: instructions
@@ -349,6 +358,12 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
 
         guard model.availability == .available else {
             throw AskPoseyServiceError.afmUnavailable
+        }
+        // Phase B: yield AFM to the user for the duration of this
+        // streaming call. See classifyIntent() above for rationale.
+        NotificationCenter.default.post(name: .askPoseyAFMDidBegin, object: nil)
+        defer {
+            NotificationCenter.default.post(name: .askPoseyAFMDidEnd, object: nil)
         }
 
         let output = AskPoseyPromptBuilder.build(inputs, budget: budget)

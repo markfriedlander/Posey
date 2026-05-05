@@ -46,6 +46,23 @@ final class IndexingTracker: ObservableObject {
     /// background-enhancement pipeline (chunking is the first).
     @Published private(set) var metadataExtractingDocumentIDs: Set<UUID> = []
 
+    /// 2026-05-05 — Phase B chunk-enhancement progress per document.
+    /// Updated via the chunk-enhancement notifications posted by
+    /// BackgroundEnhancementScheduler. enhanced/total reflect the
+    /// current state of the document's content chunks.
+    /// Synthetic chunks are excluded from these counts so the
+    /// progress fraction is meaningful (synthetic = 1 chunk, content
+    /// = 50-3000+).
+    struct ChunkEnhancementSnapshot: Equatable, Sendable {
+        let enhanced: Int
+        let total: Int
+        var fraction: Double {
+            guard total > 0 else { return 1 }
+            return min(1, max(0, Double(enhanced) / Double(total)))
+        }
+    }
+    @Published private(set) var chunkEnhancementSnapshots: [UUID: ChunkEnhancementSnapshot] = [:]
+
     /// Snapshot of indexing progress for one document.
     struct IndexingProgress: Equatable, Sendable {
         let processed: Int
@@ -90,7 +107,27 @@ final class IndexingTracker: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] note in self?.handleMetadataFail(note) }
             .store(in: &subscriptions)
+
+        // Phase B chunk-enhancement progress.
+        notificationCenter.publisher(for: .chunkEnhancementDidComplete)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleChunkEnhancementProgress(note) }
+            .store(in: &subscriptions)
+        notificationCenter.publisher(for: .chunkEnhancementDidFail)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleChunkEnhancementProgress(note) }
+            .store(in: &subscriptions)
+        notificationCenter.publisher(for: .chunkEnhancementDocumentDidComplete)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleChunkEnhancementProgress(note) }
+            .store(in: &subscriptions)
     }
+
+    /// Inject the database manager once (post-init) so the tracker
+    /// can read accurate enhanced/total counts directly rather than
+    /// trying to maintain its own count from notifications. Set by
+    /// LibraryViewModel after both objects exist.
+    var databaseProvider: (() -> DatabaseManager?)?
 
     /// Convenience the UI calls to ask "is this document being indexed
     /// right now?" without unwrapping the published set every time.
@@ -98,12 +135,13 @@ final class IndexingTracker: ObservableObject {
         indexingDocumentIDs.contains(documentID)
     }
 
-    /// True when EITHER chunking or metadata extraction is in flight.
-    /// This is the signal the unified progress ring on the Ask Posey
-    /// sparkle icon listens to.
+    /// True when EITHER chunking, metadata extraction, OR Phase B
+    /// chunk enhancement is in flight. This is the signal the unified
+    /// progress ring on the Ask Posey sparkle icon listens to.
     func isEnhancing(_ documentID: UUID) -> Bool {
         indexingDocumentIDs.contains(documentID)
             || metadataExtractingDocumentIDs.contains(documentID)
+            || chunkEnhancementSnapshots[documentID] != nil
     }
 
     /// Unified background-enhancement progress, [0, 1], across both
@@ -124,35 +162,48 @@ final class IndexingTracker: ObservableObject {
     func unifiedProgress(for documentID: UUID) -> Double? {
         guard isEnhancing(documentID) else { return nil }
 
-        // Stage 1: chunking. If we have a progress snapshot, use it;
-        // else assume the chunking pass hasn't reported yet — start
-        // at a small non-zero floor so the ring is visible.
-        let chunkFraction: Double
-        let totalChunks: Int
+        // Stage weighting:
+        //   Stage 1 (chunking + embedding) → 25% of the unified ring
+        //   Stage 2 (AFM metadata extract) → 5%
+        //   Stage 3 (Phase B per-chunk ctx) → 70%
+        // Phase B dominates because it's the longest-running stage
+        // (~1-2s per chunk × N chunks). Stages 1+2 are fast (typically
+        // a few seconds total) and rarely visible to the user as
+        // anything but a brief flash, so giving them a small slice
+        // of the ring keeps the visual signal honest about where the
+        // work actually is.
+        let stage1Weight = 0.25
+        let stage2Weight = 0.05
+        let stage3Weight = 0.70
+
+        // Stage 1 fraction.
+        let stage1: Double
         if let progress = indexingProgress[documentID] {
-            totalChunks = max(progress.total, 1)
-            chunkFraction = Double(progress.processed) / Double(totalChunks + 1)
+            stage1 = progress.fraction
         } else if indexingDocumentIDs.contains(documentID) {
-            // Chunking started, no progress posted yet. Render a 5%
-            // floor so the ring is visible immediately.
-            return 0.05
+            stage1 = 0.05
         } else {
-            // Chunking already finished — completion handler removed
-            // it from indexingDocumentIDs. We're now in the metadata
-            // stage. Use the last known chunk count if recorded.
-            totalChunks = max(lastCompletedChunkCounts[documentID] ?? 1, 1)
-            chunkFraction = Double(totalChunks) / Double(totalChunks + 1)
+            // Chunking finished.
+            stage1 = 1.0
         }
 
-        // Stage 2: metadata. Adds the +1 unit when complete. While
-        // running, contributes 0 (it's a single-step stage).
-        let metadataDone = !metadataExtractingDocumentIDs.contains(documentID)
-            && (indexingDocumentIDs.contains(documentID) == false)
-        let metadataFraction: Double = metadataDone
-            ? Double(1) / Double(totalChunks + 1)
-            : 0
+        // Stage 2 fraction.
+        let stage2: Double
+        if metadataExtractingDocumentIDs.contains(documentID) {
+            stage2 = 0.5  // running, indeterminate; show midway
+        } else if !indexingDocumentIDs.contains(documentID) {
+            stage2 = 1.0  // chunking finished AND metadata not running → done
+        } else {
+            stage2 = 0.0  // chunking still running, metadata not started
+        }
 
-        return min(1.0, max(0.0, chunkFraction + metadataFraction))
+        // Stage 3 fraction.
+        let stage3 = chunkEnhancementSnapshots[documentID]?.fraction ?? 0.0
+
+        let combined = (stage1 * stage1Weight)
+            + (stage2 * stage2Weight)
+            + (stage3 * stage3Weight)
+        return min(1.0, max(0.05, combined)) // floor at 5% so the ring is visible
     }
 
     /// Clear the completion record for a document so the "Indexed N"
@@ -213,6 +264,35 @@ final class IndexingTracker: ObservableObject {
     private func handleMetadataComplete(_ note: Notification) {
         guard let id = documentID(from: note) else { return }
         metadataExtractingDocumentIDs.remove(id)
+    }
+
+    /// Re-read chunk-enhancement counts from the DB after each chunk
+    /// completes / fails / document completes. Cheap (single COUNT(*)
+    /// SQL); avoids drift from notification-based counters.
+    private func handleChunkEnhancementProgress(_ note: Notification) {
+        guard let id = documentID(from: note),
+              let db = databaseProvider?() else { return }
+        let counts = (try? db.chunkEnhancementCounts(for: id))
+            ?? (enhanced: 0, failed: 0, pending: 0)
+        let total = counts.enhanced + counts.failed + counts.pending
+        if total == 0 {
+            chunkEnhancementSnapshots.removeValue(forKey: id)
+            return
+        }
+        // "Enhanced" includes both successful (ctx_status=1) and
+        // attempted-but-failed (ctx_status=2). The progress ring
+        // should advance on failures too — they're done, just not
+        // useful. Leaving them as "pending" would lock the ring at
+        // partial fill forever on AFM-refused content.
+        let done = counts.enhanced + counts.failed
+        let snapshot = ChunkEnhancementSnapshot(enhanced: done, total: total)
+        if done >= total {
+            // Document fully enhanced — drop from the live snapshot
+            // so the ring goes away. Phase B is complete for this doc.
+            chunkEnhancementSnapshots.removeValue(forKey: id)
+        } else {
+            chunkEnhancementSnapshots[id] = snapshot
+        }
     }
 
     private func handleMetadataFail(_ note: Notification) {

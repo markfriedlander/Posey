@@ -353,6 +353,7 @@ struct ReaderView: View {
                 lastProgrammaticScrollAt = Date()
                 viewModel.scrollToCurrentSentence(with: proxy, animated: true)
                 publishRemoteState()
+                publishReadingPositionForEnhancement()
             }
             .onChange(of: viewModel.focusedDisplayBlockID) { _, _ in
                 lastProgrammaticScrollAt = Date()
@@ -492,6 +493,24 @@ struct ReaderView: View {
     }
 
     /// Push the live reader snapshot into the API-visible state cache.
+    /// 2026-05-05 — Phase B: tell the background-enhancement scheduler
+    /// where the user is reading so it prioritizes chunks around the
+    /// current position. Cheap: scheduler re-reads its queue lazily.
+    private func publishReadingPositionForEnhancement() {
+        let idx = viewModel.currentSentenceIndex
+        let segs = viewModel.segments
+        let offset: Int = (idx >= 0 && idx < segs.count) ? segs[idx].startOffset : 0
+        let info: [AnyHashable: Any] = [
+            DocumentEmbeddingIndex.notificationDocumentIDKey: viewModel.document.id,
+            "offset": offset
+        ]
+        NotificationCenter.default.post(
+            name: .readerPositionDidUpdate,
+            object: nil,
+            userInfo: info
+        )
+    }
+
     private func publishRemoteState() {
         let segments = viewModel.segments
         let idx = viewModel.currentSentenceIndex

@@ -212,11 +212,15 @@ struct LibraryView: View {
                     didAttemptInitialRestore = true
                     maybeRestoreLastOpenedDocument()
                 }
-                // Phase B — kick off background contextual enhancement.
-                // Idempotent; the scheduler self-exits when there's no
-                // pending work and self-restarts on next reading-position
-                // update or import. Safe to call on every library appear.
-                viewModel.enhancementScheduler?.start()
+                // Phase B — kick off background contextual enhancement
+                // after a short delay so the library/reader appear is
+                // smooth before background AFM work begins competing
+                // for resources. The scheduler is idempotent and self-
+                // exits when there's no pending work.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 5_000_000_000) // 5s
+                    viewModel.enhancementScheduler?.start()
+                }
                 // M9 release-binary hygiene: the local API server is
                 // a development tool. DEBUG builds force-on the
                 // antenna at launch (developer convenience); RELEASE

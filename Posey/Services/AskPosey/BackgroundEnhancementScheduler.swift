@@ -262,12 +262,15 @@ final class BackgroundEnhancementScheduler {
                                documentSummary: next.summary,
                                documentTitle: next.title)
 
-            // 5) Soft yield between chunks so the main actor stays
-            //    responsive. AFM calls themselves are async-await
-            //    so they yield naturally; this sleep is to space out
-            //    chunks (Mark's note that throttling balances against
-            //    actually finishing — keep it short).
-            try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+            // 5) Soft yield between chunks. AFM is on-device and
+            //    effectively single-stream; even though awaits do
+            //    yield the actor, the SQLite connection and the
+            //    AFM model itself can saturate when chunks process
+            //    back-to-back. 1.5s spacing keeps the local API
+            //    responsive AND lets thermal/battery breathe; Mark's
+            //    progressive-enhancement vision values steady,
+            //    sustainable progress over peak throughput.
+            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s
         }
     }
 

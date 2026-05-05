@@ -492,7 +492,20 @@ nonisolated enum AskPoseyPromptBuilder {
 
         // -------- USER QUESTION (NEVER truncated) --------
         // Render at full size. Measure cost. Reserve unconditionally.
-        let userBlock = renderUserBlock(text: inputs.currentQuestion)
+        // 2026-05-04 — append an interpretation hint when the user
+        // typed a short, grammatical-meta question against an anchor
+        // ("what does this mean", "what's this referring to", "what
+        // is this"). AFM treats those as document-meta questions and
+        // refuses; with the hint, AFM interprets them substantively
+        // using the anchor + surrounding context. The user's original
+        // question is preserved (rendered first); the hint appends as
+        // a parenthetical interpretation note.
+        let interpretationHint: String? =
+            (inputs.anchor != nil
+             && Self.questionLooksGrammaticalMeta(inputs.currentQuestion))
+            ? "(Interpret this question substantively in light of the anchor passage and the surrounding context — describe what the passage is saying and resolve any pronouns or 'this'/'that'/'it' references against the surrounding text.)"
+            : nil
+        let userBlock = renderUserBlock(text: inputs.currentQuestion, hint: interpretationHint)
         breakdown.userQuestion = AskPoseyTokenEstimator.tokens(in: userBlock)
 
         // -------- Compute droppable budget --------
@@ -567,14 +580,30 @@ nonisolated enum AskPoseyPromptBuilder {
         )
         breakdown.ragChunks = AskPoseyTokenEstimator.tokens(in: ragRendered)
 
-        // -------- ASSEMBLE in original chronological order --------
-        // anchor → surrounding → summary → STM → RAG → user
+        // -------- ASSEMBLE — RAG before surrounding (recency bias) --------
+        // 2026-05-04 — Order changed from
+        //   anchor → surrounding → summary → STM → RAG → user
+        // to
+        //   anchor → summary → STM → RAG → surrounding → user
+        // Why: real-conversation testing surfaced RAG dominance for
+        // passage-anchored "what's next / what's the implication"
+        // questions — the immediate-following sentence in the
+        // surrounding-context block was being out-weighted by
+        // RAG chunks pulled from elsewhere in the doc, because RAG
+        // sat closer to the user question in the prompt.
+        // Transformer recency bias: the most recent context before
+        // the user question gets the most attention. We want that
+        // to be the proximity context for anchored questions.
+        // Anchor stays at the top so the topic frame is established
+        // first; surrounding moves to right before the user question
+        // so AFM weights what's immediately around the tapped
+        // sentence over chunks pulled from elsewhere.
         var sections: [String] = []
         if let anchorBlock { sections.append(anchorBlock) }
-        if let surroundingBlock { sections.append(surroundingBlock) }
         if let summaryBlock { sections.append(summaryBlock) }
         if !stmRendered.isEmpty { sections.append(stmRendered) }
         if !ragRendered.isEmpty { sections.append(ragRendered) }
+        if let surroundingBlock { sections.append(surroundingBlock) }
         sections.append(userBlock)
 
         // -------- ASSEMBLE --------
@@ -930,14 +959,63 @@ private extension AskPoseyPromptBuilder {
         """
     }
 
-    static func renderUserBlock(text: String) -> String {
+    static func renderUserBlock(text: String, hint: String? = nil) -> String {
         // Plain-prose framing for the current user question. The
         // model parses "USER QUESTION:" as a labeled field rather
         // than as scaffolding to imitate.
-        """
+        let body: String
+        if let hint, !hint.isEmpty {
+            body = "\(text)\n\n\(hint)"
+        } else {
+            body = text
+        }
+        return """
         USER QUESTION (this is the only thing you need to answer; respond to this directly, do not echo any structure or labels from the prompt above):
-        \(text)
+        \(body)
         """
+    }
+
+    /// 2026-05-04 — Detect short, grammatical-meta passage questions
+    /// that AFM treats as document-meta and refuses ("What does 'This'
+    /// refer to?", "What is this?", "What does this mean?"). Returns
+    /// true when the question is short AND contains a grammatical-meta
+    /// trigger AND no other substantive content words. The interpretation
+    /// hint is added in those cases so AFM resolves the question
+    /// against the anchor + surrounding context rather than refusing.
+    static func questionLooksGrammaticalMeta(_ question: String) -> Bool {
+        let q = question.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard q.count <= 80 else { return false } // long questions usually carry their own substance
+        // Trigger phrases that match the failing patterns from the
+        // 2026-05-04 conversational sweep.
+        let triggers = [
+            "what does this mean",
+            "what does that mean",
+            "what does it mean",
+            "what does this refer",
+            "what does that refer",
+            "what does it refer",
+            "what is this",
+            "what is that",
+            "what is it",
+            "what's this mean",
+            "what's that mean",
+            "what's it mean",
+            "what's this referring",
+            "what's that referring",
+            "what does 'this'",
+            "what does 'that'",
+            "what does 'it'",
+            "explain this",
+            "explain that",
+            "explain it",
+            "what's this about",
+            "what's that about",
+            "huh"
+        ]
+        for t in triggers {
+            if q.contains(t) { return true }
+        }
+        return false
     }
 
     /// STM rendering as a NARRATIVE SUMMARY. Replaces the previous

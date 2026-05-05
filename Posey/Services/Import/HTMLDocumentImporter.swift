@@ -64,9 +64,16 @@ struct HTMLDocumentImporter {
         // Pre-inject paragraph markers before closing block-level tags.
         // NSAttributedString collapses <p>…</p> boundaries to a single \n,
         // merging consecutive paragraphs into one undifferentiated block.
-        // U+E001 (Private Use Area) survives the HTML → plain-text conversion
-        // as literal text content; after extraction it becomes \n, so each
-        // block boundary yields (our \n)(NSAttributedString's own \n) = \n\n.
+        //
+        // 2026-05-05 — Switched from U+E001 (Private Use Area) sentinel
+        // to an ASCII-only sentinel because on iOS 18+ NSAttributedString's
+        // HTML parser interprets the U+E001 UTF-8 bytes (EE 80 81) as
+        // separate Latin-1 / Windows-1252 characters (î, €, U+0081),
+        // leaving mojibake in the extracted text. The Estuaries article
+        // in our test corpus showed this mojibake AFTER every section
+        // header and tripped the language detector into flagging the
+        // doc as non-English. ASCII sentinels round-trip through any
+        // encoding pipeline intact.
         let markedData = injectParagraphMarkers(data)
 
         let attributedString: NSAttributedString
@@ -81,6 +88,14 @@ struct HTMLDocumentImporter {
         }
 
         let rawText = attributedString.string
+            .replacingOccurrences(of: paragraphSentinel, with: "\n")
+            // Defensive: also catch the mojibake pattern observed on
+            // iOS 18+ where the original PUA sentinel got UTF-8-bytes-
+            // interpreted-as-Latin-1, leaving "î€" + optional U+0081.
+            // Kept for backward-compat with older imports that may
+            // have round-tripped through the broken sentinel.
+            .replacingOccurrences(of: "\u{00EE}\u{20AC}\u{0081}", with: "\n")
+            .replacingOccurrences(of: "\u{00EE}\u{20AC}", with: "\n")
             .replacingOccurrences(of: "\u{E001}", with: "\n")
         let normalized = normalize(rawText)
         guard normalized.isEmpty == false else {
@@ -90,9 +105,15 @@ struct HTMLDocumentImporter {
         return normalized
     }
 
-    /// Inserts U+E001 before each closing block-level tag in the raw HTML so
-    /// that paragraph boundaries produce \n\n in the final plain text rather
-    /// than the single \n that NSAttributedString emits for each <p> end.
+    /// ASCII paragraph sentinel. Distinctive enough to never appear
+    /// in real document text, ASCII-clean so it survives any
+    /// encoding pipeline NSAttributedString runs the HTML through.
+    private let paragraphSentinel = "POSEYBLOCKBREAK"
+
+    /// Inserts the ASCII paragraph sentinel before each closing
+    /// block-level tag in the raw HTML so that paragraph boundaries
+    /// produce \n\n in the final plain text rather than the single
+    /// \n that NSAttributedString emits for each <p> end.
     private func injectParagraphMarkers(_ data: Data) -> Data {
         guard var html = String(data: data, encoding: .utf8) ??
                          String(data: data, encoding: .isoLatin1) else {
@@ -102,7 +123,7 @@ struct HTMLDocumentImporter {
         for tag in blockTags {
             html = html.replacingOccurrences(
                 of: "</\(tag)>",
-                with: "\u{E001}</\(tag)>",
+                with: "\(paragraphSentinel)</\(tag)>",
                 options: .caseInsensitive
             )
         }
@@ -115,6 +136,31 @@ struct HTMLDocumentImporter {
         var t = text
         t = t.replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space
         t = t.replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen (invisible; strip entirely)
+        // 2026-05-05 — Strip ANY Unicode Private Use Area characters
+        // (U+E000–U+F8FF), control characters (U+0080–U+009F), and
+        // bare U+E001 paragraph-sentinel residue. The
+        // injectParagraphMarkers pass uses U+E001 as a paragraph
+        // sentinel and the post-extraction replace handles most cases,
+        // but on iOS 18+ NSAttributedString sometimes leaves residue
+        // — a multi-byte sequence shows up where the U+E001 was, with
+        // U+0081 control chars adjacent. Real documents never contain
+        // PUA or C1 control chars in normal text, so a blanket filter
+        // is safe and prevents the language detector from seeing
+        // these as non-Latin script content (which was tripping the
+        // non-English banner on the Estuaries article).
+        //
+        // Using unicodeScalars filter rather than regex because ICU
+        // regex character-class escaping inside Swift raw strings is
+        // fragile (\u{XXXX} braces aren't standard ICU). The filter
+        // is deterministic and easy to reason about.
+        t = String(String.UnicodeScalarView(t.unicodeScalars.compactMap { scalar -> Unicode.Scalar? in
+            let v = scalar.value
+            // Strip PUA range
+            if v >= 0xE000 && v <= 0xF8FF { return nil }
+            // Strip C1 control characters (the U+0081 leftover crowd)
+            if v >= 0x0080 && v <= 0x009F { return nil }
+            return scalar
+        }))
         t = t.replacingOccurrences(of: "\r\n", with: "\n")
         t = t.replacingOccurrences(of: "\r",   with: "\n")
         t = t.replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)

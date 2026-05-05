@@ -336,13 +336,23 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
               let rawValue,
               let interruptionType = AVAudioSession.InterruptionType(rawValue: rawValue)
         else { return }
+        // 2026-05-04 — Diagnostic for lock-screen playback issue.
+        // Mark reports playback dies on screen lock. The most likely
+        // surface for that is an audio-session interruption fired
+        // when the screen locks — but for `.playback` category,
+        // screen lock SHOULDN'T cause an interruption per Apple's
+        // docs. Logging which path actually fires so we can see
+        // tomorrow whether the lock is producing an interruption
+        // (and we should suppress pause() for it) or whether
+        // something else entirely is killing playback.
         switch interruptionType {
         case .began:
+            dbgLog("[POSEY_PLAYBACK] AVAudioSession interruption began (state=\(state))")
             if state == .playing { pause() }
         case .ended:
-            break
+            dbgLog("[POSEY_PLAYBACK] AVAudioSession interruption ended")
         @unknown default:
-            break
+            dbgLog("[POSEY_PLAYBACK] AVAudioSession interruption unknown type: \(rawValue)")
         }
     }
 
@@ -384,6 +394,13 @@ extension SpeechPlaybackService: AVSpeechSynthesizerDelegate {
         _ synthesizer: AVSpeechSynthesizer,
         didCancel utterance: AVSpeechUtterance
     ) {
+        // 2026-05-04 — Diagnostic for the lock-screen-stops-playback
+        // issue. didCancel fires when an utterance is cancelled
+        // before completing — could indicate iOS killing speech on
+        // background, an interruption-driven stop, or our own
+        // stopSynthesizer() call. Logging so tomorrow we can see
+        // who's killing playback when the screen locks.
+        dbgLog("[POSEY_PLAYBACK] AVSpeechSynthesizer didCancel utterance")
         let utteranceID = ObjectIdentifier(utterance)
         Task { @MainActor in
             // Cleanup only. State transitions are managed by stopSynthesizer()/applyVoiceMode.

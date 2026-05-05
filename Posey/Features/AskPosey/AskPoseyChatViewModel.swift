@@ -1190,6 +1190,68 @@ extension AskPoseyChatViewModel {
         isResponding = false
     }
 
+    /// 2026-05-04 — Weak-retrieval check used by the confidence
+    /// signal in send(). Returns true when no chunk outside the
+    /// front-matter prepend has relevance >= 0.35 — meaning RAG
+    /// retrieved nothing meaningful for this question, and AFM is
+    /// going to either refuse or substitute summary boilerplate.
+    /// Threshold and front-matter band derived from the
+    /// 2026-05-04 conversational sweep (see commit 68ad883).
+    static func isWeakRetrieval(chunks: [RetrievedChunk]) -> Bool {
+        // Threshold tuned 2026-05-04 from real-conversation data:
+        // 0.50+ chunks consistently produce real answers; 0.40 chunks
+        // can produce confident fabrication when the chunk is
+        // semantically near the question but doesn't actually answer
+        // it (MD "big question" → cosine 0.4 against memory-architecture
+        // chunk → fabricated framing). 0.45 catches the fabrication
+        // band while preserving strong-signal answers.
+        let strongThreshold = 0.45
+        // Front-matter prepend is the first 4 chunks (or 1 for long
+        // docs); always relevance 1.0; injected regardless of the
+        // question. Conservatively skip the first 4 chunkIDs.
+        // Lexical-full-match chunks may also have relevance 1.0; if
+        // they're outside the front-matter band, they count as a
+        // strong signal.
+        let frontMatterUpperBound = 4
+        for chunk in chunks {
+            if chunk.chunkID < frontMatterUpperBound { continue }
+            if chunk.relevance >= strongThreshold { return false }
+        }
+        return true
+    }
+
+    /// 2026-05-04 — Short-circuit response when retrieval was weak
+    /// AND the question is document-scope (no anchor). Replaces the
+    /// AFM call with an honest message that points the user toward
+    /// the action that actually works (passage-anchored asking).
+    /// This is the surface form of the re-scoped 1.0 promise.
+    func handleWeakRetrievalShortCircuit(
+        question: String,
+        placeholderID: UUID
+    ) async {
+        let answer = "I'm not finding a strong answer to that in the document. I do best when you select a sentence or passage you're curious about and ask me from there — try tapping a line in the reader, then asking again."
+        // Replace the streaming placeholder with the honest message.
+        if let index = messages.firstIndex(where: { $0.id == placeholderID }) {
+            messages[index].content = answer
+            messages[index].isStreaming = false
+        } else {
+            messages.append(AskPoseyMessage(
+                role: .assistant,
+                content: answer,
+                isStreaming: false,
+                timestamp: Date()
+            ))
+        }
+        persistTurn(
+            role: .assistant,
+            content: answer,
+            intent: nil,
+            chunksInjected: [],
+            fullPromptForLogging: "[weak-retrieval-short-circuit]"
+        )
+        isResponding = false
+    }
+
     /// 2026-05-04 — Role-question short-circuit. AFM has a strong
     /// "give-an-answer" tendency: when the user asks "Who's the
     /// editor?" and the document doesn't identify one, AFM will
@@ -1491,6 +1553,35 @@ extension AskPoseyChatViewModel {
                     // not-grounded.
                 } else {
                     chunks = self.retrieveRAGChunks(for: trimmedInput)
+                }
+
+                // 2026-05-04 — Confidence signal for weak retrieval.
+                // When the question is document-scope (no anchor) and
+                // RAG returned no chunks with meaningful relevance,
+                // short-circuit with an honest message rather than
+                // letting AFM substitute summary boilerplate. This
+                // implements the re-scoped Ask Posey promise: we
+                // tell the user what works ("try selecting a
+                // passage") rather than papering over a retrieval
+                // miss with confident-sounding fluff.
+                //
+                // Threshold (0.35) chosen from the conversational
+                // sweep: 0.50+ chunks produced real answers, 0.28
+                // chunks produced TOC-summary boilerplate, 0.0
+                // chunks produced fabrication. 0.35 catches the
+                // boilerplate band cleanly without false-positiving
+                // legitimate moderate-relevance retrievals.
+                //
+                // Anchored (passage-scope) questions skip the check
+                // — the anchor + surrounding context provides
+                // grounding even when wider RAG is weak.
+                if self.anchor == nil,
+                   Self.isWeakRetrieval(chunks: chunks) {
+                    await self.handleWeakRetrievalShortCircuit(
+                        question: trimmedInput,
+                        placeholderID: placeholderID
+                    )
+                    return
                 }
 
                 // Task 4 #9 — pairwise STM mode (parallel; opt-in).

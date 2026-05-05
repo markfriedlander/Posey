@@ -153,7 +153,12 @@ enum AskPoseyServiceError: LocalizedError, Sendable {
             // bubble error path. Task 3 QA verified the prior raw
             // "informativeRefusalFailure" string was leaking to users.
             if underlying.contains("informativeRefusalFailure") {
-                return "Posey couldn't find a clear answer to that in the document. Try rephrasing or asking about a more specific section."
+                // Aligned 2026-05-04 with the weak-retrieval short-
+                // circuit wording in AskPoseyChatViewModel — both the
+                // "I have no chunks" path and the "AFM refused on the
+                // chunks I have" path now point the user toward the
+                // affordance that actually works (passage selection).
+                return "I'm not finding a strong answer to that in the document. I do best when you select a sentence or passage you're curious about and ask me from there — try tapping a line in the reader, then asking again."
             }
             return "Posey couldn't answer that one. Try rephrasing the question or asking about a specific passage."
         }

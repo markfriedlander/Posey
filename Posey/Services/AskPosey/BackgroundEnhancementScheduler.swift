@@ -356,28 +356,48 @@ final class BackgroundEnhancementScheduler {
             ]
         )
 
-        // 1) AFM call for the context note. Returns nil on refusal /
-        //    error — mark failed and move on.
-        let note = await enhance(candidate.text, documentSummary, documentTitle)
-        guard let note, !note.isEmpty else {
-            try? database.markChunkEnhancementFailed(
-                documentID: documentID,
-                chunkIndex: candidate.chunkIndex)
-            NotificationCenter.default.post(
-                name: .chunkEnhancementDidFail,
-                object: nil,
-                userInfo: [
-                    DocumentEmbeddingIndex.notificationDocumentIDKey: documentID,
-                    "posey.askposey.chunkEnhancement.chunkIndex": candidate.chunkIndex
-                ]
+        // 1) Try AFM. Returns nil on refusal / error.
+        var note = await enhance(candidate.text, documentSummary, documentTitle)
+        var usedFallback = false
+
+        // 2) Refusal fallback. Generate a deterministic note from the
+        //    document's metadata + chunk position + named entities so
+        //    every chunk gets enhanced — never ctx_status=2.
+        //    Mark's directive: refusal rate must be 0%. The fallback
+        //    note isn't as targeted as AFM's would be, but it
+        //    materially improves embedding quality vs the raw chunk
+        //    alone (proper-noun entities + position language + doc
+        //    summary are real retrieval signal).
+        if note == nil || note?.isEmpty == true {
+            let totalChunks = (try? database.chunkCount(for: documentID)) ?? 1
+            let relPos = Double(candidate.chunkIndex) / Double(max(totalChunks, 1))
+
+            let metadata = (try? database.documentMetadata(for: documentID))
+            let authors = metadata?.authors ?? []
+            let year = metadata?.year
+            let summary = metadata?.summary
+
+            note = FallbackChunkContextSynthesizer.synthesize(
+                chunkText: candidate.text,
+                documentTitle: documentTitle,
+                documentAuthors: authors,
+                documentYear: year,
+                documentSummary: summary,
+                relativePosition: relPos
             )
+            usedFallback = true
+        }
+
+        guard let finalNote = note, !finalNote.isEmpty else {
+            // Shouldn't reach — fallback always produces something.
+            // Defensive: leave at ctx_status=0 for a future retry.
             return
         }
 
-        // 2) Re-embed with the note prepended. Same kind as before
+        // 3) Re-embed with the note prepended. Same kind as before
         //    (search-time grouping unchanged; the chunk's content
         //    just got better).
-        let prepended = "\(note)\n\n\(candidate.text)"
+        let prepended = "\(finalNote)\n\n\(candidate.text)"
         let newEmbedding = embedText(prepended, candidate.embeddingKind)
         guard !newEmbedding.isEmpty else {
             // Embedder failed — leave ctx_status at 0 so the worker
@@ -385,25 +405,33 @@ final class BackgroundEnhancementScheduler {
             return
         }
 
-        // 3) Persist atomically.
+        // 4) Persist atomically. Note the fallback path uses ctx_status=1
+        //    (enhanced) — the chunk DID get a context note, just from
+        //    a deterministic source instead of AFM. Refusal rate at
+        //    the user-facing layer is therefore 0% by construction.
         do {
             try database.saveChunkEnhancement(
                 documentID: documentID,
                 chunkIndex: candidate.chunkIndex,
-                contextNote: note,
+                contextNote: finalNote,
                 embedding: newEmbedding)
         } catch {
             return
         }
 
         NotificationCenter.default.post(
-            name: .chunkEnhancementDidComplete,
+            name: usedFallback
+                ? .chunkEnhancementDidFail
+                : .chunkEnhancementDidComplete,
             object: nil,
             userInfo: [
                 DocumentEmbeddingIndex.notificationDocumentIDKey: documentID,
                 "posey.askposey.chunkEnhancement.chunkIndex": candidate.chunkIndex
             ]
         )
+        // The DidFail notification on fallback is misleading; the
+        // chunk WAS enhanced. We post it for telemetry — internal
+        // dashboards can count fallback-vs-AFM rates if useful.
     }
 
     // MARK: Throttling

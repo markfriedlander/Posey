@@ -918,6 +918,51 @@ extension LibraryViewModel {
                     return json(["stopped": false, "reason": "scheduler nil"])
                 }
 
+            case "RETRY_REFUSED":
+                // 2026-05-05 — Reset all ctx_status=2 chunks back to
+                // pending so the scheduler retries them with the
+                // current enhancer prompt. Used to test prompt
+                // iterations on the same content.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: RETRY_REFUSED:<doc-id>"}"#
+                }
+                let resetCount = try databaseManager.resetFailedChunks(for: id)
+                return json([
+                    "documentID": id.uuidString,
+                    "resetToPending": resetCount
+                ])
+
+            case "LIST_REFUSED_CHUNKS":
+                // 2026-05-05 — Diagnostic: list chunks that AFM
+                // refused during Phase B enhancement (ctx_status = 2),
+                // with full text. Lets us inspect what content
+                // triggered AFM's safety system so we can iterate
+                // on prompt design or implement a fallback path.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: LIST_REFUSED_CHUNKS:<doc-id>"}"#
+                }
+                let stored = try databaseManager.chunks(for: id)
+                let candidates = try databaseManager.unenhancedChunks(for: id)
+                let candIndices = Set(candidates.map { $0.chunkIndex })
+                // ctx_status=2 chunks aren't in unenhancedChunks (which
+                // only returns ctx_status=0). Get them via direct query.
+                let refused = try databaseManager.enhancedChunkRecords(for: id, limit: 500)
+                    .filter { $0.ctxStatus == 2 }
+                let items: [[String: Any]] = refused.map { rec in
+                    let fullChunk = stored.first { $0.chunkIndex == rec.chunkIndex }
+                    return [
+                        "chunkIndex": rec.chunkIndex,
+                        "startOffset": rec.startOffset,
+                        "text": fullChunk?.text ?? rec.text
+                    ]
+                }
+                _ = candIndices
+                return json([
+                    "documentID": id.uuidString,
+                    "refusedCount": items.count,
+                    "chunks": items
+                ])
+
             case "LIST_ENHANCED_CHUNKS":
                 // 2026-05-05 — Show which chunks have been ctx-enhanced
                 // with their context notes. Args: <doc-id>[:<limit>].

@@ -922,6 +922,25 @@ extension DatabaseManager {
         return rows
     }
 
+    /// Reset all failed-enhancement chunks (ctx_status=2) back to
+    /// pending (ctx_status=0). Used after iterating on the enhancer
+    /// prompt: the previously-refused chunks become pending again
+    /// and will be retried by the scheduler with the new prompt.
+    /// Only resets ctx_status=2 — successful enhancements (1) keep
+    /// their context note and embedding intact.
+    func resetFailedChunks(for documentID: UUID) throws -> Int {
+        let sql = """
+        UPDATE document_chunks
+        SET ctx_status = 0
+        WHERE document_id = ? AND ctx_status = 2;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        try step(statement)
+        return Int(sqlite3_changes(database))
+    }
+
     /// Documents in the library that have any pending chunks (not
     /// enhanced AND not yet attempted). Used by the scheduler to
     /// pick the next document for library-wide traversal.

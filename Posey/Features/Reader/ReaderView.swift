@@ -1590,6 +1590,15 @@ private struct ReaderPreferencesSheet: View {
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("preferences.readingStyle")
 
+                    // 2026-05-04 — Per-selection description below
+                    // the picker (restored after I overshot in the
+                    // previous pass and dropped both this AND the
+                    // redundant footer; only the redundant footer
+                    // should have been removed).
+                    Text(viewModel.readingStyle.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Toggle(isOn: Binding(
                         get: { viewModel.motionPreference == .auto },
                         set: { newValue in
@@ -1712,6 +1721,27 @@ private struct ReaderPreferencesSheet: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+
+                    // 2026-05-04 — Audio focus toggle. Solo mode
+                    // (default) gives Lock Screen + Dynamic Island
+                    // controls but pauses other audio. Mix mode
+                    // lets music keep playing alongside but no
+                    // system playback controls.
+                    Toggle(isOn: Binding(
+                        get: { viewModel.audioFocus == .solo },
+                        set: { newValue in
+                            viewModel.audioFocus = newValue ? .solo : .mixWithOthers
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show on Lock Screen and Dynamic Island")
+                                .font(.body)
+                            Text("Other audio (music, podcasts) will pause while Posey plays.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("preferences.audioFocus")
                 }
             }
             .navigationTitle("Reader Preferences")
@@ -2256,6 +2286,19 @@ final class ReaderViewModel: ObservableObject {
         didSet {
             PlaybackPreferences.shared.readingStyle = readingStyle
             reconcileMotionDetector()
+        }
+    }
+
+    /// 2026-05-04 — Audio focus preference. Solo (default) makes
+    /// Posey the sole audio app — Lock Screen + Dynamic Island
+    /// controls work, other audio pauses. MixWithOthers lets music
+    /// keep playing alongside Posey but no system playback controls.
+    /// Setter triggers `playbackService.reconfigureAudioSession()` so
+    /// the change takes effect on the NEXT playback start.
+    @Published var audioFocus: PlaybackPreferences.AudioFocus = PlaybackPreferences.shared.audioFocus {
+        didSet {
+            PlaybackPreferences.shared.audioFocus = audioFocus
+            playbackService.reconfigureAudioSession()
         }
     }
 

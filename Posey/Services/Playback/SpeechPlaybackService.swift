@@ -298,12 +298,7 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
     private func configureAudioSessionIfNeeded() {
         guard case .system = mode else { return }
         #if os(iOS)
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.interruptSpokenAudioAndMixWithOthers])
-        } catch {
-            assertionFailure("Failed to configure AVAudioSession: \(error)")
-        }
+        applyAudioSessionCategory()
         let center = NotificationCenter.default
         audioSessionObservers.append(
             center.addObserver(
@@ -317,6 +312,47 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
                 }
             }
         )
+        #endif
+    }
+
+    /// 2026-05-04 — Apply the audio session category based on the
+    /// current `AudioFocus` preference.
+    /// - `.solo`: `.playback` / `.spokenAudio` with NO mixing options.
+    ///   This makes Posey the sole audio app — pauses other audio
+    ///   (music, podcasts) while playing, and importantly enables
+    ///   Lock Screen + Dynamic Island controls (the system only
+    ///   shows now-playing controls for non-mixing audio sessions).
+    /// - `.mixWithOthers`: includes `.interruptSpokenAudioAndMixWithOthers`
+    ///   so other non-spoken audio (music) keeps playing alongside.
+    ///   Trade-off: no Lock Screen / Dynamic Island controls (system
+    ///   can't pick a single now-playing app when audio is mixable).
+    /// Public so the Reader can call `reconfigureAudioSession()` when
+    /// the user toggles the preference.
+    func applyAudioSessionCategory() {
+        #if os(iOS)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            switch PlaybackPreferences.shared.audioFocus {
+            case .solo:
+                try session.setCategory(.playback, mode: .spokenAudio, options: [])
+            case .mixWithOthers:
+                try session.setCategory(.playback, mode: .spokenAudio, options: [.interruptSpokenAudioAndMixWithOthers])
+            }
+        } catch {
+            assertionFailure("Failed to configure AVAudioSession: \(error)")
+        }
+        #endif
+    }
+
+    /// 2026-05-04 — Re-apply the audio session category. Called from
+    /// the Reader when the user flips the audio-focus preference so
+    /// the change takes effect on the NEXT playback start. Mid-
+    /// playback reconfiguration would interrupt the current
+    /// utterance; deferring to next-play keeps the current chunk
+    /// audible.
+    func reconfigureAudioSession() {
+        #if os(iOS)
+        applyAudioSessionCategory()
         #endif
     }
 

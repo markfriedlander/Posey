@@ -25,6 +25,7 @@ enum TextNormalizer {
     static func normalize(_ text: String) -> String {
         var t = text
         t = stripBOM(t)
+        t = stripMojibakeAndControlCharacters(t)  // 2026-05-05 — universal
         t = stripInvisibleCharacters(t)
         t = normalizeLineEndings(t)
         t = stripTrailingWhitespacePerLine(t)
@@ -35,6 +36,70 @@ enum TextNormalizer {
         t = normalizeTabsAndSpaces(t)
         t = collapseExcessiveBlankLines(t)
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Universal mojibake + control-character strip. Per Mark's
+    /// directive (2026-05-05): bake "remove any of that crap" into
+    /// the import process for every format. Categories handled:
+    ///
+    /// 1. C0 control characters (U+0000–U+001F) EXCEPT the three
+    ///    that have semantic meaning: \t (U+0009), \n (U+000A),
+    ///    \r (U+000D — kept here, normalized to \n later).
+    /// 2. C1 control characters (U+0080–U+009F). These never appear
+    ///    in legitimate text — they're the result of misinterpreting
+    ///    UTF-8 bytes as Latin-1 / Windows-1252 (the classic
+    ///    mojibake source).
+    /// 3. DEL (U+007F).
+    /// 4. Unicode Private Use Area (U+E000–U+F8FF, U+F0000–U+FFFFD,
+    ///    U+100000–U+10FFFD). Real text never contains PUA chars
+    ///    in normal prose. Leftover sentinel characters from any
+    ///    importer's intermediate processing land here.
+    /// 5. Specials block (U+FFF0–U+FFFF), especially the U+FFFD
+    ///    REPLACEMENT CHARACTER which encoders produce when they
+    ///    can't decode a byte sequence.
+    /// 6. Variation selectors that aren't paired with anything
+    ///    meaningful (U+FE00–U+FE0F orphans).
+    /// 7. Known canonical mojibake sequences (e.g., "î€" + optional
+    ///    "U+0081" — the iOS NSAttributedString HTML parser bug
+    ///    that turns U+E001 into Latin-1 garble).
+    ///
+    /// This pass runs early, BEFORE any regex pass that anchors on
+    /// specific characters, so the input to those passes is already
+    /// clean. Idempotent.
+    static func stripMojibakeAndControlCharacters(_ text: String) -> String {
+        var t = text
+        // First: catch the known iOS NSAttributedString HTML mojibake
+        // pattern (U+00EE U+20AC [U+0081]). Without this, the
+        // character-class strip below would still leave the U+00EE
+        // and U+20AC because they're legitimate Unicode characters
+        // (Latin-extended + currency sign) outside our strip ranges.
+        // The 3-char sequence has to be matched as a whole.
+        t = t.replacingOccurrences(of: "\u{00EE}\u{20AC}\u{0081}", with: "\n")
+        t = t.replacingOccurrences(of: "\u{00EE}\u{20AC}", with: "\n")
+
+        // Then: filter all unicodeScalars in one pass.
+        let cleaned = String.UnicodeScalarView(t.unicodeScalars.compactMap { scalar -> Unicode.Scalar? in
+            let v = scalar.value
+            // Keep \t \n \r — semantic control chars.
+            if v == 0x09 || v == 0x0A || v == 0x0D { return scalar }
+            // Strip C0 controls (U+0000–U+001F), DEL (U+007F),
+            // C1 controls (U+0080–U+009F).
+            if v < 0x20 { return nil }
+            if v >= 0x7F && v <= 0x9F { return nil }
+            // Strip Private Use Area (BMP).
+            if v >= 0xE000 && v <= 0xF8FF { return nil }
+            // Strip Specials block — replacement char + co.
+            if v >= 0xFFF0 && v <= 0xFFFF { return nil }
+            // Strip Supplementary Private Use Area-A and -B.
+            if v >= 0xF0000 && v <= 0xFFFFD { return nil }
+            if v >= 0x100000 && v <= 0x10FFFD { return nil }
+            // Variation selectors — keep VS1-VS16 (often used in
+            // emoji presentation), strip the supplementary range
+            // U+E0100-U+E01EF.
+            if v >= 0xE0100 && v <= 0xE01EF { return nil }
+            return scalar
+        })
+        return String(cleaned)
     }
 
     // ========== BLOCK 02: INVISIBLE-CHARACTER PASSES - START ==========

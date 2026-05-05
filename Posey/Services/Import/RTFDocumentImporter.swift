@@ -47,7 +47,7 @@ struct RTFDocumentImporter {
     }
 
     private func normalize(_ text: String) -> String {
-        text
+        TextNormalizer.stripMojibakeAndControlCharacters(text)
             .replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space (common in Word/RTF)
             .replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen
             .replacingOccurrences(of: "\r\n", with: "\n")

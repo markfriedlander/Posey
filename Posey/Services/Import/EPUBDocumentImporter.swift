@@ -385,7 +385,7 @@ extension EPUBDocumentImporter {
     /// Normalizes displayText — preserves \x0c image separators and collapses
     /// excess newlines.
     private func normalizeDisplay(_ text: String) -> String {
-        text
+        TextNormalizer.stripMojibakeAndControlCharacters(text)
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r",   with: "\n")
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)

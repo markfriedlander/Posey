@@ -156,6 +156,7 @@ struct MarkdownParser {
         // so the parser's line-based logic still works.
         var t = source
         t = TextNormalizer.stripBOM(t)
+        t = TextNormalizer.stripMojibakeAndControlCharacters(t)
         t = TextNormalizer.stripInvisibleCharacters(t)
         t = TextNormalizer.normalizeLineEndings(t)
         return t.trimmingCharacters(in: .whitespacesAndNewlines)

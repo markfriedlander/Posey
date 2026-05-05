@@ -102,7 +102,7 @@ struct DOCXDocumentImporter {
     /// Display normalization preserves visual-page markers; plain-text
     /// normalization is applied after marker strip.
     private func normalizeDisplay(_ text: String) -> String {
-        text
+        TextNormalizer.stripMojibakeAndControlCharacters(text)
             .replacingOccurrences(of: "\u{00A0}", with: " ")
             .replacingOccurrences(of: "\u{00AD}", with: "")
             .replacingOccurrences(of: "\t", with: " ")

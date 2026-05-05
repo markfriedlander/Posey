@@ -101,13 +101,13 @@ struct DocumentMetadataPayload: Sendable {
     @Guide(description: "The document's title as printed on the title page or first heading. Use the natural-language title — not the filename. Empty string if the document has no clear title (a draft, a personal note, an untitled fragment).")
     let title: String
 
-    @Guide(description: "List of authors / contributors. Include every named author. For collaborative documents, list each contributor. Empty array if no authors are named.")
+    @Guide(description: "List of authors / contributors — the people who WROTE the document. Important disambiguation: in academic / student papers the student is the author, NOT the professor or course instructor. Names like 'Professor X' or 'Dr. X' that appear next to a course name, ID number, or 'Submitted by' phrasing are usually the instructor and should NOT be listed as authors. The author is the person whose name appears as the byline, usually first in the heading block. For collaborative documents, list every contributor. Empty array only if no author is genuinely named.")
     let authors: [String]
 
     @Guide(description: "Publication or creation year. Free-form — '2001', 'circa 2010', 'n.d.' are all acceptable. Empty string if no year is determinable.")
     let year: String
 
-    @Guide(description: "Short descriptor of the document type. Examples: 'law review article', 'novel', 'short story', 'research paper', 'technical specification', 'personal note', 'email', 'draft', 'blog post', 'letter'. One to four words. Always provide a best-effort guess — never empty.")
+    @Guide(description: "Short descriptor of the document type. Examples: 'law review article', 'student paper', 'novel', 'short story', 'research paper', 'technical specification', 'personal note', 'email', 'draft', 'blog post', 'letter'. One to four words. Always provide a best-effort guess — never empty.")
     let documentType: String
 
     @Guide(description: "One to two sentences giving the gestalt of what this document is. Include topic, central thesis or subject, and any defining context. Write as a complete prose sentence, not a fragment. This summary is the most-quoted field — make it useful and precise.")
@@ -445,25 +445,48 @@ nonisolated enum DocumentMetadataChunkSynthesizer {
 /// the file scope so the metadata service can call it without
 /// reaching into DocumentEmbeddingIndex's private surface.
 nonisolated enum NLLanguageDetector {
-    /// Detect dominant language of `text`. Returns `.undetermined`
-    /// when too short or ambiguous to classify confidently — we
-    /// treat that as "probably English" downstream rather than
-    /// surface a language warning on every short document.
+    /// Detect dominant language of `text`. Returns `.english` very
+    /// liberally — the non-English banner shouldn't fire unless we
+    /// have STRONG evidence the document isn't in English.
+    ///
+    /// Why so liberal: real-world English documents contain proper
+    /// nouns, scientific Latin, place names, technical terms, and
+    /// quotations from other languages. NLLanguageRecognizer can
+    /// trip into a non-English classification on benign English
+    /// content (e.g., the Field Notes on Estuaries article got
+    /// flagged as non-English on first ship). The cost of a false
+    /// non-English banner is real (visible to the user, undermines
+    /// trust). The cost of a false English classification is small
+    /// (just no banner; the user reads what they imported).
+    ///
+    /// Algorithm:
+    ///   1. If NLLanguageRecognizer's TOP hypothesis is English, the
+    ///      doc is English regardless of confidence.
+    ///   2. If the top hypothesis is non-English, require >= 0.85
+    ///      confidence AND that English not appear in the top-3 with
+    ///      >= 0.10 confidence. Otherwise default to English.
+    ///   3. If empty/short input, return English (no banner).
     static func detect(_ text: String) -> NLLanguage {
-        guard !text.isEmpty else { return .undetermined }
+        guard !text.isEmpty else { return .english }
         let recognizer = NLLanguageRecognizer()
         recognizer.processString(text)
-        guard let language = recognizer.dominantLanguage else {
-            return .undetermined
+        guard let dominant = recognizer.dominantLanguage else {
+            return .english
         }
-        // Confidence floor: NLLanguageRecognizer reports a hypothesis
-        // even on noisy / short input. Require at least 0.50
-        // confidence before claiming non-English so a 30-char draft
-        // doesn't get tagged as Italian and trigger the warning.
-        let hypotheses = recognizer.languageHypotheses(withMaximum: 1)
-        let confidence = hypotheses[language] ?? 0
-        if confidence < 0.50 { return .undetermined }
-        return language
+        if dominant == .english { return .english }
+
+        let hypotheses = recognizer.languageHypotheses(withMaximum: 5)
+        let dominantConfidence = hypotheses[dominant] ?? 0
+        let englishConfidence = hypotheses[.english] ?? 0
+
+        // Strong-evidence threshold: dominant non-English language
+        // must have at least 0.85 confidence AND English must be
+        // a distant alternative (< 0.10 confidence) for us to
+        // believe the document is genuinely non-English.
+        if dominantConfidence >= 0.85 && englishConfidence < 0.10 {
+            return dominant
+        }
+        return .english
     }
 }
 

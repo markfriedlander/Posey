@@ -948,12 +948,37 @@ nonisolated final class DocumentEmbeddingIndex {
                 for token in contentTokens {
                     if chunkLower.contains(token) { hits += 1 }
                 }
-                lexical = Double(hits) / Double(contentTokens.count)
+                // 2026-05-05 — Cap single-token lex matches at 0.5.
+                // Without the cap, a one-content-token query like
+                // "Who wrote this book?" (book is a stopword; only
+                // "wrote" survives) gives lex=1.000 to every chunk
+                // containing "wrote" anywhere — which dominates over
+                // MiniLM cosine (the actual signal). Synthetic
+                // metadata chunks lose against dozens of saturated
+                // content chunks. Dividing by max(count, 2) caps
+                // single-token matches at 0.5 so cosine can win.
+                lexical = Double(hits) / Double(max(contentTokens.count, 2))
             }
             // Entity boost from existing index lookup gets folded in
             // separately below (we don't want to re-extract entities
             // per chunk; the index does it once at index time).
-            let combined = max(cosine, lexical)
+            // 2026-05-05 — Synthetic-metadata chunks get a +0.30
+            // unconditional boost so they reliably surface for
+            // meta-questions ("who wrote this", "what is this about")
+            // even when content chunks lex-saturate on a single
+            // common token. The boost is bounded so synthetic chunks
+            // don't dominate questions that are about content rather
+            // than metadata — they still need a real cosine signal.
+            var combined = max(cosine, lexical)
+            if Self.isSyntheticKind(chunk.embeddingKind) {
+                // 0.40 chosen empirically: enough to beat the
+                // single-token-lex-saturated content noise floor
+                // (capped at 0.50), but small enough that synthetic
+                // chunks don't crowd out genuine content chunks for
+                // content-flavored questions (where content chunks
+                // score 0.55+ via multi-token lex or strong cosine).
+                combined = min(1.0, combined + 0.40)
+            }
             scored.append((chunk, cosine, lexical, combined))
         }
 
@@ -1076,11 +1101,31 @@ nonisolated final class DocumentEmbeddingIndex {
                 let chunkLower = chunk.text.lowercased()
                 var hits = 0
                 for token in contentTokens where chunkLower.contains(token) { hits += 1 }
-                lexical = Double(hits) / Double(contentTokens.count)
+                // 2026-05-05 — Cap single-token lex matches at 0.5.
+                // Without the cap, a one-content-token query like
+                // "Who wrote this book?" (book is a stopword; only
+                // "wrote" survives) gives lex=1.000 to every chunk
+                // containing "wrote" anywhere — which dominates over
+                // MiniLM cosine (the actual signal). Synthetic
+                // metadata chunks lose against dozens of saturated
+                // content chunks. Dividing by max(count, 2) caps
+                // single-token matches at 0.5 so cosine can win.
+                lexical = Double(hits) / Double(max(contentTokens.count, 2))
             }
             let entityBoosted = entityChunkIndices.contains(chunk.chunkIndex)
             var combined = max(cosine, lexical)
             if entityBoosted { combined = min(1.0, combined + 0.4) }
+            // 2026-05-05 — Synthetic-metadata chunk boost (matches
+            // searchHybrid). Keep both code paths in sync.
+            if Self.isSyntheticKind(chunk.embeddingKind) {
+                // 0.40 chosen empirically: enough to beat the
+                // single-token-lex-saturated content noise floor
+                // (capped at 0.50), but small enough that synthetic
+                // chunks don't crowd out genuine content chunks for
+                // content-flavored questions (where content chunks
+                // score 0.55+ via multi-token lex or strong cosine).
+                combined = min(1.0, combined + 0.40)
+            }
             scored.append(DiagnosticResult(
                 chunk: chunk,
                 cosine: cosine,

@@ -42,6 +42,7 @@ struct AskPoseyView: View {
     /// before they form expectations on a novel. Stored in UserDefaults
     /// so the dismissal persists across launches and devices.
     @AppStorage("Posey.AskPosey.firstUseNoticeDismissed") private var firstUseDismissed: Bool = false
+    @AppStorage("Posey.AskPosey.nonEnglishNoticeDismissed") private var nonEnglishDismissed: Bool = false
     @State private var showFirstUseSheet: Bool = false
 
     /// Closure invoked when the user taps a Sources-strip pill below
@@ -141,6 +142,11 @@ struct AskPoseyView: View {
                             if !firstUseDismissed {
                                 firstUseBanner
                                     .id("askPosey.firstUseBanner")
+                            }
+                            if viewModel.documentDetectedNonEnglish,
+                               !nonEnglishDismissed {
+                                nonEnglishBanner
+                                    .id("askPosey.nonEnglishBanner")
                             }
                             ForEach(viewModel.messages) { message in
                                 threadRow(for: message)
@@ -694,6 +700,48 @@ private extension AskPoseyView {
         }
         .padding(14)
         .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.bottom, 4)
+    }
+
+    /// 2026-05-05 — Non-English document notice. Surfaces when the
+    /// AFM metadata extractor flagged this document's language as
+    /// non-English (NLLanguageRecognizer detection on the first
+    /// 1.5K chars). Posey is tuned for English; on-device AFM and
+    /// NLEmbedding both perform best with English text. The notice
+    /// sets honest expectations — Posey will still try, but answers
+    /// may be less reliable than on English-language material.
+    /// Dismissable; the @AppStorage flag persists per-device, not
+    /// per-doc, so the notice doesn't repeat for users who have
+    /// non-English material as a regular part of their library.
+    var nonEnglishBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "globe")
+                    .font(.headline)
+                    .foregroundStyle(.tint)
+                Text("Studying a non-English document")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button {
+                    nonEnglishDismissed = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
+                .remoteRegister("askPosey.nonEnglishDismiss") {
+                    nonEnglishDismissed = true
+                }
+            }
+            Text("Posey is tuned for English. I'll do my best on this document, but my answers may be less reliable than usual.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
         .padding(.bottom, 4)
     }
 

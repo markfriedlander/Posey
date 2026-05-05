@@ -95,6 +95,13 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     var pendingInitialQuery: String?
     var pendingInitialQueryShouldAutoSubmit: Bool
 
+    /// True when AFM metadata extraction flagged the document as
+    /// non-English. Read on init from `documents.metadata_detected_non_english`.
+    /// The view surfaces a gentle "still studying [language]" notice
+    /// when this is true. Defaults to false on docs that haven't been
+    /// extracted yet (no notice shown until we know).
+    @Published var documentDetectedNonEnglish: Bool = false
+
     /// Document the conversation is anchored to. Used for both
     /// SQLite reads (prior history) and writes (every turn appends).
     let documentID: UUID
@@ -316,6 +323,16 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
             self.budget = .forLongDocument()
         } else {
             self.budget = budget
+        }
+
+        // Read non-English flag from extracted metadata so the UI
+        // can surface a "still studying [language]" notice. Silent
+        // failure is fine — if metadata isn't extracted yet the
+        // flag stays false and no notice shows; once extraction
+        // completes on the next sheet open the notice appears.
+        if let db = databaseManager,
+           let meta = try? db.documentMetadata(for: documentID) {
+            self.documentDetectedNonEnglish = meta.detectedNonEnglish
         }
 
         // Kick off history load. UI shows isLoadingHistory until

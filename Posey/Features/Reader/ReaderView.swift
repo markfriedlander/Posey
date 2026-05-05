@@ -756,7 +756,22 @@ struct ReaderView: View {
                 // the structured options behind a second tap on
                 // the in-sheet sparkle icon). Each menu item opens
                 // the sheet AND starts the corresponding action.
+                //
+                // 2026-05-05 — When background enhancement (chunking
+                // + AFM metadata extraction) is in flight for this
+                // document, surface a "Still learning…" hint at the
+                // top of the menu and overlay a circular progress
+                // ring on the sparkle icon. The ring is unified
+                // across both stages — see IndexingTracker
+                // .unifiedProgress(for:) and HISTORY 2026-05-05.
                 Menu {
+                    if let progress = indexingTracker
+                        .unifiedProgress(for: viewModel.document.id) {
+                        let pct = Int((progress * 100).rounded())
+                        Section {
+                            Text("Still learning this document — \(pct)%")
+                        }
+                    }
                     Button {
                         explainAction()
                     } label: {
@@ -778,10 +793,10 @@ struct ReaderView: View {
                         Label("Ask something specific", systemImage: "ellipsis.bubble")
                     }
                 } label: {
-                    Image(systemName: "sparkle")
-                        .font(.title3)
-                        .foregroundStyle(chromeTint)
-                        .frame(width: 44, height: 44)
+                    SparkleWithProgressRing(
+                        tint: chromeTint,
+                        progress: indexingTracker.unifiedProgress(for: viewModel.document.id)
+                    )
                 }
                 .accessibilityLabel("Ask Posey")
                 // remoteRegister for the existing top-level id —

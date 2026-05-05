@@ -1,13 +1,19 @@
 // ========== BLOCK 01: ASK POSEY FIRST-USE SHEET - START ==========
 //
-// 2026-05-04 — Per Mark's directive: a one-time notification shown
-// the first time the user opens Ask Posey on any document. Sets
-// expectations: Posey is optimized for non-fiction (essays, articles,
-// reference material, legal documents, academic papers). Fiction
-// support is a future problem.
+// 2026-05-04 — One-time notification shown the first time the user
+// opens Ask Posey on any document. Sets expectations honestly about
+// the scoped 1.0 promise: passage-anchored reading help (explain,
+// define, find related), not document-wide discussion. Non-fiction
+// reading material works best.
 //
-// Voice: warm and direct — Posey knowing her strengths, not an
-// apology. Consistent with the existing Ask Posey tone.
+// Re-scoped 2026-05-04 (evening) per Mark + Claude (claude.ai)
+// agreement: smaller, real promise that the current AFM model can
+// actually keep. The dream version (whole-doc synthesis, conceptual
+// argument discussion) is deferred until the next AFM revision (WWDC
+// June 8, 2026 — Gemini-backed Foundation Models expected).
+//
+// Voice: warm and direct — Posey knowing what she's for, not an
+// apology and not an oversell.
 
 import SwiftUI
 
@@ -15,22 +21,27 @@ struct AskPoseyFirstUseSheet: View {
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
                 Image(systemName: "sparkle.magnifyingglass")
                     .font(.system(size: 32, weight: .semibold))
                     .foregroundStyle(.tint)
-                Text("A note before we start")
+                Text("How I can help")
                     .font(.title2.bold())
             }
             .padding(.top, 8)
 
-            Text("I do my best work with non-fiction. Essays, articles, reference material, legal documents, academic papers — that's where I shine.")
+            Text("I help with passages you're reading — explaining what something means, defining a term in context, finding related parts of the document, or quoting what the doc actually says.")
                 .font(.body)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Fiction is trickier for me — novels, narrative writing, anything where the meaning lives between the lines. Give it a try if you're curious, but expect me to stumble more often.")
+            Text("Try selecting a sentence you're curious about and asking me from there. That's where I do my best work.")
+                .font(.body)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("I'm not trying to be a discussion partner about the whole book — big-picture synthesis isn't my strength yet. Non-fiction reading material works best.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

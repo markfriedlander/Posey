@@ -405,33 +405,38 @@ final class BackgroundEnhancementScheduler {
             return
         }
 
-        // 4) Persist atomically. Note the fallback path uses ctx_status=1
-        //    (enhanced) — the chunk DID get a context note, just from
-        //    a deterministic source instead of AFM. Refusal rate at
-        //    the user-facing layer is therefore 0% by construction.
+        // 4) Persist atomically. ctx_status=1 for AFM-enhanced,
+        //    ctx_status=3 for fallback-enhanced. Both are "enhanced"
+        //    from the user's perspective (every chunk gets a context
+        //    note), but distinguishing them lets the diagnostic
+        //    surface report the AFM-vs-fallback split honestly.
+        //    ctx_status=2 is reserved for "attempted and failed
+        //    catastrophically" (no AFM, no fallback either) — should
+        //    never happen in practice given the deterministic fallback
+        //    always produces something, but we keep the sentinel
+        //    available for defensive coding.
         do {
             try database.saveChunkEnhancement(
                 documentID: documentID,
                 chunkIndex: candidate.chunkIndex,
                 contextNote: finalNote,
-                embedding: newEmbedding)
+                embedding: newEmbedding,
+                source: usedFallback ? .fallback : .afm
+            )
         } catch {
             return
         }
 
         NotificationCenter.default.post(
-            name: usedFallback
-                ? .chunkEnhancementDidFail
-                : .chunkEnhancementDidComplete,
+            name: .chunkEnhancementDidComplete,
             object: nil,
             userInfo: [
                 DocumentEmbeddingIndex.notificationDocumentIDKey: documentID,
-                "posey.askposey.chunkEnhancement.chunkIndex": candidate.chunkIndex
+                "posey.askposey.chunkEnhancement.chunkIndex": candidate.chunkIndex,
+                "posey.askposey.chunkEnhancement.source":
+                    usedFallback ? "fallback" : "afm"
             ]
         )
-        // The DidFail notification on fallback is misleading; the
-        // chunk WAS enhanced. We post it for telemetry — internal
-        // dashboards can count fallback-vs-AFM rates if useful.
     }
 
     // MARK: Throttling

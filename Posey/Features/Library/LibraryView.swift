@@ -885,18 +885,29 @@ extension LibraryViewModel {
 
             case "PHASE_B_STATUS":
                 // 2026-05-05 — Show enhanced/failed/pending counts
-                // for a document. Drives test verification of the
-                // per-chunk contextual enhancement workflow.
+                // for a document, with the AFM-vs-fallback split
+                // surfaced so the user can see how many chunks
+                // landed via AFM vs via the deterministic fallback.
+                // The "enhanced" total counts both, since both result
+                // in a real context note on the chunk; the split
+                // tells you the QUALITY mix (AFM is more targeted,
+                // fallback is attribution + entities + summary).
                 guard let idStr = arg, let id = UUID(uuidString: idStr) else {
                     return #"{"error":"Usage: PHASE_B_STATUS:<doc-id>"}"#
                 }
-                let counts = try databaseManager.chunkEnhancementCounts(for: id)
+                let split = try databaseManager.chunkEnhancementCountsBySource(for: id)
+                let enhanced = split.afm + split.fallback
+                let total = enhanced + split.failed + split.pending
+                let afmRate = enhanced == 0 ? 0.0 : (100.0 * Double(split.afm) / Double(enhanced))
                 return json([
                     "documentID": id.uuidString,
-                    "enhanced": counts.enhanced,
-                    "failed": counts.failed,
-                    "pending": counts.pending,
-                    "total": counts.enhanced + counts.failed + counts.pending
+                    "enhanced": enhanced,
+                    "afm": split.afm,
+                    "fallback": split.fallback,
+                    "failed": split.failed,
+                    "pending": split.pending,
+                    "total": total,
+                    "afmAcceptRate": afmRate
                 ])
 
             case "PHASE_B_START":

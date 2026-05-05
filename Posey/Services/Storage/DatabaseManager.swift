@@ -807,9 +807,15 @@ extension DatabaseManager {
     func chunkEnhancementCounts(for documentID: UUID) throws
         -> (enhanced: Int, failed: Int, pending: Int)
     {
+        // Per the ChunkEnhancementSource split:
+        //   ctx_status = 1 → AFM-enhanced
+        //   ctx_status = 3 → fallback-enhanced
+        // Both count as "enhanced" for unified-progress purposes;
+        // the diagnostic surface can pull a finer breakdown via
+        // chunkEnhancementCountsBySource(for:) below.
         let sql = """
         SELECT
-            COALESCE(SUM(CASE WHEN ctx_status = 1 THEN 1 ELSE 0 END), 0) AS enhanced,
+            COALESCE(SUM(CASE WHEN ctx_status IN (1, 3) THEN 1 ELSE 0 END), 0) AS enhanced,
             COALESCE(SUM(CASE WHEN ctx_status = 2 THEN 1 ELSE 0 END), 0) AS failed,
             COALESCE(SUM(CASE WHEN ctx_status = 0 THEN 1 ELSE 0 END), 0) AS pending
         FROM document_chunks
@@ -829,20 +835,65 @@ extension DatabaseManager {
         )
     }
 
+    /// Source-split enhancement counts. Used by the PHASE_B_STATUS
+    /// API verb to surface AFM-vs-fallback honestly rather than
+    /// hiding the split behind a single "enhanced" number.
+    func chunkEnhancementCountsBySource(for documentID: UUID) throws
+        -> (afm: Int, fallback: Int, failed: Int, pending: Int)
+    {
+        let sql = """
+        SELECT
+            COALESCE(SUM(CASE WHEN ctx_status = 1 THEN 1 ELSE 0 END), 0) AS afm,
+            COALESCE(SUM(CASE WHEN ctx_status = 3 THEN 1 ELSE 0 END), 0) AS fallback,
+            COALESCE(SUM(CASE WHEN ctx_status = 2 THEN 1 ELSE 0 END), 0) AS failed,
+            COALESCE(SUM(CASE WHEN ctx_status = 0 THEN 1 ELSE 0 END), 0) AS pending
+        FROM document_chunks
+        WHERE document_id = ?
+          AND embedding_kind NOT LIKE '%:syn-meta';
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            return (0, 0, 0, 0)
+        }
+        return (
+            afm:      Int(sqlite3_column_int(statement, 0)),
+            fallback: Int(sqlite3_column_int(statement, 1)),
+            failed:   Int(sqlite3_column_int(statement, 2)),
+            pending:  Int(sqlite3_column_int(statement, 3))
+        )
+    }
+
+    /// Source of an enhancement — distinguishes AFM-generated context
+    /// notes from deterministic fallback notes. Both result in an
+    /// "enhanced" chunk from the user's perspective, but we track
+    /// the split so the diagnostic surface can report honestly.
+    enum ChunkEnhancementSource: Sendable {
+        case afm        // ctx_status = 1
+        case fallback   // ctx_status = 3
+    }
+
     /// Save the AFM-generated context note + refresh the embedding
-    /// for a single chunk, atomically. ctx_status flips to 1 (enhanced)
-    /// on success. If `embedding` is empty, only the note is stored
-    /// and ctx_status stays at its current value — the scheduler can
-    /// retry the embed later.
+    /// for a single chunk, atomically. ctx_status flips to 1 (AFM-
+    /// enhanced) or 3 (fallback-enhanced) per `source`. If `embedding`
+    /// is empty, only the note is stored and ctx_status stays at its
+    /// current value — the scheduler can retry the embed later.
     func saveChunkEnhancement(documentID: UUID,
                               chunkIndex: Int,
                               contextNote: String,
-                              embedding: [Double]) throws {
+                              embedding: [Double],
+                              source: ChunkEnhancementSource = .afm) throws {
+        let statusValue: Int
+        switch source {
+        case .afm:      statusValue = 1
+        case .fallback: statusValue = 3
+        }
         let sql = """
         UPDATE document_chunks
         SET context_note = ?,
             embedding = ?,
-            ctx_status = 1
+            ctx_status = \(statusValue)
         WHERE document_id = ? AND chunk_index = ?;
         """
         let statement = try prepareStatement(sql: sql)

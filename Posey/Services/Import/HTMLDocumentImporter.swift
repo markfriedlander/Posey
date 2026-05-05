@@ -134,6 +134,11 @@ struct HTMLDocumentImporter {
 // ========== BLOCK 3: TEXT NORMALIZATION - START ==========
     private func normalize(_ text: String) -> String {
         var t = text
+        // 2026-05-05 — Universal mojibake + control-character strip
+        // (TextNormalizer.stripMojibakeAndControlCharacters covers
+        // C0/C1 controls, PUA, replacement char, known iOS sentinel
+        // mojibake, etc.). Format-parity policy.
+        t = TextNormalizer.stripMojibakeAndControlCharacters(t)
         t = t.replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space
         t = t.replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen (invisible; strip entirely)
         // 2026-05-05 — Strip ANY Unicode Private Use Area characters

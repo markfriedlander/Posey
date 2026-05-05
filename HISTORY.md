@@ -1,5 +1,63 @@
 # Posey History
 
+## 2026-05-04 (evening) — Reader UX: tap-to-jump, persistent mini-player, background audio, Preferences simplification
+
+Big batch of reader-side changes from a long working session with Mark, in roughly the order they landed.
+
+**Ask Posey re-scope UI (post-MiniLM).** Took the 75% non-fiction clean-rate baseline that the MiniLM swap got us to and rebuilt the user-facing surface to make the smaller-but-real promise visible.
+- First-use notice converted from a stacked modal sheet to an inline banner at the top of the conversation thread (one-tap dismiss, persisted via `@AppStorage` `Posey.AskPosey.firstUseNoticeDismissed`). The previous modal-on-modal was visually broken on iPhone Plus models because the parent Ask Posey sheet was at `.medium` detent (Plus reports `.regular` horizontal size class in portrait, fooling the previous size-class-based detent picker).
+- Detent fix: replaced size-class check with `UIDevice.current.userInterfaceIdiom == .phone` so phones (including Plus) always get `.large` detent.
+- Quick-actions menu replaces the failed pills strip. Pills truncated to "Ex...", "Defi..." on iPhone-width because four labeled pills don't fit horizontally with full text. A SwiftUI `Menu` gives each action full label space and follows iOS conventions.
+- Chrome Ask Posey button is now a Menu (matches the previous two-choice menu pattern Mark recalled). One tap from reader → templated question started in the sheet:
+  - "Explain this passage" → auto-submits "Explain this passage in context — what's it saying?"
+  - "Define a term" → prefills composer with "Define " (user types the term)
+  - "Find related passages" → auto-submits doc-wide search query
+  - "Ask something specific" → opens the sheet with composer focused
+- `AskPoseyChatViewModel.init` accepts `initialQuery` + `autoSubmitInitialQuery` so menu items wire through to a single sheet-open path.
+- Per-message sources strip restored alongside inline `[ⁿ]` superscript citations (rescope spec called for both — granular per-claim citations PLUS at-a-glance source list).
+- Composer placeholder shapes the workflow: "Ask about this passage…" when anchored, "Tap a sentence in the reader to ask about it" when not.
+
+**Reader interaction model: single-tap-to-jump (genre standard).** Read-aloud apps (Voice Dream, Speechify, Pocket, Audible) use single-tap-on-text to jump reading position there, with persistent or auto-fade chrome triggered by a different mechanism. Posey was inverted (single-tap toggled chrome, double-tap was supposed to jump but had been removed in Task 8 #54 due to gesture conflicts). Switched to genre standard:
+- Single-tap on a sentence row jumps reading position there.
+- Tap-to-toggle-chrome removed.
+- Chrome auto-fades after 3 s and re-reveals on scroll motion (preserved).
+- Programmatic-scroll guard added — auto-scroll to follow highlight no longer triggers chrome reveal (was popping chrome on every sentence advance during playback).
+- Mini-player added: when chrome auto-fades during playback, a single play/pause button stays visible (Voice Dream / Speechify / Audible all do this). Softened to 60% opacity so it doesn't pop against text. When playback stops via mini-player, full chrome reveals so user has all controls.
+
+**Background audio (real fix, after long debugging).** Mark reported playback stopping on screen lock. The fix needed two layers:
+1. AVSpeechSynthesizer's `usesApplicationAudioSession = true` — without this, the synthesizer routes through the system spoken-content audio session which doesn't honor `.playback` background config.
+2. **The actual root cause:** `INFOPLIST_KEY_UIBackgroundModes = audio` in pbxproj does NOT inject `UIBackgroundModes` into the auto-generated Info.plist on this Xcode (verified by `PlistBuddy -c "Print :UIBackgroundModes"` on the built `.app` returning "Does Not Exist"). Tried unquoted, quoted, and array literal forms — none worked. Device log showed literal: `does not have background entitlement (or on watchOS, is not allowed to play in the background)` and `Sending stop command to com.MarkFriedlander.Posey ... because client is background suspended`. Fix: added a Run Script build phase that injects `UIBackgroundModes` via PlistBuddy after the auto-generated Info.plist is processed:
+```
+PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+PlistBuddy Add :UIBackgroundModes array
+PlistBuddy Add :UIBackgroundModes:0 string audio
+```
+Verified at build time and on device — background audio now continues with screen locked OR app minimized.
+
+**Lock Screen / Dynamic Island controls — DEFERRED.** With background audio working, controls still didn't appear because `.interruptSpokenAudioAndMixWithOthers` includes mix-with-others semantics, and the system doesn't surface now-playing controls for mixable sessions. Tried switching to a non-mixing solo configuration to get controls — controls appeared but audio stopped after the queued utterance window finished and metadata cleared (likely SwiftUI deinit'ing ReaderViewModel on background, OR an AVSpeechSynthesizer + non-mixing-session interaction we didn't fully trace). Reverted to the mixable configuration for 1.0; background playback works without controls. Lock-screen controls deferred to future release pass.
+
+Briefly built an `AudioFocus` preference (Solo / MixWithOthers) with a Toggle in Preferences to let users pick. Reverted in the same session — Mark and I agreed the trade-off is not yet worth the surface area, and the controls path was broken in non-obvious ways.
+
+**Reader Preferences simplification.**
+- Reading Style picker: Standard and Immersive removed for 1.0 (commented-out-not-deleted; kept in enum for parse-compat with persisted UserDefaults; reads of those values migrate to `.focus` on the getter). Default style: `.standard` → `.focus`.
+- Old standalone "Motion Mode" Section (Off/On/Auto picker) replaced by an inline Toggle in the Reading Style section so it's visually grouped with the picker. The Off/On/Auto trichotomy collapses cleanly: "On" = Motion selected; "Off" = something else selected; "Auto" = the toggle.
+- Per-style descriptions retained (dynamic, based on selection); redundant footer that listed all four styles removed.
+
+**Smaller fixes that landed across the session.**
+- Confidence signal: when MiniLM top-cosine retrieval is below 0.45 outside the front-matter band AND no anchor is present, short-circuit before AFM with an honest "I'm not finding a strong answer" message. Threshold tuned from real-conversation sweep data (0.50+ produced real answers; 0.40 produced fabrication; 0.45 catches fabrication band).
+- Anchored-question quality batch: prompt builder reorders so SURROUNDING context comes after RAG (recency bias); asymmetric proximity window (1/3 before, 2/3 after — natural reader questions ask forward); section-boundary clipping (don't reach back across `\n---\n`, `\n\n##`, `\f`, triple-newline); skip front-matter prepend on anchored queries (front matter is noise for passage focus); grammatical-meta interpretation hint appended to short pronoun questions on anchored queries.
+- Recommendation short-circuit (already shipped earlier today): "should I read this?" pattern → canned honest refusal before AFM is called.
+- Role-question short-circuit (already shipped earlier today): "Who's the editor?" with no editor in doc → honest refusal that names the actual roles the doc DOES mention. Roles covered: editor, publisher, illustrator, translator, narrator, ghostwriter, typesetter, designer, photographer, screenwriter, director, producer.
+- Polish call removed (already shipped earlier today). Restoration recipe preserved as inline comment in `AskPoseyService.streamProseResponse`.
+- Verbatim-phrase fallback retrieval (added earlier today, then superseded by hybrid lexical+cosine retrieval in `searchHybrid`): kept as deprecated reference; not in runtime path.
+- Diagnostic logging on AVAudioSession interruption + AVSpeechSynthesizer didCancel for tomorrow's lock-screen-controls debug pass (when we eventually return to it).
+
+**Known issues / defer list:**
+- Lock Screen + Dynamic Island controls — broken in solo mode, not present in mix mode. Defer.
+- Reader deep-test (Task 5) across 7 formats — never executed methodically. Likely surfaces small bugs.
+- Format parity remaining (Task 8): PDF inline TOC chunking, EPUB skip-until-offset, DOCX TOC fields, DOCX/HTML inline images, search-per-format, audio-export-per-format, reading-styles-per-format.
+- Tomorrow: stress-test Ask Posey conversation memory persistence across question types and turns (Mark's request after the re-scope landed).
+
 ## 2026-05-04 — Ask Posey RAG Layer 2: MiniLM via CoreML; non-fiction scope
 
 Two changes that ship together: (a) replaced the embedding model used for retrieval, (b) explicitly scoped Ask Posey to non-fiction in 1.0 with a first-use notification.

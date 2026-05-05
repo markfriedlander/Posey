@@ -19,36 +19,6 @@ final class PlaybackPreferences {
         static let fontSize             = "posey.reader.fontSize"
         static let lastOpenedDocumentID = "posey.library.lastOpenedDocumentID"
         static let readingStyle         = "posey.reader.readingStyle"
-        /// 2026-05-04 — Audio focus preference. See `audioFocus`.
-        static let audioFocus           = "posey.playback.audioFocus"
-    }
-
-    /// 2026-05-04 — Audio focus preference. Two modes:
-    /// - `.solo`: Posey takes audio focus and pauses other audio
-    ///   (music, podcasts) while it plays. Lock Screen and Dynamic
-    ///   Island show Posey playback controls. Default — matches the
-    ///   "listening while walking with the screen locked" use case.
-    /// - `.mixWithOthers`: Posey allows other audio (music, podcasts)
-    ///   to keep playing alongside. Lock Screen and Dynamic Island
-    ///   controls are NOT shown — the system can't pick a single
-    ///   "now playing" app when audio is mixable.
-    /// Settable from the Preferences sheet under Playback.
-    enum AudioFocus: String, CaseIterable, Equatable {
-        case solo
-        case mixWithOthers
-    }
-
-    var audioFocus: AudioFocus {
-        get {
-            guard let raw = UserDefaults.standard.string(forKey: Keys.audioFocus),
-                  let value = AudioFocus(rawValue: raw) else {
-                return .solo
-            }
-            return value
-        }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: Keys.audioFocus)
-        }
     }
 
     /// M8 Reading Style preferences. Persisted as a string so future

@@ -2,7 +2,44 @@
 
 ## Current Target
 
-**2026-05-04 evening — Layer 2 RAG fix + non-fiction scope landed; Task 5 next.**
+**2026-05-04 (late evening) — Reader UX overhaul + background audio shipped; Task 5 next, plus a focused punch list.**
+
+The big additions tonight (post-MiniLM): Ask Posey re-scope UI (chrome menu surfaces 4 templated actions, inline first-use banner, sources strip restored, composer placeholder shapes workflow, detents fix for iPhone Plus), reader interaction model switched to single-tap-to-jump (genre standard) with mini-player persistence during chrome auto-fade, background audio fix (UIBackgroundModes via Run Script + AVSpeechSynthesizer.usesApplicationAudioSession = true), Preferences simplification (Standard + Immersive removed for 1.0; Motion Off/On/Auto collapsed to inline Auto toggle in Reading Style section). Plus the anchored-question quality batch (prompt reorder, asymmetric proximity, section clipping, skip-FM-on-anchor, grammatical-meta hint), confidence signal, recommendation + role short-circuits, polish call removal — many of which shipped earlier in the day.
+
+**Where we are vs the 84-item task sequence:** roughly 70-75% to release. Done: Tasks 0, 1, 2, 3 (in spirit), 4 (in spirit, much further than original scope), 7, 10, 11, 12, 13, plus Task 14 prep. Remaining: Task 5 (reader deep test) never executed methodically; Task 6 depends on Task 5; Task 8 has format-parity items still open; Task 9 accessibility needs Mark's eyes; Task 14 final submit needs Mark's hands.
+
+**Tomorrow's focused punch list (in priority order):**
+
+1. **Ask Posey conversation memory stress test** (Mark's request). The re-scope changed retrieval order, skip-FM-on-anchor, grammatical-meta hint, and several other knobs. Need to verify multi-turn conversations across question types maintain consistent and persistent memory of prior turns. Real conversations on 2-3 docs, varying question types, follow-ups that explicitly reference earlier turns. Look for: turn-N references turn-(N-2) correctly; topic shifts don't lose the thread; the 60/25/15 verbatim/summary/RAG split works at scale.
+
+2. **Lock Screen + Dynamic Island controls** (deferred from tonight). Background audio works; controls don't. Tried solo audio mode → controls appeared but audio stopped after the queued utterance window finished and metadata cleared. Hypotheses to investigate: (a) ReaderViewModel deinit'ing on background (NowPlayingController.clear() only fires in deinit); (b) AVSpeechSynthesizer + non-mixing-session interaction; (c) onDisappear firing on lock. Diagnostic dbgLog already in `SpeechPlaybackService.handleAudioSessionInterruption` and `speechSynthesizer didCancel`. Next pass should also instrument ReaderView.onDisappear.
+
+3. **Task 5 — Reader deep test on 7 formats.** Methodical pass: every reader path on each of TXT / MD / RTF / DOCX / HTML / EPUB / PDF. Every button, every menu, every error path. Report findings only; no fixes during the pass.
+
+4. **Task 6 — Reader fixes** for whatever Task 5 surfaces.
+
+5. **Task 8 — Format parity remaining items** (in user-impact order):
+   - PDF inline TOC chunking (the dot-leader-without-newlines case the chunkIsMostlyTOC heuristic misses)
+   - DOCX TOC fields (Word-style auto-TOCs not parsed)
+   - DOCX/HTML inline images (only EPUB and PDF currently extract them)
+   - EPUB skip-until-offset (TOC playback-skip not wired)
+   - Search per format (verify SEARCH/NEXT/PREVIOUS/CLEAR work cleanly across all 7)
+   - Reading-styles per format (verify Focus/Motion render correctly across all 7)
+   - Audio-export per format (some formats may have voice-gating issues)
+
+6. **Task 9 — Accessibility pass (Mark present).** Prep done in `submission/task9-accessibility-prep.md`; full pass needs Mark to walk through with VoiceOver and Dynamic Type at AX5.
+
+7. **Task 14 — Submission prep + final submit (Mark present).** Privacy policy + App Store metadata drafted in `submission/`. Screenshots TBD. Final submit needs Mark for irreversible steps.
+
+**Known regressions / open items not blocking 1.0:**
+- The double-tap-to-highlight gesture was removed (Task 8 #54 / superseded by single-tap-jump in tonight's work). Don't reintroduce; single-tap is the new standard.
+- `tools/qa_battery.sh` hard-coded doc IDs — switch to title-based lookup via `LIST_DOCUMENTS` (carryover).
+- The verbatim-phrase fallback retrieval added earlier today is now superseded by hybrid lexical+cosine in `searchHybrid` — the fallback function remains in `AskPoseyChatViewModel` as deprecated reference; can be removed in a cleanup pass.
+- `idevicesyslog` device log capture is unreliable — works initially after pairing but loses connection over time per the iOS 17+ lockdown-service-restriction issue noted in CLAUDE.md. For lock-screen-controls debug tomorrow, may need to use Xcode's Console app on Mac for device log capture instead.
+
+---
+
+**Original 2026-05-04 (mid-day) — Layer 2 RAG fix + non-fiction scope landed; Task 5 next.**
 
 Ask Posey 1.0 is now scoped to non-fiction. MiniLM (CoreML) replaces NLEmbedding as the retrieval embedder — non-fiction Three Hats clean rate **75%** (was 67% with NLEmbedding, 63% with NLContextualEmbedding). First-use notification ships explaining the strength/weakness. Fiction (EPUB Illuminatus) acknowledged as a known limitation; deferred post-1.0.
 

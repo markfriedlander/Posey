@@ -243,6 +243,7 @@
 /* Begin PBXShellScriptBuildPhase section */
 		85B4AEAA2F70864D001A55DA /* Inject UIBackgroundModes */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -257,7 +258,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
-			shellScript = "# 2026-05-04 — INFOPLIST_KEY_UIBackgroundModes = audio in build\n# settings does not produce a UIBackgroundModes array in the\n# auto-generated Info.plist on this Xcode (verified by\n# inspecting the built .app/Info.plist). Without UIBackgroundModes,\n# iOS rejects our background entitlement and stops AVSpeechSynthesizer\n# audio when the screen locks. Workaround: inject UIBackgroundModes\n# via PlistBuddy in a post-Resources script phase.\nset -e\nPLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\"\nif [ -z \"${PLIST}\" ] || [ ! -f \"${PLIST}\" ]; then\n  echo \"warning: UIBackgroundModes inject — Info.plist not found at ${PLIST}\"\n  exit 0\nfi\n/usr/libexec/PlistBuddy -c \"Delete :UIBackgroundModes\" \"${PLIST}\" 2>/dev/null || true\n/usr/libexec/PlistBuddy -c \"Add :UIBackgroundModes array\" \"${PLIST}\"\n/usr/libexec/PlistBuddy -c \"Add :UIBackgroundModes:0 string audio\" \"${PLIST}\"\necho \"UIBackgroundModes injected: $(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' \"${PLIST}\")\"\n";
+			shellScript = "# 2026-05-04 — INFOPLIST_KEY_UIBackgroundModes = audio in build\n# settings does not produce a UIBackgroundModes array in the\n# auto-generated Info.plist on this Xcode. Inject via PlistBuddy\n# into BOTH the PROCESSED (intermediate) plist AND the .app's\n# final plist. The PROCESSED plist is the source of truth that\n# Xcode copies to the .app and re-applies on incremental builds;\n# the .app plist is what's already shipping in the bundle. We\n# write to both for safety.\nset -e\nfor PLIST in \"${PROCESSED_INFOPLIST_PATH}\" \\\n             \"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\"; do\n  if [ -z \"${PLIST}\" ] || [ ! -f \"${PLIST}\" ]; then\n    continue\n  fi\n  /usr/libexec/PlistBuddy -c \"Delete :UIBackgroundModes\" \"${PLIST}\" 2>/dev/null || true\n  /usr/libexec/PlistBuddy -c \"Add :UIBackgroundModes array\" \"${PLIST}\"\n  /usr/libexec/PlistBuddy -c \"Add :UIBackgroundModes:0 string audio\" \"${PLIST}\"\n  echo \"UIBackgroundModes injected into ${PLIST}\"\ndone\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

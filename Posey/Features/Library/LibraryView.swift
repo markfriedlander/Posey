@@ -212,6 +212,11 @@ struct LibraryView: View {
                     didAttemptInitialRestore = true
                     maybeRestoreLastOpenedDocument()
                 }
+                // Phase B — kick off background contextual enhancement.
+                // Idempotent; the scheduler self-exits when there's no
+                // pending work and self-restarts on next reading-position
+                // update or import. Safe to call on every library appear.
+                viewModel.enhancementScheduler?.start()
                 // M9 release-binary hygiene: the local API server is
                 // a development tool. DEBUG builds force-on the
                 // antenna at launch (developer convenience); RELEASE
@@ -392,6 +397,32 @@ final class LibraryViewModel: ObservableObject {
             database: databaseManager,
             metadataExtractor: extractor
         )
+    }()
+
+    /// Phase B background-enhancement scheduler. Held lazily so it
+    /// only spins up if AFM is available; on older OS versions this
+    /// stays nil and Phase B is a no-op (Phase A still functional).
+    @MainActor lazy var enhancementScheduler: BackgroundEnhancementScheduler? = {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+            let enhancer = DocumentChunkEnhancer()
+            let enhanceClosure: DocumentChunkContextClosure = { text, summary, title in
+                await enhancer.contextNote(
+                    forChunk: text,
+                    documentSummary: summary,
+                    documentTitle: title)
+            }
+            let embedClosure: BackgroundEnhancementScheduler.ChunkEmbedClosure = { text, kind in
+                DocumentEmbeddingIndex.embedTextWithKind(text: text, kind: kind)
+            }
+            return BackgroundEnhancementScheduler(
+                database: databaseManager,
+                enhance: enhanceClosure,
+                embedText: embedClosure
+            )
+        }
+        #endif
+        return nil
     }()
     private lazy var txtLibraryImporter      = TXTLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
     private lazy var markdownLibraryImporter = MarkdownLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
@@ -825,6 +856,90 @@ extension LibraryViewModel {
                 #else
                 return json(["error": "FoundationModels framework not available"])
                 #endif
+
+            case "PHASE_B_DEBUG":
+                // 2026-05-05 — Surface the scheduler's internal state
+                // for debugging when chunks aren't getting processed.
+                #if canImport(FoundationModels)
+                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+                    let lastFail = DocumentChunkEnhancer.lastFailureReason
+                    let pendingDocs = (try? databaseManager.documentsWithPendingChunks()) ?? []
+                    let info = ProcessInfo.processInfo
+                    return json([
+                        "schedulerWired": enhancementScheduler != nil,
+                        "isPaused": enhancementScheduler?.isPausedForUserAFM ?? false,
+                        "currentReadingDocumentID": enhancementScheduler?.currentReadingDocumentID?.uuidString ?? "",
+                        "currentReadingOffset": enhancementScheduler?.currentReadingOffset ?? -1,
+                        "pendingDocumentCount": pendingDocs.count,
+                        "lowPowerMode": info.isLowPowerModeEnabled,
+                        "thermalState": "\(info.thermalState)",
+                        "lastEnhancerFailure": lastFail
+                    ])
+                }
+                #endif
+                return json(["schedulerWired": false])
+
+            case "PHASE_B_STATUS":
+                // 2026-05-05 — Show enhanced/failed/pending counts
+                // for a document. Drives test verification of the
+                // per-chunk contextual enhancement workflow.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: PHASE_B_STATUS:<doc-id>"}"#
+                }
+                let counts = try databaseManager.chunkEnhancementCounts(for: id)
+                return json([
+                    "documentID": id.uuidString,
+                    "enhanced": counts.enhanced,
+                    "failed": counts.failed,
+                    "pending": counts.pending,
+                    "total": counts.enhanced + counts.failed + counts.pending
+                ])
+
+            case "PHASE_B_START":
+                // Force-start the scheduler. Useful for tests that
+                // import a doc and want enhancement to kick off
+                // without waiting for the library .task to fire.
+                if let scheduler = enhancementScheduler {
+                    scheduler.start()
+                    return json(["started": true])
+                } else {
+                    return json(["started": false, "reason": "AFM unavailable"])
+                }
+
+            case "PHASE_B_STOP":
+                if let scheduler = enhancementScheduler {
+                    scheduler.stop()
+                    return json(["stopped": true])
+                } else {
+                    return json(["stopped": false, "reason": "scheduler nil"])
+                }
+
+            case "LIST_ENHANCED_CHUNKS":
+                // 2026-05-05 — Show which chunks have been ctx-enhanced
+                // with their context notes. Args: <doc-id>[:<limit>].
+                let raw = arg ?? ""
+                let parts = raw.split(separator: ":", maxSplits: 1,
+                                      omittingEmptySubsequences: false)
+                guard parts.count >= 1,
+                      let id = UUID(uuidString: String(parts[0])) else {
+                    return #"{"error":"Usage: LIST_ENHANCED_CHUNKS:<doc-id>[:<limit>]"}"#
+                }
+                let limit = parts.count >= 2 ? (Int(String(parts[1])) ?? 20) : 20
+                let canonical = try databaseManager.enhancedChunkRecords(for: id, limit: limit)
+                let items: [[String: Any]] = canonical.map { rec in
+                    [
+                        "chunkIndex": rec.chunkIndex,
+                        "startOffset": rec.startOffset,
+                        "ctxStatus": rec.ctxStatus,
+                        "contextNote": rec.contextNote ?? "",
+                        "textPreview": String(rec.text.prefix(120))
+                    ]
+                }
+                return json([
+                    "documentID": id.uuidString,
+                    "returned": items.count,
+                    "chunks": items
+                ])
 
             case "GET_DOCUMENT_METADATA":
                 // 2026-05-05 — Read extracted metadata for a document.

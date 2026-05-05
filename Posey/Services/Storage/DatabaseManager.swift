@@ -753,6 +753,197 @@ extension DatabaseManager {
         return chunks
     }
 
+    /// 2026-05-05 — Phase B chunk-enhancement queue access.
+    ///
+    /// One row per content chunk that needs a context note. Excludes
+    /// synthetic chunks (chunk_kind ending `:syn-meta`) — those are
+    /// already curated metadata and don't need contextual prepends.
+    /// Excludes chunks already enhanced (ctx_status = 1) or attempted
+    /// and failed (ctx_status = 2; we don't retry refusals).
+    ///
+    /// The scheduler walks results from this query in the order
+    /// provided. The query orders by chunk_index ASC; the scheduler
+    /// re-orders by user reading position before processing. Caller
+    /// (BackgroundEnhancementScheduler) is responsible for skipping
+    /// already-processed entries on its own pointer.
+    struct ChunkEnhancementCandidate: Sendable {
+        let chunkIndex: Int
+        let startOffset: Int
+        let endOffset: Int
+        let text: String
+        let embeddingKind: String
+    }
+
+    func unenhancedChunks(for documentID: UUID) throws -> [ChunkEnhancementCandidate] {
+        let sql = """
+        SELECT chunk_index, start_offset, end_offset, text, embedding_kind
+        FROM document_chunks
+        WHERE document_id = ?
+          AND ctx_status = 0
+          AND embedding_kind NOT LIKE '%:syn-meta'
+        ORDER BY chunk_index ASC;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var rows: [ChunkEnhancementCandidate] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let idx = Int(sqlite3_column_int(statement, 0))
+            let start = Int(sqlite3_column_int(statement, 1))
+            let end = Int(sqlite3_column_int(statement, 2))
+            guard let text = sqliteString(statement, index: 3) else { continue }
+            let kind = sqliteString(statement, index: 4) ?? "unknown"
+            rows.append(.init(chunkIndex: idx, startOffset: start,
+                              endOffset: end, text: text, embeddingKind: kind))
+        }
+        return rows
+    }
+
+    /// Counts of chunk enhancement progress for a document.
+    /// Returns (enhanced, attempted-failed, pending). Pending excludes
+    /// synthetic chunks. Used to drive the unified progress ring on
+    /// the sparkle icon — the Phase B fraction is enhanced /
+    /// (enhanced + pending).
+    func chunkEnhancementCounts(for documentID: UUID) throws
+        -> (enhanced: Int, failed: Int, pending: Int)
+    {
+        let sql = """
+        SELECT
+            COALESCE(SUM(CASE WHEN ctx_status = 1 THEN 1 ELSE 0 END), 0) AS enhanced,
+            COALESCE(SUM(CASE WHEN ctx_status = 2 THEN 1 ELSE 0 END), 0) AS failed,
+            COALESCE(SUM(CASE WHEN ctx_status = 0 THEN 1 ELSE 0 END), 0) AS pending
+        FROM document_chunks
+        WHERE document_id = ?
+          AND embedding_kind NOT LIKE '%:syn-meta';
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            return (0, 0, 0)
+        }
+        return (
+            enhanced: Int(sqlite3_column_int(statement, 0)),
+            failed:   Int(sqlite3_column_int(statement, 1)),
+            pending:  Int(sqlite3_column_int(statement, 2))
+        )
+    }
+
+    /// Save the AFM-generated context note + refresh the embedding
+    /// for a single chunk, atomically. ctx_status flips to 1 (enhanced)
+    /// on success. If `embedding` is empty, only the note is stored
+    /// and ctx_status stays at its current value — the scheduler can
+    /// retry the embed later.
+    func saveChunkEnhancement(documentID: UUID,
+                              chunkIndex: Int,
+                              contextNote: String,
+                              embedding: [Double]) throws {
+        let sql = """
+        UPDATE document_chunks
+        SET context_note = ?,
+            embedding = ?,
+            ctx_status = 1
+        WHERE document_id = ? AND chunk_index = ?;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(contextNote, at: 1, for: statement)
+
+        let bytesPerDouble = MemoryLayout<Double>.size
+        var data = Data(count: embedding.count * bytesPerDouble)
+        data.withUnsafeMutableBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            for (i, value) in embedding.enumerated() {
+                base.advanced(by: i * bytesPerDouble)
+                    .storeBytes(of: value, as: Double.self)
+            }
+        }
+        try data.withUnsafeBytes { rawBuffer -> Void in
+            sqlite3_bind_blob(
+                statement, 2, rawBuffer.baseAddress,
+                Int32(rawBuffer.count), SQLITE_TRANSIENT)
+        }
+        try bind(documentID.uuidString, at: 3, for: statement)
+        sqlite3_bind_int(statement, 4, Int32(chunkIndex))
+        try step(statement)
+    }
+
+    /// Mark a chunk as failed-enhancement. Used after AFM refusal so
+    /// the scheduler doesn't keep retrying the same chunk.
+    func markChunkEnhancementFailed(documentID: UUID,
+                                    chunkIndex: Int) throws {
+        let sql = """
+        UPDATE document_chunks
+        SET ctx_status = 2
+        WHERE document_id = ? AND chunk_index = ?;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        sqlite3_bind_int(statement, 2, Int32(chunkIndex))
+        try step(statement)
+    }
+
+    /// Diagnostic-only: return chunks that have been enhancement-touched
+    /// (ctx_status != 0) with their stored context note + text preview.
+    /// Drives the LIST_ENHANCED_CHUNKS local-API verb so we can verify
+    /// the scheduler's outputs from the Python harness.
+    struct EnhancedChunkRecord: Sendable {
+        let chunkIndex: Int
+        let startOffset: Int
+        let ctxStatus: Int
+        let contextNote: String?
+        let text: String
+    }
+
+    func enhancedChunkRecords(for documentID: UUID, limit: Int = 20) throws
+        -> [EnhancedChunkRecord]
+    {
+        let sql = """
+        SELECT chunk_index, start_offset, ctx_status, context_note, text
+        FROM document_chunks
+        WHERE document_id = ? AND ctx_status != 0
+        ORDER BY chunk_index ASC
+        LIMIT \(max(1, limit));
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var rows: [EnhancedChunkRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let idx = Int(sqlite3_column_int(statement, 0))
+            let off = Int(sqlite3_column_int(statement, 1))
+            let status = Int(sqlite3_column_int(statement, 2))
+            let note = sqliteString(statement, index: 3)
+            let text = sqliteString(statement, index: 4) ?? ""
+            rows.append(.init(chunkIndex: idx, startOffset: off,
+                              ctxStatus: status, contextNote: note, text: text))
+        }
+        return rows
+    }
+
+    /// Documents in the library that have any pending chunks (not
+    /// enhanced AND not yet attempted). Used by the scheduler to
+    /// pick the next document for library-wide traversal.
+    func documentsWithPendingChunks() throws -> [UUID] {
+        let sql = """
+        SELECT DISTINCT document_id
+        FROM document_chunks
+        WHERE ctx_status = 0
+          AND embedding_kind NOT LIKE '%:syn-meta';
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        var ids: [UUID] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let s = sqliteString(statement, index: 0),
+               let u = UUID(uuidString: s) {
+                ids.append(u)
+            }
+        }
+        return ids
+    }
+
     /// Number of indexed chunks for a document. Used by callers that
     /// need to decide whether to retro-index without paying for a full
     /// row read.
@@ -1364,6 +1555,17 @@ extension DatabaseManager {
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
             """)
+        // 2026-05-05 — Phase B per-chunk contextual retrieval state.
+        // context_note: AFM-generated 1-2 sentence prepend describing
+        //   the chunk's topic and document position. Stored separately
+        //   from `text` so we can re-embed without recomputing the
+        //   note (rare; embedder upgrades).
+        // ctx_status: enhancement state machine.
+        //   0 = not enhanced (default), 1 = enhanced (context_note +
+        //   embedding refreshed), 2 = enhancement attempted and
+        //   failed (e.g., AFM refused; don't keep retrying).
+        try addColumnIfNeeded(table: "document_chunks", column: "context_note", definition: "TEXT")
+        try addColumnIfNeeded(table: "document_chunks", column: "ctx_status", definition: "INTEGER NOT NULL DEFAULT 0")
         try execute("""
             CREATE INDEX IF NOT EXISTS idx_document_chunks_doc
             ON document_chunks(document_id, chunk_index);

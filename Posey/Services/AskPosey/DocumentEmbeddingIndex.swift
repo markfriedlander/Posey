@@ -136,10 +136,24 @@ nonisolated final class DocumentEmbeddingIndex {
     private let database: DatabaseManager
     private let configuration: DocumentEmbeddingIndexConfiguration
 
+    /// Optional metadata extractor closure (AFM-backed `@Generable`
+    /// call wrapped in a closure). When non-nil, `enqueueIndexing`
+    /// automatically chains to `enhanceMetadata` after the indexing
+    /// pass completes, so the synthesized metadata chunk lands shortly
+    /// after the content chunks. Nil on devices/OS versions that lack
+    /// AFM, or in tests that don't want to exercise the AFM path.
+    /// Closure-typed (rather than protocol-typed) to avoid the
+    /// nonisolated→@MainActor cast hazards that Swift 6 surfaces when
+    /// stashing protocol existentials inside a nonisolated class.
+    typealias MetadataExtractorClosure = @MainActor (Document) async -> DocumentMetadata?
+    private let metadataExtractor: MetadataExtractorClosure?
+
     init(database: DatabaseManager,
-         configuration: DocumentEmbeddingIndexConfiguration = .default) {
+         configuration: DocumentEmbeddingIndexConfiguration = .default,
+         metadataExtractor: MetadataExtractorClosure? = nil) {
         self.database = database
         self.configuration = configuration
+        self.metadataExtractor = metadataExtractor
     }
 
     // MARK: Public surface
@@ -345,6 +359,32 @@ nonisolated final class DocumentEmbeddingIndex {
                             DocumentEmbeddingIndex.notificationChunkCountKey: stored.count
                         ]
                     )
+                    // 2026-05-05 — Chain to metadata enhancement
+                    // when an extractor is wired. Runs as a separate
+                    // MainActor Task so we can `await` the AFM call.
+                    // The synthesized prose chunk lands shortly after
+                    // the content chunks; both stages roll up to a
+                    // single progress signal in the UI.
+                    dbgLog("DocumentEmbeddingIndex: indexing complete; metadataExtractor=%@",
+                           self.metadataExtractor == nil ? "nil" : "set")
+                    if let extractor = self.metadataExtractor {
+                        let doc = Document(
+                            id: documentID,
+                            title: documentTitle,
+                            fileName: documentTitle,
+                            fileType: "",
+                            importedAt: Date(),
+                            modifiedAt: Date(),
+                            displayText: plainText,
+                            plainText: plainText,
+                            characterCount: plainText.count
+                        )
+                        Task { @MainActor in
+                            dbgLog("DocumentEmbeddingIndex: starting metadata enhancement for %@", documentTitle)
+                            await self.enhanceMetadata(doc, extractor: extractor)
+                            dbgLog("DocumentEmbeddingIndex: metadata enhancement complete for %@", documentTitle)
+                        }
+                    }
                 } catch {
                     dbgLog(
                         "[POSEY_ASK_POSEY] embedding index failed for %@ (%@): %@",
@@ -382,6 +422,261 @@ nonisolated final class DocumentEmbeddingIndex {
     /// Notification userInfo key for total-chunk count. Present on
     /// .didProgress. Total is known up front from the chunking pass.
     static let notificationTotalChunksKey = "posey.askposey.indexing.totalChunks"
+
+    /// 2026-05-05 — Metadata enhancement notifications. Mirrors the
+    /// indexing notifications shape so the IndexingTracker (and the
+    /// future progress ring on the sparkle icon) can drive a single
+    /// progress signal across multiple background-enhancement stages.
+    static let metadataEnhancementDidStart = Notification.Name(
+        "posey.askposey.metadata.didStart")
+    static let metadataEnhancementDidComplete = Notification.Name(
+        "posey.askposey.metadata.didComplete")
+    static let metadataEnhancementDidFail = Notification.Name(
+        "posey.askposey.metadata.didFail")
+
+    /// Embedding-kind tag used for the synthetic metadata chunk. The
+    /// suffix is intentional — it matches the document's content
+    /// chunks' kind prefix (e.g., "en-minilm" + ":syn-meta") so
+    /// `searchHybrid` can split synthetic chunks into their own kind
+    /// group and embed the query with the matching embedder. Format:
+    /// "<base-kind>:syn-meta" where base-kind is the kind already in
+    /// use for the document's content chunks.
+    static func syntheticMetadataKind(baseKind: String) -> String {
+        "\(baseKind):syn-meta"
+    }
+    /// Inverse: extract the base kind from a synthetic kind tag, or
+    /// return the input unchanged if it isn't a synthetic kind.
+    static func baseKind(fromSyntheticKind kind: String) -> String {
+        if let range = kind.range(of: ":syn-meta") {
+            return String(kind[..<range.lowerBound])
+        }
+        return kind
+    }
+    /// True when this kind is a synthetic-metadata tag.
+    static func isSyntheticKind(_ kind: String) -> Bool {
+        kind.hasSuffix(":syn-meta")
+    }
+
+    /// Run AFM metadata extraction + prose synthesis for a document
+    /// in the background. Posts `metadataEnhancementDidStart` /
+    /// `…DidComplete` / `…DidFail` notifications around the work so
+    /// the unified background-enhancement progress indicator can
+    /// reflect both indexing and metadata stages as one ring.
+    ///
+    /// Idempotent: returns immediately if metadata for this document
+    /// has already been extracted (`metadata_extracted_at > 0`).
+    /// The AFM call only runs once per document.
+    ///
+    /// Threading: the AFM call must run on @MainActor (LanguageModelSession
+    /// constraint). The embedding pass and DB writes also run on main
+    /// because they touch shared state. Total wall-clock cost: 1-3
+    /// seconds per document, dominated by the AFM round-trip.
+    @MainActor
+    func enhanceMetadata(_ document: Document,
+                         extractor: MetadataExtractorClosure?) async {
+        // Skip if no extractor wired (pre-AFM device, or test path).
+        guard let extractor else { return }
+
+        // Skip if already extracted.
+        if let existing = try? database.documentMetadata(for: document.id),
+           existing.extractedAt.timeIntervalSince1970 > 0 {
+            dbgLog("DocumentMetadata: already extracted for %@; skipping",
+                   document.title)
+            return
+        }
+
+        let documentID = document.id
+        NotificationCenter.default.post(
+            name: Self.metadataEnhancementDidStart,
+            object: nil,
+            userInfo: [
+                Self.notificationDocumentIDKey: documentID,
+                Self.notificationDocumentTitleKey: document.title
+            ]
+        )
+
+        // 1) Extract via AFM.
+        guard let metadata = await extractor(document) else {
+            // Extraction failed (AFM unavailable, refusal, error).
+            // Document still works — just no synthetic chunk.
+            NotificationCenter.default.post(
+                name: Self.metadataEnhancementDidFail,
+                object: nil,
+                userInfo: [Self.notificationDocumentIDKey: documentID]
+            )
+            return
+        }
+
+        // 2) Persist structured fields on documents table.
+        let stored = StoredDocumentMetadata(
+            title: metadata.title,
+            authors: metadata.authors,
+            year: metadata.year,
+            documentType: metadata.documentType,
+            summary: metadata.summary,
+            extractedAt: Date(),
+            detectedNonEnglish: metadata.detectedNonEnglish
+        )
+        do {
+            try database.saveDocumentMetadata(stored, for: documentID)
+        } catch {
+            dbgLog("DocumentMetadata: save failed for %@: %@",
+                   document.title, "\(error)")
+            NotificationCenter.default.post(
+                name: Self.metadataEnhancementDidFail,
+                object: nil,
+                userInfo: [Self.notificationDocumentIDKey: documentID]
+            )
+            return
+        }
+
+        // 3) Pull TOC entries (if any) for prose synthesis.
+        let tocEntries: [String]
+        if let entries = try? database.tocEntries(for: documentID) {
+            tocEntries = entries.map { $0.title }
+        } else {
+            tocEntries = []
+        }
+
+        // 4) Synthesize natural-prose chunk.
+        guard let proseText = DocumentMetadataChunkSynthesizer.synthesize(
+            metadata: metadata,
+            documentTitle: document.title,
+            tocEntries: tocEntries
+        ) else {
+            // Nothing meaningful to synthesize. Structured fields are
+            // saved on the documents table; that's enough for future
+            // library-wide queries. Just no synthetic RAG chunk.
+            NotificationCenter.default.post(
+                name: Self.metadataEnhancementDidComplete,
+                object: nil,
+                userInfo: [Self.notificationDocumentIDKey: documentID]
+            )
+            return
+        }
+
+        // 5) Embed the synthetic prose chunk with MiniLM specifically.
+        //    The synthetic chunk is the document's metadata "beacon" —
+        //    it should rank well for meta-questions like "who wrote
+        //    this" or "what is this document about." MiniLM clusters
+        //    those queries with their answers far better than
+        //    NLEmbedding does, so we use MiniLM regardless of which
+        //    embedder produced the document's content chunks. The
+        //    kind tag ":syn-meta" suffix preserves the distinction;
+        //    searchHybrid's per-kind grouping gives the synthetic
+        //    chunk its own MiniLM-embedded query at search time.
+        //
+        //    If MiniLM is unavailable, fall back to the document's
+        //    dominant content kind so the synthetic chunk still gets
+        //    embedded (just less effectively).
+        let preferredSyntheticKind = "en-minilm"
+        var baseKind = preferredSyntheticKind
+        var embedding = Self.embedMiniLMSync(proseText) ?? []
+        if embedding.isEmpty {
+            // Fallback: MiniLM unavailable. Use the dominant kind
+            // from the document's content chunks.
+            do {
+                let chunks = try database.chunks(for: documentID)
+                let contentChunks = chunks.filter { !Self.isSyntheticKind($0.embeddingKind) }
+                if !contentChunks.isEmpty {
+                    let kindCounts = Dictionary(
+                        grouping: contentChunks, by: { $0.embeddingKind }
+                    ).mapValues(\.count)
+                    baseKind = kindCounts.max(by: { $0.value < $1.value })?.key
+                        ?? "en-sentence"
+                    embedding = Self.embedTextWithKind(text: proseText, kind: baseKind)
+                } else {
+                    // No content chunks yet — indexing hasn't completed.
+                    NotificationCenter.default.post(
+                        name: Self.metadataEnhancementDidComplete,
+                        object: nil,
+                        userInfo: [Self.notificationDocumentIDKey: documentID]
+                    )
+                    return
+                }
+            } catch {
+                dbgLog("DocumentMetadata: chunk lookup failed: %@", "\(error)")
+                return
+            }
+        }
+        guard !embedding.isEmpty else {
+            dbgLog("DocumentMetadata: embedding empty for synthesized chunk")
+            return
+        }
+
+        // 6) Insert synthetic chunk into document_chunks.
+        let syntheticKind = Self.syntheticMetadataKind(baseKind: baseKind)
+        do {
+            try database.insertSyntheticChunk(
+                text: proseText,
+                embedding: embedding,
+                embeddingKind: syntheticKind,
+                for: documentID
+            )
+            dbgLog("DocumentMetadata: synthetic chunk inserted for %@ (kind=%@, %d chars)",
+                   document.title, syntheticKind, proseText.count)
+        } catch {
+            dbgLog("DocumentMetadata: synthetic chunk insert failed: %@", "\(error)")
+        }
+
+        NotificationCenter.default.post(
+            name: Self.metadataEnhancementDidComplete,
+            object: nil,
+            userInfo: [Self.notificationDocumentIDKey: documentID]
+        )
+    }
+
+    /// Embed a query string using the embedder matching `kind`.
+    /// Centralizes the kind→embedder dispatch that searchHybrid /
+    /// searchHybridDiagnostic / search all need, including the
+    /// synthetic-metadata suffix strip so synthetic chunks of kind
+    /// "en-minilm:syn-meta" get queried with MiniLM (same as their
+    /// content-chunk siblings of kind "en-minilm"). Falls back to
+    /// the hash embedding on embedder failure to keep cosine sane.
+    static func embedQueryForKind(_ query: String, kind: String) -> [Double] {
+        let baseKind = Self.baseKind(fromSyntheticKind: kind)
+        if baseKind == "en-contextual" {
+            if let ctx = Self.contextualEmbedder(for: .english),
+               let v = Self.embedContextual(query, with: ctx) {
+                return v
+            }
+            return Self.hashEmbedding(for: query)
+        }
+        if baseKind == "en-minilm" {
+            return Self.embedMiniLMSync(query) ?? Self.hashEmbedding(for: query)
+        }
+        let language = Self.language(forKind: baseKind)
+        let embedder = Self.embedder(for: language)
+        return Self.embed(query, with: embedder)
+    }
+
+    /// Embed `text` using the embedder that produced chunks of `kind`.
+    /// Mirrors the per-chunk embedding path used inside `rebuildIndex`.
+    /// Strips the synthetic-metadata suffix before dispatching, so a
+    /// kind of "en-minilm:syn-meta" is embedded with MiniLM (same as
+    /// the document's content chunks). Returns empty array on
+    /// embedder failure.
+    static func embedTextWithKind(text: String, kind: String) -> [Double] {
+        guard !text.isEmpty else { return [] }
+        let baseKind = Self.baseKind(fromSyntheticKind: kind)
+        if baseKind == "en-contextual" {
+            if let ctx = Self.contextualEmbedder(for: .english),
+               let v = Self.embedContextual(text, with: ctx) {
+                return v
+            }
+            return Self.hashEmbedding(for: text)
+        }
+        if baseKind == "en-minilm" {
+            if let v = Self.embedMiniLMSync(text) {
+                return v
+            }
+            return Self.hashEmbedding(for: text)
+        }
+        // Default: NLEmbedding with the language inferred from kind.
+        let language = Self.language(forKind: baseKind)
+        let embedder = Self.embedder(for: language)
+        return Self.embed(text, with: embedder)
+    }
 
     /// Force a rebuild of the chunk index for a document. Used by
     /// re-import paths where the underlying text may have changed.
@@ -485,21 +780,7 @@ nonisolated final class DocumentEmbeddingIndex {
         let kindGroups = Dictionary(grouping: stored, by: { $0.embeddingKind })
         var allScored: [DocumentEmbeddingSearchResult] = []
         for (kind, group) in kindGroups {
-            let queryVector: [Double]
-            if kind == "en-contextual" {
-                if let ctx = Self.contextualEmbedder(for: .english),
-                   let v = Self.embedContextual(query, with: ctx) {
-                    queryVector = v
-                } else {
-                    queryVector = Self.hashEmbedding(for: query)
-                }
-            } else if kind == "en-minilm" {
-                queryVector = Self.embedMiniLMSync(query) ?? Self.hashEmbedding(for: query)
-            } else {
-                let language = Self.language(forKind: kind)
-                let embedder = Self.embedder(for: language)
-                queryVector = Self.embed(query, with: embedder)
-            }
+            let queryVector = Self.embedQueryForKind(query, kind: kind)
             for storedChunk in group {
                 let score = Self.cosine(queryVector, storedChunk.embedding)
                 allScored.append(DocumentEmbeddingSearchResult(chunk: storedChunk, similarity: score))
@@ -635,20 +916,7 @@ nonisolated final class DocumentEmbeddingIndex {
         let kindGroups = Dictionary(grouping: stored, by: { $0.embeddingKind })
         var queryVecByKind: [String: [Double]] = [:]
         for (kind, _) in kindGroups {
-            if kind == "en-contextual" {
-                if let ctx = Self.contextualEmbedder(for: .english),
-                   let v = Self.embedContextual(query, with: ctx) {
-                    queryVecByKind[kind] = v
-                } else {
-                    queryVecByKind[kind] = Self.hashEmbedding(for: query)
-                }
-            } else if kind == "en-minilm" {
-                queryVecByKind[kind] = Self.embedMiniLMSync(query) ?? Self.hashEmbedding(for: query)
-            } else {
-                let language = Self.language(forKind: kind)
-                let embedder = Self.embedder(for: language)
-                queryVecByKind[kind] = Self.embed(query, with: embedder)
-            }
+            queryVecByKind[kind] = Self.embedQueryForKind(query, kind: kind)
         }
 
         // ── Extract content tokens (lexical query signal).
@@ -771,20 +1039,7 @@ nonisolated final class DocumentEmbeddingIndex {
         let kindGroups = Dictionary(grouping: stored, by: { $0.embeddingKind })
         var queryVecByKind: [String: [Double]] = [:]
         for (kind, _) in kindGroups {
-            if kind == "en-contextual" {
-                if let ctx = Self.contextualEmbedder(for: .english),
-                   let v = Self.embedContextual(query, with: ctx) {
-                    queryVecByKind[kind] = v
-                } else {
-                    queryVecByKind[kind] = Self.hashEmbedding(for: query)
-                }
-            } else if kind == "en-minilm" {
-                queryVecByKind[kind] = Self.embedMiniLMSync(query) ?? Self.hashEmbedding(for: query)
-            } else {
-                let language = Self.language(forKind: kind)
-                let embedder = Self.embedder(for: language)
-                queryVecByKind[kind] = Self.embed(query, with: embedder)
-            }
+            queryVecByKind[kind] = Self.embedQueryForKind(query, kind: kind)
         }
 
         // Lexical tokens — same filtering as searchHybrid.
@@ -975,6 +1230,37 @@ nonisolated final class DocumentEmbeddingIndex {
     /// `self` capture. Visibility-internal so unit tests can pass a
     /// custom configuration if they ever need to assert boundaries
     /// against a non-default chunk size.
+    ///
+    /// 2026-05-05 — Replaced blind character-window chunking with
+    /// sentence-aware chunking modeled on Hal's MENTAT strategy
+    /// (Hal.swift:9275). NLTokenizer(unit: .sentence) enumerates
+    /// sentence boundaries; chunks accumulate whole sentences until
+    /// `chunkSize` is reached, then emit. Overlap is sentence-granular
+    /// (whole sentences from the tail of the previous chunk seed the
+    /// next), not character-granular. Side benefits:
+    /// - Comparative statements like "Litigation is more time-consuming
+    ///   than ADR" never get split mid-clause; AFM sees the full
+    ///   sentence with both subjects intact.
+    /// - Antecedents like "This is generally an advantage" are bounded
+    ///   by the same chunk as their referent ("Litigation takes longer
+    ///   than ADR"), reducing pronoun-resolution failures across chunk
+    ///   boundaries.
+    /// - The chunk text remains a meaningful prose unit, not a
+    ///   character window that happens to contain partial sentences.
+    ///
+    /// `startOffset` / `endOffset` are still character offsets in the
+    /// ORIGINAL `text` (not in the cleaned chunk), preserving the
+    /// existing contract that downstream code uses for jump-to-passage,
+    /// dedup, and the document_chunks schema.
+    ///
+    /// Edge cases preserved:
+    /// - Empty text → empty array.
+    /// - Sentence longer than chunkSize → emitted as its own chunk
+    ///   anyway (boundary integrity > size cap; truncating a sentence
+    ///   defeats the purpose).
+    /// - NLTokenizer detects 0 sentences (single very long string with
+    ///   no terminators, code blob, hex dump) → fall back to legacy
+    ///   character-window chunking.
     static func chunk(
         _ text: String,
         configuration: DocumentEmbeddingIndexConfiguration
@@ -984,10 +1270,163 @@ nonisolated final class DocumentEmbeddingIndex {
         precondition(chunkSize > 0, "chunkSize must be positive")
         precondition(overlap >= 0 && overlap < chunkSize, "overlap must be in [0, chunkSize)")
 
+        if text.isEmpty { return [] }
+
+        // ── Step 1: Enumerate sentence boundaries.
+        // Track running character offset alongside the String.Index
+        // walk so we don't pay O(N) for every distance() call. The
+        // tokenizer enumerates in order, so each sentence's start is
+        // ≥ the previous sentence's end — we walk forward only.
+        var sentenceRanges: [(start: Int, end: Int)] = []
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+        var cursor = text.startIndex
+        var cursorOffset = 0
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            // Walk from cursor → range.lowerBound, accumulating chars.
+            if range.lowerBound != cursor {
+                cursorOffset += text.distance(from: cursor, to: range.lowerBound)
+                cursor = range.lowerBound
+            }
+            let startOffset = cursorOffset
+            // Walk from cursor → range.upperBound.
+            cursorOffset += text.distance(from: cursor, to: range.upperBound)
+            cursor = range.upperBound
+            let endOffset = cursorOffset
+            // Skip empty / whitespace-only sentences (NLTokenizer
+            // doesn't usually emit these but be defensive).
+            if endOffset > startOffset {
+                sentenceRanges.append((start: startOffset, end: endOffset))
+            }
+            return true
+        }
+
+        // ── Step 2: If sentence detection failed (no sentences at all,
+        //   or only one giant sentence with no terminators), fall back
+        //   to the legacy character-window strategy. Hal does this same
+        //   fallback (createWordBasedChunks); we use character windows
+        //   for parity with prior behavior on edge-case inputs.
+        if sentenceRanges.isEmpty {
+            return Self.chunkByCharacterWindow(
+                text: text, chunkSize: chunkSize, overlap: overlap)
+        }
+
+        // ── Step 3: Accumulate sentences into chunks bounded by
+        //   chunkSize. Sentence-granular overlap.
+        var chunks: [DocumentEmbeddingChunk] = []
+        var currentSentences: [(start: Int, end: Int)] = []
+        var chunkIndex = 0
+
+        // Helper: span size of currentSentences in the original text.
+        //   Span runs from the first sentence's start to the last
+        //   sentence's end, INCLUDING inter-sentence whitespace —
+        //   that's what AFM will see, so that's what we measure.
+        func currentSpan() -> Int {
+            guard let first = currentSentences.first,
+                  let last  = currentSentences.last else { return 0 }
+            return last.end - first.start
+        }
+
+        // Helper: emit currentSentences as one chunk, then seed the
+        //   next chunk with the trailing sentences of the previous
+        //   that fit within `overlap` characters.
+        func emitChunkAndOverlap() {
+            guard let first = currentSentences.first,
+                  let last  = currentSentences.last else { return }
+            let startOff = first.start
+            let endOff   = last.end
+            let lower = text.index(text.startIndex, offsetBy: startOff)
+            let upper = text.index(text.startIndex, offsetBy: endOff)
+            let slice = String(text[lower..<upper])
+            // Same per-chunk sanitization as before — strips Wayback
+            // Machine print headers, dot-leader runs, trailing page
+            // numbers from short lines. Preserves prose untouched.
+            let cleaned = Self.sanitizeChunkText(slice)
+            chunks.append(DocumentEmbeddingChunk(
+                chunkIndex: chunkIndex,
+                startOffset: startOff,
+                endOffset: endOff,
+                text: cleaned
+            ))
+            chunkIndex += 1
+
+            // Seed next chunk with trailing sentences as overlap.
+            // Walk currentSentences from the END, accumulating
+            // sentences whose total span (last.end - candidate.start)
+            // ≤ overlap. Skip the LAST sentence — including it would
+            // make the next chunk identical to this one if no further
+            // sentences arrive. We want overlap to be "context for the
+            // next chunk's first new sentence," not a duplicate of the
+            // previous emit.
+            var seed: [(start: Int, end: Int)] = []
+            if currentSentences.count >= 2 {
+                let referenceEnd = last.end
+                for s in currentSentences.dropLast().reversed() {
+                    let prospective = referenceEnd - s.start
+                    if prospective <= overlap {
+                        seed.insert(s, at: 0)
+                    } else {
+                        break
+                    }
+                }
+            }
+            currentSentences = seed
+        }
+
+        for sentence in sentenceRanges {
+            // If this single sentence already exceeds chunkSize, emit
+            // any pending chunk first, then emit the long sentence
+            // as its own chunk. Boundary integrity wins over size cap.
+            if sentence.end - sentence.start > chunkSize {
+                if !currentSentences.isEmpty {
+                    emitChunkAndOverlap()
+                }
+                currentSentences = [sentence]
+                emitChunkAndOverlap()
+                continue
+            }
+            // Compute the prospective span if we add this sentence.
+            // Use the FIRST sentence's start (or this sentence's start
+            // when currentSentences is empty) as the start anchor.
+            let prospectiveStart = currentSentences.first?.start ?? sentence.start
+            let prospectiveSpan  = sentence.end - prospectiveStart
+            if prospectiveSpan <= chunkSize || currentSentences.isEmpty {
+                currentSentences.append(sentence)
+            } else {
+                // Adding this sentence would exceed chunkSize. Emit
+                // what we have, then start fresh (with overlap seed)
+                // and add this sentence.
+                emitChunkAndOverlap()
+                currentSentences.append(sentence)
+            }
+            // Defensive: if even after appending we somehow have a
+            // span exceeding chunkSize (overlap seed pushed us past
+            // it), emit immediately.
+            if currentSpan() >= chunkSize {
+                emitChunkAndOverlap()
+            }
+        }
+
+        // Final flush.
+        if !currentSentences.isEmpty {
+            emitChunkAndOverlap()
+        }
+
+        return chunks
+    }
+
+    /// Legacy character-window chunking, retained as the fallback for
+    /// inputs where sentence detection fails (no terminators, single
+    /// giant token). Preserves the original 2026-05-04 sanitization
+    /// behavior. Most documents never hit this path.
+    private static func chunkByCharacterWindow(
+        text: String,
+        chunkSize: Int,
+        overlap: Int
+    ) -> [DocumentEmbeddingChunk] {
         var chunks: [DocumentEmbeddingChunk] = []
         let total = text.count
         if total == 0 { return [] }
-
         var start = 0
         var index = 0
         while start < total {
@@ -995,26 +1434,6 @@ nonisolated final class DocumentEmbeddingIndex {
             let lower = text.index(text.startIndex, offsetBy: start)
             let upper = text.index(text.startIndex, offsetBy: end)
             let slice = String(text[lower..<upper])
-            // 2026-05-04 — RAG audit Layer 1. Two-stage cleanup:
-            // (a) Strip Wayback Machine print headers from the chunk
-            //     text. The normalize pass already strips them at
-            //     import time but stale imports + chunk-boundary
-            //     straddles still leak through.
-            // (b) Strip TOC artifacts: trailing page numbers from
-            //     short lines, dot-leader runs ("...."), nothing
-            //     else. Preserves the actual chapter / section /
-            //     role text — "Mark Friedlander: Your Humble
-            //     Moderator 6" becomes "Mark Friedlander: Your
-            //     Humble Moderator", which is exactly what the
-            //     "Who's the moderator?" question needs.
-            // We chose to CLEAN chunks rather than SKIP them after
-            // an initial skip-only pass measured at 61% (vs. 71%
-            // pre-fix) — the skip dropped real structural content
-            // (chapter listings, role assignments, EPUB title page)
-            // alongside the page-number noise. Cleaning keeps the
-            // structural content; the no-noise TOC text is a
-            // first-class retrieval surface for "what chapter
-            // covers X?" questions.
             let cleaned = Self.sanitizeChunkText(slice)
             chunks.append(DocumentEmbeddingChunk(
                 chunkIndex: index,
@@ -1023,14 +1442,7 @@ nonisolated final class DocumentEmbeddingIndex {
                 text: cleaned
             ))
             index += 1
-            // chunkIndex is the index of *kept* chunks; startOffset
-            // continues to advance with the sliding window so we
-            // don't re-process the same region. Skipped TOC chunks
-            // simply leave a gap in chunkIndex (e.g. 0, 1, 5, 6, …)
-            // — front-end code already treats chunkIndex as opaque.
             if end == total { break }
-            // Advance by chunkSize - overlap so each new chunk shares
-            // `overlap` characters with the previous one.
             start = max(start + chunkSize - overlap, start + 1)
         }
         return chunks

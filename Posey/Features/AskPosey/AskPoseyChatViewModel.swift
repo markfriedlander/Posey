@@ -777,6 +777,20 @@ private extension AskPoseyChatViewModel {
             return []
         }
 
+        // 2026-05-04 — Skip front-matter prepend when there's an
+        // anchor. Real-conversation testing showed front-matter
+        // chunks (title page / contributor list / prologue work
+        // items) competing with the user's actual passage focus —
+        // for "what's next on THIS" questions, AFM was answering
+        // from the prologue's "Run clean memory test" content
+        // instead of the immediate-following sentence in the
+        // surrounding context. The user is asking about a specific
+        // passage; the document's title-page metadata is noise here.
+        // Document-scope queries (no anchor) still get front matter
+        // prepended — that's where it actually helps ("who wrote
+        // this", "what is this about").
+        let skipFrontMatter = anchor != nil
+
         // Front-matter injection — runs for EVERY invocation
         // (passage or document scope). Always prepend the document's
         // first 4 chunks so the prompt sees the title page + table
@@ -794,11 +808,11 @@ private extension AskPoseyChatViewModel {
         // long docs (titles + author + abstract still fit in
         // 2000 chars at the start of the document); short docs
         // keep all 4.
-        let frontMatterLimit: Int = documentPlainText.count
+        let frontMatterLimit: Int = skipFrontMatter ? 0 : (documentPlainText.count
             >= DocumentEmbeddingIndexConfiguration.longDocumentThresholdChars
-            ? 1 : 4
+            ? 1 : 4)
         var frontMatter: [RetrievedChunk] = []
-        if let db = databaseManager {
+        if !skipFrontMatter, let db = databaseManager {
             let storedFront = (try? db.frontMatterChunks(for: documentID, limit: frontMatterLimit)) ?? []
             for stored in storedFront {
                 let alreadyPresent = results.contains { $0.chunk.chunkIndex == stored.chunkIndex }
@@ -1095,11 +1109,32 @@ private extension AskPoseyChatViewModel {
         guard !plain.isEmpty else { return nil }
 
         let anchorOffset = max(0, min(plain.count, anchor.plainTextOffset))
-        let halfBefore = totalChars / 2
-        let halfAfter = totalChars - halfBefore
-        let startOffset = max(0, anchorOffset - halfBefore)
+
+        // 2026-05-04 — Asymmetric split: 1/3 before, 2/3 after.
+        // Real-conversation testing showed that for natural reader
+        // questions ("what comes next", "what's the implication",
+        // "explain this") the answer usually lives in the text
+        // immediately AFTER the anchor — the user has just read up
+        // to the anchor and is asking forward. The wide before-window
+        // (previously 1/2 of the budget) reached back across section
+        // breaks and pulled in unrelated content that AFM weighted
+        // over the immediate-following sentence.
+        let beforeChars = totalChars / 3
+        let afterChars = totalChars - beforeChars
+
         let anchorEndOffset = min(plain.count, anchorOffset + anchor.text.count)
-        let endOffset = min(plain.count, anchorEndOffset + halfAfter)
+        var startOffset = max(0, anchorOffset - beforeChars)
+        var endOffset = min(plain.count, anchorEndOffset + afterChars)
+
+        // 2026-05-04 — Section-boundary clipping. Real-conversation
+        // testing showed the surrounding window crossing strong
+        // section breaks (MD `---`, page-break `\f`, triple-newline
+        // paragraph gaps, and `\n\n##`/`\n\n###` markdown headings)
+        // and pulling in cross-section content. Clip the window at
+        // the nearest boundary in each direction so the proximity
+        // stays inside the same conceptual section as the anchor.
+        startOffset = clipWindowStart(plain: plain, startOffset: startOffset, anchorOffset: anchorOffset)
+        endOffset = clipWindowEnd(plain: plain, endOffset: endOffset, anchorEndOffset: anchorEndOffset)
 
         guard startOffset < endOffset else { return nil }
 
@@ -1108,6 +1143,52 @@ private extension AskPoseyChatViewModel {
         let raw = String(plain[startIndex..<endIndex])
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Walk backward from `startOffset` looking for the latest strong
+    /// section break before the anchor. Strong break: line containing
+    /// only "---" (MD horizontal rule), form-feed `\f` (PDF page
+    /// break), `\n\n##` or `\n\n###` (MD heading), triple-newline gap.
+    /// Returns the offset just past the boundary (so the window
+    /// starts at the beginning of the same section as the anchor).
+    private func clipWindowStart(plain: String, startOffset: Int, anchorOffset: Int) -> Int {
+        let segment = plain.utf16Slice(from: startOffset, to: anchorOffset)
+        let breakPatterns = ["\n---\n", "\n\n## ", "\n\n### ", "\n\n\n", "\u{000C}"]
+        var bestBreakEnd = startOffset
+        for pat in breakPatterns {
+            if let r = segment.range(of: pat, options: .backwards) {
+                let breakAbsoluteEnd = startOffset + segment.distance(from: segment.startIndex, to: r.upperBound)
+                if breakAbsoluteEnd > bestBreakEnd { bestBreakEnd = breakAbsoluteEnd }
+            }
+        }
+        return bestBreakEnd
+    }
+
+    /// Walk forward from `anchorEndOffset` looking for the earliest
+    /// strong section break after the anchor; cap the window there.
+    private func clipWindowEnd(plain: String, endOffset: Int, anchorEndOffset: Int) -> Int {
+        guard anchorEndOffset < endOffset else { return endOffset }
+        let segment = plain.utf16Slice(from: anchorEndOffset, to: endOffset)
+        let breakPatterns = ["\n---\n", "\n\n## ", "\n\n### ", "\n\n\n", "\u{000C}"]
+        var earliestBreakStart = endOffset
+        for pat in breakPatterns {
+            if let r = segment.range(of: pat) {
+                let breakAbsoluteStart = anchorEndOffset + segment.distance(from: segment.startIndex, to: r.lowerBound)
+                if breakAbsoluteStart < earliestBreakStart { earliestBreakStart = breakAbsoluteStart }
+            }
+        }
+        return earliestBreakStart
+    }
+}
+
+private extension String {
+    /// Safe substring by character offsets — clamps to bounds.
+    func utf16Slice(from: Int, to: Int) -> Substring {
+        let lower = Swift.max(0, Swift.min(count, from))
+        let upper = Swift.max(lower, Swift.min(count, to))
+        let lowerIdx = index(startIndex, offsetBy: lower)
+        let upperIdx = index(startIndex, offsetBy: upper)
+        return self[lowerIdx..<upperIdx]
     }
 }
 // ========== BLOCK 03: SURROUNDING CONTEXT - END ==========

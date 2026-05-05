@@ -929,6 +929,48 @@ extension LibraryViewModel {
                     return json(["stopped": false, "reason": "scheduler nil"])
                 }
 
+            case "ENHANCE_CHUNK_NOW":
+                // 2026-05-05 — Diagnostic: run the chunk enhancer on
+                // ONE chunk in isolation and report what AFM said
+                // (or what error). Used to iterate on the enhancer
+                // prompt without waiting for the whole library.
+                // Args: <doc-id>:<chunk-index>
+                let raw = arg ?? ""
+                let parts = raw.split(separator: ":", maxSplits: 1,
+                                      omittingEmptySubsequences: false)
+                guard parts.count == 2,
+                      let id = UUID(uuidString: String(parts[0])),
+                      let chunkIdx = Int(String(parts[1])) else {
+                    return #"{"error":"Usage: ENHANCE_CHUNK_NOW:<doc-id>:<chunk-index>"}"#
+                }
+                #if canImport(FoundationModels)
+                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+                    let chunks = try databaseManager.chunks(for: id)
+                    guard let target = chunks.first(where: { $0.chunkIndex == chunkIdx }) else {
+                        return #"{"error":"Chunk not found"}"#
+                    }
+                    let docs = try databaseManager.documents()
+                    let doc = docs.first(where: { $0.id == id })
+                    let metadata = try? databaseManager.documentMetadata(for: id)
+                    let title = doc?.title ?? "Untitled"
+                    let summary = metadata?.summary
+                    let enhancer = DocumentChunkEnhancer()
+                    DocumentChunkEnhancer.lastFailureReason = ""
+                    let note = await enhancer.contextNote(
+                        forChunk: target.text,
+                        documentSummary: summary,
+                        documentTitle: title)
+                    return json([
+                        "chunkIndex": chunkIdx,
+                        "chunkTextPreview": String(target.text.prefix(300)),
+                        "afmNote": note ?? "",
+                        "succeeded": note != nil && !(note?.isEmpty ?? true),
+                        "lastFailureReason": DocumentChunkEnhancer.lastFailureReason
+                    ])
+                }
+                #endif
+                return json(["error": "AFM unavailable"])
+
             case "RETRY_REFUSED":
                 // 2026-05-05 — Reset all ctx_status=2 chunks back to
                 // pending so the scheduler retries them with the

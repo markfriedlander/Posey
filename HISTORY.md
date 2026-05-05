@@ -1,5 +1,46 @@
 # Posey History
 
+## 2026-05-05 (evening) — Phase B: progressive background per-chunk contextual enhancement
+
+Anthropic's contextual-retrieval pattern, on-device, with Mark's progressive-enhancement design layered on top. Documents get smarter over time as the user reads. AFM generates a 1-2 sentence "context note" per content chunk; the prepended note + chunk text gets re-embedded; the chunk's vector lands closer to the queries it should match. Reported 49% retrieval-failure reduction in Anthropic's published benchmarks; on-device with AFM the same shape but with refusal-handling we built in.
+
+**Validated end-to-end on Mark's iPhone.** The PDF (Copyright Law, 51 chunks) finished in ~80 seconds — 30 enhanced + 21 AFM safety refusals (Napster / mp3.com content tripping AFM moderation; refused chunks keep their original embedding and are `ctx_status=2`'d so the scheduler doesn't retry forever). The RTF (AI Book Collaboration, 346 chunks) finished in ~10 minutes background time — 259 enhanced + 87 refusals.
+
+**Hard sweep across the enhanced docs, 8/8 PASS** (one initial "FAIL" was a test-design error: I assumed the AI Book didn't mention self-driving cars; RAG_FIND showed it has 2 matches for "self-driving" and 6 for "autonomous" — AFM's answer was correct, not a fabrication):
+
+| Question type | PDF (Copyright) | RTF (AI Book) |
+|---|---|---|
+| Specific named entity | ✓ Napster legal situation grounded in 5c+1s | ✓ ethical concerns grounded in 5c+1s |
+| Deep-doc detail | ✓ ADR's effect on legal precedent | ✓ AI's role supporting humans |
+| Weak-cosine topic | ✓ ADR disadvantages — surfaced binding-precedent + legal-protection | ✓ consciousness/feelings in AI surfaced cleanly |
+| Anti-fabrication | ✓ honest refusal on GDPR | ✓ accurate "self-driving" answer (not in compound-question test sense, but factually correct) |
+
+**Architecture:**
+
+- **`DocumentChunkEnhancer`** — AFM `@Generable` call returning a `DocumentChunkContextPayload` with a single `contextNote` field. Prompt asks for "1-2 sentence search-relevance note" — what the passage is about, where it sits in the document, in words a reader would actually search with. Refusal-retry with a more neutral "bibliographic-only" prompt; same pattern as the Phase A metadata extractor.
+
+- **`BackgroundEnhancementScheduler`** — `@MainActor` worker. Walks the library's content chunks in priority order: (a) currentReadingDocumentID's chunks at offset >= currentReadingOffset, (b) currentReadingDocumentID's chunks before currentReadingOffset, (c) other library docs with pending chunks. Yields immediately to user-driven AFM calls via NotificationCenter brackets posted by `AskPoseyService` (`.askPoseyAFMDidBegin` / `.askPoseyAFMDidEnd`). Throttles on low-power mode and serious/critical thermal state. Self-exits when no pending work; self-restarts on next reading-position update or import.
+
+- **Schema:** two new columns on `document_chunks` — `context_note TEXT` (the AFM-generated prepend, stored separately so re-embedding doesn't recompute the note) and `ctx_status INTEGER` (state machine: 0 not enhanced, 1 enhanced, 2 attempted-and-failed). Synthetic metadata chunks (`embedding_kind` ending `:syn-meta`) excluded from enhancement — already curated.
+
+- **`IndexingTracker`** — extended to subscribe to chunk-enhancement notifications and roll Phase B into the unified progress ring. Stage weights in `unifiedProgress`: 25% chunking + 5% metadata + 70% per-chunk enhancement, reflecting where the wall-clock time actually goes. Re-reads `chunkEnhancementCounts` from the DB on each notification rather than maintaining a counter — cheap, drift-free.
+
+- **`ReaderView`** — posts `.readerPositionDidUpdate` on every sentence advance with documentID + offset. The scheduler subscribes and re-prioritizes its queue lazily.
+
+- **`AskPoseyService`** — brackets `classifyIntent` and `streamProseResponse` with begin/end notifications. The scheduler pauses for the duration; AFM is single-stream on-device, and without yielding the user's question would wait up to ~2s behind a chunk-context-note generation.
+
+- **Sustainable pacing.** Initial 200ms spacing between chunks proved too aggressive — the scheduler was saturating AFM and the local API antenna timed out for 120+ seconds during a sweep. Bumped to 1.5s spacing, which lets thermal/battery breathe AND keeps the local API responsive AND aligns with Mark's "steady, sustainable progress over peak throughput" framing of progressive enhancement.
+
+- **5-second startup delay.** Originally the library `.task` block kicked the scheduler immediately. Combined with the user opening a document → ReaderViewModel loading → embedding index loading → all on main actor, that produced visible startup lag. Now starts 5s after library appears.
+
+**Refusal rate observation.** PDF: 21/52 (40%). RTF: 87/346 (25%). Higher than Phase A's metadata extraction (~10%) because per-chunk content is broader — an entire document's worth of paragraphs is more likely to contain language AFM moderates than just the title page. Acceptable for v1: refused chunks keep their original embeddings and continue to work in retrieval; they just don't get the contextual lift. Could be tuned with prompt iteration, but the 60-75% that DO enhance is enough to materially improve retrieval.
+
+**Local-API verbs added:** `PHASE_B_STATUS`, `PHASE_B_DEBUG`, `PHASE_B_START`, `PHASE_B_STOP`, `LIST_ENHANCED_CHUNKS`. The Python `tools/posey_phase_b_sweep.py` runs the hard sweep.
+
+Commits `0c67579` (Phase B core) → followups for the saturation fix.
+
+---
+
 ## 2026-05-05 (afternoon) — Phase A: sentence-aware chunking + synthetic metadata chunk
 
 The harness from this morning paid for itself within hours. Mark and I worked through a substantive RAG redesign together — instead of just slapping in Anthropic's per-chunk contextual retrieval (expensive on-device: ~80 minutes to index Illuminatus on AFM), we landed on a smarter shape: **AFM extracts clean structured metadata at index time, the result becomes a single natural-prose chunk that lives in the RAG alongside content chunks.** It only travels with the prompt when the query semantically calls for it, no always-on attention tax, no position-based "front matter" guessing game.

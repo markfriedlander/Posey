@@ -1,5 +1,23 @@
 # Posey History
 
+## 2026-05-05 (morning) — RAG diagnostic harness (foundation for today's chunking work)
+
+Mark surfaced an AFM factual inversion bug yesterday: "What is an example of an advantage of using ADR?" returned "ADR is advantageous because it is often much more time-consuming than litigation" — the exact opposite of what the document says. Before fixing the prompt or blaming AFM, Mark asked the foundational question: do we even have a good chunking strategy? Honest read: no — fixed character-window cutting (500 chars short docs / 1000 chars long), 10% overlap, blind to sentence/paragraph/section boundaries, no contextual retrieval. Plausible mechanism for the inversion ("advantage of ADR is less time-consuming" could split between chunks while a different chunk talks about ADR's drawbacks including time).
+
+Decided to instrument before guessing. Built a generalized RAG diagnostic harness, not a one-off ADR probe:
+
+- **`DocumentEmbeddingIndex.searchHybridDiagnostic`** — production-mirror of `searchHybrid` that returns the score decomposition (cosine, lexical, entityBoosted, combined, rank) instead of collapsing into a single `similarity` field. Same scoring arithmetic; the two methods must not drift.
+- **Local-API verbs** in `LibraryView`:
+  - `RAG_TRACE:<doc-id>:<query>[:<topK>]` — top-K with full decomposition + full chunk text.
+  - `RAG_FIND:<doc-id>:<keyword>` — case-insensitive substring search in plainText, returns every match offset and the chunk(s) that own those offsets ("ground-truth probe").
+- **`tools/posey_rag_debug.py`** — Python orchestrator. Calls both verbs, optionally fires `/ask` via `--with-ask`, pretty-prints a trace, and emits a verdict that classifies the failure mode: `CHUNKING MISS` / `BUDGET MISS` / `PROMPT-OR-MODEL` / `RETRIEVAL OK`. Front-matter prepend (chunks 0-3 for short docs, chunk 0 for long docs ≥ 200K chars) is accounted for in the verdict so unanchored questions don't get false "chunking miss" calls when the answer lives in the forced front matter.
+
+Smoke-tested on the AI Book Collaboration doc with "Who are the contributors to this book?" The harness already surfaced real signal: the top-10 organic ranking is dominated by thematically-AI-flavored chunks (ethics, AI as new species) while the actual contributor-list chunks (TOC region, chunks 2 and 13) don't rank organically. They only reach AFM via the front-matter prepend. The lexical signal is 0 across the entire top-10 because the user said "contributors," not "ChatGPT" / "Mark Friedlander" — exactly the kind of question where embedder thematic clustering and surface lexical scoring both miss.
+
+Commit `6549dd2`. Next: run the harness on the ADR query and a handful of other "should be findable" questions before deciding what chunking redesign actually fixes the observed gaps.
+
+---
+
 ## 2026-05-04 (evening) — Reader UX: tap-to-jump, persistent mini-player, background audio, Preferences simplification
 
 Big batch of reader-side changes from a long working session with Mark, in roughly the order they landed.

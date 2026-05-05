@@ -138,6 +138,10 @@ struct AskPoseyView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
+                            if !firstUseDismissed {
+                                firstUseBanner
+                                    .id("askPosey.firstUseBanner")
+                            }
                             ForEach(viewModel.messages) { message in
                                 threadRow(for: message)
                                     .id(message.id)
@@ -173,6 +177,7 @@ struct AskPoseyView: View {
                         // (or the navigation target) is in `messages`.
                         if !newValue {
                             scrollToInitialAnchor(proxy: proxy)
+                            consumePendingInitialQuery()
                         }
                     }
                     .onAppear {
@@ -183,12 +188,9 @@ struct AskPoseyView: View {
                         // would never fire.
                         if !viewModel.isLoadingHistory {
                             scrollToInitialAnchor(proxy: proxy)
+                            consumePendingInitialQuery()
                         }
                     }
-                }
-
-                if viewModel.anchor != nil {
-                    affordanceStrip
                 }
 
                 Divider().opacity(0.4)
@@ -227,23 +229,12 @@ struct AskPoseyView: View {
             }
             .onAppear {
                 RemoteControlState.shared.presentedSheet = "askPosey"
-                if !firstUseDismissed {
-                    // Brief delay so the sheet finishes presenting
-                    // before we layer another sheet on top — iOS gets
-                    // grumpy about same-frame nested presentations.
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(350))
-                        showFirstUseSheet = true
-                    }
-                }
-            }
-            .sheet(isPresented: $showFirstUseSheet) {
-                AskPoseyFirstUseSheet(onDismiss: {
-                    firstUseDismissed = true
-                    showFirstUseSheet = false
-                })
-                .presentationDetents([.medium])
-                .presentationDragIndicator(.visible)
+                // 2026-05-04 (revised) — Removed the modal-on-modal
+                // first-use sheet (was layering on top of Ask Posey
+                // and producing a confusing two-sheet stack). The
+                // first-use message now renders as an inline banner
+                // at the top of the conversation thread (see
+                // `firstUseBanner`), dismissed with one tap.
             }
             .onDisappear {
                 if RemoteControlState.shared.presentedSheet == "askPosey" {
@@ -553,11 +544,24 @@ private extension AskPoseyView {
     /// `.medium` + `.large`; real estate is large enough that
     /// `.medium` keeps document context visible behind the sheet.
     var detentsForCurrentDevice: Set<PresentationDetent> {
-        if horizontalSizeClass == .compact {
+        // 2026-05-04 (revised) — iPhone Plus models report
+        // .regular horizontal size class in portrait, which made the
+        // previous size-class check present medium-by-default on
+        // those phones — wrong UX (half-sheet leaves a useless void
+        // below the composer; sheet IS the focused task on phones).
+        // Use device idiom directly: phones always get .large only;
+        // iPad / Mac get medium + large because the screen is big
+        // enough that medium keeps document context visible.
+        #if os(iOS) || os(visionOS)
+        let idiom = UIDevice.current.userInterfaceIdiom
+        if idiom == .phone {
             return [.large]
         } else {
             return [.medium, .large]
         }
+        #else
+        return [.medium, .large]
+        #endif
     }
 
     /// "Posey is thinking…" placeholder while a response is in
@@ -601,76 +605,115 @@ private extension AskPoseyView {
         return "Tap a sentence in the reader to ask about it"
     }
 
-    /// 2026-05-04 — Four-affordance strip. The visible expression of
-    /// the re-scoped 1.0 promise: when the user has a passage anchored,
-    /// these four buttons map directly to the question types AFM can
-    /// reliably handle. "Explain" / "Find related" submit pre-templated
-    /// questions immediately; "Define" prefills the composer so the
-    /// user types the term to define; "Ask" focuses the composer for
-    /// free-text. The free-text path runs the same retrieval pipeline
-    /// (anchor + proximity + RAG) so users can still get good answers
-    /// from natural questions — the affordances just give them a fast
-    /// path to the kinds of questions that work best.
+    /// 2026-05-04 (revised) — Quick-actions menu replacing the
+    /// previous pills strip. Pills truncated to "Ex...", "Defi...",
+    /// "Find..." on iPhone-width because four labeled pills don't
+    /// fit horizontally with full text. A Menu gives each action
+    /// full label space, follows iOS conventions, and stays compact
+    /// when not in use. Lives in the composer row as a leading
+    /// button (sparkle icon).
     @ViewBuilder
-    var affordanceStrip: some View {
-        HStack(spacing: 8) {
-            affordanceButton(
-                title: "Explain this",
-                systemImage: "text.bubble",
-                action: { sendTemplated("Explain this passage in context — what's it saying?") },
-                identifier: "askPosey.affordance.explain"
-            )
-            affordanceButton(
-                title: "Define a term",
-                systemImage: "character.book.closed",
-                action: { focusComposerWithPrefix("Define ") },
-                identifier: "askPosey.affordance.define"
-            )
-            affordanceButton(
-                title: "Find related",
-                systemImage: "magnifyingglass",
-                action: { sendTemplated("Find other passages in the document that discuss the same topic.") },
-                identifier: "askPosey.affordance.findRelated"
-            )
-            affordanceButton(
-                title: "Ask",
-                systemImage: "ellipsis.bubble",
-                action: { focusComposer() },
-                identifier: "askPosey.affordance.askSpecific"
-            )
+    var quickActionsMenu: some View {
+        Menu {
+            Button {
+                sendTemplated("Explain this passage in context — what's it saying?")
+            } label: {
+                Label("Explain this passage", systemImage: "text.bubble")
+            }
+            .accessibilityIdentifier("askPosey.action.explain")
+
+            Button {
+                focusComposerWithPrefix("Define ")
+            } label: {
+                Label("Define a term", systemImage: "character.book.closed")
+            }
+            .accessibilityIdentifier("askPosey.action.define")
+
+            Button {
+                sendTemplated("Find other passages in the document that discuss the same topic.")
+            } label: {
+                Label("Find related passages", systemImage: "magnifyingglass")
+            }
+            .accessibilityIdentifier("askPosey.action.findRelated")
+
+            Button {
+                focusComposer()
+            } label: {
+                Label("Ask something specific", systemImage: "ellipsis.bubble")
+            }
+            .accessibilityIdentifier("askPosey.action.askSpecific")
+        } label: {
+            Image(systemName: "sparkles")
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .frame(width: 32, height: 32)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial)
-        .accessibilityElement(children: .contain)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
         .accessibilityLabel("Quick actions for this passage")
+        .accessibilityIdentifier("askPosey.quickActions")
+        .disabled(viewModel.isResponding)
     }
 
-    /// One affordance button. Compact pill with SF Symbol + label.
-    func affordanceButton(
-        title: String,
-        systemImage: String,
-        action: @escaping () -> Void,
-        identifier: String
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.caption.weight(.medium))
-                Text(title)
-                    .font(.caption.weight(.medium))
-                    .lineLimit(1)
+    /// 2026-05-04 (revised) — First-use banner rendered inline at
+    /// the top of the conversation thread. Replaces the modal-on-
+    /// modal sheet that was layering on top of Ask Posey. One tap
+    /// to dismiss; persists via @AppStorage so it never shows again.
+    @ViewBuilder
+    var firstUseBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkle.magnifyingglass")
+                    .font(.headline)
+                    .foregroundStyle(.tint)
+                Text("How I can help")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    firstUseDismissed = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
+                .accessibilityIdentifier("askPosey.firstUseDismiss")
+                .remoteRegister("askPosey.firstUseDismiss") {
+                    firstUseDismissed = true
+                }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color.accentColor.opacity(0.12), in: Capsule())
-            .foregroundStyle(.tint)
+            Text("I help with passages you're reading — explaining what they mean, defining a term in context, finding related parts of the document. Tap the ✨ button to see quick actions, or just type your question.")
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Big-picture synthesis isn't my strength yet. Non-fiction reading material works best.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .buttonStyle(.plain)
-        .disabled(viewModel.isResponding)
-        .accessibilityIdentifier(identifier)
-        .remoteRegister(identifier, action: action)
+        .padding(14)
+        .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.bottom, 4)
+    }
+
+    /// 2026-05-04 — Consume the pending initial query if the chrome
+    /// menu opened the sheet with one. If autoSubmit was set, fires
+    /// the question through the same path a user tap would use; if
+    /// not, just prefills the composer and focuses it. Cleared after
+    /// consumption so re-renders don't refire.
+    func consumePendingInitialQuery() {
+        guard let query = viewModel.pendingInitialQuery else { return }
+        let shouldSubmit = viewModel.pendingInitialQueryShouldAutoSubmit
+        viewModel.pendingInitialQuery = nil
+        viewModel.pendingInitialQueryShouldAutoSubmit = false
+        if shouldSubmit {
+            viewModel.inputText = query
+            submit()
+        } else {
+            viewModel.inputText = query
+            composerFocused = true
+        }
     }
 
     /// Submit a pre-templated question immediately. Sets the input,
@@ -695,6 +738,9 @@ private extension AskPoseyView {
 
     var composer: some View {
         HStack(spacing: 10) {
+            if viewModel.anchor != nil {
+                quickActionsMenu
+            }
             TextField(
                 composerPlaceholder,
                 text: $viewModel.inputText,

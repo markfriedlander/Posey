@@ -87,6 +87,14 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// creates a new view model with a new anchor.
     let anchor: AskPoseyAnchor?
 
+    /// 2026-05-04 — Initial-action plumbing for the chrome-level
+    /// quick-actions menu. When the chrome Ask Posey button is a
+    /// menu (Explain / Define / Find related / Ask), the chosen
+    /// action's templated question travels through here so the
+    /// sheet opens already in flight. Consumed once, then cleared.
+    var pendingInitialQuery: String?
+    var pendingInitialQueryShouldAutoSubmit: Bool
+
     /// Document the conversation is anchored to. Used for both
     /// SQLite reads (prior history) and writes (every turn appends).
     let documentID: UUID
@@ -254,6 +262,14 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// creating a new anchor.
     private let invocationReadingOffset: Int?
 
+    /// 2026-05-04 — `initialQuery` + `autoSubmitInitialQuery` allow
+    /// the chrome-level Ask Posey menu to open the sheet AND start
+    /// a templated action (e.g. "Explain this passage") in one tap.
+    /// When `autoSubmitInitialQuery` is true, the question fires
+    /// automatically once history loads. When false, the text just
+    /// pre-fills the composer and the user types/sends the rest
+    /// (used for "Define a term" — prefills "Define " for the user
+    /// to complete).
     init(
         documentID: UUID,
         documentPlainText: String,
@@ -267,13 +283,17 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         navigator: AskPoseyNavigating? = nil,
         databaseManager: DatabaseManager? = nil,
         budget: AskPoseyTokenBudget = .afmDefault,
-        useSummarizedSTM: Bool = false
+        useSummarizedSTM: Bool = false,
+        initialQuery: String? = nil,
+        autoSubmitInitialQuery: Bool = false
     ) {
         self.useSummarizedSTM = useSummarizedSTM
         self.documentID = documentID
         self.documentPlainText = documentPlainText
         self.documentTitle = documentTitle
         self.anchor = anchor
+        self.pendingInitialQuery = initialQuery
+        self.pendingInitialQueryShouldAutoSubmit = autoSubmitInitialQuery
         // Default invocation offset: derive from passage anchor when
         // available so passage-scoped callers don't have to pass it
         // twice. Document-scoped callers must pass it explicitly.

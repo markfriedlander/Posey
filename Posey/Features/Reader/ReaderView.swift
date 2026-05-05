@@ -104,19 +104,22 @@ struct ReaderView: View {
                             )
                             .id(block.id)
                             .accessibilityIdentifier("reader.segment.\(block.id)")
-                            // Task 8 #54: per-row double-tap-to-jump
-                            // removed temporarily — both the
-                            // `.onTapGesture(count: 2)` and the
-                            // `.simultaneousGesture(TapGesture(count: 2))`
-                            // variants caused the outer single-tap
-                            // chrome-reveal to stop working after the
-                            // first reveal/fade cycle (verified via
-                            // NSLog instrumentation: outer tap fires
-                            // on first tap, never fires on subsequent
-                            // taps once a per-row tap recogniser
-                            // claims a touch sequence). Double-tap
-                            // jump will be reintroduced via a UIKit
-                            // recogniser that doesn't compete.
+                            // 2026-05-04 — Single-tap-to-jump
+                            // (Mark + cc, evening). Match the
+                            // read-aloud genre convention: tapping
+                            // a sentence jumps reading position
+                            // there. Works now because the outer
+                            // tap-to-toggle-chrome gesture was
+                            // removed (chrome is persistent), so
+                            // there's no competing single-tap
+                            // recogniser. Skip on visual-placeholder
+                            // blocks (no startOffset to jump to).
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if block.kind != .visualPlaceholder {
+                                    viewModel.jumpToOffset(block.startOffset)
+                                }
+                            }
                         }
                     } else {
                         ForEach(viewModel.segments) { segment in
@@ -136,24 +139,26 @@ struct ReaderView: View {
                             )
                             .id(segment.id)
                             .accessibilityIdentifier("reader.segment.\(segment.id)")
-                            // Task 8 #54 — per-row double-tap removed,
-                            // see displayBlock branch above for
-                            // rationale.
+                            // 2026-05-04 — Single-tap-to-jump
+                            // (see displayBlock branch comment).
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                viewModel.jumpToOffset(segment.startOffset)
+                            }
                         }
                     }
                 }
                 .padding(.vertical)
             }
             .contentShape(Rectangle())
-            // Chrome behavior — tap-to-TOGGLE per Mark's spec:
-            //   - chrome hidden + tap → reveal (auto-fades after 3 s)
-            //   - chrome visible + tap → dismiss immediately
-            // Auto-fade (3 s) is preserved per design.
-            .onTapGesture { toggleChrome() }
-            // Scroll-triggered reveal: any scroll motion (even tiny)
-            // counts as "user interacting" and brings chrome back.
-            // Belt-and-suspenders for the SwiftUI tap-gesture
-            // unreliability documented elsewhere.
+            // 2026-05-04 — Tap-to-toggle-chrome removed; single-tap
+            // on a sentence row now jumps reading position there
+            // (per-row `.onTapGesture` in the ForEach blocks above).
+            // Chrome auto-fades after 3 s and re-reveals on scroll
+            // motion (any scroll position change brings it back —
+            // belt-and-suspenders for the "I want the controls now"
+            // intent). Chrome-button taps also reveal chrome (each
+            // chrome button calls revealChrome() in its action).
             .onScrollGeometryChange(for: CGFloat.self,
                                     of: { $0.contentOffset.y },
                                     action: { _, _ in revealChrome() })
@@ -649,26 +654,54 @@ struct ReaderView: View {
             // existing transport HStack — no collision with
             // Previous / Play / Next / Restart spacing.
             if AskPoseyAvailability.isAvailable {
-                // Single entry point — the AFM intent classifier
-                // routes invisibly between passage / document /
-                // navigation behaviors. Anchor is always the active
-                // sentence; document-scoped queries still work because
-                // the prompt builder + RAG pipeline ground answers
-                // across the whole document regardless of anchor.
-                Button {
-                    revealChrome()
-                    openAskPosey(scope: .passage)
+                // 2026-05-04 — Quick-actions menu replaces the
+                // single-tap Button. Surfaces the four scoped
+                // actions immediately on tap rather than dropping
+                // the user into a free-text composer (which buries
+                // the structured options behind a second tap on
+                // the in-sheet sparkle icon). Each menu item opens
+                // the sheet AND starts the corresponding action.
+                Menu {
+                    Button {
+                        explainAction()
+                    } label: {
+                        Label("Explain this passage", systemImage: "text.bubble")
+                    }
+                    Button {
+                        defineAction()
+                    } label: {
+                        Label("Define a term", systemImage: "character.book.closed")
+                    }
+                    Button {
+                        findRelatedAction()
+                    } label: {
+                        Label("Find related passages", systemImage: "magnifyingglass")
+                    }
+                    Button {
+                        askSpecificAction()
+                    } label: {
+                        Label("Ask something specific", systemImage: "ellipsis.bubble")
+                    }
                 } label: {
                     Image(systemName: "sparkle")
                         .font(.title3)
                         .foregroundStyle(chromeTint)
                         .frame(width: 44, height: 44)
                 }
-                .remoteRegister("reader.askPosey") {
-                    revealChrome()
-                    openAskPosey(scope: .passage)
-                }
                 .accessibilityLabel("Ask Posey")
+                // remoteRegister for the existing top-level id —
+                // opens the sheet plainly (same as "Ask something
+                // specific"). Each menu item also registers under
+                // its own id so autonomous tests can fire the
+                // specific action without needing to navigate the
+                // popover menu.
+                .remoteRegister("reader.askPosey") {
+                    askSpecificAction()
+                }
+                .remoteRegister("reader.askPosey.explain", action: { explainAction() })
+                .remoteRegister("reader.askPosey.define", action: { defineAction() })
+                .remoteRegister("reader.askPosey.findRelated", action: { findRelatedAction() })
+                .remoteRegister("reader.askPosey.askSpecific", action: { askSpecificAction() })
 
                 Spacer(minLength: 24)
             }
@@ -915,11 +948,15 @@ struct ReaderView: View {
         return Color.clear
     }
 
+    /// 2026-05-04 — Auto-fade restored (Mark, evening). Chrome
+    /// reveals when summoned, fades after 3 s of no interaction.
+    /// What changed from the previous design: tap-to-toggle on the
+    /// outer ScrollView is GONE (single-tap on a sentence row now
+    /// jumps reading position — see per-row .onTapGesture in the
+    /// ForEach blocks). Reveal triggers that remain: scroll motion,
+    /// chrome-button taps (search/TOC/prefs/Ask Posey/playback),
+    /// onAppear, and notification-driven actions.
     private func revealChrome() {
-        // Chrome auto-fades after 3 s of no taps (deliberate design:
-        // controls fade when not needed, document is the focus).
-        // Triggered from: scroll-position change, segment double-tap,
-        // search dismiss, onAppear, and the toggle path below.
         chromeFadeTask?.cancel()
         isChromeVisible = true
         chromeFadeTask = Task { @MainActor in
@@ -931,18 +968,12 @@ struct ReaderView: View {
         }
     }
 
-    /// Tap-to-toggle: if chrome is visible, dismiss it immediately;
-    /// otherwise reveal it (with the standard auto-fade timer).
+    /// 2026-05-04 — No-op stub. The outer tap-to-toggle gesture was
+    /// removed (it crowded out the standard tap-to-jump-sentence
+    /// gesture). Some call sites still reference `toggleChrome`;
+    /// they now just reveal chrome (with the standard auto-fade).
     private func toggleChrome() {
-        if isChromeVisible {
-            chromeFadeTask?.cancel()
-            chromeFadeTask = nil
-            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
-                isChromeVisible = false
-            }
-        } else {
-            revealChrome()
-        }
+        revealChrome()
     }
 
     /// Capture the active sentence as the Ask Posey anchor and open
@@ -971,9 +1002,44 @@ struct ReaderView: View {
     /// chunks since there's no anchor passage to ground the answer).
     enum AskPoseyScope { case passage, document }
 
+    /// 2026-05-04 — Quick-action helpers used by the chrome
+    /// Ask Posey menu AND the corresponding remoteRegister ids.
+    /// Each helper opens the sheet with the right initial-query
+    /// shape so a single tap fires the templated action.
+    private func explainAction() {
+        revealChrome()
+        openAskPosey(
+            scope: .passage,
+            initialQuery: "Explain this passage in context — what's it saying?",
+            autoSubmitInitialQuery: true
+        )
+    }
+    private func defineAction() {
+        revealChrome()
+        openAskPosey(
+            scope: .passage,
+            initialQuery: "Define ",
+            autoSubmitInitialQuery: false
+        )
+    }
+    private func findRelatedAction() {
+        revealChrome()
+        openAskPosey(
+            scope: .passage,
+            initialQuery: "Find other passages in the document that discuss the same topic.",
+            autoSubmitInitialQuery: true
+        )
+    }
+    private func askSpecificAction() {
+        revealChrome()
+        openAskPosey(scope: .passage)
+    }
+
     private func openAskPosey(
         scope: AskPoseyScope,
-        initialAnchorStorageID: String? = nil
+        initialAnchorStorageID: String? = nil,
+        initialQuery: String? = nil,
+        autoSubmitInitialQuery: Bool = false
     ) {
         let segments = viewModel.segments
         let active = segments.indices.contains(viewModel.currentSentenceIndex)
@@ -1041,7 +1107,9 @@ struct ReaderView: View {
             streamer: streamer,
             summarizer: summarizer,
             navigator: navigator,
-            databaseManager: database
+            databaseManager: database,
+            initialQuery: initialQuery,
+            autoSubmitInitialQuery: autoSubmitInitialQuery
         )
     }
 }
@@ -1147,6 +1215,16 @@ private final class TapPassthroughUIView: UIView {
     // recogniser ensures the touch isn't consumed.
 }
 // ========== BLOCK TC: TAP CATCHER - END ==========
+
+
+// 2026-05-04 — DoubleTapCatcherView removed before it shipped.
+// The plan briefly was a UIKit double-tap-per-row recogniser to
+// reintroduce the Task 1 #14 jump-on-double-tap behaviour. After
+// surveying genre conventions (Voice Dream / Speechify / Pocket
+// all use single-tap-on-text to jump reading position, with
+// persistent chrome rather than tap-to-toggle), we pivoted to
+// the simpler standard pattern instead. Per-row single-tap is
+// now wired in the SwiftUI ForEach blocks above.
 
 
 // ========== BLOCK RC: REMOTE-CONTROL OBSERVERS - START ==========

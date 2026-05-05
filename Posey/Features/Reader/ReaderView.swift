@@ -42,6 +42,18 @@ struct ReaderView: View {
     @State private var askPoseyChat: AskPoseyChatViewModel? = nil
     @State private var isChromeVisible = true
     @State private var chromeFadeTask: Task<Void, Never>?
+
+    /// 2026-05-04 — Programmatic-scroll guard. The reader auto-scrolls
+    /// to track the highlighted sentence during playback; that scroll
+    /// motion would otherwise trigger the `.onScrollGeometryChange`
+    /// chrome-reveal hook and pop full chrome on every sentence
+    /// advance — exactly the "horrible experience" Mark called out.
+    /// Each programmatic scroll stamps this timestamp; the scroll
+    /// handler skips chrome reveal when the most recent stamp is
+    /// within the suppression window (covers both the scroll's
+    /// initial frame AND the animation's coast-down to a stop).
+    @State private var lastProgrammaticScrollAt: Date = .distantPast
+    private let programmaticScrollSuppressionWindow: TimeInterval = 0.7
     @State private var expandedImageItem: ExpandedImageItem? = nil
     private let chromeTint = Color.white.opacity(0.9)
     private let chromeSecondaryTint = Color.white.opacity(0.62)
@@ -161,7 +173,13 @@ struct ReaderView: View {
             // chrome button calls revealChrome() in its action).
             .onScrollGeometryChange(for: CGFloat.self,
                                     of: { $0.contentOffset.y },
-                                    action: { _, _ in revealChrome() })
+                                    action: { _, _ in
+                if Date().timeIntervalSince(lastProgrammaticScrollAt)
+                    < programmaticScrollSuppressionWindow {
+                    return
+                }
+                revealChrome()
+            })
             .navigationTitle(viewModel.document.title)
             .navigationBarTitleDisplayMode(.inline)
             // Centering strategy:
@@ -252,6 +270,7 @@ struct ReaderView: View {
             // above is sufficient for the device-level behavior.
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: viewModel.isSearchActive)
             .onChange(of: viewModel.searchScrollSignal) { _, _ in
+                lastProgrammaticScrollAt = Date()
                 viewModel.scrollToSearchMatch(with: proxy)
             }
             .overlay(alignment: .topLeading) {
@@ -311,8 +330,10 @@ struct ReaderView: View {
                 // partially advanced the lazy realization.
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(60))
+                    lastProgrammaticScrollAt = Date()
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                     try? await Task.sleep(for: .milliseconds(180))
+                    lastProgrammaticScrollAt = Date()
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                 }
             }
@@ -329,10 +350,12 @@ struct ReaderView: View {
                 clearRemoteStateIfOurs()
             }
             .onChange(of: viewModel.currentSentenceIndex) { _, _ in
+                lastProgrammaticScrollAt = Date()
                 viewModel.scrollToCurrentSentence(with: proxy, animated: true)
                 publishRemoteState()
             }
             .onChange(of: viewModel.focusedDisplayBlockID) { _, _ in
+                lastProgrammaticScrollAt = Date()
                 viewModel.scrollToCurrentSentence(with: proxy, animated: true)
             }
             // M9 landscape polish: re-fire scrollToCurrentSentence
@@ -347,8 +370,10 @@ struct ReaderView: View {
             .onChange(of: verticalSizeClass) { _, _ in
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(60))
+                    lastProgrammaticScrollAt = Date()
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                     try? await Task.sleep(for: .milliseconds(180))
+                    lastProgrammaticScrollAt = Date()
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                 }
             }
@@ -358,8 +383,10 @@ struct ReaderView: View {
                 // re-center pass.
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(60))
+                    lastProgrammaticScrollAt = Date()
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                     try? await Task.sleep(for: .milliseconds(180))
+                    lastProgrammaticScrollAt = Date()
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                 }
             }
@@ -373,8 +400,10 @@ struct ReaderView: View {
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(60))
+                    lastProgrammaticScrollAt = Date()
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                     try? await Task.sleep(for: .milliseconds(180))
+                    lastProgrammaticScrollAt = Date()
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
                 }
             }
@@ -615,14 +644,19 @@ struct ReaderView: View {
         } label: {
             Image(systemName: viewModel.playPauseImageName)
                 .font(.title3)
-                .foregroundStyle(.white)
+                .foregroundStyle(.white.opacity(0.85))
                 .frame(width: 56, height: 56)
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay(
-                    Circle().stroke(.white.opacity(0.15), lineWidth: 0.5)
+                    Circle().stroke(.white.opacity(0.10), lineWidth: 0.5)
                 )
         }
         .buttonStyle(.plain)
+        // 2026-05-04 — Softened opacity so the mini-player doesn't
+        // pop as hard as the text behind it. 0.6 lets text show
+        // through at a glance but the button is still clearly
+        // tappable when the user looks at it.
+        .opacity(0.6)
         .padding(.bottom, 24)
         .accessibilityLabel(viewModel.playbackState == .playing ? "Pause" : "Play")
         .accessibilityIdentifier("reader.miniPlayer.playPause")
@@ -1537,23 +1571,59 @@ private struct ReaderPreferencesSheet: View {
                     }
                 }
 
-                // Reading Style section (M8)
+                // 2026-05-04 — Reading Style section, simplified
+                // (Mark's directive). Only Focus + Motion exposed
+                // (Standard barely a style; Immersive overlaps
+                // Motion). Auto-switch toggle inline with the
+                // picker so it's visually grouped — was previously
+                // a separate "Motion Mode" Section lower down,
+                // disconnected from the picker. Redundant footer
+                // describing each style removed (the in-picker
+                // selection itself is the description; users learn
+                // by trying).
                 Section {
                     Picker("Reading Style", selection: $viewModel.readingStyle) {
-                        ForEach(PlaybackPreferences.ReadingStyle.allCases, id: \.self) { style in
+                        ForEach(PlaybackPreferences.ReadingStyle.userSelectableCases, id: \.self) { style in
                             Text(style.displayName).tag(style)
                         }
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("preferences.readingStyle")
-                    Text(viewModel.readingStyle.description)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+
+                    Toggle(isOn: Binding(
+                        get: { viewModel.motionPreference == .auto },
+                        set: { newValue in
+                            viewModel.motionPreference = newValue ? .auto : .off
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Switch to Motion automatically")
+                                .font(.body)
+                            Text("When the device detects you're moving, switch to Motion mode and back when still.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("preferences.motionAutoSwitch")
+
+                    if viewModel.motionPreference == .auto && !viewModel.motionAutoConsent {
+                        Button {
+                            viewModel.showMotionConsent = true
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                Text("Auto needs your permission to read motion sensors. Tap to review.")
+                                    .font(.callout)
+                                    .foregroundStyle(.primary)
+                            }
+                        }
+                        .remoteRegister("preferences.motionConsentReview") {
+                            viewModel.showMotionConsent = true
+                        }
+                    }
                 } header: {
                     Text("Reading Style")
-                } footer: {
-                    Text("Standard keeps surrounding text at full opacity. Focus dims it. Immersive centers the active sentence and fades the rest. Motion enlarges one sentence at a time for hands-free reading.")
-                        .font(.caption2)
                 }
 
                 // Motion sub-settings (only visible when Motion is the chosen Reading Style)
@@ -1581,43 +1651,14 @@ private struct ReaderPreferencesSheet: View {
                         .font(.caption2)
                 }
 
-                if viewModel.readingStyle == .motion {
-                    Section {
-                        Picker("When to use Motion", selection: $viewModel.motionPreference) {
-                            ForEach(PlaybackPreferences.MotionPreference.allCases, id: \.self) { p in
-                                Text(p.displayName).tag(p)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .accessibilityIdentifier("preferences.motionPreference")
-
-                        if viewModel.motionPreference == .auto && !viewModel.motionAutoConsent {
-                            Button {
-                                viewModel.showMotionConsent = true
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .foregroundStyle(.orange)
-                                    Text("Auto needs your permission to read motion sensors. Tap to review.")
-                                        .font(.callout)
-                                        .foregroundStyle(.primary)
-                                }
-                            }
-                            .remoteRegister("preferences.motionConsentReview") {
-                                viewModel.showMotionConsent = true
-                            }
-                        } else {
-                            Text(viewModel.motionPreference.description)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    } header: {
-                        Text("Motion Mode")
-                    } footer: {
-                        Text("Auto monitors device motion via CoreMotion to switch between Motion and your last non-Motion style. Motion data stays on this device.")
-                            .font(.caption2)
-                    }
-                }
+                // 2026-05-04 — Old standalone "Motion Mode" Section
+                // removed. Replaced by the inline Auto toggle in the
+                // Reading Style section above (visually grouped with
+                // the picker per Mark's "consolidate so it's visually
+                // connected" directive). The Off/On/Auto trichotomy
+                // collapsed: "On" is implicit when Motion is the
+                // selected style; "Off" is implicit when something
+                // else is selected; "Auto" is the toggle.
 
                 // Playback section
                 Section("Playback") {

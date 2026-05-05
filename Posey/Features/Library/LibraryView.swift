@@ -778,6 +778,162 @@ extension LibraryViewModel {
                 return json(["query": query, "totalChunks": stored.count,
                              "topMatches": items])
 
+            case "RAG_TRACE":
+                // 2026-05-05 — Generalized RAG diagnostic. Args:
+                //   <doc-id>:<query>[:<topK>]
+                // Runs the production hybrid retrieval path
+                // (`searchHybridDiagnostic`) and returns the score
+                // decomposition for the top-K chunks: cosine, lexical,
+                // entity-boost, combined, rank, plus the FULL chunk
+                // text. Lets us answer "did retrieval find the right
+                // chunk and at what rank, was it the cosine or lexical
+                // signal that surfaced it, did the entity boost matter"
+                // — exactly the questions chunking-vs-prompt-vs-AFM
+                // debugging needs answered. See tools/posey_rag_debug.py
+                // for the orchestrator that uses this.
+                let raw = arg ?? ""
+                let parts = raw.split(separator: ":", maxSplits: 2,
+                                      omittingEmptySubsequences: false)
+                guard parts.count >= 2,
+                      let id = UUID(uuidString: String(parts[0])) else {
+                    return #"{"error":"Usage: RAG_TRACE:<doc-id>:<query>[:<topK>]"}"#
+                }
+                // The query may itself contain colons; if topK was
+                // supplied, parts[2] holds the rest. Detect topK vs
+                // a colon-bearing query: if the LAST trailing
+                // ":<integer>" parses as Int and parts.count == 3,
+                // treat it as topK; otherwise re-glue.
+                let query: String
+                let topK: Int
+                if parts.count == 3,
+                   let candidate = Int(String(parts[2]).trimmingCharacters(in: .whitespaces)) {
+                    query = String(parts[1])
+                    topK = max(1, min(candidate, 50))
+                } else if parts.count == 3 {
+                    query = String(parts[1]) + ":" + String(parts[2])
+                    topK = 10
+                } else {
+                    query = String(parts[1])
+                    topK = 10
+                }
+                guard !query.isEmpty else {
+                    return #"{"error":"Empty query"}"#
+                }
+                let totalChunks = try databaseManager.chunkCount(for: id)
+                guard totalChunks > 0 else {
+                    return #"{"error":"No chunks indexed for document"}"#
+                }
+                let diagnostic = try embeddingIndex.searchHybridDiagnostic(
+                    documentID: id, query: query)
+                let provider = diagnostic.first?.chunk.embeddingKind ?? "unknown"
+                let topItems: [[String: Any]] = diagnostic.prefix(topK).map { r in
+                    [
+                        "rank": r.rank,
+                        "chunkIndex": r.chunk.chunkIndex,
+                        "startOffset": r.chunk.startOffset,
+                        "endOffset": r.chunk.endOffset,
+                        "cosine": r.cosine,
+                        "lexical": r.lexical,
+                        "entityBoosted": r.entityBoosted,
+                        "combined": r.combined,
+                        "embeddingKind": r.chunk.embeddingKind,
+                        "text": r.chunk.text
+                    ]
+                }
+                return json([
+                    "query": query,
+                    "topK": topK,
+                    "totalChunks": totalChunks,
+                    "embeddingProvider": provider,
+                    "topMatches": topItems
+                ])
+
+            case "RAG_FIND":
+                // 2026-05-05 — Ground-truth probe. Args:
+                //   <doc-id>:<keyword>
+                // Case-insensitive substring search in the document's
+                // plainText. Returns every match offset and the chunk
+                // that owns each offset (by [startOffset, endOffset)
+                // range). Answers: "is the answer literally in the
+                // document, where, and which chunk(s) hold it." When
+                // paired with RAG_TRACE you can see whether retrieval
+                // surfaced the chunk that contains the verbatim answer
+                // or whether something earlier in the pipeline failed.
+                //
+                // The keyword is treated as a literal substring (no
+                // regex). Multi-word phrases work as long as they
+                // appear contiguous in the plainText. To probe a
+                // pattern you'd need to chain multiple RAG_FIND calls
+                // and union the results.
+                let raw = arg ?? ""
+                guard let colonIdx = raw.firstIndex(of: ":") else {
+                    return #"{"error":"Usage: RAG_FIND:<doc-id>:<keyword>"}"#
+                }
+                let idStr = String(raw[..<colonIdx])
+                let keyword = String(raw[raw.index(after: colonIdx)...])
+                guard let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Invalid document ID"}"#
+                }
+                guard !keyword.isEmpty else {
+                    return #"{"error":"Empty keyword"}"#
+                }
+                let docs = try databaseManager.documents()
+                guard let doc = docs.first(where: { $0.id == id }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                let haystack = doc.plainText.lowercased()
+                let needle = keyword.lowercased()
+                var matchOffsets: [Int] = []
+                var searchStart = haystack.startIndex
+                while searchStart < haystack.endIndex,
+                      let found = haystack.range(of: needle, range: searchStart..<haystack.endIndex) {
+                    let off = haystack.distance(from: haystack.startIndex, to: found.lowerBound)
+                    matchOffsets.append(off)
+                    searchStart = found.upperBound
+                    if matchOffsets.count >= 200 { break } // safety cap
+                }
+                // Map offsets to chunks. A chunk owns offset O when
+                // startOffset <= O < endOffset. With 10% overlap an
+                // offset may belong to up to two chunks; we report
+                // both so the diagnostic doesn't lie about which
+                // window retrieval would actually rank.
+                let stored = try databaseManager.chunks(for: id)
+                let matchItems: [[String: Any]] = matchOffsets.map { offset in
+                    let owners = stored.filter {
+                        offset >= $0.startOffset && offset < $0.endOffset
+                    }
+                    let ownerInfo: [[String: Any]] = owners.map { c in
+                        [
+                            "chunkIndex": c.chunkIndex,
+                            "startOffset": c.startOffset,
+                            "endOffset": c.endOffset
+                        ]
+                    }
+                    // Excerpt: 60 chars before + keyword + 60 chars
+                    // after, from the ORIGINAL plainText (preserves
+                    // case). Helps eyeball context without firing a
+                    // separate GET_PLAIN_TEXT.
+                    let plain = doc.plainText
+                    let plainStart = plain.index(plain.startIndex,
+                        offsetBy: max(0, offset - 60))
+                    let plainEnd = plain.index(plain.startIndex,
+                        offsetBy: min(plain.count, offset + keyword.count + 60))
+                    let excerpt = String(plain[plainStart..<plainEnd])
+                    return [
+                        "offset": offset,
+                        "chunks": ownerInfo,
+                        "excerpt": excerpt
+                    ]
+                }
+                return json([
+                    "documentID": id.uuidString,
+                    "keyword": keyword,
+                    "matchCount": matchOffsets.count,
+                    "matches": matchItems,
+                    "totalChunks": stored.count,
+                    "documentLength": doc.plainText.count
+                ])
+
             case "DB_STATS":
                 let docs = try databaseManager.documents()
                 var byType: [String: Int] = [:]

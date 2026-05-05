@@ -1,5 +1,45 @@
 # Posey History
 
+## 2026-05-05 (afternoon) — Phase A: sentence-aware chunking + synthetic metadata chunk
+
+The harness from this morning paid for itself within hours. Mark and I worked through a substantive RAG redesign together — instead of just slapping in Anthropic's per-chunk contextual retrieval (expensive on-device: ~80 minutes to index Illuminatus on AFM), we landed on a smarter shape: **AFM extracts clean structured metadata at index time, the result becomes a single natural-prose chunk that lives in the RAG alongside content chunks.** It only travels with the prompt when the query semantically calls for it, no always-on attention tax, no position-based "front matter" guessing game.
+
+**Validated end-to-end on three regression queries (Mark's iPhone):**
+
+| Question | Before | After |
+|---|---|---|
+| "What is an example of an advantage of using ADR?" | "ADR is advantageous because it is much more time-consuming than litigation" (factual inversion — AFM swapped subjects of comparison) | "An example of an advantage of using ADR is that it allows parties to keep proceedings confidential and informal" (correct, grounded in chunk 29) |
+| "Who wrote this paper and when?" | "I'm not finding a strong answer" (weak retrieval gate) | "Professor Sharp wrote this paper in 2000" (correct, from synthetic chunk) |
+| "Who are the contributors to this book?" | "I'm not finding a strong answer" (front-matter relevance fix regressed it) | "Mark Friedlander, ChatGPT, Claude, and Gemini" (correct, from synthetic chunk) |
+
+**Architecture in detail:**
+
+1. **Sentence-aware chunking** (Hal MENTAT pattern, `Hal.swift:9275`). NLTokenizer enumerates sentence boundaries; chunks accumulate whole sentences until the size cap; overlap is sentence-granular. Comparative statements ("Litigation is more time-consuming than ADR") never split mid-clause; antecedents stay bounded with their referents. Falls back to character-window chunking when sentence detection finds 0 sentences (single-token blob, hex dump). Same `chunkSize` / `chunkOverlap` config knobs — they're now targets, not exact slice boundaries.
+
+2. **AFM `@Generable` metadata extraction**. One round-trip per document at index time (`DocumentMetadataService`). Returns `{title, authors[], year, documentType, summary}` with `@Guide` annotations enforcing a tight schema. Snippet is the first 1,500 chars of plainText (originally 4K, dropped after the Copyright Law article tripped a "May contain sensitive content" refusal on body content like "Napster, mp3.com, copyright disputes"). Refusal-retry kicks in with a more neutral bibliographic-only prompt when the first attempt is refused.
+
+3. **Synthetic prose chunk** (`DocumentMetadataChunkSynthesizer`). The structured fields get composed into one natural-prose paragraph: *"This document is titled X, written by Y in Z. It is a [type]. [Summary]."* Plus optional TOC overview if the document has parsed entries. Embedded with **MiniLM regardless of the document's content embedder** — meta-questions cluster much better in MiniLM's vector space than in NLEmbedding's. Stored in `document_chunks` with `embedding_kind = "en-minilm:syn-meta"` so retrieval splits it into its own kind group at search time. `start_offset = end_offset = -1` sentinel marks "not a slice of plainText" so jump-to-passage and citation linking skip it.
+
+4. **Retrieval gate updates** in `AskPoseyChatViewModel`:
+   - Front-matter relevance lowered from 1.0 to 0.30 + merged list sorted by relevance descending before the budget enforcer. High-confidence organic retrieval now beats forced front-matter, fixing the BUDGET MISS that the ADR question's answer chunk (cosine 0.66) hit when 4 front-matter chunks at relevance 1.0 were eating the 1800-token budget first.
+   - `isWeakRetrieval` treats synthetic chunks (startOffset < 0) as strong evidence regardless of cosine. Their cosine is artificially constrained by short text + narrow vocabulary, but their presence in top-K means the question matched the doc's metadata beacon.
+
+5. **Storage** (`DatabaseManager`): new columns on `documents` for the structured fields (title, authors as JSON, year, documentType, summary, extractedAt sentinel, detectedNonEnglish flag) so future library-wide queries — "show me all law review articles by this author" — can run as plain SQL instead of parsing the synthetic chunk's prose. `insertSyntheticChunk` is idempotent across re-extraction (deletes any prior chunk whose embedding_kind ends `:syn-meta` before inserting).
+
+6. **Local-API verbs** (`LibraryView`): `GET_ASK_POSEY_HISTORY`, `GET_DOCUMENT_METADATA`, `LIST_SYNTHETIC_CHUNKS`, `RESET_DOCUMENT_METADATA`, `EXTRACT_METADATA_NOW`, `RUN_METADATA_CHAIN`. Used during the build-test-iterate loop to isolate failures (the AFM refusal was caught by `EXTRACT_METADATA_NOW`'s in-line error capture; the chain plumbing was validated via `RUN_METADATA_CHAIN`'s synchronous-await form).
+
+**Decisions deferred (Phase A is shippable as-is):**
+
+- **Progress ring on the sparkle icon + "Still learning... 47%" menu hint.** The back-end notifications are posted (`metadataEnhancementDidStart` / `…DidComplete` / `…DidFail`), just not wired to a view. Mark wants ONE unified ring covering all background-enhancement stages combined, not per-stage. Will land alongside Phase B (per-chunk contextual prepends, if measurement supports it) so the ring can roll up everything.
+- **Non-English document notice.** `DocumentMetadata.detectedNonEnglish` is set via NLLanguageRecognizer at extraction time. Mark wants the UI to say "Posey is still studying [Mandarin] and isn't yet totally conversant" when a non-English document is opened in Ask Posey. Cheap to wire later.
+- **Always-on summary toggle.** Mark and I disagreed (politely) on whether a 30-token summary in the system prompt would help or distract small on-device AFM. Rather than guess, build it as an internal DEBUG toggle and measure with the harness. Default OFF until data says ON. Skipped for v1 since the synthetic-chunk-in-RAG approach already covers the metadata-question case correctly.
+- **Removing position-based front-matter prepend entirely.** The synthetic chunk now does what front-matter was doing, more cleanly. Keeping front-matter at relevance 0.30 as a fallback for now; can remove once we've validated across more queries.
+- **Per-chunk contextual retrieval (Phase B).** The Anthropic-style per-chunk prepends. Mark's progressive-enhancement idea (reading-position-aware, library-wide background traversal, yield-on-AFM-needed) is the right shape if we go this route. **Won't decide until we measure** — the phrase "we both believe Phase B will be useful" was honest, but "useful" might be a 2% improvement that doesn't justify the engineering cost. Measure first.
+
+Commits `6549dd2` (harness) → `18e2d35` (Phase A). Mark's Cloud-of-High-Tech-Copyright doc and AI-Book Collaboration doc are reindexed with the new pipeline; remaining docs (Illuminatus, Internet Steps) need a manual `REINDEX_DOCUMENT` per Mark's "delete + reimport, no migration code needed" directive — fast.
+
+---
+
 ## 2026-05-05 (morning) — RAG diagnostic harness (foundation for today's chunking work)
 
 Mark surfaced an AFM factual inversion bug yesterday: "What is an example of an advantage of using ADR?" returned "ADR is advantageous because it is often much more time-consuming than litigation" — the exact opposite of what the document says. Before fixing the prompt or blaming AFM, Mark asked the foundational question: do we even have a good chunking strategy? Honest read: no — fixed character-window cutting (500 chars short docs / 1000 chars long), 10% overlap, blind to sentence/paragraph/section boundaries, no contextual retrieval. Plausible mechanism for the inversion ("advantage of ADR is less time-consuming" could split between chunks while a different chunk talks about ADR's drawbacks including time).

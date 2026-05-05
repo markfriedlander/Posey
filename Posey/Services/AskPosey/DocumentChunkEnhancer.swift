@@ -197,6 +197,63 @@ final class DocumentChunkEnhancer {
         self.model = model
     }
 
+    /// Extract significant nouns + named entities from a chunk for
+    /// the tier-3 keyword retry. Used when AFM refuses on the chunk
+    /// text itself — we send AFM only the words, not the chunk's
+    /// assertions, which is enough for AFM to write a topic note
+    /// without tripping its content gate.
+    /// Returns up to 12 unique tokens, lowercased keys but original
+    /// case in output.
+    static func extractKeywords(from text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+        var seen = Set<String>()
+        var ordered: [String] = []
+        let tagger = NLTagger(tagSchemes: [.nameType, .lexicalClass])
+        tagger.string = text
+        let options: NLTagger.Options = [.omitWhitespace, .omitPunctuation, .joinNames]
+        // First pass: named entities (highest signal).
+        tagger.enumerateTags(
+            in: text.startIndex..<text.endIndex,
+            unit: .word,
+            scheme: .nameType,
+            options: options
+        ) { tag, range in
+            if let tag = tag,
+               tag == .personalName || tag == .placeName || tag == .organizationName {
+                let span = String(text[range])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let key = span.lowercased()
+                let letters = span.filter { $0.isLetter }.count
+                if letters >= 2, !seen.contains(key) {
+                    seen.insert(key); ordered.append(span)
+                }
+            }
+            if ordered.count >= 12 { return false }
+            return true
+        }
+        // Second pass: significant nouns (length-filtered).
+        if ordered.count < 12 {
+            tagger.enumerateTags(
+                in: text.startIndex..<text.endIndex,
+                unit: .word,
+                scheme: .lexicalClass,
+                options: options
+            ) { tag, range in
+                if tag == .noun {
+                    let span = String(text[range])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let key = span.lowercased()
+                    if span.count >= 4, !seen.contains(key) {
+                        seen.insert(key); ordered.append(span)
+                    }
+                }
+                if ordered.count >= 12 { return false }
+                return true
+            }
+        }
+        return ordered
+    }
+
     /// Generate a context note for a chunk. Returns nil on AFM
     /// unavailable / refusal / error. Caller proceeds without the
     /// enhancement (chunk stays at its current `embedding_kind` and
@@ -270,12 +327,9 @@ final class DocumentChunkEnhancer {
         } catch {
             let isRefusal = "\(error)".lowercased().contains("refusal")
             if isRefusal {
-                // Even more conservative retry: drop ALL framing,
-                // ask only for a topic phrase. Sometimes the document
-                // overview / title context is what AFM is reacting
-                // to (e.g., "copyright disputes" sounds adversarial
-                // to the model even though the actual passage is
-                // benign).
+                // Tier 2 retry: drop ALL framing, ask only for a
+                // topic phrase. Sometimes the document overview /
+                // title context is what AFM is reacting to.
                 let neutralPrompt = """
                 What is the topic of this short text? Reply with one \
                 sentence naming the subject.
@@ -299,6 +353,47 @@ final class DocumentChunkEnhancer {
                     return retry.content.contextNote
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                 } catch {
+                    let isStillRefusal = "\(error)".lowercased().contains("refusal")
+                    if isStillRefusal {
+                        // Tier 3 retry: keyword-only. AFM never sees
+                        // the raw chunk text; we extract significant
+                        // nouns + entities locally via NLTagger and
+                        // ask AFM to describe what THOSE WORDS are
+                        // about. The chunk's potentially-triggering
+                        // assertions never reach AFM. Particularly
+                        // effective for AI-discussing-AI content
+                        // where AFM refuses on the prose itself but
+                        // is comfortable with bare keyword-list input.
+                        let keywords = Self.extractKeywords(from: chunkSnippet)
+                        if !keywords.isEmpty {
+                            let keywordPrompt = """
+                            These keywords come from a short passage: \
+                            \(keywords.joined(separator: ", ")). \
+                            Write one sentence describing what topic \
+                            a passage with these keywords would cover.
+                            """
+                            let keywordInstructions = """
+                            You describe topics from keyword lists. \
+                            Write one descriptive sentence naming the \
+                            likely subject. Output the sentence only.
+                            """
+                            let keywordSession = LanguageModelSession(
+                                model: model,
+                                instructions: keywordInstructions
+                            )
+                            do {
+                                let kwRetry = try await keywordSession.respond(
+                                    to: keywordPrompt,
+                                    generating: DocumentChunkContextPayload.self
+                                )
+                                return kwRetry.content.contextNote
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                            } catch {
+                                Self.lastFailureReason = "respond failed (after keyword retry): \(error)"
+                                return nil
+                            }
+                        }
+                    }
                     Self.lastFailureReason = "respond failed (after refusal retry): \(error)"
                     return nil
                 }

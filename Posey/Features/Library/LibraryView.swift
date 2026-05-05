@@ -3,6 +3,10 @@ import NaturalLanguage
 import SwiftUI
 import UniformTypeIdentifiers
 
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
 // ========== BLOCK 01: LIBRARY VIEW - START ==========
 
 struct LibraryView: View {
@@ -369,7 +373,26 @@ final class LibraryViewModel: ObservableObject {
     /// Shared Ask Posey embedding index. Built once per LibraryViewModel
     /// instance and handed to every importer so chunks land at import
     /// time across all formats (format-parity standing policy).
-    private lazy var embeddingIndex = DocumentEmbeddingIndex(database: databaseManager)
+    private lazy var embeddingIndex: DocumentEmbeddingIndex = {
+        // Wire the AFM-backed metadata extractor when AFM is available.
+        // On older OS versions or devices without AFM, the closure is
+        // nil and DocumentEmbeddingIndex skips the metadata enhancement
+        // stage — content chunks still get indexed, just without the
+        // synthesized metadata chunk.
+        var extractor: DocumentEmbeddingIndex.MetadataExtractorClosure? = nil
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+            let service = DocumentMetadataService()
+            extractor = { document in
+                await service.extractMetadata(from: document)
+            }
+        }
+        #endif
+        return DocumentEmbeddingIndex(
+            database: databaseManager,
+            metadataExtractor: extractor
+        )
+    }()
     private lazy var txtLibraryImporter      = TXTLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
     private lazy var markdownLibraryImporter = MarkdownLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
     private lazy var rtfLibraryImporter      = RTFLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
@@ -650,6 +673,14 @@ extension LibraryViewModel {
                 // and rebuilds the embedding index for one doc using
                 // current chunking config (e.g. after TOC-skip
                 // landed). Args: <doc-id>.
+                //
+                // 2026-05-05 — Switched from indexIfNeeded (synchronous,
+                // no metadata enhancement) to enqueueIndexing (async,
+                // triggers AFM metadata extraction + synthetic chunk
+                // insertion). Returns immediately with chunkCount = 0
+                // because the work is dispatched in the background;
+                // poll LIST_CHUNKS or GET_DOCUMENT_METADATA to see
+                // when it completes.
                 guard let idStr = arg, let id = UUID(uuidString: idStr) else {
                     return #"{"error":"Usage: REINDEX_DOCUMENT:<doc-id>"}"#
                 }
@@ -658,9 +689,194 @@ extension LibraryViewModel {
                     return #"{"error":"Document not found"}"#
                 }
                 try databaseManager.deleteChunks(for: id)
-                let count = try embeddingIndex.indexIfNeeded(doc)
-                return json(["reindexed": true, "id": id.uuidString,
-                             "chunkCount": count])
+                embeddingIndex.enqueueIndexing(doc)
+                return json([
+                    "reindexed": true,
+                    "id": id.uuidString,
+                    "note": "Reindexing dispatched in background — metadata extraction will run after chunking completes."
+                ])
+
+            case "RESET_DOCUMENT_METADATA":
+                // 2026-05-05 — Clear extracted metadata so re-extraction
+                // can run on the next REINDEX_DOCUMENT (without this,
+                // enhanceMetadata short-circuits on the existing
+                // extracted_at > 0 sentinel). Used during testing.
+                // Writes a sentinel record with extractedAt = epoch 0;
+                // documentMetadata(for:) returns nil for that row, so
+                // the "already extracted" check fails and re-extraction
+                // fires on the next pass.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: RESET_DOCUMENT_METADATA:<doc-id>"}"#
+                }
+                let cleared = StoredDocumentMetadata(
+                    title: nil,
+                    authors: [],
+                    year: nil,
+                    documentType: nil,
+                    summary: nil,
+                    extractedAt: Date(timeIntervalSince1970: 0),
+                    detectedNonEnglish: false
+                )
+                try databaseManager.saveDocumentMetadata(cleared, for: id)
+                return json(["reset": true, "id": id.uuidString])
+
+            case "EXTRACT_METADATA_NOW":
+                // 2026-05-05 — Diagnostic verb for the metadata
+                // extraction path. Bypasses the chunking pipeline; calls
+                // DocumentMetadataService directly and returns the raw
+                // result, including AFM availability + any error
+                // captured at the call site.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: EXTRACT_METADATA_NOW:<doc-id>"}"#
+                }
+                let docs = try databaseManager.documents()
+                guard let doc = docs.first(where: { $0.id == id }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                #if canImport(FoundationModels)
+                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+                    let model = SystemLanguageModel.default
+                    let availabilityStr: String
+                    switch model.availability {
+                    case .available: availabilityStr = "available"
+                    case .unavailable(let reason): availabilityStr = "unavailable(\(reason))"
+                    @unknown default: availabilityStr = "unknown"
+                    }
+                    if model.availability != .available {
+                        return json(["extracted": false,
+                                     "reason": "AFM availability: \(availabilityStr)"])
+                    }
+                    // Call the service AND also catch the error inline
+                    // so we can return what AFM actually said.
+                    let snippet = String(doc.plainText.prefix(4000))
+                    let session = LanguageModelSession(
+                        model: model,
+                        instructions: "You extract structured metadata from documents. Return concise factual fields. Do not invent. Use empty strings for unknown fields. The summary should be one or two complete sentences."
+                    )
+                    do {
+                        let response = try await session.respond(
+                            to: """
+                            Below is the opening of a document. Extract its metadata.
+                            ----- DOCUMENT OPENING -----
+                            \(snippet)
+                            ----- END DOCUMENT OPENING -----
+                            """,
+                            generating: DocumentMetadataPayload.self
+                        )
+                        let payload = response.content
+                        return json([
+                            "extracted": true,
+                            "afmAvailability": availabilityStr,
+                            "title": payload.title,
+                            "authors": payload.authors,
+                            "year": payload.year,
+                            "documentType": payload.documentType,
+                            "summary": payload.summary
+                        ])
+                    } catch {
+                        return json([
+                            "extracted": false,
+                            "afmAvailability": availabilityStr,
+                            "errorType": "\(type(of: error))",
+                            "errorDescription": "\(error)"
+                        ])
+                    }
+                } else {
+                    return json(["extracted": false, "reason": "iOS 26 / macOS 26 required"])
+                }
+                #else
+                return json(["extracted": false, "reason": "FoundationModels framework not available at compile time"])
+                #endif
+
+            case "RUN_METADATA_CHAIN":
+                // 2026-05-05 — Diagnostic: directly run enhanceMetadata
+                // synchronously (well, awaited) and report the outcome.
+                // Bypasses the dispatch chain inside enqueueIndexing
+                // so we can isolate whether the issue is the chain
+                // plumbing vs the enhancement logic itself.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: RUN_METADATA_CHAIN:<doc-id>"}"#
+                }
+                let docs = try databaseManager.documents()
+                guard let doc = docs.first(where: { $0.id == id }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                #if canImport(FoundationModels)
+                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+                    let service = DocumentMetadataService()
+                    let extractor: DocumentEmbeddingIndex.MetadataExtractorClosure = { d in
+                        await service.extractMetadata(from: d)
+                    }
+                    await embeddingIndex.enhanceMetadata(doc, extractor: extractor)
+                    let after = try? databaseManager.documentMetadata(for: id)
+                    let stored = try databaseManager.chunks(for: id)
+                    let synthCount = stored.filter {
+                        DocumentEmbeddingIndex.isSyntheticKind($0.embeddingKind)
+                    }.count
+                    return json([
+                        "ranChain": true,
+                        "metadataExtracted": after != nil,
+                        "syntheticChunkCount": synthCount,
+                        "lastFailureReason": DocumentMetadataService.lastFailureReason
+                    ])
+                } else {
+                    return json(["error": "iOS 26 / macOS 26 required"])
+                }
+                #else
+                return json(["error": "FoundationModels framework not available"])
+                #endif
+
+            case "GET_DOCUMENT_METADATA":
+                // 2026-05-05 — Read extracted metadata for a document.
+                // Returns nil-valued fields when extraction hasn't run.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: GET_DOCUMENT_METADATA:<doc-id>"}"#
+                }
+                guard let metadata = try databaseManager.documentMetadata(for: id) else {
+                    return json([
+                        "documentID": id.uuidString,
+                        "extracted": false
+                    ])
+                }
+                var result: [String: Any] = [
+                    "documentID": id.uuidString,
+                    "extracted": true,
+                    "extractedAt": ISO8601DateFormatter().string(from: metadata.extractedAt),
+                    "authors": metadata.authors,
+                    "detectedNonEnglish": metadata.detectedNonEnglish
+                ]
+                if let title = metadata.title { result["title"] = title }
+                if let year = metadata.year { result["year"] = year }
+                if let type = metadata.documentType { result["documentType"] = type }
+                if let summary = metadata.summary { result["summary"] = summary }
+                return json(result)
+
+            case "LIST_SYNTHETIC_CHUNKS":
+                // 2026-05-05 — Diagnostic verb to inspect synthetic
+                // chunks for a document. Filters document_chunks by
+                // embedding_kind suffix ":syn-meta" so we can verify
+                // the metadata enhancement actually landed.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: LIST_SYNTHETIC_CHUNKS:<doc-id>"}"#
+                }
+                let stored = try databaseManager.chunks(for: id)
+                let synthetic = stored.filter {
+                    DocumentEmbeddingIndex.isSyntheticKind($0.embeddingKind)
+                }
+                let items: [[String: Any]] = synthetic.map { c in
+                    [
+                        "chunkIndex": c.chunkIndex,
+                        "embeddingKind": c.embeddingKind,
+                        "startOffset": c.startOffset,
+                        "endOffset": c.endOffset,
+                        "text": c.text
+                    ]
+                }
+                return json([
+                    "documentID": id.uuidString,
+                    "syntheticChunkCount": items.count,
+                    "chunks": items
+                ])
 
             case "LIST_CHUNKS":
                 // 2026-05-04 — RAG audit verb. Args:
@@ -932,6 +1148,42 @@ extension LibraryViewModel {
                     "matches": matchItems,
                     "totalChunks": stored.count,
                     "documentLength": doc.plainText.count
+                ])
+
+            case "GET_ASK_POSEY_HISTORY":
+                // 2026-05-05 — RAG diagnostic helper. Args:
+                //   <doc-id>[:<limit>]
+                // Returns the persisted Ask Posey conversation history
+                // for the document — every user/assistant turn in
+                // chronological order, with role, content, intent,
+                // and anchor offset. Lets us replay an old conversation
+                // through the diagnostic harness without needing the
+                // user to remember the exact question they asked.
+                let raw = arg ?? ""
+                let parts = raw.split(separator: ":", maxSplits: 1,
+                                      omittingEmptySubsequences: false)
+                guard parts.count >= 1,
+                      let id = UUID(uuidString: String(parts[0])) else {
+                    return #"{"error":"Usage: GET_ASK_POSEY_HISTORY:<doc-id>[:<limit>]"}"#
+                }
+                let limit: Int? = parts.count >= 2 ? Int(String(parts[1])) : nil
+                let turns = try databaseManager.askPoseyTurns(for: id, limit: limit)
+                let items: [[String: Any]] = turns.map { t in
+                    var dict: [String: Any] = [
+                        "id": t.id,
+                        "timestamp": ISO8601DateFormatter().string(from: t.timestamp),
+                        "role": t.role,
+                        "content": t.content,
+                        "invocation": t.invocation
+                    ]
+                    if let off = t.anchorOffset { dict["anchorOffset"] = off }
+                    if let intent = t.intent { dict["intent"] = intent }
+                    return dict
+                }
+                return json([
+                    "documentID": id.uuidString,
+                    "turnCount": items.count,
+                    "turns": items
                 ])
 
             case "DB_STATS":

@@ -179,6 +179,227 @@ extension DatabaseManager {
 
 // ========== BLOCK 02: DOCUMENTS - END ==========
 
+// ========== BLOCK 02b: DOCUMENT METADATA - START ==========
+
+/// Stored representation of AFM-extracted document metadata. Mirrors
+/// `DocumentMetadata` (the domain type) but lives in the storage
+/// layer so the database extension can avoid importing the
+/// AskPosey module. Conversion happens at the call boundary.
+nonisolated struct StoredDocumentMetadata: Sendable, Equatable {
+    let title: String?
+    let authors: [String]
+    let year: String?
+    let documentType: String?
+    let summary: String?
+    let extractedAt: Date
+    let detectedNonEnglish: Bool
+}
+
+extension DatabaseManager {
+
+    /// Read the stored metadata for a document. Returns nil when no
+    /// extraction has been run yet (`metadata_extracted_at = 0`).
+    /// Empty strings come back as nil so callers don't have to
+    /// distinguish "" from missing.
+    func documentMetadata(for documentID: UUID) throws -> StoredDocumentMetadata? {
+        let sql = """
+        SELECT
+            metadata_title,
+            metadata_authors,
+            metadata_year,
+            metadata_document_type,
+            metadata_summary,
+            metadata_extracted_at,
+            metadata_detected_non_english
+        FROM documents
+        WHERE id = ?
+        LIMIT 1;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+
+        let extractedAtRaw = sqlite3_column_double(statement, 5)
+        guard extractedAtRaw > 0 else { return nil }
+
+        let title    = sqliteString(statement, index: 0)?.nilIfEmpty
+        let authorsRaw = sqliteString(statement, index: 1) ?? "[]"
+        let year     = sqliteString(statement, index: 2)?.nilIfEmpty
+        let docType  = sqliteString(statement, index: 3)?.nilIfEmpty
+        let summary  = sqliteString(statement, index: 4)?.nilIfEmpty
+        let nonEng   = sqlite3_column_int(statement, 6) != 0
+
+        let authors: [String]
+        if let data = authorsRaw.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            authors = decoded
+        } else {
+            authors = []
+        }
+
+        return StoredDocumentMetadata(
+            title: title,
+            authors: authors,
+            year: year,
+            documentType: docType,
+            summary: summary,
+            extractedAt: Date(timeIntervalSince1970: extractedAtRaw),
+            detectedNonEnglish: nonEng
+        )
+    }
+
+    /// Persist extracted metadata for a document. Overwrites any
+    /// prior extraction — use `documentMetadata(for:)` first if the
+    /// caller wants to skip when already present.
+    func saveDocumentMetadata(_ metadata: StoredDocumentMetadata,
+                              for documentID: UUID) throws {
+        let sql = """
+        UPDATE documents
+        SET metadata_title = ?,
+            metadata_authors = ?,
+            metadata_year = ?,
+            metadata_document_type = ?,
+            metadata_summary = ?,
+            metadata_extracted_at = ?,
+            metadata_detected_non_english = ?
+        WHERE id = ?;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+
+        try bindOrNull(metadata.title, at: 1, for: statement)
+
+        let authorsJSON: String
+        if let data = try? JSONEncoder().encode(metadata.authors),
+           let json = String(data: data, encoding: .utf8) {
+            authorsJSON = json
+        } else {
+            authorsJSON = "[]"
+        }
+        try bind(authorsJSON, at: 2, for: statement)
+
+        try bindOrNull(metadata.year, at: 3, for: statement)
+        try bindOrNull(metadata.documentType, at: 4, for: statement)
+        try bindOrNull(metadata.summary, at: 5, for: statement)
+
+        sqlite3_bind_double(statement, 6, metadata.extractedAt.timeIntervalSince1970)
+        sqlite3_bind_int(statement, 7, metadata.detectedNonEnglish ? 1 : 0)
+
+        try bind(documentID.uuidString, at: 8, for: statement)
+        try step(statement)
+    }
+
+    /// Insert a single synthetic chunk (e.g., the metadata-prose
+    /// chunk produced by `DocumentMetadataChunkSynthesizer`). Picks
+    /// `chunk_index = max + 1` so the synthetic chunk lives AFTER
+    /// the content chunks and doesn't disturb the front-matter
+    /// query (`ORDER BY chunk_index ASC LIMIT N`) which always
+    /// returns the document's actual opening chunks.
+    ///
+    /// Idempotent w.r.t. all synthetic chunks for the document: any
+    /// existing chunk whose embedding_kind ends in ":syn-meta" is
+    /// deleted before inserting, so re-extraction always leaves a
+    /// single canonical synthetic chunk regardless of whether the
+    /// embedder for synthetic chunks changes between runs.
+    func insertSyntheticChunk(text: String,
+                              embedding: [Double],
+                              embeddingKind: String,
+                              for documentID: UUID) throws {
+        // Delete ALL prior synthetic chunks for this document (any
+        // kind ending with ":syn-meta"). This handles the case where
+        // an earlier extraction used a different base embedder.
+        let deleteSQL = """
+        DELETE FROM document_chunks
+        WHERE document_id = ? AND embedding_kind LIKE '%:syn-meta';
+        """
+        let deleteStmt = try prepareStatement(sql: deleteSQL)
+        try bind(documentID.uuidString, at: 1, for: deleteStmt)
+        try step(deleteStmt)
+        sqlite3_finalize(deleteStmt)
+
+        // Find the next chunk index (max + 1; 0 if no chunks yet).
+        let maxSQL = """
+        SELECT COALESCE(MAX(chunk_index), -1) + 1
+        FROM document_chunks
+        WHERE document_id = ?;
+        """
+        let maxStmt = try prepareStatement(sql: maxSQL)
+        try bind(documentID.uuidString, at: 1, for: maxStmt)
+        var nextIndex = 0
+        if sqlite3_step(maxStmt) == SQLITE_ROW {
+            nextIndex = Int(sqlite3_column_int(maxStmt, 0))
+        }
+        sqlite3_finalize(maxStmt)
+
+        // Insert.
+        let insertSQL = """
+        INSERT INTO document_chunks
+            (document_id, chunk_index, start_offset, end_offset, text, embedding, embedding_kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """
+        let insertStmt = try prepareStatement(sql: insertSQL)
+        defer { sqlite3_finalize(insertStmt) }
+
+        try bind(documentID.uuidString, at: 1, for: insertStmt)
+        sqlite3_bind_int(insertStmt, 2, Int32(nextIndex))
+        // Synthetic chunks have no offset in the source text.
+        // Convention: start_offset = end_offset = -1 marks "synthetic;
+        // not a slice of plainText." Downstream code that uses these
+        // offsets to map back to the document (jump-to-passage) must
+        // skip negatives — citation code already shouldn't be linking
+        // synthetic chunks to a passage anyway.
+        sqlite3_bind_int(insertStmt, 3, -1)
+        sqlite3_bind_int(insertStmt, 4, -1)
+        try bind(text, at: 5, for: insertStmt)
+
+        // Embedding as Data blob — same encoding pattern as
+        // replaceChunks (Doubles → little-endian bytes).
+        let bytesPerDouble = MemoryLayout<Double>.size
+        var embeddingData = Data(count: embedding.count * bytesPerDouble)
+        embeddingData.withUnsafeMutableBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            for (i, value) in embedding.enumerated() {
+                base.advanced(by: i * bytesPerDouble)
+                    .storeBytes(of: value, as: Double.self)
+            }
+        }
+        try embeddingData.withUnsafeBytes { rawBuffer -> Void in
+            sqlite3_bind_blob(
+                insertStmt, 6, rawBuffer.baseAddress,
+                Int32(rawBuffer.count), SQLITE_TRANSIENT)
+        }
+
+        try bind(embeddingKind, at: 7, for: insertStmt)
+        try step(insertStmt)
+    }
+
+    /// Helper: bind a String? as either text or NULL.
+    fileprivate func bindOrNull(_ value: String?, at index: Int32,
+                                for statement: OpaquePointer?) throws {
+        if let value {
+            try bind(value, at: index, for: statement)
+        } else {
+            sqlite3_bind_null(statement, index)
+        }
+    }
+}
+
+private extension Optional where Wrapped == String {
+    var nilIfEmpty: String? {
+        guard let self else { return nil }
+        return self.isEmpty ? nil : self
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}
+
+// ========== BLOCK 02b: DOCUMENT METADATA - END ==========
+
 // ========== BLOCK 03: READING POSITIONS - START ==========
 
 extension DatabaseManager {
@@ -1007,6 +1228,21 @@ extension DatabaseManager {
         // the reader should auto-jump on first open. Used by the PDF TOC
         // detector to suppress reading the TOC aloud. 0 = no skip.
         try addColumnIfNeeded(table: "documents", column: "playback_skip_until_offset", definition: "INTEGER NOT NULL DEFAULT 0")
+
+        // 2026-05-05 — Document metadata (title/authors/year/type/summary)
+        // extracted via AFM @Generable call at index time. Stored as
+        // structured columns (not JSON blob) so future library-wide
+        // queries — "show me all law review articles by this author" —
+        // can run as plain SQL. Authors is JSON because it's an array;
+        // everything else is a single value.
+        // metadata_extracted_at = unix timestamp; 0 means not yet extracted.
+        try addColumnIfNeeded(table: "documents", column: "metadata_title", definition: "TEXT")
+        try addColumnIfNeeded(table: "documents", column: "metadata_authors", definition: "TEXT NOT NULL DEFAULT '[]'")
+        try addColumnIfNeeded(table: "documents", column: "metadata_year", definition: "TEXT")
+        try addColumnIfNeeded(table: "documents", column: "metadata_document_type", definition: "TEXT")
+        try addColumnIfNeeded(table: "documents", column: "metadata_summary", definition: "TEXT")
+        try addColumnIfNeeded(table: "documents", column: "metadata_extracted_at", definition: "REAL NOT NULL DEFAULT 0")
+        try addColumnIfNeeded(table: "documents", column: "metadata_detected_non_english", definition: "INTEGER NOT NULL DEFAULT 0")
 
         try execute("""
             CREATE TABLE IF NOT EXISTS reading_positions (

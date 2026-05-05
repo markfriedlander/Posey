@@ -831,6 +831,18 @@ private extension AskPoseyChatViewModel {
         let frontMatterLimit: Int = skipFrontMatter ? 0 : (documentPlainText.count
             >= DocumentEmbeddingIndexConfiguration.longDocumentThresholdChars
             ? 1 : 4)
+        // 2026-05-05 — Front-matter relevance lowered from 1.0 to 0.30.
+        // The diagnostic harness caught a BUDGET MISS where the answer
+        // chunk for "What is an example of an advantage of using ADR?"
+        // ranked at cosine 0.66 in retrieval but got dropped because 4
+        // front-matter chunks (artificially relevance=1.0) ate the RAG
+        // token budget first. Front matter is a fallback for when
+        // retrieval is weak — it shouldn't crowd out high-confidence
+        // organic hits. With 0.30, front-matter beats only-weak
+        // retrieval (<0.30) and still gets included for "who wrote
+        // this" / "what's this about" questions where ALL organic
+        // chunks score low. Strong organic retrieval wins.
+        let frontMatterRelevance = 0.30
         var frontMatter: [RetrievedChunk] = []
         if !skipFrontMatter, let db = databaseManager {
             let storedFront = (try? db.frontMatterChunks(for: documentID, limit: frontMatterLimit)) ?? []
@@ -849,7 +861,7 @@ private extension AskPoseyChatViewModel {
                     // AFM gets the cleaned text so it doesn't choke
                     // on dozens of repeated URLs.
                     text: TextNormalizer.stripWaybackPrintHeaders(stored.text),
-                    relevance: 1.0
+                    relevance: frontMatterRelevance
                 ))
             }
         }
@@ -893,7 +905,18 @@ private extension AskPoseyChatViewModel {
         // verbatim query phrases get a high lexical score and rank
         // alongside (often above) cosine matches. The fallback is
         // no longer needed.
-        return frontMatter + translated
+        //
+        // 2026-05-05 — Sort the merged list (front-matter + organic
+        // retrieval) by relevance descending before returning, so the
+        // RAG budget enforcer in renderRAGBlock takes them in true
+        // relevance order. Without this, front-matter-first array
+        // order combined with the budget enforcer's "drop from the
+        // tail" behavior caused high-confidence answer chunks to be
+        // dropped while low-confidence front-matter ate the budget.
+        // Stable sort: chunks with equal relevance retain their
+        // original ordering (front-matter first, then organic).
+        let merged = frontMatter + translated
+        return merged.sorted { $0.relevance > $1.relevance }
     }
 
     /// 2026-05-04 — DEPRECATED. Kept temporarily so any test code
@@ -1315,6 +1338,16 @@ extension AskPoseyChatViewModel {
         // strong signal.
         let frontMatterUpperBound = 4
         for chunk in chunks {
+            // 2026-05-05 — Synthetic metadata chunks (startOffset = -1
+            // sentinel) are clean distillations of title/author/year/
+            // summary. Their cosine is artificially low because the
+            // text is short and doesn't share lots of vocabulary with
+            // typical questions, but their MERE PRESENCE in the
+            // top-K means the question matched the doc's metadata
+            // beacon — that's exactly the case we WANT to answer
+            // rather than refuse. Treat synthetic chunks as strong
+            // evidence regardless of their cosine score.
+            if chunk.startOffset < 0 { return false }
             if chunk.chunkID < frontMatterUpperBound { continue }
             if chunk.relevance >= strongThreshold { return false }
         }

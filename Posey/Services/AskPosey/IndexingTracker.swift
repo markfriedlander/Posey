@@ -40,6 +40,12 @@ final class IndexingTracker: ObservableObject {
     /// read it without reshaping the model.
     @Published private(set) var lastCompletedChunkCounts: [UUID: Int] = [:]
 
+    /// Documents whose AFM metadata extraction is currently running.
+    /// Set when `.metadataEnhancementDidStart` fires; cleared on
+    /// either DidComplete or DidFail. Tracks the second stage of the
+    /// background-enhancement pipeline (chunking is the first).
+    @Published private(set) var metadataExtractingDocumentIDs: Set<UUID> = []
+
     /// Snapshot of indexing progress for one document.
     struct IndexingProgress: Equatable, Sendable {
         let processed: Int
@@ -71,12 +77,82 @@ final class IndexingTracker: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] note in self?.handleFail(note) }
             .store(in: &subscriptions)
+        // Metadata enhancement (stage 2) — same shape as indexing.
+        notificationCenter.publisher(for: DocumentEmbeddingIndex.metadataEnhancementDidStart)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleMetadataStart(note) }
+            .store(in: &subscriptions)
+        notificationCenter.publisher(for: DocumentEmbeddingIndex.metadataEnhancementDidComplete)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleMetadataComplete(note) }
+            .store(in: &subscriptions)
+        notificationCenter.publisher(for: DocumentEmbeddingIndex.metadataEnhancementDidFail)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleMetadataFail(note) }
+            .store(in: &subscriptions)
     }
 
     /// Convenience the UI calls to ask "is this document being indexed
     /// right now?" without unwrapping the published set every time.
     func isIndexing(_ documentID: UUID) -> Bool {
         indexingDocumentIDs.contains(documentID)
+    }
+
+    /// True when EITHER chunking or metadata extraction is in flight.
+    /// This is the signal the unified progress ring on the Ask Posey
+    /// sparkle icon listens to.
+    func isEnhancing(_ documentID: UUID) -> Bool {
+        indexingDocumentIDs.contains(documentID)
+            || metadataExtractingDocumentIDs.contains(documentID)
+    }
+
+    /// Unified background-enhancement progress, [0, 1], across both
+    /// stages combined.
+    ///
+    /// Total units = totalChunks + 1 (the +1 is the metadata
+    /// extraction step). Progress = chunksProcessed +
+    /// (metadata-stage-finished ? 1 : 0), divided by total. Returns
+    /// nil when nothing is enhancing.
+    ///
+    /// Edge cases:
+    /// - Chunking complete + metadata still running → returns
+    ///   totalChunks / (totalChunks + 1) ≈ "almost done."
+    /// - Chunking running, total unknown yet → falls back to a
+    ///   conservative estimate so the ring doesn't snap to 0%.
+    /// - Both stages already finished → returns nil (the document is
+    ///   no longer in either in-flight set).
+    func unifiedProgress(for documentID: UUID) -> Double? {
+        guard isEnhancing(documentID) else { return nil }
+
+        // Stage 1: chunking. If we have a progress snapshot, use it;
+        // else assume the chunking pass hasn't reported yet — start
+        // at a small non-zero floor so the ring is visible.
+        let chunkFraction: Double
+        let totalChunks: Int
+        if let progress = indexingProgress[documentID] {
+            totalChunks = max(progress.total, 1)
+            chunkFraction = Double(progress.processed) / Double(totalChunks + 1)
+        } else if indexingDocumentIDs.contains(documentID) {
+            // Chunking started, no progress posted yet. Render a 5%
+            // floor so the ring is visible immediately.
+            return 0.05
+        } else {
+            // Chunking already finished — completion handler removed
+            // it from indexingDocumentIDs. We're now in the metadata
+            // stage. Use the last known chunk count if recorded.
+            totalChunks = max(lastCompletedChunkCounts[documentID] ?? 1, 1)
+            chunkFraction = Double(totalChunks) / Double(totalChunks + 1)
+        }
+
+        // Stage 2: metadata. Adds the +1 unit when complete. While
+        // running, contributes 0 (it's a single-step stage).
+        let metadataDone = !metadataExtractingDocumentIDs.contains(documentID)
+            && (indexingDocumentIDs.contains(documentID) == false)
+        let metadataFraction: Double = metadataDone
+            ? Double(1) / Double(totalChunks + 1)
+            : 0
+
+        return min(1.0, max(0.0, chunkFraction + metadataFraction))
     }
 
     /// Clear the completion record for a document so the "Indexed N"
@@ -127,6 +203,24 @@ final class IndexingTracker: ObservableObject {
         // Don't record a chunk count for failures — UI must not show
         // "Indexed 0 sections" or similar.
         lastCompletedChunkCounts.removeValue(forKey: id)
+    }
+
+    private func handleMetadataStart(_ note: Notification) {
+        guard let id = documentID(from: note) else { return }
+        metadataExtractingDocumentIDs.insert(id)
+    }
+
+    private func handleMetadataComplete(_ note: Notification) {
+        guard let id = documentID(from: note) else { return }
+        metadataExtractingDocumentIDs.remove(id)
+    }
+
+    private func handleMetadataFail(_ note: Notification) {
+        guard let id = documentID(from: note) else { return }
+        // Treat failure same as completion for UI purposes — the
+        // metadata stage is no longer in flight, the ring should
+        // disappear. The document still works without metadata.
+        metadataExtractingDocumentIDs.remove(id)
     }
 
     private func documentID(from note: Notification) -> UUID? {

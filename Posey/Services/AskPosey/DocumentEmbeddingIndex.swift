@@ -722,6 +722,136 @@ nonisolated final class DocumentEmbeddingIndex {
         return Array(top)
     }
 
+    // ========== BLOCK 03b: HYBRID SEARCH DIAGNOSTIC - START ==========
+
+    /// Diagnostic-only search result with the score decomposition that
+    /// `searchHybrid` collapses into a single `similarity` value. Used
+    /// by the `RAG_TRACE` local-API verb to investigate retrieval
+    /// quality, chunking, and "why didn't it find that?" questions.
+    nonisolated struct DiagnosticResult: Sendable {
+        let chunk: StoredDocumentChunk
+        /// Raw cosine similarity, query-vector against chunk-vector, in
+        /// [-1, 1]. For sentence embeddings on related text typically
+        /// [0, 1].
+        let cosine: Double
+        /// Fraction of non-stopword content tokens from the query that
+        /// appear (substring, case-insensitive) anywhere in the chunk
+        /// text. Range [0, 1].
+        let lexical: Double
+        /// True if the entity index flagged this chunk as containing a
+        /// named entity from the query.
+        let entityBoosted: Bool
+        /// Final ranking score: `max(cosine, lexical)`, plus 0.4
+        /// (capped at 1.0) when `entityBoosted` is true. This is the
+        /// single value `searchHybrid` returns as `similarity`.
+        let combined: Double
+        /// Rank among ALL chunks for this query (0-based, after sort).
+        /// Tells you "the answer chunk was retrievable but it sat at
+        /// rank 23 — beyond the top-K cutoff" vs "it was rank 0 but
+        /// the budget filter cut it" vs "it scored zero."
+        let rank: Int
+    }
+
+    /// Diagnostic mirror of `searchHybrid` that returns the score
+    /// decomposition for every chunk in the document. The scoring
+    /// path here is byte-equivalent to `searchHybrid` — if you change
+    /// scoring, change both. Returns ranked descending by `combined`.
+    ///
+    /// Not for production use. Wired to the `RAG_TRACE` local-API
+    /// verb in DEBUG builds.
+    func searchHybridDiagnostic(
+        documentID: UUID,
+        query: String
+    ) throws -> [DiagnosticResult] {
+        guard !query.isEmpty else { return [] }
+        let stored = try database.chunks(for: documentID)
+        guard !stored.isEmpty else { return [] }
+
+        // Embed query per kind — same logic path as searchHybrid.
+        let kindGroups = Dictionary(grouping: stored, by: { $0.embeddingKind })
+        var queryVecByKind: [String: [Double]] = [:]
+        for (kind, _) in kindGroups {
+            if kind == "en-contextual" {
+                if let ctx = Self.contextualEmbedder(for: .english),
+                   let v = Self.embedContextual(query, with: ctx) {
+                    queryVecByKind[kind] = v
+                } else {
+                    queryVecByKind[kind] = Self.hashEmbedding(for: query)
+                }
+            } else if kind == "en-minilm" {
+                queryVecByKind[kind] = Self.embedMiniLMSync(query) ?? Self.hashEmbedding(for: query)
+            } else {
+                let language = Self.language(forKind: kind)
+                let embedder = Self.embedder(for: language)
+                queryVecByKind[kind] = Self.embed(query, with: embedder)
+            }
+        }
+
+        // Lexical tokens — same filtering as searchHybrid.
+        let stopwords = Self.lexicalStopwords
+        let rawTokens = query.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        let contentTokens = rawTokens.filter { !stopwords.contains($0) && $0.count >= 3 }
+
+        // Entity-index hits.
+        let queryEntities = Self.extractEntities(from: query)
+        var entityChunkIndices: Set<Int> = []
+        if !queryEntities.isEmpty {
+            let mentioned = (try? database.chunkIndicesMentioningEntities(
+                documentID: documentID,
+                entitiesLower: Array(queryEntities))) ?? []
+            entityChunkIndices = Set(mentioned)
+        }
+
+        // Score every chunk with the same arithmetic as searchHybrid.
+        var scored: [DiagnosticResult] = []
+        scored.reserveCapacity(stored.count)
+        for chunk in stored {
+            let cosine: Double
+            if let qVec = queryVecByKind[chunk.embeddingKind] {
+                cosine = Self.cosine(qVec, chunk.embedding)
+            } else {
+                cosine = 0
+            }
+            let lexical: Double
+            if contentTokens.isEmpty {
+                lexical = 0
+            } else {
+                let chunkLower = chunk.text.lowercased()
+                var hits = 0
+                for token in contentTokens where chunkLower.contains(token) { hits += 1 }
+                lexical = Double(hits) / Double(contentTokens.count)
+            }
+            let entityBoosted = entityChunkIndices.contains(chunk.chunkIndex)
+            var combined = max(cosine, lexical)
+            if entityBoosted { combined = min(1.0, combined + 0.4) }
+            scored.append(DiagnosticResult(
+                chunk: chunk,
+                cosine: cosine,
+                lexical: lexical,
+                entityBoosted: entityBoosted,
+                combined: combined,
+                rank: 0
+            ))
+        }
+
+        // Sort descending and assign rank.
+        let sorted = scored.sorted { $0.combined > $1.combined }
+        return sorted.enumerated().map { (i, r) in
+            DiagnosticResult(
+                chunk: r.chunk,
+                cosine: r.cosine,
+                lexical: r.lexical,
+                entityBoosted: r.entityBoosted,
+                combined: r.combined,
+                rank: i
+            )
+        }
+    }
+
+    // ========== BLOCK 03b: HYBRID SEARCH DIAGNOSTIC - END ==========
+
     /// Stopwords used for lexical query tokenization. Conservative —
     /// includes function words and common pronouns/auxiliaries plus
     /// generic "ask about a doc" verbs that don't carry signal.

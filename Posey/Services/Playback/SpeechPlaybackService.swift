@@ -315,44 +315,31 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         #endif
     }
 
-    /// 2026-05-04 — Apply the audio session category based on the
-    /// current `AudioFocus` preference.
-    /// - `.solo`: `.playback` / `.spokenAudio` with NO mixing options.
-    ///   This makes Posey the sole audio app — pauses other audio
-    ///   (music, podcasts) while playing, and importantly enables
-    ///   Lock Screen + Dynamic Island controls (the system only
-    ///   shows now-playing controls for non-mixing audio sessions).
-    /// - `.mixWithOthers`: includes `.interruptSpokenAudioAndMixWithOthers`
-    ///   so other non-spoken audio (music) keeps playing alongside.
-    ///   Trade-off: no Lock Screen / Dynamic Island controls (system
-    ///   can't pick a single now-playing app when audio is mixable).
-    /// Public so the Reader can call `reconfigureAudioSession()` when
-    /// the user toggles the preference.
-    func applyAudioSessionCategory() {
+    /// 2026-05-04 — Audio session category for read-aloud playback.
+    /// `.playback` + `.spokenAudio` + `.interruptSpokenAudioAndMixWithOthers`:
+    /// background audio works (with the UIBackgroundModes audio
+    /// entitlement injected by the post-Resources Run Script
+    /// build phase), and other non-spoken audio (music, podcasts)
+    /// can play alongside.
+    /// Lock Screen / Dynamic Island controls do NOT show in this
+    /// configuration because the system doesn't surface now-playing
+    /// controls for mixable sessions. We tried switching to a
+    /// non-mixing `.solo`-style configuration to get the controls
+    /// back; controls appeared but audio stopped after the queued
+    /// utterance window finished and metadata cleared (likely
+    /// SwiftUI deinit'ing ReaderViewModel on background, OR an
+    /// AVSpeechSynthesizer + non-mixing-session interaction we
+    /// haven't fully traced). Reverted to mixable here for 1.0;
+    /// background playback works without controls. Lock-screen
+    /// controls are deferred to a future release pass.
+    private func applyAudioSessionCategory() {
         #if os(iOS)
         do {
             let session = AVAudioSession.sharedInstance()
-            switch PlaybackPreferences.shared.audioFocus {
-            case .solo:
-                try session.setCategory(.playback, mode: .spokenAudio, options: [])
-            case .mixWithOthers:
-                try session.setCategory(.playback, mode: .spokenAudio, options: [.interruptSpokenAudioAndMixWithOthers])
-            }
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.interruptSpokenAudioAndMixWithOthers])
         } catch {
             assertionFailure("Failed to configure AVAudioSession: \(error)")
         }
-        #endif
-    }
-
-    /// 2026-05-04 — Re-apply the audio session category. Called from
-    /// the Reader when the user flips the audio-focus preference so
-    /// the change takes effect on the NEXT playback start. Mid-
-    /// playback reconfiguration would interrupt the current
-    /// utterance; deferring to next-play keeps the current chunk
-    /// audible.
-    func reconfigureAudioSession() {
-        #if os(iOS)
-        applyAudioSessionCategory()
         #endif
     }
 

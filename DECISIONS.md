@@ -1,5 +1,63 @@
 # Posey Decisions
 
+## 2026-05-04 (evening) — Reader: Single-Tap-To-Jump Replaces Tap-To-Toggle-Chrome
+
+- Status: Accepted
+- Decision: Single-tap on a sentence row jumps reading position there. The tap-to-toggle-chrome gesture (which previously occupied the single-tap slot) is removed. Chrome auto-fades after 3 s and reveals on scroll motion (preserved).
+- Rationale: Read-aloud genre convention. Voice Dream Reader, Speechify, Pocket, and Audible all use single-tap-on-text to jump reading position there. Posey was inverted (single-tap = chrome toggle, double-tap = jump) which (a) required users to learn a non-standard gesture for the most common navigation action, and (b) had been technically fragile — Task 8 #54 removed the per-row double-tap because every SwiftUI variant (`.onTapGesture(count: 2)`, `.simultaneousGesture(TapGesture(count: 2))`) made the outer single-tap chrome catcher stop firing after the first reveal/fade cycle. Aligning with the genre fixes both problems with a simpler model.
+- Implementation:
+  - Per-row `.onTapGesture { viewModel.jumpToOffset(offset) }` on each sentence row in both displayBlocks and segments branches of the `ForEach`.
+  - Outer `.onTapGesture { toggleChrome() }` removed from the ScrollView container.
+  - `toggleChrome()` reduced to a no-op stub that just calls `revealChrome()` (some notification observers still reference it; removing those call sites would be a wider edit; the stub is harmless).
+  - `revealChrome()` retained with its 3 s auto-fade Task; `.onScrollGeometryChange` reveal trigger preserved.
+  - Mini-player overlay added: when `!isChromeVisible && viewModel.playbackState == .playing`, a single softened (60% opacity) play/pause button stays visible above the home indicator. When playback stops via mini-player, full chrome reveals so the user has all controls.
+  - Programmatic-scroll guard: `lastProgrammaticScrollAt` timestamp is stamped at every programmatic-scroll site (sentence-index change, focused-block change, search match, sizeClass changes, orientation rotation, initial scroll-to-anchor); the `.onScrollGeometryChange` handler skips chrome reveal when within a 0.7 s suppression window. Without this, auto-scroll during playback was popping chrome on every sentence advance.
+- Hidden gesture: tapping the currently-highlighted sentence pauses playback (via the same `jumpToOffset → playbackService.prepare(at:)` path; preparing at the current position tears down the in-flight utterance). Mark surfaced this as a happy accident; we left it undocumented in the UI for now.
+- Source: Mark + cc 2026-05-04 evening; informed by Mark's directive to research what other read-aloud apps do before reinventing.
+
+## 2026-05-04 (evening) — Background Audio: Run Script Injects UIBackgroundModes; Lock Screen Controls Deferred
+
+- Status: Accepted
+- Decision: Use a Run Script build phase to inject `UIBackgroundModes = [audio]` into the auto-generated Info.plist. Set `AVSpeechSynthesizer.usesApplicationAudioSession = true` so the synthesizer respects our app's `.playback` audio session instead of routing through the system spoken-content session. Keep `.interruptSpokenAudioAndMixWithOthers` as the session option (background audio works; Lock Screen / Dynamic Island controls are deferred to a future release).
+- Rationale (UIBackgroundModes):
+  - `INFOPLIST_KEY_UIBackgroundModes = audio;` in pbxproj does NOT inject `UIBackgroundModes` into the auto-generated Info.plist on this Xcode (`Xcode 26.3` / `iphoneos26.4` SDK). Verified by `PlistBuddy -c "Print :UIBackgroundModes"` on the built `.app` returning `Print: Entry, ":UIBackgroundModes", Does Not Exist`. Tried unquoted (`audio`), quoted (`"audio"`), and pbxproj array literal (`(audio,)`) forms — none worked. Xcode normalizes all three back to `INFOPLIST_KEY_UIBackgroundModes = audio;` on next save and still fails to inject the key.
+  - Device log confirmed the entitlement gap with literal text: `does not have background entitlement (or on watchOS, is not allowed to play in the background)` and `Sending stop command to com.MarkFriedlander.Posey ... because client is background suspended`.
+  - Without `UIBackgroundModes` containing `audio`, iOS suspended the app on screen lock and stopped AVSpeechSynthesizer regardless of our session config.
+  - Run Script approach is lighter touch than disabling `GENERATE_INFOPLIST_FILE = YES` and maintaining all standard `CFBundle*` keys by hand. The script runs after Resources phase (after the auto-generated Info.plist is processed) and PlistBuddy-injects the key.
+- Rationale (usesApplicationAudioSession):
+  - AVSpeechSynthesizer's default routes through the system spoken-content / accessibility audio session, which doesn't honor `.playback` background-audio settings configured at the app level.
+  - Setting `usesApplicationAudioSession = true` makes the synthesizer respect our app's session.
+  - The two changes (UIBackgroundModes + usesApplicationAudioSession) compose: entitlement allows backgrounding, application-session config makes the synthesizer use the right session.
+- Lock Screen / Dynamic Island controls — Deferred:
+  - With background audio working, Lock Screen / Dynamic Island controls still didn't appear. Cause: `.interruptSpokenAudioAndMixWithOthers` includes mix-with-others semantics, and the system doesn't surface now-playing controls for mixable sessions (it can't pick a single "now playing" app when multiple sessions are mixable).
+  - Tried switching to a non-mixing solo configuration (`.playback`/`.spokenAudio` with empty options): controls appeared but audio stopped after the queued utterance window finished AND the now-playing metadata cleared (only `NowPlayingController.deinit` calls `clear()` — strongly suggests `ReaderViewModel` deinit'd on background, OR an `AVSpeechSynthesizer` + non-mixing-session interaction we haven't fully traced).
+  - Briefly built an `AudioFocus` Preferences toggle (Solo / MixWithOthers) so users could pick. Reverted in the same session — the controls path was broken in non-obvious ways and the trade-off didn't yet justify the surface area for 1.0.
+  - Restored the original mixable session config. Background playback works; Lock Screen / Dynamic Island controls do not. Documented as known limitation.
+- Run Script implementation (in pbxproj as a `PBXShellScriptBuildPhase`, named "Inject UIBackgroundModes", attached to the Posey target's buildPhases after Resources):
+  ```
+  PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+  /usr/libexec/PlistBuddy -c "Delete :UIBackgroundModes" "$PLIST" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" "$PLIST"
+  ```
+- Future-restoration note: when we revisit Lock Screen controls, start by instrumenting `ReaderView.onDisappear` to confirm/deny the deinit-on-background hypothesis; if confirmed, the fix is to keep the ReaderViewModel alive across background transitions (move the playback service ownership higher in the view tree, or use a singleton coordinator that owns NowPlayingController).
+- Source: Mark + cc 2026-05-04 evening; long debug session that included idevicesyslog capture revealing the literal "background entitlement: NO" log line.
+
+## 2026-05-04 (evening) — Reader Preferences: Standard + Immersive Hidden; Motion Sub-Panel Inlined
+
+- Status: Accepted
+- Decision: Reading Style picker shows only Focus + Motion in the Preferences sheet for 1.0. The Standard and Immersive cases remain in the `ReadingStyle` enum (parse-compat with persisted UserDefaults) but are hidden from the picker and migrated to `.focus` on read. Default style flipped from `.standard` → `.focus`. The previous standalone "Motion Mode" Section (Off/On/Auto picker) replaced by an inline Toggle in the Reading Style section.
+- Rationale:
+  - Standard ("keeps surrounding text at full opacity") was barely a reading style — just "no styling." Focus matches the "quiet focused reading environment" framing better as the default.
+  - Immersive ("centers the active sentence and fades the rest") overlapped Motion ("enlarges one sentence at a time") substantially — both center + fade surrounding text. Two styles fighting for the same purpose was confusing; Motion has a clearer use-case (walking, hands-free).
+  - The Off/On/Auto trichotomy of the Motion Mode collapses cleanly: "On" = Motion is the selected style; "Off" = something else is selected; "Auto" = the toggle. Auto-switch toggle should always be visible (regardless of current selection) since it engages auto-switching FROM whatever's currently selected TO Motion when device motion is detected.
+  - The Auto toggle is now visually grouped with the picker (same Section) per Mark's directive — not in a separate disconnected Section lower down.
+  - Per-style descriptions (dynamic, based on selection) retained; redundant footer that listed all four styles removed.
+- Implementation:
+  - `PlaybackPreferences.ReadingStyle.userSelectableCases: [ReadingStyle] = [.focus, .motion]` — Picker iterates this, not `.allCases`.
+  - `readingStyle.get` migrates `.standard` and `.immersive` reads to `.focus` so users on the hidden styles land on a selectable one. The persisted raw value is left untouched — if we ever re-introduce those styles, the user's original choice surfaces again.
+- Source: Mark's directive 2026-05-04 evening.
+
 ## 2026-05-04 — Ask Posey: MiniLM (CoreML) Replaces NLEmbedding for RAG
 
 - Status: Accepted

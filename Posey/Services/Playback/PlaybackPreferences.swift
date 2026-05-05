@@ -25,23 +25,40 @@ final class PlaybackPreferences {
     /// cases append without migration. Per `DECISIONS.md` "Reading
     /// Style as Preferences not Modes" (2026-05-01).
     enum ReadingStyle: String, CaseIterable, Equatable {
-        /// Single highlighted active sentence, surrounding text at
-        /// full opacity. Default — current behavior.
+        /// 2026-05-04 — `.standard` HIDDEN from the UI for 1.0
+        /// (Mark's directive). Was the original "no styling"
+        /// default — barely a reading style at all. Kept in the
+        /// enum so persisted UserDefaults values still parse;
+        /// migrated to `.focus` on read (see `readingStyle` getter).
+        /// Excluded from `userSelectableCases`.
         case standard
         /// Dim every non-active sentence to ~45% opacity so the eye
         /// is naturally drawn to the active one. Functionally
         /// additive on top of the existing highlight tier.
+        /// 2026-05-04 — Default for 1.0.
         case focus
-        /// Slot-machine / drum-roll scroll. Active sentence centered
-        /// at full size + brightness; sentences above and below fade
-        /// out and scale down with distance from center, creating a
-        /// smooth rolling transition as playback advances.
+        /// 2026-05-04 — `.immersive` HIDDEN from the UI for 1.0
+        /// (Mark's directive). Centers + fades surrounding text but
+        /// overlapped substantially with `.motion` (which adds the
+        /// "one large centered sentence" framing on top of the same
+        /// center+fade behavior). Kept in enum for parse-compat;
+        /// migrated to `.focus` on read.
         case immersive
         /// Large single centered sentence, optimized for
         /// walking / driving / hands-free. Inherits the
         /// three-setting Off / On / Auto behavior captured in
         /// `MotionPreference`.
         case motion
+
+        /// 2026-05-04 — Subset of `allCases` shown in the user-
+        /// facing Preferences picker. Standard and Immersive are
+        /// excluded for 1.0 per Mark's directive (Standard was
+        /// barely a style; Immersive overlapped Motion). Both
+        /// remain in the enum for parse-compat with existing
+        /// UserDefaults; the `readingStyle` getter migrates them
+        /// to `.focus` on read so users on the hidden styles land
+        /// on a selectable one.
+        static let userSelectableCases: [ReadingStyle] = [.focus, .motion]
 
         var displayName: String {
             switch self {
@@ -107,9 +124,21 @@ final class PlaybackPreferences {
         get {
             guard let raw = UserDefaults.standard.string(forKey: Keys.readingStyle),
                   let style = ReadingStyle(rawValue: raw) else {
-                return .standard
+                return .focus
             }
-            return style
+            // 2026-05-04 — Migrate styles hidden from the 1.0 UI
+            // (`.standard`, `.immersive`) to the closest selectable
+            // style (`.focus`) so users who had those selected don't
+            // get stuck on a style they can't re-pick from the
+            // picker. The persisted raw value is left untouched —
+            // if we ever re-introduce those styles, the user's
+            // original choice surfaces again.
+            switch style {
+            case .standard, .immersive:
+                return .focus
+            case .focus, .motion:
+                return style
+            }
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: Keys.readingStyle)

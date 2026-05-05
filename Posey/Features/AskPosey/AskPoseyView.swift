@@ -187,6 +187,10 @@ struct AskPoseyView: View {
                     }
                 }
 
+                if viewModel.anchor != nil {
+                    affordanceStrip
+                }
+
                 Divider().opacity(0.4)
 
                 composer
@@ -441,15 +445,26 @@ private extension AskPoseyView {
         case .user, .assistant:
             VStack(alignment: .leading, spacing: 4) {
                 AskPoseyMessageBubble(message: message)
-                // Navigation cards (.search intent results) are still
-                // rendered as a separate strip — they're a structurally
-                // different surface from text + inline citations. The
-                // old "SOURCES N · 87%" pill strip is gone; sources
-                // are now inline `[ⁿ]` superscripts inside the bubble
-                // text (Task 2 #25).
+                // Navigation cards (.search intent results) render as
+                // a separate strip — they're a structurally different
+                // surface from text + inline citations.
                 if message.role == .assistant,
                    !message.navigationCards.isEmpty {
                     navigationCardList(for: message)
+                }
+                // 2026-05-04 — Sources strip restored alongside
+                // inline `[ⁿ]` citations as part of the re-scoped 1.0
+                // Ask Posey. Inline citations link specific claims to
+                // specific chunks; the strip gives an at-a-glance view
+                // of every chunk this answer drew from with relevance
+                // score. Tap a pill to jump to that chunk in the
+                // reader. Skip when there are no chunks (the
+                // weak-retrieval and short-circuit paths).
+                if message.role == .assistant,
+                   !message.chunksInjected.isEmpty,
+                   message.navigationCards.isEmpty {
+                    sourcesStrip(for: message.chunksInjected)
+                        .padding(.top, 2)
                 }
             }
         }
@@ -574,10 +589,114 @@ private extension AskPoseyView {
         .accessibilityLabel("Posey is thinking")
     }
 
+    /// 2026-05-04 — Composer placeholder shapes the user toward
+    /// passage-anchored questions (the re-scoped 1.0 promise). When
+    /// the sheet has an anchor, the placeholder invites questions
+    /// about the passage. When there's no anchor (chrome-level
+    /// entry), it nudges the user to pick a passage in the reader.
+    var composerPlaceholder: String {
+        if viewModel.anchor != nil {
+            return "Ask about this passage…"
+        }
+        return "Tap a sentence in the reader to ask about it"
+    }
+
+    /// 2026-05-04 — Four-affordance strip. The visible expression of
+    /// the re-scoped 1.0 promise: when the user has a passage anchored,
+    /// these four buttons map directly to the question types AFM can
+    /// reliably handle. "Explain" / "Find related" submit pre-templated
+    /// questions immediately; "Define" prefills the composer so the
+    /// user types the term to define; "Ask" focuses the composer for
+    /// free-text. The free-text path runs the same retrieval pipeline
+    /// (anchor + proximity + RAG) so users can still get good answers
+    /// from natural questions — the affordances just give them a fast
+    /// path to the kinds of questions that work best.
+    @ViewBuilder
+    var affordanceStrip: some View {
+        HStack(spacing: 8) {
+            affordanceButton(
+                title: "Explain this",
+                systemImage: "text.bubble",
+                action: { sendTemplated("Explain this passage in context — what's it saying?") },
+                identifier: "askPosey.affordance.explain"
+            )
+            affordanceButton(
+                title: "Define a term",
+                systemImage: "character.book.closed",
+                action: { focusComposerWithPrefix("Define ") },
+                identifier: "askPosey.affordance.define"
+            )
+            affordanceButton(
+                title: "Find related",
+                systemImage: "magnifyingglass",
+                action: { sendTemplated("Find other passages in the document that discuss the same topic.") },
+                identifier: "askPosey.affordance.findRelated"
+            )
+            affordanceButton(
+                title: "Ask",
+                systemImage: "ellipsis.bubble",
+                action: { focusComposer() },
+                identifier: "askPosey.affordance.askSpecific"
+            )
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Quick actions for this passage")
+    }
+
+    /// One affordance button. Compact pill with SF Symbol + label.
+    func affordanceButton(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void,
+        identifier: String
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.caption.weight(.medium))
+                Text(title)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.accentColor.opacity(0.12), in: Capsule())
+            .foregroundStyle(.tint)
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isResponding)
+        .accessibilityIdentifier(identifier)
+        .remoteRegister(identifier, action: action)
+    }
+
+    /// Submit a pre-templated question immediately. Sets the input,
+    /// then triggers the same submit path the user would.
+    func sendTemplated(_ question: String) {
+        viewModel.inputText = question
+        submit()
+    }
+
+    /// Focus the composer with an optional prefix (used by "Define a
+    /// term" — sets input to "Define " and lets the user type the
+    /// word to define).
+    func focusComposerWithPrefix(_ prefix: String) {
+        viewModel.inputText = prefix
+        composerFocused = true
+    }
+
+    /// Focus the composer for free-text input.
+    func focusComposer() {
+        composerFocused = true
+    }
+
     var composer: some View {
         HStack(spacing: 10) {
             TextField(
-                "Ask Posey…",
+                composerPlaceholder,
                 text: $viewModel.inputText,
                 axis: .vertical
             )

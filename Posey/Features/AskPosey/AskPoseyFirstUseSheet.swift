@@ -36,7 +36,7 @@ struct AskPoseyFirstUseSheet: View {
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Try selecting a sentence you're curious about and asking me from there. That's where I do my best work.")
+            Text("Double-tap a sentence in the reader to highlight it, then tap me. I'll open already focused on that passage — quick actions for explaining it, defining a term, or finding related parts of the document.")
                 .font(.body)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)

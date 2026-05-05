@@ -219,6 +219,31 @@ struct ReaderView: View {
                     .allowsHitTesting(isChromeVisible)
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
             }
+            // 2026-05-04 — Mini-player. When chrome auto-fades during
+            // playback, the play/pause button alone stays visible so
+            // the user can pause without summoning full chrome (the
+            // genre standard — Voice Dream / Speechify / Audible all
+            // do this). When the user pauses via the mini-player,
+            // chrome re-reveals so they have full controls right
+            // when they're likely to want them. When playback stops
+            // for any other reason (end of doc, etc.) chrome also
+            // re-reveals.
+            .overlay(alignment: .bottom) {
+                miniPlayer
+                    .opacity(miniPlayerVisible ? 1 : 0)
+                    .allowsHitTesting(miniPlayerVisible)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: miniPlayerVisible)
+            }
+            .onChange(of: viewModel.playbackState) { oldValue, newValue in
+                // Re-reveal chrome when playback transitions from
+                // playing to not-playing. The user just stopped
+                // listening; they probably want to do something
+                // next (skip, change voice, ask a question) and
+                // need the full chrome bar.
+                if oldValue == .playing && newValue != .playing {
+                    revealChrome()
+                }
+            }
             // Task 8 #54: TapCatcherView (BLOCK TC) is kept in the
             // file for future use but not mounted here. The always-
             // on overlay variant broke the ScrollView's pan gesture
@@ -568,6 +593,42 @@ struct ReaderView: View {
         formatter.numberStyle = .decimal
         formatter.groupingSeparator = ","
         return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    /// 2026-05-04 — Mini-player visibility: only when chrome is
+    /// faded AND playback is currently active. The user gets a
+    /// always-tappable pause button without needing to summon
+    /// full chrome.
+    private var miniPlayerVisible: Bool {
+        !isChromeVisible && viewModel.playbackState == .playing
+    }
+
+    /// Mini-player view — single play/pause button on a thin-material
+    /// background so it's visible against any text behind it.
+    /// Smaller than the full chrome bar; sits above the home indicator.
+    private var miniPlayer: some View {
+        Button {
+            viewModel.togglePlayback()
+            // After toggling, the playbackState change listener
+            // (above) will reveal full chrome — the user just
+            // paused and is likely about to interact further.
+        } label: {
+            Image(systemName: viewModel.playPauseImageName)
+                .font(.title3)
+                .foregroundStyle(.white)
+                .frame(width: 56, height: 56)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(
+                    Circle().stroke(.white.opacity(0.15), lineWidth: 0.5)
+                )
+        }
+        .buttonStyle(.plain)
+        .padding(.bottom, 24)
+        .accessibilityLabel(viewModel.playbackState == .playing ? "Pause" : "Play")
+        .accessibilityIdentifier("reader.miniPlayer.playPause")
+        .remoteRegister("reader.miniPlayer.playPause") {
+            viewModel.togglePlayback()
+        }
     }
 
     private var topControls: some View {

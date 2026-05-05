@@ -60,6 +60,18 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         self.voiceMode = voiceMode
         super.init()
         synthesizer.delegate = self
+        // 2026-05-04 — Use the app's audio session, not the system
+        // accessibility/spoken-content session. AVSpeechSynthesizer
+        // defaults to routing through the system spoken-content
+        // session which doesn't honor our `.playback` background
+        // configuration — that's why playback was stopping when
+        // Mark locked the screen. With usesApplicationAudioSession
+        // = true, the synthesizer respects the .playback session
+        // we configure (with `audio` UIBackgroundMode), so playback
+        // continues with the screen locked AND the lock-screen
+        // controls (already wired via NowPlayingController +
+        // MPRemoteCommandCenter) become functional.
+        synthesizer.usesApplicationAudioSession = true
         configureAudioSessionIfNeeded()
     }
 

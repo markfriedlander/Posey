@@ -66,10 +66,30 @@ EPUB Focus-during screenshot shows the title page with "Surviving the Informatio
 
 ### Items I still didn't fully verify per format
 
-- **Voice mode switching audibly.** Tested API toggle on every format; confirming the voice actually changed audibly requires listening, which I can't do.
-- **Rate slider "takes effect at next sentence boundary" specifically.** Tested SET_RATE returns OK on every format and playback continues; the "takes effect at sentence boundary" claim requires audio analysis or listening.
+Mark confirmed the two ears-required items in his end-of-session feedback:
+- **Voice mode switching audibly: VERIFIED by Mark** ("yes"). Best Available and Custom voices sound audibly different.
+- **Rate slider takes effect at next sentence boundary: VERIFIED by Mark** ("yes"). Rate changes apply at the next sentence boundary as designed.
+
 - **Image audit for RTF: NOW TESTED.** Generated `test_with_image.rtf` with a `{\pict}` block containing a hex-encoded PNG. Result: image DROPPED silently — `LIST_IMAGES` returns 0, no marker in displayText, no placeholder text. **RTF importer ignores `\pict` blocks entirely.** Bonus finding: RTF importer also has a paragraph-concatenation bug — the heading "Section 1" merged with the following body line into "Section 1is a paragraph before an embedded image." with the missing space.
 - **Multi-image case: NOW TESTED.** Generated `test_multi_image.docx` with 3 inline images (red/blue/green) interspersed with 4 text paragraphs. Result: all 3 images extracted (LIST_IMAGES count=3), all 3 markers placed correctly between paragraphs in displayText. All 3 render as **literal marker text** in the reader, exactly matching the single-image case. Confirms the DOCX image-render bug is consistent across image counts, not a single-image fluke.
+
+### Image audit gaps Mark called out
+
+Mark's end-of-session feedback: "it sounds like from above you didnt do a full image audit. and it failed by dropping silently. until thats fixed it makes no sense for me to test further."
+
+He's right. The audit covered five formats with one image-bearing test doc each, plus one multi-image DOCX. Specifically NOT tested:
+
+- **HTML with embedded data: URIs** (would test whether the importer can extract images when the bytes are inline rather than referenced externally)
+- **HTML with bundled image** (multi-part import where the HTML and its referenced PNGs arrive together)
+- **EPUB with various image types in different positions** (cover, inline figure mid-chapter, end-of-chapter, full-page art) — only tested whatever positions Data Smog's 4 images happen to be in
+- **PDF with multiple visual-only pages** (only tested a 3-page PDF with one image-bearing page)
+- **PDF with images embedded in text-bearing pages** (vs. visual-only pages) — Posey only renders visual-only pages as thumbnails; images embedded in text pages are not extracted at all
+- **EPUB with multiple cover formats** (cover.xhtml, NCX-referenced cover, OPF-meta cover)
+- **DOCX with floating images** (anchor-based positioning rather than inline)
+- **DOCX with images in tables**
+- **Images larger than viewport** — none of the test docs had oversized images to stress the layout
+
+The two silent-drop failures (HTML `<img>` and RTF `\pict`) mean the importer is producing no signal that an image was even present in the source. A user importing a real-world doc with images will get clean prose with images mysteriously missing — no error, no warning, no marker, no placeholder. That alone is a submission blocker.
 
 ### Items NOW verified per format (additions after Mark caught the assumption pattern AGAIN)
 
@@ -121,6 +141,8 @@ After committing the second pass at d76982c I claimed I was done. Mark asked if 
 20. **Audio export speed appears ~3.6× faster than live playback.** TXT 32-segment doc exports as 47.4s of audio; expected ~170s at normal speech rate. ffmpeg confirms it's real audio (not silence), but the rate or segment concatenation is much tighter than playback would be. Worth investigation before submission.
 21. **RTF embedded `{\pict}` images dropped silently.** RTF importer doesn't extract or marker-replace images at all. Tested with a hex-encoded PNG inside `{\pict\pngblip}`. Image disappeared.
 22. **RTF importer has paragraph-concatenation bug.** "Section 1\\par This is a paragraph..." renders as "Section 1is a paragraph" with the space eaten. Likely a `\par` boundary handling issue in the RTF parser.
+23. **Audio export has no progress indicator in the UI.** The backend exposes progress (AUDIO_EXPORT_STATUS returns `progress` 0-1, `currentSegmentIndex`/`totalSegments`), but the Audio Export sheet shows only "Export not started" / "Export complete" — no live progress bar, no "X of N segments" text, no spinner. For long-doc exports (RTF was 1382 segments / 12.7 MB; EPUB was 4339 segments / 34.8 MB and took multiple minutes), this leaves the user waiting in front of a static sheet with no signal anything is happening. Confirmed by Mark: "no progress indicator. i'm not waiting endlessly to test this."
+24. **REGRESSION — audio stops when device is locked.** Mark reports playback halts on lock; he confirms "this worked yesterday." The SIMULATE_BACKGROUND substitute test on every format showed playback continuing through the simulated background (state remained `playing`, sentence index advanced) — but a real hardware lock is stopping audio. The notification-based substitute is exercising a different code path than the actual screen-lock event, so the test missed this regression. Likely candidates: AVAudioSession category re-evaluation on `applicationProtectedDataWillBecomeUnavailable`, or a recent change to `usesApplicationAudioSession`. Yesterday's working state predates today's commits — git log of audio-session-related changes is the place to start.
 
 ## Per-format pass/fail tables
 

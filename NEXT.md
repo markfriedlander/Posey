@@ -1,5 +1,20 @@
 # Next
 
+## 2026-05-06 — Submission day pass
+
+Mark's submission-day list, status of each:
+
+1. **HTML mojibake**: FIXED + verified on phone. Commit `0a2bed3`. NSAttributedString now gets explicit UTF-8 character encoding; em-dash, smart quotes, ellipsis all render correctly.
+2. **Background audio lock-screen regression**: FIXED durably. Switched the project from `GENERATE_INFOPLIST_FILE = YES` + Run Script injection to an explicit committed `Info.plist` at the repo root with `UIBackgroundModes = ["audio"]` hardcoded. Verified: clean build + incremental rebuild both produce a binary with the key. The recurring regression caused by Xcode's incremental build cache dropping the script output is gone. Commit `cf8dd42`. **Mark must still verify lock-screen audio continues** — I cannot programmatically lock the device.
+
+3. **Conversation reload on reopen**: FIXED. Commit `fb427f0`. Sheet now scrolls to the last actual message (not the new invocation anchor) so prior conversation is visible.
+
+4. **TOC for MD/DOCX/PDF**: FIXED. Commit `8e87903`. MD extracts `# / ## / ###` headings; DOCX extracts `<w:pStyle Heading*>` paragraphs; PDF falls back to `outlineRoot` when text-pattern detector finds nothing. Verified on phone: MD test doc → 5 entries, DOCX test doc → 3 entries, Cryptography for Dummies PDF → 187 entries.
+   - **RTF deferred** — RTF doesn't have explicit heading semantics in standard. Heuristic detection (bold + larger font + line-leading) is fragile. Coming in a later release.
+
+5. **Audio export hidden from UI**: DONE. Removed the "Export to Audio File" button + entire Audio Export section from the Preferences sheet. Backend infrastructure (AudioExporter, RemoteAudioExportRegistry, EXPORT_AUDIO API verb) is intact and continues to work for testing. Coming-soon for users.
+   - **Reasons for deferring user-facing UI**: (a) no progress indicator during long renders — RTF/EPUB exports take minutes and the user sees a static sheet; (b) the export speed observed in testing was ~3.6× faster than live playback, suggesting either rate or segment-concatenation differs from playback in a way that needs investigation before users see it.
+
 ## 2026-05-05 (closing) — Ask Posey shipped end-to-end on phone
 
 Tonight's late session locked down the Ask Posey citation rendering, the composer affordances, the scroll-on-send behavior (real one — `.contentMargins(.bottom, viewportHeight, for: .scrollContent)` paired with watching the latest user-message ID), the thinking-indicator visibility, and the sub-40% relevance filter on chunks going to AFM. All verified on Mark's iPhone with real AFM responses, multiple times, multiple test cases (short message, long message, multi-citation). See the HISTORY entries from this date for the per-fix breakdown.

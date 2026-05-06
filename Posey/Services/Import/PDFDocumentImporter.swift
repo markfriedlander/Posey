@@ -211,11 +211,22 @@ extension PDFDocumentImporter {
         // existing TOC sheet can navigate the document.
         let tocResult = PDFTOCDetector.detect(pageTexts: readableTextPages)
         let tocSkipUntilOffset = tocResult?.regionEndOffset ?? 0
-        let tocEntries: [PDFTOCEntry] = tocResult.map { result in
+        var tocEntries: [PDFTOCEntry] = tocResult.map { result in
             buildEntries(for: result.entries,
                          in: plainText,
                          postTOCOffset: result.regionEndOffset)
         } ?? []
+
+        // 2026-05-06 — PDF native outline (PDFKit's outlineRoot) as a
+        // fallback when text-pattern TOC detection found nothing.
+        // Many PDFs (papers, ebooks) ship a structural outline even
+        // when they don't print a visible table-of-contents page.
+        if tocEntries.isEmpty,
+           let outline = document.outlineRoot, outline.numberOfChildren > 0 {
+            tocEntries = extractOutlineEntries(from: outline,
+                                               in: document,
+                                               readableTextPages: readableTextPages)
+        }
 
         return ParsedPDFDocument(
             title: title,
@@ -258,6 +269,51 @@ extension PDFDocumentImporter {
                                      playOrder: index))
         }
         return built
+    }
+
+    /// 2026-05-06 — Walk the PDF native outline tree and emit
+    /// `PDFTOCEntry` rows. Fallback used when the text-pattern TOC
+    /// detector finds nothing. For each outline entry, resolve its
+    /// destination page (PDFOutline.destination?.page) and compute a
+    /// plainText offset by summing the lengths of all earlier
+    /// readable-text pages plus separators.
+    private func extractOutlineEntries(from root: PDFOutline,
+                                       in document: PDFDocument,
+                                       readableTextPages: [String]) -> [PDFTOCEntry] {
+        // Precompute the start offset of each page in the joined
+        // plainText. plainText was joined with "\n\n" between pages.
+        var pageStartOffsets: [Int] = []
+        var running = 0
+        for (i, p) in readableTextPages.enumerated() {
+            pageStartOffsets.append(running)
+            running += p.count
+            if i < readableTextPages.count - 1 { running += 2 }
+        }
+
+        var entries: [PDFTOCEntry] = []
+        var order = 0
+        func walk(_ node: PDFOutline, depth: Int) {
+            for i in 0..<node.numberOfChildren {
+                guard let child = node.child(at: i) else { continue }
+                let title = (child.label ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !title.isEmpty,
+                   let dest = child.destination,
+                   let page = dest.page,
+                   let pageIndex = document.index(for: page) as Int?,
+                   pageIndex >= 0,
+                   pageIndex < pageStartOffsets.count {
+                    order += 1
+                    entries.append(PDFTOCEntry(
+                        title: title,
+                        plainTextOffset: pageStartOffsets[pageIndex],
+                        playOrder: order
+                    ))
+                }
+                walk(child, depth: depth + 1)
+            }
+        }
+        walk(root, depth: 0)
+        return entries
     }
 }
 

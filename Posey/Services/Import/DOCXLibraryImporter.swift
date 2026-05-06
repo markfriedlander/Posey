@@ -12,11 +12,6 @@ struct DOCXLibraryImporter {
     }
 
     func importDocument(from url: URL) throws -> Document {
-        // Task 8 #3 + #4 (2026-05-03): rich import returns
-        // (displayText with inline image markers, plainText with
-        // markers stripped, image bytes for persistence). DOCX TOC
-        // fields are stripped from both display + plain text by the
-        // extractor before we get here.
         let parsed = try textLoader.loadDocument(from: url)
         return try importNormalizedDocument(
             title: url.deletingPathExtension().lastPathComponent,
@@ -24,7 +19,8 @@ struct DOCXLibraryImporter {
             fileType: url.pathExtension.lowercased(),
             displayText: parsed.displayText,
             plainText: parsed.plainText,
-            images: parsed.images
+            images: parsed.images,
+            headings: parsed.headings
         )
     }
 
@@ -36,7 +32,8 @@ struct DOCXLibraryImporter {
             fileType: fileType,
             displayText: parsed.displayText,
             plainText: parsed.plainText,
-            images: parsed.images
+            images: parsed.images,
+            headings: parsed.headings
         )
     }
 
@@ -46,7 +43,8 @@ struct DOCXLibraryImporter {
         fileType: String,
         displayText: String,
         plainText: String,
-        images: [PageImageRecord]
+        images: [PageImageRecord],
+        headings: [DOCXDocumentImporter.DOCXHeadingEntry]
     ) throws -> Document {
         let now = Date()
         let existingDocument = try databaseManager.existingDocument(
@@ -74,6 +72,17 @@ struct DOCXLibraryImporter {
         try databaseManager.deleteImages(for: document.id)
         for image in images {
             try databaseManager.insertImage(id: image.imageID, documentID: document.id, data: image.data)
+        }
+
+        // 2026-05-06 — Persist heading-style paragraphs as TOC entries.
+        // The extractor surfaced (level, title, plainTextOffset) for
+        // every paragraph styled as Heading1-9 or Title. Only insert
+        // if at least one heading was found.
+        if !headings.isEmpty {
+            let stored = headings.enumerated().map { (idx, h) in
+                StoredTOCEntry(title: h.title, plainTextOffset: h.plainTextOffset, playOrder: idx + 1)
+            }
+            try databaseManager.insertTOCEntries(stored, for: document.id)
         }
 
         if existingDocument == nil {

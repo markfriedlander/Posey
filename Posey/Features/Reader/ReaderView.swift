@@ -1795,29 +1795,15 @@ private struct ReaderPreferencesSheet: View {
                 }
 
                 // Motion sub-settings (only visible when Motion is the chosen Reading Style)
-                // Audio export section (M8)
-                Section {
-                    Button {
-                        viewModel.beginAudioExport()
-                    } label: {
-                        HStack {
-                            Image(systemName: "waveform.badge.plus")
-                            Text("Export to Audio File")
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .foregroundStyle(.secondary)
-                        }
-                        .foregroundStyle(.primary)
-                    }
-                    .remoteRegister("preferences.exportAudio") {
-                        viewModel.beginAudioExport()
-                    }
-                } header: {
-                    Text("Audio Export")
-                } footer: {
-                    Text("Render this document to an .m4a file you can save or share. Best Available voices are usually gated from capture; switch to a Custom voice in Playback above if export refuses.")
-                        .font(.caption2)
-                }
+                // 2026-05-06 — Audio export section hidden from UI for
+                // 1.0 submission. The backend (AudioExporter,
+                // RemoteAudioExportRegistry, EXPORT_AUDIO API verb) is
+                // intact and continues to work; only the user-facing
+                // entry point in Preferences is removed. Reasons: no
+                // visible progress indicator on long renders (RTF /
+                // EPUB exports take minutes) and the rate observed in
+                // testing didn't match live playback. Documented in
+                // NEXT.md as "coming soon."
 
                 // 2026-05-04 — Old standalone "Motion Mode" Section
                 // removed. Replaced by the inline Auto toggle in the

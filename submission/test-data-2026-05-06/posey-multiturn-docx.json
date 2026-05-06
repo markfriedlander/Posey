@@ -1,0 +1,39 @@
+{
+  "format": "docx",
+  "doc_id": "568819E2-89FF-4816-8108-CDC440B414F7",
+  "turns": [
+    {
+      "label": "fact",
+      "question": "Who co-authored this article and what tool did they build?",
+      "response": "Mark Friedlander and ChatGPT co-authored the article. They built a GPT-powered proposal assistant.",
+      "intent": "general",
+      "chunkCount": 5,
+      "error": ""
+    },
+    {
+      "label": "cross",
+      "question": "What does the article say the assistant runs on, and how does that relate to how Jordan uses it?",
+      "response": "The article says the assistant runs on prompts, not code. This means the assistant is guided by natural language instructions crafted to guide GPT\u2019s behavior. Jordan uses the assistant by receiving a new RFP, extracting questions, comparing them to its memory, filling in known answers, asking for missing information directly from Jordan, and compiling a draft.[4]",
+      "intent": "general",
+      "chunkCount": 5,
+      "error": ""
+    },
+    {
+      "label": "followup",
+      "question": "Building on the prompt-driven design, what's the JSON file's role?",
+      "response": "The JSON file serves as a structured memory for the assistant, allowing it to grow and adapt organically alongside real-world feedback from Jordan.[1]",
+      "intent": "search",
+      "chunkCount": 5,
+      "error": ""
+    },
+    {
+      "label": "not-in-doc",
+      "question": "Does this article describe the assistant's pricing tiers?",
+      "response": "",
+      "intent": "",
+      "chunkCount": 0,
+      "error": "I'm not finding a strong answer to that in the document. I do best when you select a sentence or passage you're curious about and ask me from there \u2014 try tapping a line in the reader, then asking again."
+    }
+  ],
+  "expected_grounding": ""
+}

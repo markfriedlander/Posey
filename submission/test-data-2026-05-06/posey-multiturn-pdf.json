@@ -1,0 +1,39 @@
+{
+  "format": "pdf",
+  "doc_id": "BB511268-CA94-4D97-86F0-8579A3F8CBCE",
+  "turns": [
+    {
+      "label": "fact",
+      "question": "Who is the author of this paper and what is its main thesis?",
+      "response": "The author of this paper is Professor Sharp, and its main thesis is that alternative dispute resolution methods should be used sparingly in the cloud of high-tech copyright disputes.[1]",
+      "intent": "immediate",
+      "chunkCount": 1,
+      "error": ""
+    },
+    {
+      "label": "cross",
+      "question": "What does the paper say about Napster and mp3.com, and how do these examples support its thesis?",
+      "response": "The paper discusses the companies mp3.com and Napster as examples of those that provided internet services and software that the entertainment community purports to cause copyright infringement.[3] It highlights three cases through a combination of partial litigation and negotiation, where the companies had their technology purchased by the plaintiffs.[3]\n\nIn the case of mp3.com, the delivery method of music changed forever with the debut of mp3.com\u2019s my.mp3.com service on January 12, 2000.[3] The remaining plaintiff settled for warrants of mp3.com common stock before damages were awarded, and the case was not appealed, meaning a controlling interpretation of the DMCA or fair use as applied to the Internet has not yet been reached.[4]\n\nIn the case of Napster, the first version of its \"peer-to-peer\" software was released on the Internet in the fall of 1999.[4][3] Napster kept a list of all music files available for immediate download from any computer currently on its network.[4]\n\nThese examples support the paper's thesis by illustrating the challenges of copyright law in the digital age and the need for alternative dispute resolution methods.[1][2] The cases show how companies like mp3.com and Napster faced legal battles over copyright infringement and how the entertainment community sought to address these issues through negotiation and litigation.[3][2] The paper emphasizes the importance of using alternative dispute resolution methods to resolve copyright disputes in the cloud of high-tech copyright law.[1][2]",
+      "intent": "immediate",
+      "chunkCount": 5,
+      "error": ""
+    },
+    {
+      "label": "followup",
+      "question": "Building on that, what does the paper conclude about whether ADR is appropriate for cloud copyright disputes?",
+      "response": "The paper concludes that alternative dispute resolution (ADR) is not appropriate for cloud copyright disputes.[2] It emphasizes that ADR lacks binding precedents and fails to create legal precedents outside the agreement signed in the proceeding, which can leave defendants without legal protection or contention.[2] Additionally, the paper argues that ADR deters actions that are potentially legal and chills future ventures, making it unsuitable for resolving cloud copyright disputes.[5][2]",
+      "intent": "general",
+      "chunkCount": 5,
+      "error": ""
+    },
+    {
+      "label": "not-in-doc",
+      "question": "What does this paper say about facial recognition technology?",
+      "response": "The document doesn't mention facial recognition technology.",
+      "intent": "general",
+      "chunkCount": 1,
+      "error": ""
+    }
+  ],
+  "expected_grounding": ""
+}

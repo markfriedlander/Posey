@@ -1,0 +1,39 @@
+{
+  "format": "rtf",
+  "doc_id": "8BF2DD18-4490-4A94-BCD4-3B6097A937EF",
+  "turns": [
+    {
+      "label": "fact",
+      "question": "Who are the authors listed for this book?",
+      "response": "ChatGPT, Claude, Gemini, and Mark Friedlander.",
+      "intent": "search",
+      "chunkCount": 1,
+      "error": ""
+    },
+    {
+      "label": "cross",
+      "question": "What does the book say about AI consciousness, and how does that connect to its discussion of AI control?",
+      "response": "The book does not explicitly discuss AI consciousness. It focuses on the foundational principles of AI, its applications, and ethical considerations through a collaborative approach with leading AI models.[1]",
+      "intent": "general",
+      "chunkCount": 5,
+      "error": ""
+    },
+    {
+      "label": "followup",
+      "question": "Following up on that, what specific concerns does the book raise about data privacy in AI systems?",
+      "response": "The book raises concerns about the potential risks to data privacy and security with AI systems.[1][3] It emphasizes the need for robust protections and policies to address these issues.",
+      "intent": "general",
+      "chunkCount": 5,
+      "error": ""
+    },
+    {
+      "label": "not-in-doc",
+      "question": "What does this book say about the 1969 moon landing?",
+      "response": "The document doesn't mention the 1969 moon landing.",
+      "intent": "general",
+      "chunkCount": 2,
+      "error": ""
+    }
+  ],
+  "expected_grounding": ""
+}

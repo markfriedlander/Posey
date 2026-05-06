@@ -1,0 +1,39 @@
+{
+  "format": "txt",
+  "doc_id": "C4427C39-CE1C-43AD-8C0A-2DE6CFA4AC4A",
+  "turns": [
+    {
+      "label": "fact",
+      "question": "Who is the author of this essay and what year was it written?",
+      "response": "Marcus Rivera, 2024",
+      "intent": "immediate",
+      "chunkCount": 2,
+      "error": ""
+    },
+    {
+      "label": "cross",
+      "question": "What does the author argue is the relationship between slow reading and difficult sentences?",
+      "response": "The author argues that slow reading is essential for understanding difficult sentences and intricate arguments.[1]",
+      "intent": "immediate",
+      "chunkCount": 3,
+      "error": ""
+    },
+    {
+      "label": "followup",
+      "question": "Building on that, what does the author say happens to the page in modern reading?",
+      "response": "The author says that in modern reading, the page becomes a surface to be processed, not a place to dwell.[3]",
+      "intent": "general",
+      "chunkCount": 3,
+      "error": ""
+    },
+    {
+      "label": "not-in-doc",
+      "question": "Does this essay discuss the history of typography in the 1800s?",
+      "response": "The document doesn't mention the history of typography in the 1800s.",
+      "intent": "general",
+      "chunkCount": 1,
+      "error": ""
+    }
+  ],
+  "expected_grounding": ""
+}

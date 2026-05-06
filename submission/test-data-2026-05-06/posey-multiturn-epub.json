@@ -1,0 +1,39 @@
+{
+  "format": "epub",
+  "doc_id": "05D0B999-77D7-4630-A8AF-5AA1958F5645",
+  "turns": [
+    {
+      "label": "fact",
+      "question": "Who is the author of Data Smog and what is the book's subtitle?",
+      "response": "The author of \"DATA SMOG: Surviving the Information Glut\" is David Shenk. The book does not have a subtitle.",
+      "intent": "search",
+      "chunkCount": 3,
+      "error": ""
+    },
+    {
+      "label": "cross",
+      "question": "What does the book say about information overload, and how does that connect to its central argument about filtering?",
+      "response": "The book discusses information overload as a consequence of the low transaction cost of capturing and sharing information.[3] It highlights how this ease of access leads to an overwhelming amount of data, which can occupy the brain and reduce productivity.[3] The central argument of the book is that while information is abundant, understanding it is crucial.[3] The author emphasizes the importance of distinguishing between information and understanding to avoid feeling personally overwhelmed by the information glut.[3] The book aims to provide remedies and insights to help individuals navigate this overwhelming landscape effectively.",
+      "intent": "search",
+      "chunkCount": 3,
+      "error": ""
+    },
+    {
+      "label": "followup",
+      "question": "Following up on that, what specific examples does the book give of data smog in everyday life?",
+      "response": "The book gives the example of the April 1994 spamming by Canter & Siegel.",
+      "intent": "immediate",
+      "chunkCount": 3,
+      "error": ""
+    },
+    {
+      "label": "not-in-doc",
+      "question": "Does Data Smog discuss the COVID-19 pandemic?",
+      "response": "The document doesn't mention the COVID-19 pandemic.",
+      "intent": "general",
+      "chunkCount": 2,
+      "error": ""
+    }
+  ],
+  "expected_grounding": ""
+}

@@ -1,0 +1,39 @@
+{
+  "format": "md",
+  "doc_id": "F0221910-9DB1-43F4-9A36-15CC1F7AD13F",
+  "turns": [
+    {
+      "label": "fact",
+      "question": "Who is the author of these notes and what year were they written?",
+      "response": "Lin Park, 2023",
+      "intent": "immediate",
+      "chunkCount": 2,
+      "error": ""
+    },
+    {
+      "label": "cross",
+      "question": "What four things does the author say happen when you work in public, and how does this connect to optimizing for engagement?",
+      "response": "The author says that when you work in public, the work gets better through outside critique, people you don't know catch errors, the work gets better through outside critique, and the work gets better through outside critique.[5][2] This connects to optimizing for engagement because it allows for constructive feedback and improvement, which can enhance the quality of the work and increase its appeal to a wider audience.[1][2]",
+      "intent": "immediate",
+      "chunkCount": 6,
+      "error": ""
+    },
+    {
+      "label": "followup",
+      "question": "You mentioned three things that happen. What does the author say is the most underrated phrase in public-facing work?",
+      "response": "The author says \"I think this might be wrong because \" is the most underrated phrase in public-facing work.[2]",
+      "intent": "search",
+      "chunkCount": 5,
+      "error": ""
+    },
+    {
+      "label": "not-in-doc",
+      "question": "What does the author say about cryptocurrency?",
+      "response": "The document doesn't mention cryptocurrency.",
+      "intent": "general",
+      "chunkCount": 1,
+      "error": ""
+    }
+  ],
+  "expected_grounding": ""
+}

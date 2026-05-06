@@ -1,0 +1,39 @@
+{
+  "format": "html",
+  "doc_id": "57577FF0-F078-445E-8636-92FBB48D03D7",
+  "turns": [
+    {
+      "label": "fact",
+      "question": "Who is the author of these field notes and where were they published?",
+      "response": "Dr. Aisha Khan, in 2022.",
+      "intent": "immediate",
+      "chunkCount": 2,
+      "error": ""
+    },
+    {
+      "label": "cross",
+      "question": "What does the author say about the brackish layer beneath the river plume, and why does it matter?",
+      "response": "Dr. Aisha Khan emphasizes that the brackish layer beneath the river plume is crucial for shrimp, as it is the environment they depend on.[3][1] She argues that understanding this layer is essential for marine biologists to help non-scientists grasp the importance of the estuary's ecosystem.[1] By recognizing the brackish layer, individuals can better protect it from being overlooked or destroyed by focusing on surface-level phenomena like sailboats and seagulls.",
+      "intent": "general",
+      "chunkCount": 3,
+      "error": ""
+    },
+    {
+      "label": "followup",
+      "question": "Following up, what does the author say a marine biologist's most important job is?",
+      "response": "The author says a marine biologist's most important job is to help non-scientists develop the right mental model of how an estuary works.[2]",
+      "intent": "immediate",
+      "chunkCount": 2,
+      "error": ""
+    },
+    {
+      "label": "not-in-doc",
+      "question": "What does this article say about coral reefs in the Caribbean?",
+      "response": "",
+      "intent": "",
+      "chunkCount": 0,
+      "error": "I'm not finding a strong answer to that in the document. I do best when you select a sentence or passage you're curious about and ask me from there \u2014 try tapping a line in the reader, then asking again."
+    }
+  ],
+  "expected_grounding": ""
+}

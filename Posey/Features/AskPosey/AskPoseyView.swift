@@ -242,6 +242,30 @@ struct AskPoseyView: View {
                             consumePendingInitialQuery()
                         }
                     }
+                    .onReceive(
+                        NotificationCenter.default
+                            .publisher(for: .remoteScrollAskPoseyToLatest)
+                    ) { _ in
+                        // 2026-05-05 — Remote scroll-to-latest. Used
+                        // by the local-API SCROLL_ASK_POSEY_TO_LATEST
+                        // verb so the test harness can bring the
+                        // most-recent assistant message (and its
+                        // chips + SOURCES strip) into view when the
+                        // conversation is taller than the visible
+                        // sheet. Same three-pass technique as the
+                        // initial-anchor scroll.
+                        guard let target = viewModel.messages.last else { return }
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(80))
+                            proxy.scrollTo(target.id, anchor: .bottom)
+                            try? await Task.sleep(for: .milliseconds(180))
+                            proxy.scrollTo(target.id, anchor: .bottom)
+                            try? await Task.sleep(for: .milliseconds(220))
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) {
+                                proxy.scrollTo(target.id, anchor: .bottom)
+                            }
+                        }
+                    }
                 }
 
                 Divider().opacity(0.4)

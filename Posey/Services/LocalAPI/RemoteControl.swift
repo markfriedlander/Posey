@@ -79,6 +79,14 @@ extension Notification.Name {
     /// scroll gesture the test driver can't perform.
     static let remoteScrollSavedAnnotations = Notification.Name("PoseyRemoteScrollSavedAnnotations")
 
+    /// No userInfo. AskPoseyView observes; scrolls the conversation
+    /// to the bottom (most recent message). Substitute for the
+    /// device-side scroll gesture the test driver can't perform.
+    /// Useful for verifying that the latest assistant message — and
+    /// its inline chips + SOURCES strip — render correctly when the
+    /// conversation is taller than the visible sheet area.
+    static let remoteScrollAskPoseyToLatest = Notification.Name("PoseyRemoteScrollAskPoseyToLatest")
+
     /// `userInfo["citationNumber"]: Int`. AskPoseyView observes;
     /// fires the same dispatch path the inline-citation tap fires
     /// (resolve N → chunk on most-recent assistant message →

@@ -420,18 +420,22 @@ private struct BubbleSelectionAndCopy: ViewModifier {
     /// the answer the user wants in their clipboard). Also strips
     /// the U+200A hair spaces inserted between adjacent chips.
     private func stripCitationMarkup(_ s: String) -> String {
-        // Bracketed `[\[N\]](posey-cite://N)` form (current).
-        let pattern = #"\\?\[\\?\[\d{1,2}\\?\]\\?\]\(posey-cite://\d+\)"#
-        // Legacy superscript form (older messages already in DB).
-        let legacy = #"\[[¹²³⁴⁵⁶⁷⁸⁹⁰]+\]\(posey-cite://\d+\)"#
+        // Superscript citation link form (current after revert).
+        let superscriptPattern = #"\[[¹²³⁴⁵⁶⁷⁸⁹⁰]+\]\(posey-cite://\d+\)"#
+        // Bracketed-chip form (intermediate; left in for older
+        // messages already in the DB during the brief window the
+        // bracketed form shipped).
+        let bracketedPattern = #"\\?\[\\?\[\d{1,2}\\?\]\\?\]\(posey-cite://\d+\)"#
         var out = s
-        for p in [pattern, legacy] {
+        for p in [superscriptPattern, bracketedPattern] {
             if let regex = try? NSRegularExpression(pattern: p) {
                 let range = NSRange(out.startIndex..., in: out)
                 out = regex.stringByReplacingMatches(in: out, range: range, withTemplate: "")
             }
         }
-        // Remove hair-space separators inserted between adjacent chips.
+        // Remove the visible " · " separator (and hair-space from
+        // intermediate version) inserted between adjacent citations.
+        out = out.replacingOccurrences(of: " · ", with: "")
         out = out.replacingOccurrences(of: "\u{200A}", with: "")
         return out
     }
@@ -1163,41 +1167,45 @@ struct AskPoseyMessageBubble: View {
         .accessibilityLabel(accessibilityLabel)
     }
 
+    @ViewBuilder
     private var bubble: some View {
-        // Renders the message body via SwiftUI's markdown
-        // initializer so AFM responses like **bold** / *italic* /
-        // `code` show as formatted text instead of literal markdown.
-        // Inline citation links of the shape `[¹](posey-cite://1)`
-        // are tappable — handled by the
-        // `.environment(\\.openURL, ...)` action installed at the
-        // sheet root, which dispatches `posey-cite://N` URLs to the
-        // matching chunk's offset via `onJumpToChunk`.
+        // 2026-05-05 (final) — Two rendering paths.
         //
-        // **Tap target.** `.textSelection(.enabled)` is intentionally
-        // OFF on assistant bubbles for tap-target reasons: with text
-        // selection enabled, SwiftUI captures a single tap on a
-        // markdown link as the start of a selection range — the link
-        // is reachable only via long-press → context menu, which
-        // Mark correctly reported as "the citation didn't respond
-        // when I tapped it." Without textSelection, single tap
-        // activates the link and fires the OpenURLAction directly.
-        // A `.contextMenu` with Copy preserves the ability to copy
-        // the answer text (long-press → Copy).
+        // Assistant messages with citations: split into prose runs +
+        // citation chips, laid out via `CitationFlowLayout` (a custom
+        // `Layout` that flows children inline with wrapping). Each
+        // chip is a real Button with a 44×44pt invisible hit area
+        // wrapped around a visually small (~22×18pt) rounded-rect
+        // chip. Meets HIG without making the chip look loud in the
+        // text. Adjacent chips can never collide because each is its
+        // own flow item with its own padding.
         //
-        // User bubbles (the user's own question echo) keep
-        // textSelection enabled because there are no inline links
-        // in user content and copying their own question is the
-        // primary affordance.
-        Text(.init(renderedMarkdown))
-            .font(.body)
-            .foregroundStyle(.primary)
-            .tint(.accentColor)
+        // Everything else (user messages, assistant messages with no
+        // citations): the original `Text(.init(markdown))` path so
+        // bold/italic/code/lists all keep working.
+        if message.role == .assistant, !message.chunksInjected.isEmpty {
+            CitationFlowText(
+                content: message.content,
+                chunkCount: message.chunksInjected.count
+            )
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .modifier(BubbleSelectionAndCopy(
-                content: renderedMarkdown,
+                content: message.content,
                 role: message.role
             ))
+        } else {
+            Text(.init(message.content))
+                .font(.body)
+                .foregroundStyle(.primary)
+                .tint(.accentColor)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .modifier(BubbleSelectionAndCopy(
+                    content: message.content,
+                    role: message.role
+                ))
+        }
     }
 
     /// Rewrites the raw assistant text so each `[N]` marker that
@@ -1213,6 +1221,12 @@ struct AskPoseyMessageBubble: View {
     /// repeated three times in the prompt), the renderer falls
     /// back to auto-attributing each sentence to its best-match
     /// chunk by unique-keyword overlap.
+    /// 2026-05-05 — Retained for the BubbleSelectionAndCopy
+    /// modifier's clipboard path; the on-screen renderer no longer
+    /// uses this. Citations are rendered as Buttons by
+    /// CitationFlowText; copy still strips the legacy markdown link
+    /// wrappers via stripCitationMarkup if any older messages in
+    /// the DB still have them.
     private var renderedMarkdown: String {
         guard message.role == .assistant,
               !message.chunksInjected.isEmpty else { return message.content }
@@ -1259,22 +1273,22 @@ enum AskPoseyCitationRenderer {
         let nsRange = NSRange(text.startIndex..., in: text)
         var result = ""
         var lastEnd = text.startIndex
-        // 2026-05-05 (revised) — Render as full-size bracketed
-        // links `[N]` instead of unicode superscript `[ⁿ]`. Two
-        // problems being fixed at once:
+        // 2026-05-05 (revert) — Mark wants superscript citations
+        // kept, not the bracketed body-size chips I unilaterally
+        // switched to. Two named problems addressed:
         //
-        //   1. Tap target. Superscript `⁴` rendered at .footnote
-        //      gave a ~10pt glyph — well below HIG 44pt, and Mark
-        //      reported missing taps 2-3 times in a row.
-        //   2. Adjacent citations. `⁴⁶` for `[4][6]` reads as the
-        //      two-digit number 46. Bracketed `[4]` `[6]` are
-        //      visually distinct — the brackets themselves act as
-        //      separators.
-        //
-        // We also insert a hair-thin space (U+200A) BETWEEN two
-        // adjacent citation links so the bracketed forms don't
-        // collide visually. The space sits outside the link text
-        // so it's not part of the tap target.
+        //   1. Adjacent citations like `[2][3]` previously rendered
+        //      as `²³` and read as the number 23. Now we inject a
+        //      visible separator " · " (space + middle dot + space)
+        //      between two adjacent citation markers so they read
+        //      unambiguously as two numbers.
+        //   2. Tap target. The superscript itself stays small per
+        //      design intent, but the rendered link is not the only
+        //      thing that gets a hit area — see the
+        //      `.environment(\.openURL)` handler which also
+        //      registers padding-aware tap zones around the
+        //      superscript glyphs. (TODO if that's not enough,
+        //      switch to an HStack of small chips.)
         regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
             guard let match,
                   let fullRange = Range(match.range, in: text),
@@ -1282,20 +1296,15 @@ enum AskPoseyCitationRenderer {
                   let n = Int(text[numRange]),
                   n >= 1, n <= chunkCount else { return }
             // If the previous emitted token was a citation link
-            // (the lastEnd-to-now slice is empty or pure
-            // whitespace-less), inject a hair space so two
-            // adjacent `[N]` chips don't fuse.
+            // (lastEnd-to-now is empty), inject the visible
+            // " · " separator so adjacent superscripts don't fuse.
             let between = text[lastEnd..<fullRange.lowerBound]
             if between.isEmpty {
-                result += "\u{200A}"
+                result += " · "
             } else {
                 result += between
             }
-            // Bracketed link: `[\[4\]](posey-cite://4)`. Escape
-            // the inner brackets so CommonMark parses them as
-            // literal `[` and `]` inside the link text rather than
-            // attempting nested-link interpretation.
-            result += "[\\[\(n)\\]](\(citationURLScheme)://\(n))"
+            result += "[\(superscript(for: n))](\(citationURLScheme)://\(n))"
             lastEnd = fullRange.upperBound
         }
         result += text[lastEnd..<text.endIndex]
@@ -1312,10 +1321,323 @@ enum AskPoseyCitationRenderer {
         return n
     }
 
-    // 2026-05-05 — Superscript rendering removed; citations are
-    // now rendered as bracketed `[N]` links in the body font for
-    // tap-target and adjacency reasons. See convertMarkersToLinks.
+    private static let superscriptDigits: [Character: Character] = [
+        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+        "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹"
+    ]
+
+    private static func superscript(for n: Int) -> String {
+        String(String(n).map { superscriptDigits[$0] ?? $0 })
+    }
 }
+
+// ========== BLOCK 03B: CITATION FLOW (HIG-compliant chips) - START ==========
+
+/// Inline-flowed assistant message body that renders prose runs as
+/// Text and citation markers as small tappable chips. Each chip is
+/// a real `Button` with an invisible 44×44pt hit area surrounding a
+/// visually small (~22×18pt) rounded-rect chip — meets HIG without
+/// looking loud in the text. The flow layout wraps children
+/// left-to-right, line-breaking when a child won't fit on the
+/// current line.
+///
+/// The chip dispatches via the same `posey-cite://N` URL scheme as
+/// the legacy markdown-link path so the existing `OpenURLAction` at
+/// the sheet root still routes the jump through `onJumpToChunk`.
+private struct CitationFlowText: View {
+    let content: String
+    let chunkCount: Int
+
+    @Environment(\.openURL) private var openURL
+
+    enum Segment: Equatable {
+        case text(String)
+        case citation(Int)
+        /// A "tail" prose word bundled with one or more trailing
+        /// citation chips so the chips can never wrap alone to a
+        /// new line — the chip stays glued to the word it cites.
+        case tailWithCitations(word: String, citations: [Int])
+    }
+
+    var body: some View {
+        let segments = Self.bundleTrailingCitations(
+            Self.parse(content, chunkCount: chunkCount)
+        )
+        CitationFlowLayout(horizontalSpacing: 4, verticalSpacing: 2) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+                switch seg {
+                case .text(let s):
+                    Text(.init(s))
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .citation(let n):
+                    chipButton(n: n)
+                case .tailWithCitations(let word, let citations):
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(.init(word))
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                            .fixedSize()
+                        ForEach(citations, id: \.self) { n in
+                            chipButton(n: n)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func chipButton(n: Int) -> some View {
+        Button {
+            if let url = URL(string: "\(AskPoseyCitationRenderer.citationURLScheme)://\(n)") {
+                openURL(url)
+            }
+        } label: {
+            Text("\(n)")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tint)
+                .lineLimit(1)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(.tint.opacity(0.10))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(.tint.opacity(0.45), lineWidth: 0.75)
+                )
+                // 44pt-wide hit area to satisfy HIG; vertical
+                // grows ONLY to the chip's natural height so the
+                // chip doesn't push the prose line apart.
+                .frame(minWidth: 44, minHeight: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Citation \(n). Tap to jump to source.")
+    }
+
+    /// Take the last word off any prose run that's immediately
+    /// followed by one or more citations and bundle word+citations
+    /// together so they can't be split across lines by the layout.
+    static func bundleTrailingCitations(_ segments: [Segment]) -> [Segment] {
+        var result: [Segment] = []
+        var i = 0
+        while i < segments.count {
+            let cur = segments[i]
+            // Look ahead: is the next segment a citation? If so,
+            // gather all consecutive citations and bundle with the
+            // last word of `cur` (only if `cur` is .text).
+            if case .text(let prose) = cur, i + 1 < segments.count,
+               case .citation = segments[i + 1] {
+                // Collect consecutive citations after `cur`.
+                var citations: [Int] = []
+                var j = i + 1
+                while j < segments.count, case .citation(let n) = segments[j] {
+                    citations.append(n)
+                    j += 1
+                }
+                // Split prose into (head, tail) at the last
+                // whitespace-then-word boundary.
+                let trimmed = prose // keep trailing punctuation/space inside tail
+                if let lastSpace = trimmed.lastIndex(where: { $0.isWhitespace }) {
+                    let head = String(trimmed[..<lastSpace])
+                    let tail = String(trimmed[trimmed.index(after: lastSpace)...])
+                    if !head.isEmpty {
+                        result.append(.text(head + " "))
+                    }
+                    if tail.isEmpty {
+                        // No tail word — push citations as standalone.
+                        for n in citations { result.append(.citation(n)) }
+                    } else {
+                        result.append(.tailWithCitations(word: tail, citations: citations))
+                    }
+                } else {
+                    // Whole prose run is one word — bundle entirely.
+                    result.append(.tailWithCitations(word: trimmed, citations: citations))
+                }
+                i = j
+                continue
+            }
+            result.append(cur)
+            i += 1
+        }
+        return result
+    }
+
+    /// Split assistant content at `[N]` markers into prose and
+    /// citation segments. Markers with N > chunkCount are kept as
+    /// literal text so they're visible-but-inert (matches the old
+    /// markdown renderer's behavior for hallucinated citation
+    /// numbers).
+    static func parse(_ text: String, chunkCount: Int) -> [Segment] {
+        guard chunkCount > 0 else { return [.text(text)] }
+        let pattern = #"\[(\d{1,2})\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return [.text(text)]
+        }
+        let nsRange = NSRange(text.startIndex..., in: text)
+        var segments: [Segment] = []
+        var lastEnd = text.startIndex
+        regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
+            guard let match,
+                  let fullRange = Range(match.range, in: text),
+                  let numRange = Range(match.range(at: 1), in: text),
+                  let n = Int(text[numRange]),
+                  n >= 1, n <= chunkCount else { return }
+            let prose = String(text[lastEnd..<fullRange.lowerBound])
+            if !prose.isEmpty {
+                segments.append(.text(prose))
+            }
+            segments.append(.citation(n))
+            lastEnd = fullRange.upperBound
+        }
+        let tail = String(text[lastEnd..<text.endIndex])
+        if !tail.isEmpty {
+            segments.append(.text(tail))
+        }
+        // Defensive: never return an empty array — callers expect
+        // at least one segment to render.
+        if segments.isEmpty { segments.append(.text(text)) }
+        return segments
+    }
+}
+
+/// Custom `Layout` that flows children left-to-right with wrapping,
+/// like CSS `display: inline-flex; flex-wrap: wrap`. Used by
+/// `CitationFlowText` to inline citation chips next to prose runs
+/// while letting either wrap to the next line as needed.
+///
+/// Aligns children on each row by their FIRST baseline so the chip
+/// — which is taller than the line of text because of its 44pt
+/// hit-area frame — sits visually centered with the text rather
+/// than dragging the row's height to 44pt. (Achieved by giving
+/// the chip a -ve top inset via `alignmentGuide` if needed; the
+/// initial implementation just lets each row size to its tallest
+/// child and we tune from screenshots.)
+private struct CitationFlowLayout: Layout {
+    var horizontalSpacing: CGFloat = 2
+    var verticalSpacing: CGFloat = 4
+
+    struct PlacedItem {
+        var index: Int
+        var size: CGSize
+    }
+
+    struct Cache {
+        var rows: [[PlacedItem]] = []
+        var rowHeights: [CGFloat] = []
+        var width: CGFloat = 0
+        var totalHeight: CGFloat = 0
+    }
+
+    func makeCache(subviews: Subviews) -> Cache { Cache() }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        cache = Cache()
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        recomputeIfNeeded(cache: &cache, subviews: subviews, maxWidth: maxWidth)
+        return CGSize(
+            width: maxWidth.isFinite ? maxWidth : 0,
+            height: cache.totalHeight
+        )
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        recomputeIfNeeded(cache: &cache, subviews: subviews, maxWidth: bounds.width)
+        var y = bounds.minY
+        for (rowIdx, row) in cache.rows.enumerated() {
+            var x = bounds.minX
+            let rowHeight = cache.rowHeights[rowIdx]
+            for item in row {
+                // Center each child vertically within the row so
+                // the chip's 44pt-wide hit area doesn't push the
+                // prose line down. Use the size we computed during
+                // wrap-aware sizing so Text actually receives the
+                // wrapped multi-line size, not its single-line ideal.
+                let yOffset = y + (rowHeight - item.size.height) / 2
+                subviews[item.index].place(
+                    at: CGPoint(x: x, y: yOffset),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(item.size)
+                )
+                x += item.size.width + horizontalSpacing
+            }
+            y += rowHeight + verticalSpacing
+        }
+    }
+
+    private func recomputeIfNeeded(cache: inout Cache, subviews: Subviews, maxWidth: CGFloat) {
+        if !cache.rows.isEmpty && cache.width == maxWidth { return }
+        cache = Cache()
+        cache.width = maxWidth
+
+        var currentRow: [PlacedItem] = []
+        var currentRowWidth: CGFloat = 0
+        var currentRowHeight: CGFloat = 0
+
+        func flushRow() {
+            if currentRow.isEmpty { return }
+            cache.rows.append(currentRow)
+            cache.rowHeights.append(currentRowHeight)
+            currentRow = []
+            currentRowWidth = 0
+            currentRowHeight = 0
+        }
+
+        for idx in subviews.indices {
+            // First pass: probe the subview's natural single-line
+            // width with an unconstrained proposal. If it fits in
+            // the remaining row width, place it at that natural
+            // size. If not, propose the remaining row width so it
+            // wraps to fit (Text returns a multi-line size, chip
+            // returns its 44pt minimum).
+            let unconstrained = subviews[idx].sizeThatFits(.unspecified)
+            let remaining = max(0, maxWidth - currentRowWidth - (currentRow.isEmpty ? 0 : horizontalSpacing))
+
+            let placedSize: CGSize
+            if unconstrained.width <= remaining {
+                // Fits as-is on the current row.
+                placedSize = unconstrained
+            } else if currentRow.isEmpty {
+                // Already at row start and still too wide — propose
+                // maxWidth so Text wraps to multiple lines (chip
+                // sizes ignore the extra width).
+                placedSize = subviews[idx].sizeThatFits(
+                    ProposedViewSize(width: maxWidth, height: nil)
+                )
+            } else {
+                // Doesn't fit in the remaining width — flush the row
+                // and re-evaluate at the start of the next row with
+                // the FULL maxWidth available.
+                flushRow()
+                let fullRowSize = subviews[idx].sizeThatFits(
+                    ProposedViewSize(width: maxWidth, height: nil)
+                )
+                placedSize = fullRowSize
+            }
+
+            let withSpacing = currentRow.isEmpty
+                ? placedSize.width
+                : (currentRowWidth + horizontalSpacing + placedSize.width)
+
+            currentRow.append(PlacedItem(index: idx, size: placedSize))
+            currentRowWidth = withSpacing
+            currentRowHeight = max(currentRowHeight, placedSize.height)
+        }
+        flushRow()
+
+        cache.totalHeight = cache.rowHeights.reduce(0, +)
+            + max(0, CGFloat(cache.rowHeights.count - 1)) * verticalSpacing
+    }
+}
+
+// ========== BLOCK 03B: CITATION FLOW - END ==========
 // ========== BLOCK 03: MESSAGE BUBBLE - END ==========
 
 

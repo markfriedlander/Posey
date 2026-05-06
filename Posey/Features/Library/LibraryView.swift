@@ -684,6 +684,82 @@ extension LibraryViewModel {
                 loadDocuments()
                 return json(["deleted": docs.count])
 
+            case "SEED_ASK_POSEY_FIXTURE":
+                // 2026-05-05 — Test-only verb. Seeds a fixture
+                // assistant turn into a document's persisted Ask
+                // Posey conversation so the simulator can exercise
+                // the rendering paths (citation chips, sources
+                // strip pill numbering, scroll behavior) WITHOUT
+                // needing AFM to be available — the simulator does
+                // not have AFM model assets in some configurations.
+                //
+                // Args: <doc-id>. The fixture is fixed: a short
+                // user question, then an assistant response that
+                // cites `[2][3]` (twice, adjacent each time) over
+                // a chunksInjected array of 3 entries with offsets
+                // 100/200/300 and decreasing relevance. Tap a chip
+                // → reader jumps to the chunk's startOffset; tap a
+                // sources-strip pill → same dispatch. Pill labels
+                // MUST read 2 and 3 to pass.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: SEED_ASK_POSEY_FIXTURE:<doc-id>"}"#
+                }
+                let docs2 = try databaseManager.documents()
+                guard docs2.first(where: { $0.id == id }) != nil else {
+                    return #"{"error":"Document not found"}"#
+                }
+                let now = Date()
+                let userTurn = StoredAskPoseyTurn(
+                    id: UUID().uuidString,
+                    documentID: id,
+                    timestamp: now.addingTimeInterval(-5),
+                    role: "user",
+                    content: "What questions does the book raise about colony structure and honey production?",
+                    invocation: "document",
+                    anchorOffset: nil,
+                    intent: "general",
+                    chunksInjectedJSON: "[]",
+                    fullPromptForLogging: nil,
+                    summaryOfTurnsThrough: 0,
+                    isSummary: false
+                )
+                let fixtureChunks: [[String: Any]] = [
+                    ["chunkID": 1001, "startOffset": 100, "text": "Front-matter blurb describing the book.", "relevance": 0.78],
+                    ["chunkID": 1002, "startOffset": 1200, "text": "A passage about the colony's queen and worker structure.", "relevance": 0.55],
+                    ["chunkID": 1003, "startOffset": 2400, "text": "A passage about nectar collection and honey production.", "relevance": 0.42]
+                ]
+                let chunksJSON: String = {
+                    if let data = try? JSONSerialization.data(withJSONObject: fixtureChunks),
+                       let s = String(data: data, encoding: .utf8) {
+                        return s
+                    }
+                    return "[]"
+                }()
+                let assistantTurn = StoredAskPoseyTurn(
+                    id: UUID().uuidString,
+                    documentID: id,
+                    timestamp: now,
+                    role: "assistant",
+                    content: "The book raises questions about how the colony coordinates work between the queen and workers,[2][3] and how nectar is converted into long-lasting honey through repeated regurgitation and evaporation.[2][3]",
+                    invocation: "document",
+                    anchorOffset: nil,
+                    intent: nil,
+                    chunksInjectedJSON: chunksJSON,
+                    fullPromptForLogging: "[seeded-fixture]",
+                    summaryOfTurnsThrough: 0,
+                    isSummary: false
+                )
+                try databaseManager.appendAskPoseyTurn(userTurn)
+                try databaseManager.appendAskPoseyTurn(assistantTurn)
+                return json([
+                    "seeded": true,
+                    "documentID": id.uuidString,
+                    "userTurnID": userTurn.id,
+                    "assistantTurnID": assistantTurn.id,
+                    "expectedPills": [2, 3],
+                    "chunksInjectedCount": 3
+                ])
+
             case "SET_EMBEDDING_PROVIDER":
                 // 2026-05-04 — Layer 2 benchmark verb. Args:
                 //   nlSentence | nlContextual | coreMLMiniLM

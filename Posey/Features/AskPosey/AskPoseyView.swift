@@ -167,32 +167,43 @@ struct AskPoseyView: View {
     /// (60ms + 180ms) which was added for the same reason.
     private func scrollToInitialAnchor(proxy: ScrollViewProxy) {
         let storageID = viewModel.initialScrollAnchorStorageID
-        // Scope the search by `storageID == storageID` predicate when
-        // we have one — `messages.first(where:)` instead of `last(where:)`
-        // because the storage id is unique and `.first` short-circuits.
+        // 2026-05-06 — On reopen, prior user/assistant turns should be
+        // VISIBLE to the user — Mark caught the previous behavior
+        // where the new invocation's anchor card sat at the top with
+        // all prior conversation scrolled off above, looking like a
+        // blank reopen. Now: when prior user/assistant turns exist,
+        // scroll to the LAST one (the most recent assistant reply)
+        // with `.bottom` anchor so it sits at the bottom of the
+        // visible area, with the prior thread visible above. The new
+        // anchor card lives below the visible area but is still
+        // reachable by scrolling down. When there's no prior thread
+        // (genuinely fresh conversation), scroll to the invocation
+        // anchor as before.
+        let priorTurn = viewModel.messages.last { msg in
+            msg.role == .user || msg.role == .assistant
+        }
         let target: AskPoseyMessage?
-        if let storageID {
+        let anchorPoint: UnitPoint
+        if let priorTurn {
+            target = priorTurn
+            anchorPoint = .bottom
+        } else if let storageID {
             target = viewModel.messages.first { msg in
                 msg.role == .anchor && msg.storageID == storageID
             }
+            anchorPoint = .top
         } else {
             target = viewModel.messages.last { $0.role == .anchor }
+            anchorPoint = .top
         }
         guard let target else { return }
         Task { @MainActor in
-            // Pass 1 — no animation, immediate. Forces the lazy stack
-            // to realize the target's enclosing region.
-            proxy.scrollTo(target.id, anchor: .top)
+            proxy.scrollTo(target.id, anchor: anchorPoint)
             try? await Task.sleep(for: .milliseconds(200))
-            // Pass 2 — still no animation. Catches the case where
-            // pass 1 only partially advanced realization (long
-            // threads with many anchors).
-            proxy.scrollTo(target.id, anchor: .top)
+            proxy.scrollTo(target.id, anchor: anchorPoint)
             try? await Task.sleep(for: .milliseconds(250))
-            // Pass 3 — smooth animated land for the user-visible
-            // settle.
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                proxy.scrollTo(target.id, anchor: .top)
+                proxy.scrollTo(target.id, anchor: anchorPoint)
             }
         }
     }

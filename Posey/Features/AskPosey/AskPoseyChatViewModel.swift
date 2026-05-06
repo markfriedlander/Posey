@@ -1854,7 +1854,8 @@ extension AskPoseyChatViewModel {
             // comma-separated phrases contains duplicates, collapse
             // the duplicates while preserving order.
             let depolished = AskPoseyPromptBuilder.stripPolishPreamble(metadata.finalText)
-            let stripped = AskPoseyPromptBuilder.dedupeRepeatedListItems(depolished)
+            let commaDeduped = AskPoseyPromptBuilder.dedupeRepeatedListItems(depolished)
+            let stripped = AskPoseyPromptBuilder.dedupeNumberedListItems(commaDeduped)
             guard let index = embeddingIndex,
                   !metadata.chunksInjected.isEmpty else { return stripped }
             let chunkRefs = metadata.chunksInjected.enumerated().map { (i, c) in

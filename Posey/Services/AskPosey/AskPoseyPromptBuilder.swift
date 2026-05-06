@@ -393,22 +393,28 @@ nonisolated enum AskPoseyPromptBuilder {
     finish patterns. Real lists in real documents have specific \
     items; making them up to look complete is fabrication.
 
-    6a. **DON'T HIT A NUMBER BY REPEATING.** If the user asks for \
+    6a. **DON'T HIT A NUMBER BY PADDING.** If the user asks for \
     a specific count ("the four things", "the three reasons") and \
     the document only contains M items where M ≠ N, give the M \
-    actual items and correct the count. NEVER pad to N by \
-    repeating an item, paraphrasing the same idea twice, or \
-    inventing filler. \
-    FAILED: question "what four things happen when you work in \
-    public?" when doc lists three → answer "the work gets better \
-    through outside critique, people you don't know catch errors, \
-    the work gets better through outside critique, and the work \
-    gets better through outside critique." (same item 3 times). \
+    actual items and CORRECT THE COUNT in your answer. NEVER pad \
+    to N by repeating an item, paraphrasing the same idea twice, \
+    or inventing a generic filler item to round up to the user's \
+    number. \
+    FAILED #1 (repetition): question "what four things happen \
+    when you work in public?" when doc lists three → answer "the \
+    work gets better through outside critique, people you don't \
+    know catch errors, the work gets better through outside \
+    critique, and the work gets better through outside critique." \
+    (same item 3 times). \
+    FAILED #2 (invention): same question → answer "1. The work \
+    gets better through outside critique. 2. You meet people who \
+    care. 3. You build a record. 4. You learn from the experience." \
+    where item 4 is invented to hit "four". \
     SUCCEEDED: "The document mentions three, not four: (1) the \
     work gets better through outside critique, (2) you meet \
     people who care about the same problems, (3) you build a \
-    record of how you think." Repeating a single item to satisfy \
-    a count is a form of fabrication.
+    record of how you think." Padding a list to satisfy a count \
+    — by repetition OR invention — is fabrication.
 
     5. **NEVER RECOMMEND.** If the user asks "should I read this?" \
     or "is this worth reading?" or "would you recommend this?" — \
@@ -954,6 +960,60 @@ extension AskPoseyPromptBuilder {
     /// sentence's comma-separated list, and the duplicates are
     /// at least 3 words long (so legitimate repetitions like
     /// "yes, yes" or "no, no" don't get collapsed).
+    /// 2026-05-06 — Catch numbered-list duplicate items. AFM
+    /// sometimes pads a numbered/bulleted list to satisfy a count
+    /// in the user's question by repeating an earlier item with
+    /// minor rewording. This pass walks list lines (lines beginning
+    /// with `N.` / `N)` / `- ` / `* ` / `•`) and drops any whose
+    /// content is a near-duplicate of an earlier list item.
+    /// Conservative: only fires inside a contiguous list section,
+    /// requires items >= 3 words, and uses normalized-text equality
+    /// (lowercased, punctuation stripped) so legitimate
+    /// near-duplicates that differ in substance survive.
+    static func dedupeNumberedListItems(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        // Identify list lines.
+        let listPattern = #"^\s*(\d+[.)]|[-*•])\s+(.+)$"#
+        guard let regex = try? NSRegularExpression(pattern: listPattern) else { return text }
+        func normalize(_ s: String) -> String {
+            let lowered = s.lowercased()
+            // Strip leading numbering and trailing punctuation.
+            var t = lowered.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Strip trailing period/comma.
+            while let last = t.last, ".,;:!?".contains(last) {
+                t.removeLast()
+            }
+            return t.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var output: [String] = []
+        var seen: Set<String> = []
+        for line in lines {
+            let nsLine = line as NSString
+            if let match = regex.firstMatch(in: line, range: NSRange(location: 0, length: nsLine.length)),
+               match.numberOfRanges >= 3 {
+                let body = nsLine.substring(with: match.range(at: 2))
+                let key = normalize(body)
+                let wordCount = key.split(whereSeparator: { $0.isWhitespace }).count
+                if wordCount >= 3 {
+                    if seen.contains(key) {
+                        // Drop duplicate list line entirely.
+                        continue
+                    }
+                    seen.insert(key)
+                }
+            } else if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Blank line — reset seen set so duplicates across
+                // separate lists don't false-positive.
+                seen.removeAll()
+            } else {
+                // Prose line outside a list — also reset.
+                seen.removeAll()
+            }
+            output.append(line)
+        }
+        return output.joined(separator: "\n")
+    }
+
     static func dedupeRepeatedListItems(_ text: String) -> String {
         var result: [String] = []
         // Split into sentences on .!? followed by space or end.

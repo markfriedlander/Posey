@@ -167,36 +167,26 @@ struct AskPoseyView: View {
     /// (60ms + 180ms) which was added for the same reason.
     private func scrollToInitialAnchor(proxy: ScrollViewProxy) {
         let storageID = viewModel.initialScrollAnchorStorageID
-        // 2026-05-06 — On reopen, prior user/assistant turns should be
-        // VISIBLE to the user — Mark caught the previous behavior
-        // where the new invocation's anchor card sat at the top with
-        // all prior conversation scrolled off above, looking like a
-        // blank reopen. Now: when prior user/assistant turns exist,
-        // scroll to the LAST one (the most recent assistant reply)
-        // with `.bottom` anchor so it sits at the bottom of the
-        // visible area, with the prior thread visible above. The new
-        // anchor card lives below the visible area but is still
-        // reachable by scrolling down. When there's no prior thread
-        // (genuinely fresh conversation), scroll to the invocation
-        // anchor as before.
-        let priorTurn = viewModel.messages.last { msg in
-            msg.role == .user || msg.role == .assistant
-        }
+        // 2026-05-06 (revised) — Per Mark: the new invocation's
+        // anchor MUST be visible without scrolling. It frames the
+        // user's next question and tells them what passage they're
+        // asking about. Prior conversation is secondary and remains
+        // accessible by scrolling up.
+        //
+        // Scroll the anchor to .top of the viewport. Above the anchor
+        // (off-screen) sits prior conversation — the user scrolls up
+        // to see it. Below the anchor is empty space (until they ask)
+        // and the composer pinned at the bottom of the sheet.
         let target: AskPoseyMessage?
-        let anchorPoint: UnitPoint
-        if let priorTurn {
-            target = priorTurn
-            anchorPoint = .bottom
-        } else if let storageID {
+        if let storageID {
             target = viewModel.messages.first { msg in
                 msg.role == .anchor && msg.storageID == storageID
             }
-            anchorPoint = .top
         } else {
             target = viewModel.messages.last { $0.role == .anchor }
-            anchorPoint = .top
         }
         guard let target else { return }
+        let anchorPoint: UnitPoint = .top
         Task { @MainActor in
             proxy.scrollTo(target.id, anchor: anchorPoint)
             try? await Task.sleep(for: .milliseconds(200))

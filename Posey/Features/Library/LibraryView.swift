@@ -1623,6 +1623,18 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "SCROLL_ASK_POSEY_TO_LATEST":
+                // 2026-05-05 — Bring the most recent assistant message
+                // into view in the open Ask Posey sheet, so the test
+                // harness can screenshot the chips + SOURCES strip
+                // when the conversation is taller than the visible
+                // sheet area. AskPoseyView observes the notification
+                // and runs a three-pass scrollTo(.bottom).
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteScrollAskPoseyToLatest, object: nil)
+                }
+                return json(["status": "posted"])
+
             case "CREATE_BOOKMARK":
                 // CREATE_BOOKMARK:<docID>:<offset>
                 guard let parts = arg?.split(separator: ":", maxSplits: 1).map(String.init),

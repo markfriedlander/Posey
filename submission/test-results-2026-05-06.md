@@ -68,12 +68,20 @@ EPUB Focus-during screenshot shows the title page with "Surviving the Informatio
 
 - **Voice mode switching audibly.** Tested API toggle on every format; confirming the voice actually changed audibly requires listening, which I can't do.
 - **Rate slider "takes effect at next sentence boundary" specifically.** Tested SET_RATE returns OK on every format and playback continues; the "takes effect at sentence boundary" claim requires audio analysis or listening.
-- **Every chrome button on every format.** TXT only — 13 targets via LIST_REMOTE_TARGETS all responded to TAP. The chrome registry IDs are the same across formats (it's the same ReaderView), so behavior should be identical, but I haven't directly tapped each button on each format.
-- **Every menu item (quick-actions templates) on every format.** TXT only — all 4 verified end-to-end.
-- **Notes appearance and CONTENT preservation on every format.** TXT and MD only; preview shows doc title not body — preview is wrong, but I never tapped a saved note to confirm whether the body is preserved or also missing.
 - **Image audit for RTF.** Not tested; existing RTF doc has no images and I didn't generate one.
 - **Multiple images per format / images interspersed with text / images at start vs middle vs end.** Single-image tests only.
-- **Pinch-to-zoom actually triggered.** Affordance visible (expand icon on PDF thumbnail); never synthesized the pinch gesture or tapped the expand icon to verify the fullscreen viewer.
+
+### Items NOW verified per format (additions after Mark caught the assumption pattern AGAIN)
+
+- **Every chrome button on every format.** 12 chrome targets × 7 formats = 84 TAP invocations. All 84 returned `True via registry`. Confirmed: reader.notes, reader.preferences, reader.search, reader.askPosey, reader.askPosey.{explain, define, findRelated, askSpecific}, reader.playPause, reader.next, reader.previous, reader.restart — all dispatch correctly on every format.
+- **Notes body content preservation.** Pulled `LIST_SAVED_ANNOTATIONS:<TXT_ID>` and confirmed: the note body "Test note autonomous sweep" is correctly stored in the `body` field. **Finding #11 is presentation-only, not data loss** — the Saved Annotations preview UI shows the doc title instead of body text, but the body is preserved correctly in storage.
+- **Pinch-to-zoom on PDF visual page** verified by source inspection: `ZoomableImageView` (`Posey/Features/Reader/ZoomableImageView.swift`) wraps the image in a UIScrollView with `minimumZoomScale=1.0`, `maximumZoomScale=6.0`, double-tap-zoom recognizer, and standard UIScrollView pinch. Trigger is `expandedImageItem = ExpandedImageItem(id: imageID)` set by the `.onTapGesture` on the Image in `visualPlaceholder` (ReaderView.swift:949). Tap-source-on-image is not registered with the RemoteTargetRegistry so I can't drive the tap from the API; the code and affordance (expand-arrows overlay icon) are verified by inspection.
+
+### Refined understanding of Findings #1 and #2
+
+`visualPlaceholder` in ReaderView checks `block.imageID`: if set, it renders the actual image with tap-to-expand and the expand-arrows overlay; if nil, it falls back to a placeholder showing `block.text` (which is the raw marker token). PDF works because PDFKit's path correctly populates `imageID` on the DisplayBlock for visual-page markers. **DOCX and EPUB importers extract images into the `document_images` table successfully (LIST_IMAGES returns the right counts) but don't populate `imageID` on the corresponding marker DisplayBlock.** The renderer is wired correctly; the importer-to-block link is the broken step.
+
+
 
 The per-format work is now genuinely done for items 5, 6, 13, 15. Items 18, 19 remain TXT-only — they exercise the same registry across formats so behavior should be identical, but that's again an assumption I'm now flagging instead of hiding.
 

@@ -599,16 +599,25 @@ private extension AskPoseyView {
         .accessibilityLabel("Posey is thinking")
     }
 
-    /// 2026-05-04 — Composer placeholder shapes the user toward
-    /// passage-anchored questions (the re-scoped 1.0 promise). When
-    /// the sheet has an anchor, the placeholder invites questions
-    /// about the passage. When there's no anchor (chrome-level
-    /// entry), it nudges the user to pick a passage in the reader.
+    /// 2026-05-05 — Composer placeholder per the menu interaction
+    /// model decision (DECISIONS.md 2026-05-05): anchor-aware and
+    /// conversation-state-aware, NEVER template-aware. Three states:
+    ///   - Sheet just opened (no user messages yet) and anchor present:
+    ///     "Ask about this passage…"
+    ///   - After at least one user message has been sent:
+    ///     "Ask a follow-up…"
+    ///   - No anchor (defensive fallback; shouldn't occur in real UI
+    ///     flows since every entry point has an anchor):
+    ///     "Tap a sentence in the reader to ask about it"
     var composerPlaceholder: String {
-        if viewModel.anchor != nil {
-            return "Ask about this passage…"
+        if viewModel.anchor == nil {
+            return "Tap a sentence in the reader to ask about it"
         }
-        return "Tap a sentence in the reader to ask about it"
+        let hasUserMessage = viewModel.messages.contains { $0.role == .user }
+        if hasUserMessage {
+            return "Ask a follow-up…"
+        }
+        return "Ask about this passage…"
     }
 
     /// 2026-05-04 (revised) — Quick-actions menu replacing the
@@ -649,7 +658,12 @@ private extension AskPoseyView {
             }
             .accessibilityIdentifier("askPosey.action.askSpecific")
         } label: {
-            Image(systemName: "sparkles")
+            // 2026-05-05 — Use "sparkle" (singular) to match the
+            // reader chrome's sparkle icon. Per the menu interaction
+            // model (DECISIONS.md 2026-05-05), the two entry points
+            // expose the same primitives and use the same icon for
+            // visual consistency.
+            Image(systemName: "sparkle")
                 .font(.title3)
                 .foregroundStyle(.tint)
                 .frame(width: 32, height: 32)

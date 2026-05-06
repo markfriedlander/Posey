@@ -1,6 +1,8 @@
+import AVFoundation
 import Combine
 import NaturalLanguage
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 #if canImport(FoundationModels)
@@ -1623,6 +1625,73 @@ extension LibraryViewModel {
                     NotificationCenter.default.post(name: .remoteDismissPresentedSheet, object: nil)
                 }
                 return json(["status": "posted"])
+
+            case "SIMULATE_BACKGROUND":
+                // Post UIApplication.didEnterBackground/willEnterForeground
+                // notifications + transition the active scene's state.
+                // Lets the test harness verify that playback continues
+                // through a backgrounding event (Lock-screen-equivalent
+                // — Apple doesn't allow programmatic device locking,
+                // but the playback path that matters is the same:
+                // does AVSpeechSynthesizer keep speaking when the app
+                // is backgrounded, with audio session in playback
+                // category? Arg: optional duration in ms (default
+                // 4000) to stay backgrounded before re-foregrounding.
+                let parts = arg?.split(separator: ":").map(String.init) ?? []
+                let durationMs = (parts.first.flatMap(Int.init)) ?? 4000
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: UIApplication.didEnterBackgroundNotification,
+                        object: nil
+                    )
+                }
+                try? await Task.sleep(for: .milliseconds(durationMs))
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: UIApplication.willEnterForegroundNotification,
+                        object: nil
+                    )
+                }
+                return json(["status": "cycled", "durationMs": durationMs])
+
+            case "LIST_AUDIO_EXPORTS":
+                // List exported audio files in the app's documents
+                // directory so the test harness can verify
+                // EXPORT_AUDIO produced a file. Returns name + size +
+                // duration for each.
+                let fm = FileManager.default
+                guard let docsDir = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                    return json(["error": "documents dir unavailable"])
+                }
+                let exportsDir = docsDir.appendingPathComponent("AudioExports", isDirectory: true)
+                guard fm.fileExists(atPath: exportsDir.path) else {
+                    return json(["count": 0, "files": [] as [String]])
+                }
+                let urls = (try? fm.contentsOfDirectory(at: exportsDir, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles])) ?? []
+                var files: [[String: Any]] = []
+                for url in urls {
+                    let attrs = (try? fm.attributesOfItem(atPath: url.path)) ?? [:]
+                    let size = (attrs[.size] as? Int) ?? 0
+                    var entry: [String: Any] = [
+                        "name": url.lastPathComponent,
+                        "path": url.path,
+                        "size": size
+                    ]
+                    let asset = AVURLAsset(url: url)
+                    if let duration = try? await asset.load(.duration) {
+                        entry["durationSeconds"] = duration.seconds
+                    }
+                    files.append(entry)
+                }
+                return json(["count": files.count, "files": files])
+
+            case "GET_READER_STATE_FULL":
+                // Comprehensive snapshot of the live reader state +
+                // playback state. Aggregates everything READER_STATE
+                // returns plus playback info from the
+                // RemoteControlState.
+                let snap = await MainActor.run { RemoteControlState.shared.snapshot() }
+                return json(snap)
 
             case "LOGS":
                 // LOGS, LOGS:<limit>, LOGS:<limit>:<sinceEpochMs>

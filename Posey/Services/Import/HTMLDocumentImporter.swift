@@ -78,9 +78,23 @@ struct HTMLDocumentImporter {
 
         let attributedString: NSAttributedString
         do {
+            // 2026-05-06 — Explicit UTF-8 character encoding. Without
+            // this, NSAttributedString HTML parsing defaults to
+            // Windows-1252 when the HTML has no `<meta charset>`
+            // declaration, causing UTF-8 multi-byte sequences (e.g.
+            // em-dash 0xE2 0x80 0x94) to be misread as Latin-1 and
+            // surface as mojibake like "â€"" in the rendered text.
+            // The Field Notes on Estuaries article exhibited this:
+            // "the surface â€" the sailboats" instead of "the surface
+            // — the sailboats". Forcing UTF-8 fixes it because every
+            // path that loads HTML data above goes through
+            // String(data:encoding: .utf8) first.
             attributedString = try NSAttributedString(
                 data: markedData,
-                options: [.documentType: NSAttributedString.DocumentType.html],
+                options: [
+                    .documentType: NSAttributedString.DocumentType.html,
+                    .characterEncoding: NSNumber(value: String.Encoding.utf8.rawValue)
+                ],
                 documentAttributes: nil
             )
         } catch {

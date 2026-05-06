@@ -1,5 +1,25 @@
 # Posey History
 
+## 2026-05-06 (afternoon) — Pre-Release Parity Punch List #1: RTF TOC navigation
+
+Closed Tier 1 #1 of the 17-item parity punch list. RTF documents now produce a populated Table of Contents from heading-styled paragraphs.
+
+**The problem.** RTF was the only structured format Posey supported with no TOC. The first attempt was to read NSAttributedString font attributes after parsing — that works on macOS (verified by an offline probe) but does NOT work on iOS: NSAttributedString-from-RTF on iOS yields a single attribute span with no `.font` set, even though the cleanly-extracted plaintext is correct. iOS's RTF text-system parser drops style information that macOS preserves.
+
+**The fix.** A focused RTF tokenizer at `Posey/Services/Import/RTFDocumentImporter.swift` (Block 5) walks the raw RTF bytes directly, tracks per-character `\fs` (font size in half-points) and `\b` (bold) state, splits on `\par`, and emits `(text, dominantSize, dominantBold)` per paragraph. NSAttributedString is still used for clean plaintext extraction. The two are joined: heading paragraphs get matched into the normalized plaintext via forward-only prefix search, and their offsets persist as `StoredTOCEntry` rows.
+
+Three nontrivial pitfalls in the tokenizer surfaced and got fixed during testing on device:
+- Skip-group exit used `<` where `<=` is correct; without that, every `{\fonttbl...}` swallowed the rest of the document.
+- Style state at `\par` was post-formatting-reset, not the formatting active during the paragraph's text. Fix: track per-character (size, bold) and pick the dominant style when the paragraph flushes — required because Word writes `\fs48\b Chapter One\b0\fs24\par` with the reset BEFORE the paragraph break.
+- Bold-only fallback for headings flooded the candidates on Word RTFs that mark body text as bold via style-table references our tokenizer doesn't resolve. Dropped the fallback; rely solely on `font_size ≥ 1.15× body_size`. Robust on the test corpus.
+
+**Verification.**
+- Synthetic RTF (`/tmp/posey-rtf-test.rtf`): 4 expected headings detected, offsets exactly match the macOS NSAttributedString reference (58 / 204 / 313 / 426).
+- Real-world `AI Book Collaboration Project.rtf` (148k chars): 91 TOC entries with sensible titles ("Demystifying the Machine: A Collaborative Exploration...", "Embracing Collaboration", "Mark Friedlander: Your Humble Moderator", "Chapter 1: What is AI?", ...).
+- Real-world `Ch1 What is artificial intelligence.rtf`: 7 entries (the question + 6 model-round headings).
+- `READER_GOTO` to TOC offset 1509 lands directly on the highlighted "Chapter 1: What is AI?" sentence — verified via SCREENSHOT on the connected iPhone.
+- Simulator: same build installs and runs (verification path is platform-agnostic Swift code; the iOS-specific bug was the NSAttributedString font-attribute loss the new tokenizer sidesteps).
+
 ## 2026-05-06 — Submission day: 7-item punch list closed
 
 Mark's submission-day list, in priority order. Each item fixed, deployed to phone, verified via screenshot or device test before moving on. CLAUDE.md two-rules in effect (search before failing twice; two pieces of hardware + screenshots before commit).

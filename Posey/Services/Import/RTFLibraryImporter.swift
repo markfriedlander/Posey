@@ -12,26 +12,32 @@ struct RTFLibraryImporter {
     }
 
     func importDocument(from url: URL) throws -> Document {
-        let plainText = try textLoader.loadText(from: url)
+        let parsed = try textLoader.loadDocument(from: url)
         return try importNormalizedDocument(
             title: url.deletingPathExtension().lastPathComponent,
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
-            plainText: plainText
+            plainText: parsed.plainText,
+            headings: parsed.headings
         )
     }
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "rtf") throws -> Document {
-        let plainText = try textLoader.loadText(fromData: rawData)
+        let parsed = try textLoader.loadDocument(fromData: rawData)
         return try importNormalizedDocument(
             title: title,
             fileName: fileName,
             fileType: fileType,
-            plainText: plainText
+            plainText: parsed.plainText,
+            headings: parsed.headings
         )
     }
 
-    private func importNormalizedDocument(title: String, fileName: String, fileType: String, plainText: String) throws -> Document {
+    private func importNormalizedDocument(title: String,
+                                          fileName: String,
+                                          fileType: String,
+                                          plainText: String,
+                                          headings: [RTFDocumentImporter.RTFHeadingEntry]) throws -> Document {
         let now = Date()
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
@@ -53,11 +59,19 @@ struct RTFLibraryImporter {
 
         try databaseManager.upsertDocument(document)
 
+        // 2026-05-06 — Persist heading-styled paragraphs as TOC entries
+        // (parity item #1). Only insert if at least one heading was found.
+        if !headings.isEmpty {
+            let stored = headings.enumerated().map { (idx, h) in
+                StoredTOCEntry(title: h.title, plainTextOffset: h.plainTextOffset, playOrder: idx + 1)
+            }
+            try databaseManager.insertTOCEntries(stored, for: document.id)
+        }
+
         if existingDocument == nil {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
 
-        // Ask Posey embedding index — best-effort (logs on failure).
         embeddingIndex?.enqueueIndexing(document)
 
         return document

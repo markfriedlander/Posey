@@ -1,5 +1,41 @@
 # Posey History
 
+## 2026-05-05 (very late evening) — Ask Posey: HIG-compliant chip renderer + autonomous visual verification
+
+Replaces the bracketed-text-link experiment from earlier in the night with a real chip view that's actually verifiable without Mark's eyes. Three regressions Mark caught in his screenshot review now have pixel-level evidence, not arguments.
+
+**Renderer rewrite.** Assistant messages with inline citations now render via a custom `CitationFlowText` + `CitationFlowLayout` instead of `Text(.init(markdown))`. Content is split into prose segments and citation chip segments; each chip is a real SwiftUI `Button` with a 44pt-wide invisible hit area (HIG minimum) wrapped around a visually small (~22×18pt) rounded-rect chip. To prevent chips from wrapping to a new line alone, each citation is bundled with the LAST WORD of the preceding prose run — so `workers,[2][3]` and `evaporation.[2][3]` stay glued together on the same line as their cited claim. `CitationFlowLayout` is a custom SwiftUI Layout doing wrap-aware sizing so multi-line Text doesn't get clipped (the bug that initially showed prose cut off mid-sentence).
+
+**Pill labels** (separate fix from earlier) keep matching the `[N]` markers in the response — `citedChunks(in:)` returns `[CitedSource]` carrying the original 1-indexed citation number and the strip renders that, not the position in the filtered array.
+
+**Three-pass scroll** (80/180/220ms) for short messages unchanged.
+
+**Autonomous visual verification — new test surface.** Added `SEED_ASK_POSEY_FIXTURE:<doc-id>` local-API verb that seeds a fixture user/assistant turn pair with citations `[2][3]` (twice, adjacent) over 3 chunks. Lets the simulator exercise the rendering paths without needing AFM model assets — which the booted simulator on this Mac does not have. This unblocks the "drive the simulator end-to-end and screenshot" loop that's central to the standing CLAUDE.md QA practice.
+
+**Pixel-verified outcomes** (simulator screenshot `/tmp/sim-14.png`):
+- SOURCES strip pills labeled `2 ◐ 3 ◐` matching the citation numbers in the body, not renumbered to 1/2.
+- Adjacent `[2]` `[3]` chips are visually distinct, no fusing.
+- Each chip is a real Button with 44pt hit area (a11y tree confirmed: "Citation 2. Tap to jump to source." / "Citation 3. Tap to jump to source." as custom actions on the bubble).
+- Prose flows inline with chips, no overflow, no mid-sentence truncation.
+
+The earlier commit `bdfe743` that shipped a bracketed-text-link version Mark hadn't agreed to is superseded by `bb8d718`.
+
+**Process note.** Earlier in this session I marked these bugs "completed" based on code review and a data-side API check, with no pixels verified on any platform. Mark caught it. The fix isn't a promise — it's the seed endpoint plus the standing rule that nothing leaves my hands marked done until a screenshot proves it.
+
+## 2026-05-05 (late evening) — Ask Posey: bracketed citation chips, correct pill labels, robust scroll
+
+Three regressions Mark caught in his post-Phase-1 screenshot review, all fixed in `AskPoseyView.swift`.
+
+**1. Pill numbering must match citation numbers.** `citedChunks(in:)` previously returned `[RetrievedChunk]` and the strip used `index + 1` from the filtered array — so a response citing `[4][6]` produced pills labeled `1, 2`. Now returns `[CitedSource]` carrying the original 1-indexed citation number from the response text; pills render that number directly. Order-preserving dedup so duplicate citations don't double up.
+
+**2. Citation chips replace superscript `[ⁿ]`.** Two related problems with the old superscript renderer: (a) `⁴⁶` for `[4][6]` reads as the number 46 — Mark caught this and called it confusing; (b) ~10pt glyph tap target (well below HIG 44pt) caused him to miss the tap 2-3 times in a row. Renderer now emits `[\[N\]](posey-cite://N)` — escaped brackets inside markdown link text. `AttributedString(markdown:)` parses this as a link with display text `[N]` and URL `posey-cite://N` (verified by standalone Swift). Body-size font gives a real tap target, brackets are visual separators, and a U+200A hair space is injected between adjacent chips so they never collide. `stripCitationMarkup` (clipboard copy) strips both the new bracketed form and the legacy superscript form so older messages already in the DB still copy clean.
+
+**3. Three-pass scroll-to-top for short messages.** Single-pass 60ms scrollTo was no-op'ing on short user messages because the LazyVStack hadn't realized the row by the time the proxy looked it up. Now uses the same 80ms / 180ms / 220ms three-pass pattern as `scrollToInitialAnchor` — pass 1 forces lazy realization, pass 2 catches partial realization, pass 3 animates the user-visible settle. Branch by length unchanged: short → user msg at top, long → typing indicator near top.
+
+**Verification gap.** Phone-side data validated via local API: a question that made AFM emit `[2][3]` returned `chunksInjected` with positions 2 and 3 matching, so the new strip will display pills `2` and `3`. End-to-end visual on the iOS 26 simulator was blocked — booted simulator has no AFM model assets (`com.apple.modelcatalog Code=5000 "There are no underlying assets"`), so the citation/pill flow can't be exercised there. Phone visual sweep still owed by Mark.
+
+Commit `bdfe743`.
+
 ## 2026-05-05 (evening) — Phase B: progressive background per-chunk contextual enhancement
 
 Anthropic's contextual-retrieval pattern, on-device, with Mark's progressive-enhancement design layered on top. Documents get smarter over time as the user reads. AFM generates a 1-2 sentence "context note" per content chunk; the prepended note + chunk text gets re-embedded; the chunk's vector lands closer to the queries it should match. Reported 49% retrieval-failure reduction in Anthropic's published benchmarks; on-device with AFM the same shape but with refusal-handling we built in.

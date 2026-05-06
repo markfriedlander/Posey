@@ -4,6 +4,43 @@
 
 ---
 
+## Two Standing Rules — Read Before Anything Else
+
+These two rules came out of a long, painful session on 2026-05-05 where I burned hours of Mark's time guessing at solutions and shipping commits that weren't actually verified. Both are non-negotiable. Both apply on every change, every session, every task.
+
+### Rule 1 — Search Before You Fail Twice
+
+If you don't know how to solve something, **search the web for the proven pattern before your second failed attempt**. Do not write a third guess. Do not iterate on your own intuition past the second attempt. The second failure is the signal that you don't know the answer; the response is to find it, not to keep guessing.
+
+This applies to:
+- SwiftUI / UIKit / iOS framework behavior you're not 100% certain on (scroll behavior, layout, gestures, lifecycle, observable propagation, etc.)
+- Apple framework usage (AVFoundation, FoundationModels, NaturalLanguage, PDFKit, etc.)
+- Common UX patterns other apps have already solved (chat scrolling, citation rendering, message lists, transitions)
+- Any "I think this is how it works" hunch that turns out to be wrong once
+
+The pattern that triggered this rule: I tried five different scroll-on-send fixes in a row (three-pass timing tweaks, character-count branches, anchor-y heuristics, force nil-then-reassign, inline trailing Color.clear spacers) before Mark made me web-search. The proven answer (`.contentMargins(.bottom, viewportHeight, for: .scrollContent)` paired with watching the latest user-message ID instead of `messages.count`) was documented in WWDC23 and every public SwiftUI chat tutorial. I should have found it after attempt #2.
+
+The cost of one extra web search is seconds. The cost of three more wrong commits is the rest of Mark's evening.
+
+### Rule 2 — Two Pieces of Hardware, Two Screenshots, Before You Commit
+
+Do not commit any change that touches user-visible behavior until you have:
+
+1. **Run the change on at least two pieces of hardware** — typically the connected iPhone AND the iOS Simulator (or Mac Catalyst when available). Don't ship a fix that only worked on one. Different runtimes hit different layout, timing, and lifecycle code paths; "works on the simulator" has never meant "works on the phone."
+2. **Captured a screenshot from each piece of hardware** showing the change behaving correctly. Use the `SCREENSHOT` local-API verb on the phone (returns base64 PNG; decode and view it). Use the simulator MCP screenshot tool on the simulator. **You must look at both images** and confirm the behavior matches the spec before you stage the commit.
+3. **Verified that the screenshot shows the behavior actually working**, not just that the app didn't crash. If the change is "user message scrolls to top on send," the screenshot must show the user message at the top with prior content scrolled off above. "I see a sheet" is not verification.
+
+The specific anti-pattern this rule kills:
+- Editing code, running `/ask` (data API), seeing JSON come back, assuming the UI rendered correctly, and committing.
+- Verifying on simulator only because the simulator can run AFM today (it can't on this machine, but even if it could) and skipping the phone.
+- Calling a fix "verified" because the build succeeded.
+
+If the local API is missing a verb you need to drive the test (e.g., couldn't fire scroll-on-send via the API → couldn't screenshot the result), **add the verb first**, then test, then commit. Don't commit "I think this works" code because the test loop is inconvenient.
+
+If a change genuinely doesn't touch user-visible behavior (pure refactor of internal types, comment-only changes, doc updates), Rule 2 doesn't apply — but be honest with yourself about what "user-visible" means. A change to a view model is user-visible. A change to a layout helper is user-visible. A change to a data structure that any view reads is user-visible.
+
+---
+
 ## Three Hats — Developer, QA, and User
 
 Before declaring any feature or milestone done, you must wear three hats — not just one. This applies to every feature on this project, not just Ask Posey.

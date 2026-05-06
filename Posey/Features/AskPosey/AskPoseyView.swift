@@ -83,35 +83,47 @@ struct AskPoseyView: View {
         guard let target = viewModel.messages.last(where: { $0.role == .user }) else {
             return
         }
+        // 2026-05-05 (revised) — Three-pass scroll matching
+        // scrollToInitialAnchor's pattern. The previous single-pass
+        // 60ms attempt did not reliably move the user's question to
+        // the top on short answers — Mark reported "scroll doesnt
+        // work" repeatedly. The LazyVStack realises rows lazily and
+        // a single scrollTo on a target far below the natural top
+        // can no-op when the proxy can't find the row's frame.
+        // Pass 1 forces realization, pass 2 catches partial
+        // realization, pass 3 animates the user-visible settle.
+        //
+        // Branch by length: short messages anchor the user's bubble
+        // to the very top so the question stays in view; long
+        // messages anchor the typing indicator near the top so the
+        // streaming response is what's visible while the user's
+        // question sits scrolled-up just above.
+        let isLong = target.content.count >= 250
+        let anchor: UnitPoint = isLong ? UnitPoint(x: 0.5, y: 0.12) : .top
+        // The LazyVStack rows use `.id(message.id)` (UUID value);
+        // the typing-indicator uses `.id(typingIndicatorID)` (String).
+        // ScrollViewProxy keys by the original Hashable identity, so
+        // we have to dispatch by type — passing UUID.uuidString to a
+        // UUID-keyed row silently no-ops.
+        let doScroll: () -> Void = {
+            if isLong {
+                proxy.scrollTo(Self.typingIndicatorID, anchor: anchor)
+            } else {
+                proxy.scrollTo(target.id, anchor: anchor)
+            }
+        }
+
         Task { @MainActor in
-            // Brief delay so the LazyVStack realises the new row
-            // before scrollTo runs — otherwise the proxy can't find
-            // the id and the scroll silently no-ops.
-            try? await Task.sleep(for: .milliseconds(60))
-            // 2026-05-05 — Item 5 scroll behavior. Decide between
-            // short-message and long-message modes via character-
-            // count heuristic. Earlier attempt used GeometryReader
-            // measurement (more correct per the brief's "calculated
-            // dynamically" line) but the .background(GeometryReader)
-            // on user bubbles broke scroll position resolution
-            // (likely lazy-realization race or row-identity
-            // invalidation). The heuristic is a strict step back to
-            // working-but-approximate; can be upgraded later if
-            // ScrollView geometry observation can be made
-            // non-interfering.
-            //   ~250 chars ≈ 5–7 lines on iPhone, ≈ 40% of typical
-            //   sheet viewport. Short → user msg at top of viewport.
-            //   Long → typing indicator ~12% down, msg bottom above.
-            let isLong = target.content.count >= 250
-            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.20)) {
-                if isLong {
-                    proxy.scrollTo(
-                        Self.typingIndicatorID,
-                        anchor: UnitPoint(x: 0.5, y: 0.12)
-                    )
-                } else {
-                    proxy.scrollTo(target.id, anchor: .top)
-                }
+            // Pass 1 — immediate, forces lazy realization.
+            try? await Task.sleep(for: .milliseconds(80))
+            doScroll()
+            // Pass 2 — catches partial realization.
+            try? await Task.sleep(for: .milliseconds(180))
+            doScroll()
+            // Pass 3 — smooth animated settle.
+            try? await Task.sleep(for: .milliseconds(220))
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) {
+                doScroll()
             }
         }
     }
@@ -403,14 +415,25 @@ private struct BubbleSelectionAndCopy: ViewModifier {
     }
 
     /// Strip the markdown link wrappers around inline citation
-    /// markers so the copied text reads naturally — `Foo[ⁿ](posey-cite://1)`
-    /// becomes `Foo` (the superscript was UI affordance, not part
-    /// of the answer the user wants in their clipboard).
+    /// markers so the copied text reads naturally — `Foo[\[1\]](posey-cite://1)`
+    /// becomes `Foo` (the chip was UI affordance, not part of
+    /// the answer the user wants in their clipboard). Also strips
+    /// the U+200A hair spaces inserted between adjacent chips.
     private func stripCitationMarkup(_ s: String) -> String {
-        let pattern = #"\[[¹²³⁴⁵⁶⁷⁸⁹⁰]+\]\(posey-cite://\d+\)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return s }
-        let range = NSRange(s.startIndex..., in: s)
-        return regex.stringByReplacingMatches(in: s, range: range, withTemplate: "")
+        // Bracketed `[\[N\]](posey-cite://N)` form (current).
+        let pattern = #"\\?\[\\?\[\d{1,2}\\?\]\\?\]\(posey-cite://\d+\)"#
+        // Legacy superscript form (older messages already in DB).
+        let legacy = #"\[[¹²³⁴⁵⁶⁷⁸⁹⁰]+\]\(posey-cite://\d+\)"#
+        var out = s
+        for p in [pattern, legacy] {
+            if let regex = try? NSRegularExpression(pattern: p) {
+                let range = NSRange(out.startIndex..., in: out)
+                out = regex.stringByReplacingMatches(in: out, range: range, withTemplate: "")
+            }
+        }
+        // Remove hair-space separators inserted between adjacent chips.
+        out = out.replacingOccurrences(of: "\u{200A}", with: "")
+        return out
     }
 }
 
@@ -962,13 +985,23 @@ private extension AskPoseyView {
     /// sheet and jumps the reader to the chunk's offset (when
     /// `onJumpToChunk` is wired). Spec'd in
     /// `ask_posey_spec.md` "Source Attribution".
-    func sourcesStrip(for chunks: [RetrievedChunk]) -> some View {
+    /// A chunk that AFM cited in its response, paired with the
+    /// 1-indexed citation number that appeared in the prompt and
+    /// in the rendered response text. The label rendered in the
+    /// sources strip MUST match this number so the strip aligns
+    /// 1:1 with the inline `[N]` markers in the answer body.
+    struct CitedSource {
+        let citationNumber: Int   // matches `[N]` in the response text
+        let chunk: RetrievedChunk
+    }
+
+    func sourcesStrip(for sources: [CitedSource]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 14) {
                 Text("SOURCES")
                     .font(.caption2.smallCaps())
                     .foregroundStyle(.secondary)
-                ForEach(Array(chunks.enumerated()), id: \.offset) { index, chunk in
+                ForEach(sources, id: \.citationNumber) { source in
                     Button {
                         guard let onJumpToChunk else { return }
                         // Cancel any in-flight stream + dismiss the
@@ -979,27 +1012,43 @@ private extension AskPoseyView {
                         // fromCitation = true so the reader sets up
                         // the return-pill flow.
                         viewModel.cancelInFlight()
-                        onJumpToChunk(chunk.startOffset, true)
+                        onJumpToChunk(source.chunk.startOffset, true)
                         dismiss()
                     } label: {
                         HStack(spacing: 3) {
-                            Text("\(index + 1)")
+                            // 2026-05-05 (revised) — Display the
+                            // citation number that appeared in the
+                            // response text, NOT the position of
+                            // this chunk inside the filtered list.
+                            // Earlier behavior renumbered to 1, 2,
+                            // 3 from the filtered array, so a
+                            // response citing [4][6] showed pills
+                            // labeled 1, 2 — Mark caught this. The
+                            // user's mental model: "the [4] in the
+                            // text is the same source as the 4 in
+                            // the strip below."
+                            Text("\(source.citationNumber)")
                                 .font(.caption2.weight(.semibold))
-                            // 2026-05-05 — Single circle glyph,
-                            // three states for confidence:
-                            //   filled (●):     high (>65%)
-                            //   half (◐):       medium (40–65%)
-                            //   empty (○):      low (<40%)
-                            // No pill background — number + glyph
-                            // sits inline against the sheet, all
-                            // monochromatic .secondary.
-                            Image(systemName: confidenceGlyph(for: chunk.relevance))
+                            // Single circle glyph, three states for
+                            // confidence: filled (●) high (>65%),
+                            // half (◐) medium (40–65%), empty (○)
+                            // low (<40%). No pill background.
+                            Image(systemName: confidenceGlyph(for: source.chunk.relevance))
                                 .font(.caption2)
                         }
                         .foregroundStyle(.secondary)
+                        // 2026-05-05 (revised) — Hit area enlarged
+                        // beyond the visible glyphs. Default rendered
+                        // size is ~18×12pt which is well below the
+                        // HIG 44pt minimum and made the pills hard to
+                        // tap. Padding + contentShape gives a 32pt
+                        // target without changing the visual.
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 6)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(sourcesAccessibilityLabel(index: index, chunk: chunk))
+                    .accessibilityLabel(sourcesAccessibilityLabel(number: source.citationNumber, chunk: source.chunk))
                     .disabled(onJumpToChunk == nil)
                 }
             }
@@ -1008,33 +1057,38 @@ private extension AskPoseyView {
         .accessibilityElement(children: .contain)
     }
 
-    /// 2026-05-05 — Return the subset of chunksInjected that AFM
-    /// actually cited in the assistant message's content. Citations
-    /// appear as `[N]` markers (1-indexed) in the response text;
-    /// chunksInjected is 1-indexed too. Mark caught the original
-    /// "response cites [3], strip lists 4" mismatch — the user's
-    /// mental model is "sources = things cited," so we filter.
-    /// Falls back to the full list if no `[N]` markers are present
-    /// (which shouldn't happen for grounded answers, but if it does
-    /// the user still sees something rather than an empty strip).
-    private func citedChunks(in message: AskPoseyMessage) -> [RetrievedChunk] {
+    /// 2026-05-05 (revised) — Return the subset of chunksInjected
+    /// that AFM actually cited in the assistant message's content,
+    /// each paired with the original 1-indexed citation number that
+    /// appears in the response text (`[N]`). The strip's pill
+    /// labels MUST match those numbers so the [4] in the body is
+    /// the same source as the 4 in the strip.
+    /// Falls back to numbering chunks 1…N if AFM didn't emit any
+    /// markers (so the user still sees something rather than an
+    /// empty strip).
+    private func citedChunks(in message: AskPoseyMessage) -> [CitedSource] {
         let text = message.content
         let pattern = #"\[(\d{1,2})\]"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return message.chunksInjected
+            return message.chunksInjected.enumerated().map {
+                CitedSource(citationNumber: $0.offset + 1, chunk: $0.element)
+            }
         }
         let nsRange = NSRange(text.startIndex..., in: text)
-        var citedNumbers = Set<Int>()
+        var citedNumbers = [Int]()  // ordered, deduped
+        var seen = Set<Int>()
         regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
             guard let match,
                   let numRange = Range(match.range(at: 1), in: text),
                   let n = Int(text[numRange]),
                   n >= 1, n <= message.chunksInjected.count else { return }
-            citedNumbers.insert(n)
+            if seen.insert(n).inserted {
+                citedNumbers.append(n)
+            }
         }
         if citedNumbers.isEmpty { return [] }
-        return message.chunksInjected.enumerated().compactMap { (idx, chunk) in
-            citedNumbers.contains(idx + 1) ? chunk : nil
+        return citedNumbers.map { n in
+            CitedSource(citationNumber: n, chunk: message.chunksInjected[n - 1])
         }
     }
 
@@ -1049,7 +1103,7 @@ private extension AskPoseyView {
     /// Accessibility label for a source. VoiceOver users still get
     /// the precise relevance number even though the visual is just
     /// number + circle — no information loss in the alt text.
-    private func sourcesAccessibilityLabel(index: Int, chunk: RetrievedChunk) -> String {
+    private func sourcesAccessibilityLabel(number: Int, chunk: RetrievedChunk) -> String {
         let tier: String
         if chunk.relevance > 0.65 {
             tier = "high confidence"
@@ -1058,7 +1112,7 @@ private extension AskPoseyView {
         } else {
             tier = "low confidence"
         }
-        return "Source \(index + 1), \(tier) (\(String(format: "%.0f", chunk.relevance * 100)) percent). Tap to jump."
+        return "Source \(number), \(tier) (\(String(format: "%.0f", chunk.relevance * 100)) percent). Tap to jump."
     }
 
 /// Submit the composer's content. Routes to the live `send()`
@@ -1205,14 +1259,43 @@ enum AskPoseyCitationRenderer {
         let nsRange = NSRange(text.startIndex..., in: text)
         var result = ""
         var lastEnd = text.startIndex
+        // 2026-05-05 (revised) — Render as full-size bracketed
+        // links `[N]` instead of unicode superscript `[ⁿ]`. Two
+        // problems being fixed at once:
+        //
+        //   1. Tap target. Superscript `⁴` rendered at .footnote
+        //      gave a ~10pt glyph — well below HIG 44pt, and Mark
+        //      reported missing taps 2-3 times in a row.
+        //   2. Adjacent citations. `⁴⁶` for `[4][6]` reads as the
+        //      two-digit number 46. Bracketed `[4]` `[6]` are
+        //      visually distinct — the brackets themselves act as
+        //      separators.
+        //
+        // We also insert a hair-thin space (U+200A) BETWEEN two
+        // adjacent citation links so the bracketed forms don't
+        // collide visually. The space sits outside the link text
+        // so it's not part of the tap target.
         regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
             guard let match,
                   let fullRange = Range(match.range, in: text),
                   let numRange = Range(match.range(at: 1), in: text),
                   let n = Int(text[numRange]),
                   n >= 1, n <= chunkCount else { return }
-            result += text[lastEnd..<fullRange.lowerBound]
-            result += "[\(superscript(for: n))](\(citationURLScheme)://\(n))"
+            // If the previous emitted token was a citation link
+            // (the lastEnd-to-now slice is empty or pure
+            // whitespace-less), inject a hair space so two
+            // adjacent `[N]` chips don't fuse.
+            let between = text[lastEnd..<fullRange.lowerBound]
+            if between.isEmpty {
+                result += "\u{200A}"
+            } else {
+                result += between
+            }
+            // Bracketed link: `[\[4\]](posey-cite://4)`. Escape
+            // the inner brackets so CommonMark parses them as
+            // literal `[` and `]` inside the link text rather than
+            // attempting nested-link interpretation.
+            result += "[\\[\(n)\\]](\(citationURLScheme)://\(n))"
             lastEnd = fullRange.upperBound
         }
         result += text[lastEnd..<text.endIndex]
@@ -1229,14 +1312,9 @@ enum AskPoseyCitationRenderer {
         return n
     }
 
-    private static let superscriptDigits: [Character: Character] = [
-        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
-        "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹"
-    ]
-
-    private static func superscript(for n: Int) -> String {
-        String(String(n).map { superscriptDigits[$0] ?? $0 })
-    }
+    // 2026-05-05 — Superscript rendering removed; citations are
+    // now rendered as bracketed `[N]` links in the body font for
+    // tap-target and adjacency reasons. See convertMarkersToLinks.
 }
 // ========== BLOCK 03: MESSAGE BUBBLE - END ==========
 

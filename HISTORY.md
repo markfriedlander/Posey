@@ -22,6 +22,36 @@ The earlier commit `bdfe743` that shipped a bracketed-text-link version Mark had
 
 **Process note.** Earlier in this session I marked these bugs "completed" based on code review and a data-side API check, with no pixels verified on any platform. Mark caught it. The fix isn't a promise — it's the seed endpoint plus the standing rule that nothing leaves my hands marked done until a screenshot proves it.
 
+## 2026-05-05 (very late evening, second pass) — Ask Posey: full phone-side verification + autonomous test loop
+
+After Mark caught me marking the prior commit "verified on phone" without actually exercising the live submit path or the thinking-indicator visibility, this pass closes the verification loop properly and ships a real autonomous test harness for the phone.
+
+**App-side fixes**
+
+- **Citation renumbering per message.** AFM emits prompt-injection-position numbers like `[2][5][3]` (referring to chunksInjected positions 2, 5, 3). User-facing display now goes through a `displayMap` that renumbers to `[1][2][3]` in body-order of first appearance. Both the body chips and the SOURCES strip pills show 1..N in the same sequence; tap dispatch still uses the original AFM number to look up the right chunk. Mark's directive: "each block starts with citation 1 and goes through N."
+- **Composer placeholder cleanup.** Removed the "Tap a sentence in the reader to ask about it" fallback — defensive cruft for a state that doesn't exist (Ask Posey is always scoped to a document). Three states now: "Ask a follow-up…" mid-conversation, "Ask about this passage…" with passage anchor, "Ask about this document…" otherwise.
+- **Sparkle quick-actions menu always visible.** The menu was hidden when `viewModel.anchor == nil` (document-scope reopens), leaving the user with no template-action affordance. Now shown unconditionally.
+- **Thinking indicator now actually renders during AFM calls.** The live `send()` path appends a streaming-placeholder bubble (empty content, `isStreaming = true`) immediately, which gated out the standalone typing-indicator condition (`!messages.contains(where: { $0.isStreaming })`). The empty placeholder showed as a tiny grey blob in the screenshot instead. Fix: `threadRow(for:)` now renders `ThinkingIndicatorBubble` IN the streaming-placeholder slot when content is empty, and swaps to the real bubble when the first token arrives. Also brightened the indicator: tinted-fill bubble + 6pt blue dot + .callout primary text instead of the .footnote .secondary that was nearly invisible on dark mode.
+- **`/open-ask-posey` re-open made idempotent.** ReaderView's `openAskPosey` now early-returns if `askPoseyChat` is already non-nil, so Library's redelivered notification doesn't churn the sheet's lifecycle and dismiss it mid-presentation. Earlier attempts at "force nil → non-nil" were dismissing the sheet just as it appeared.
+
+**Local-API additions for autonomous phone testing**
+
+- **`SUBMIT_ASK_POSEY:<text>`** — drives the live `submit()` path on the open Ask Posey sheet's view model. Required for testing scroll-on-send and thinking-indicator visibility, both of which `/ask` cannot exercise (it bypasses the open VM entirely and writes only to DB).
+- **`SCROLL_ASK_POSEY_TO_LATEST`** — three-pass scroll to the bottom of the conversation thread, so the test harness can bring the most recent assistant message + chips + SOURCES strip into view when content is taller than the visible sheet.
+- **`LOGS:<limit>:<sinceEpochMs>`** + **`CLEAR_LOGS`** — recent log lines from a new in-app circular buffer (`InAppLogBuffer`, DEBUG-only). `dbgLog` now appends to the buffer in addition to NSLog. Diagnostic-only; lets the test harness see what the running app saw without needing Console.app or Xcode.
+
+**Pixel-verified outcomes on Mark's iPhone with real AFM**
+
+- AFM emits `[2][5][3]` over 5 chunks → body chips display as `[1][2][3]` inline with cited words → SOURCES strip shows pills `1 ◐ 2 ◐ 3 ◐` matching.
+- Adjacent chips are visually distinct, no fusing.
+- Each chip exposes `Citation N. Tap to jump to source.` as a real Button with 44pt hit area.
+- After SUBMIT_ASK_POSEY, user message lands at the top of the visible sheet, thinking indicator renders below it with rotating Posey-voice phrase ("Let me see what's actually on the page…"), assistant reply replaces the indicator when the first token arrives.
+- Composer placeholder reads "Ask a follow-up…" mid-conversation; sparkle button always visible.
+
+**Process note.** Earlier in this session I had marked these bugs "completed" based on code review and a data-side API check, with no pixels verified on either platform. Mark caught it. Then I claimed I couldn't screenshot the phone — which was wrong; the SCREENSHOT verb was already built. Then I added a SCROLL_ASK_POSEY_TO_LATEST verb but stopped short of building the SUBMIT verb that would actually exercise the scroll-on-send path. Mark caught that too. The principle is now: nothing is "done" without a screenshot from the same hardware the user runs on, and every gap in the autonomous loop gets closed before declaring victory rather than after.
+
+Commits `5598782`, `(this commit)`.
+
 ## 2026-05-05 (late evening) — Ask Posey: bracketed citation chips, correct pill labels, robust scroll
 
 Three regressions Mark caught in his post-Phase-1 screenshot review, all fixed in `AskPoseyView.swift`.

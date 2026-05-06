@@ -498,12 +498,19 @@ struct ReaderView: View {
                 // simultaneous reader scenes are possible on iPad.
                 guard
                     let info = notification.userInfo,
-                    let documentID = info["documentID"] as? UUID,
-                    documentID == viewModel.document.id
-                else { return }
+                    let documentID = info["documentID"] as? UUID
+                else {
+                    dbgLog("ReaderView openAskPoseyForDocument: no documentID in userInfo")
+                    return
+                }
+                guard documentID == viewModel.document.id else {
+                    dbgLog("ReaderView openAskPoseyForDocument: docID mismatch %@ vs %@", documentID.uuidString, viewModel.document.id.uuidString)
+                    return
+                }
                 let scopeStr = (info["scope"] as? String)?.lowercased() ?? "passage"
                 let scope: AskPoseyScope = (scopeStr == "document") ? .document : .passage
                 let initialAnchorStorageID = info["initialAnchorStorageID"] as? String
+                dbgLog("ReaderView openAskPoseyForDocument: invoking openAskPosey scope=%@", scopeStr)
                 openAskPosey(
                     scope: scope,
                     initialAnchorStorageID: initialAnchorStorageID
@@ -1324,21 +1331,40 @@ struct ReaderView: View {
         }
         #endif
 
-        askPoseyChat = AskPoseyChatViewModel(
-            documentID: document.id,
-            documentPlainText: document.plainText,
-            documentTitle: document.title,
-            anchor: anchor,
-            invocationReadingOffset: invocationOffset,
-            initialScrollAnchorStorageID: initialAnchorStorageID,
-            classifier: classifier,
-            streamer: streamer,
-            summarizer: summarizer,
-            navigator: navigator,
-            databaseManager: database,
-            initialQuery: initialQuery,
-            autoSubmitInitialQuery: autoSubmitInitialQuery
-        )
+        // 2026-05-05 (revised) — Force a nil → non-nil transition so
+        // .sheet(item:) reliably re-presents on subsequent calls.
+        // Without the nil-out + delay, when the sheet was just
+        // dismissed via .remoteDismissPresentedSheet, SwiftUI can be
+        // mid-dismissal-animation and a same-tick re-assignment to
+        // askPoseyChat is silently swallowed. The /open-ask-posey
+        // verb hitting a doc that's already loaded was hitting this.
+        let buildAndAssign: () -> Void = {
+            askPoseyChat = AskPoseyChatViewModel(
+                documentID: document.id,
+                documentPlainText: document.plainText,
+                documentTitle: document.title,
+                anchor: anchor,
+                invocationReadingOffset: invocationOffset,
+                initialScrollAnchorStorageID: initialAnchorStorageID,
+                classifier: classifier,
+                streamer: streamer,
+                summarizer: summarizer,
+                navigator: navigator,
+                databaseManager: database,
+                initialQuery: initialQuery,
+                autoSubmitInitialQuery: autoSubmitInitialQuery
+            )
+        }
+        // 2026-05-05 — Idempotency: if a sheet is already presenting,
+        // a redelivered notification (Library re-posts after delay)
+        // should be a no-op. Otherwise we churn the sheet's lifecycle
+        // and SwiftUI dismisses it mid-presentation.
+        if askPoseyChat != nil {
+            dbgLog("openAskPosey: sheet already presenting; ignoring duplicate")
+            return
+        }
+        buildAndAssign()
+        dbgLog("openAskPosey: assigned new VM")
     }
 }
 

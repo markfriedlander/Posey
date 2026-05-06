@@ -44,6 +44,16 @@ struct AskPoseyView: View {
     @AppStorage("Posey.AskPosey.firstUseNoticeDismissed") private var firstUseDismissed: Bool = false
     @AppStorage("Posey.AskPosey.nonEnglishNoticeDismissed") private var nonEnglishDismissed: Bool = false
     @State private var showFirstUseSheet: Bool = false
+    /// Live viewport height of the conversation ScrollView, used to
+    /// size the trailing spacer so scrollTo(.top) on the user message
+    /// can actually reach the literal top of the visible area.
+    @State private var scrollViewportHeight: CGFloat = 0
+    /// Conservative pad height — most of the viewport, minus a sliver
+    /// so the user can still see the assistant content scrolling in
+    /// below their question. Computed in `trailingScrollPadHeight`.
+    private var trailingScrollPadHeight: CGFloat {
+        max(scrollViewportHeight - 80, 200)
+    }
 
 
     /// Closure invoked when the user taps a Sources-strip pill OR an
@@ -75,6 +85,10 @@ struct AskPoseyView: View {
     /// flight yet. Used as a fallback scroll target if the
     /// most-recent-user-message lookup fails.
     private static let typingIndicatorID = "askPosey.typingIndicator"
+    /// ID of the trailing breathing-room spacer that lives at the
+    /// bottom of the LazyVStack so scrollTo(userMessage.id, anchor: .top)
+    /// can actually park the question at the literal viewport top.
+    private static let trailingPadID = "askPosey.trailingPad"
 
     /// Scroll the most-recently-sent user message to the top of the
     /// visible scroll area so the question stays anchored at the top
@@ -98,19 +112,16 @@ struct AskPoseyView: View {
         // messages anchor the typing indicator near the top so the
         // streaming response is what's visible while the user's
         // question sits scrolled-up just above.
-        let isLong = target.content.count >= 250
-        let anchor: UnitPoint = isLong ? UnitPoint(x: 0.5, y: 0.12) : .top
-        // The LazyVStack rows use `.id(message.id)` (UUID value);
-        // the typing-indicator uses `.id(typingIndicatorID)` (String).
-        // ScrollViewProxy keys by the original Hashable identity, so
-        // we have to dispatch by type — passing UUID.uuidString to a
-        // UUID-keyed row silently no-ops.
+        // 2026-05-05 (revised) — Always pin the USER MESSAGE at the
+        // top of the visible scroll area, regardless of length.
+        // Earlier code branched: long messages anchored the typing
+        // indicator at y=0.12, with the user msg scrolled off-screen
+        // above. That broke Mark's mental model: when he asks a
+        // question, he wants the question to stay in view at the top,
+        // with the answer streaming in below it. The long/short
+        // branch had no user benefit and actively hid the question.
         let doScroll: () -> Void = {
-            if isLong {
-                proxy.scrollTo(Self.typingIndicatorID, anchor: anchor)
-            } else {
-                proxy.scrollTo(target.id, anchor: anchor)
-            }
+            proxy.scrollTo(target.id, anchor: .top)
         }
 
         Task { @MainActor in
@@ -204,10 +215,41 @@ struct AskPoseyView: View {
                                     .id(Self.typingIndicatorID)
                                     .transition(.opacity)
                             }
+
+                            // 2026-05-05 — Trailing breathing room so
+                            // `scrollTo(userMessage.id, anchor: .top)`
+                            // can actually park the user's question at
+                            // the literal viewport top. Without this,
+                            // a SwiftUI ScrollView clamps scroll
+                            // position to "just enough to show all
+                            // content," meaning a short conversation
+                            // can't scroll the user message up to the
+                            // top — the LazyVStack lays out its
+                            // intrinsic height and stops. This invisible
+                            // spacer is sized to the viewport so there's
+                            // always room below the user message for
+                            // the scroll anchor to take effect, even
+                            // when the assistant reply is still empty
+                            // or short. Doesn't appear visually because
+                            // the sheet is the same color as the spacer.
+                            Color.clear
+                                .frame(height: trailingScrollPadHeight)
+                                .id(Self.trailingPadID)
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 12)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .onAppear {
+                                        scrollViewportHeight = proxy.size.height
+                                    }
+                                    .onChange(of: proxy.size.height) { _, newValue in
+                                        scrollViewportHeight = newValue
+                                    }
+                            }
+                        )
                     }
                     .frame(maxHeight: .infinity)
                     .onChange(of: viewModel.messages.count) { oldValue, newValue in
@@ -241,6 +283,19 @@ struct AskPoseyView: View {
                             scrollToInitialAnchor(proxy: proxy)
                             consumePendingInitialQuery()
                         }
+                    }
+                    .onReceive(
+                        NotificationCenter.default
+                            .publisher(for: .remoteSubmitAskPoseyMessage)
+                    ) { note in
+                        guard let text = note.userInfo?["text"] as? String,
+                              !text.isEmpty else { return }
+                        // Drive the live submit path so messages.count
+                        // onChange fires + scrollToLatestUserMessage
+                        // runs + typing indicator becomes visible —
+                        // exactly what a real send does.
+                        viewModel.inputText = text
+                        submit()
                     }
                     .onReceive(
                         NotificationCenter.default
@@ -533,7 +588,21 @@ private extension AskPoseyView {
             anchorMarkerRow(message)
         case .user, .assistant:
             VStack(alignment: .leading, spacing: 4) {
-                AskPoseyMessageBubble(message: message)
+                // 2026-05-05 — While AFM is streaming and no content
+                // has arrived yet, render the thinking indicator
+                // INSIDE the streaming placeholder slot. The live
+                // send() path appends a streaming bubble immediately,
+                // which used to gate out the standalone typing
+                // indicator (Mark caught its absence on the phone).
+                // Now: empty + streaming = thinking indicator.
+                if message.role == .assistant,
+                   message.isStreaming,
+                   message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ThinkingIndicatorBubble()
+                        .accessibilityLabel("Posey is thinking")
+                } else {
+                    AskPoseyMessageBubble(message: message)
+                }
                 // Navigation cards (.search intent results) render as
                 // a separate strip — they're a structurally different
                 // surface from text + inline citations.
@@ -897,9 +966,16 @@ private extension AskPoseyView {
 
     var composer: some View {
         HStack(spacing: 10) {
-            if viewModel.anchor != nil {
-                quickActionsMenu
-            }
+            // 2026-05-05 (revised) — Always show the quick-actions
+            // menu. Earlier code hid it when viewModel.anchor was nil
+            // (i.e. document-scope reopens), leaving the user with no
+            // affordance for the templated questions. Mark caught the
+            // missing button on a document-scope reopen. The menu's
+            // template actions all work regardless of scope; the only
+            // one that needs an anchor (Explain this passage) sends
+            // the templated text and lets the view model resolve the
+            // scope from the conversation state.
+            quickActionsMenu
             TextField(
                 composerPlaceholder,
                 text: $viewModel.inputText,

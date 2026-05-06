@@ -933,7 +933,17 @@ private extension AskPoseyChatViewModel {
         // Stable sort: chunks with equal relevance retain their
         // original ordering (front-matter first, then organic).
         let merged = frontMatter + translated
-        return merged.sorted { $0.relevance > $1.relevance }
+        // 2026-05-05 — Drop chunks with relevance < 0.40 from the AFM
+        // input. Mark caught a low-confidence (empty-circle) pill in
+        // a sources strip — the chunk had been passed to AFM and AFM
+        // cited it, but the relevance was below our "weak grounding"
+        // threshold. Filter here so AFM never sees sub-40% material
+        // and can't cite it. Synthetic metadata chunks (startOffset
+        // < 0) are exempt — their relevance is artificially set and
+        // they're curated content, not retrieval results.
+        return merged
+            .filter { $0.startOffset < 0 || $0.relevance >= 0.40 }
+            .sorted { $0.relevance > $1.relevance }
     }
 
     /// 2026-05-04 — DEPRECATED. Kept temporarily so any test code

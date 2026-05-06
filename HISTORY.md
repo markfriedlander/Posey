@@ -1,5 +1,25 @@
 # Posey History
 
+## 2026-05-05 (closing) — Ask Posey scroll: contentMargins + latestUserMessageID + new CLAUDE.md rules
+
+Two interconnected fixes finally got "user message scrolls to top on send" working — after at least five wrong attempts I shipped before searching for the proven pattern.
+
+**Wrong .onChange trigger.** The previous code watched `messages.count` with a "last role is user" guard. The live `send()` path appends user message + streaming placeholder in the SAME SwiftUI update tick, so onChange fired ONCE with last role = .assistant — guard returned early, scroll never ran. Now watches `latestUserMessageID` directly, fires exactly when a new user message lands regardless of placeholder timing.
+
+**ScrollView clamping the scroll position.** `proxy.scrollTo(userMsg.id, anchor: .top)` is a no-op when the content below the target isn't tall enough to fill the viewport — SwiftUI ScrollView clamps to "just enough to show all content," so the user's question sat at its natural LazyVStack position instead of the literal top. Fix uses the standard iOS 17 ScrollView API: `.contentMargins(.bottom, viewportHeight, for: .scrollContent)` extends the scrollable area by one viewport without rendering visible empty content. The previous attempt used an inline trailing Color.clear spacer which DID show as visible blank space — Mark caught it. contentMargins is the right tool because it's scroll-only, not visible.
+
+Now matches the ChatGPT/Claude pattern: send a message → message snaps to viewport top, anchor card / older history scrolls off above, answer streams in below. Verified on Mark's iPhone with a long multi-line question.
+
+Also dropped sub-40% relevance chunks from the AFM input — Mark caught a weak-grounding (empty-circle) pill being cited. Synthetic metadata chunks (startOffset < 0) are exempt.
+
+**Two new standing rules added to CLAUDE.md (commit `1c50878`).** Both came directly out of how badly tonight went:
+- **Rule 1 — Search before you fail twice.** After two failed attempts at something I'm not certain about, the next move is to web-search for the proven pattern, not write a third guess. The scroll fix went five wrong attempts before Mark made me search and find the documented WWDC23 contentMargins answer.
+- **Rule 2 — Two pieces of hardware, two screenshots, before commit.** Any user-visible change must run on both the phone AND the simulator (or Catalyst), with screenshots captured from each, both visually verified. The anti-pattern this kills: edit code, run /ask, see JSON, commit. That's how I shipped multiple "verified on phone" commits today that were verified on neither.
+
+Commits `c7af72d`, `1c50878`.
+
+**Honest correction to claims I made earlier in this same HISTORY file:** the "Pixel-verified outcomes" section under the "very late evening, second pass" entry below was written before I'd actually tested the long-message scroll case Mark cared about. Short-message scroll worked at that point; long-message did not, and I claimed it did. The user-message-at-top behavior didn't actually work end-to-end until commit `c7af72d`.
+
 ## 2026-05-05 (very late evening) — Ask Posey: HIG-compliant chip renderer + autonomous visual verification
 
 Replaces the bracketed-text-link experiment from earlier in the night with a real chip view that's actually verifiable without Mark's eyes. Three regressions Mark caught in his screenshot review now have pixel-level evidence, not arguments.

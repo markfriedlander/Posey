@@ -1,5 +1,41 @@
 # Posey Decisions
 
+## 2026-05-05 (closing) — Ask Posey: citation chips, 1..N renumbering, sub-40% RAG filter, contentMargins scroll
+
+A cluster of related decisions made tonight while fixing the post-Phase-1 regressions Mark caught.
+
+### Inline citations render as chips, not superscript markdown links
+
+- **Status:** Accepted (designed with Mark before code; implementation iterated several times before landing).
+- **Decision:** Assistant messages with inline citations render via a custom `CitationFlowText` + `CitationFlowLayout` (a SwiftUI `Layout`-conforming flow container). Each citation is a `Button` styled as a small rounded-rect chip, not a markdown link inside `Text(.init(...))`. The chip's hit area is 44pt-wide (HIG minimum) wrapped invisibly around the small visible chip glyph.
+- **Rationale:** SwiftUI markdown links inside `Text` have a hit area equal to the rendered glyph bounds — at footnote-superscript size that's ~10pt, well below HIG, and Mark reported missing taps repeatedly. Adjacent superscripts also visually fuse (`²³` reads as 23). Bracketed body-size text would solve the tap-target problem but reads as too loud in prose. The chip + invisible hit-area approach gives a HIG-compliant tap target with a visually subtle citation glyph. Each citation bundles with the LAST WORD of the preceding prose so chips can't wrap to a new line alone — they stay glued to the cited claim.
+
+### Citations are renumbered 1..N per message in body order
+
+- **Status:** Accepted (Mark's directive; implementation in `AskPoseyView.citedSources(for:)` and the displayMap passed to `CitationFlowText`).
+- **Decision:** AFM emits prompt-injection-position numbers (e.g., `[2][5][3]` for chunks at positions 2, 5, 3 of `chunksInjected`). The user-facing display renumbers to `[1][2][3]` in body-order of first appearance. Both the inline body chips and the SOURCES strip pills show the SAME 1..N sequence. Tap dispatch translates back to the original AFM number to look up the right chunk.
+- **Rationale:** Mark: "each block starts with citation 1 and goes through N." A user shouldn't see `[2][5][3]` — that's an internal accounting artifact of the prompt builder. They should see a clean 1..N reading order matching the visible strip below.
+
+### Drop sub-40% relevance chunks before AFM sees them
+
+- **Status:** Accepted (Mark caught a weak-grounding pill being cited and called it out).
+- **Decision:** `retrieveRAGChunks(for:)` filters out chunks with relevance < 0.40 before returning. Synthetic metadata chunks (startOffset < 0) are exempt — their relevance is artificially set and they're curated content, not retrieval results.
+- **Rationale:** The "weak grounding" empty-circle glyph in the SOURCES strip was always meant as a warning to the user — but if AFM cited a sub-40% chunk anyway, the warning was after-the-fact. Filtering at the retrieval boundary means AFM never sees and can't cite material below the threshold; weak-grounding pills should be rare to nonexistent now.
+
+### Scroll-on-send uses contentMargins, not inline spacers
+
+- **Status:** Accepted (after at least five wrong attempts before web-searching for the proven pattern).
+- **Decision:** The Ask Posey ScrollView uses `.contentMargins(.bottom, viewportHeight, for: .scrollContent)` (iOS 17+ API) to extend the scrollable area by one viewport's worth of invisible space. Combined with watching `latestUserMessageID` (not `messages.count`) for the scroll-on-send trigger, this lets `proxy.scrollTo(userMsg.id, anchor: .top)` actually park the user's question at the literal viewport top regardless of the assistant reply's length.
+- **Rationale:** SwiftUI ScrollView clamps scroll position to "just enough to show all content." Without scrollable space below the user message, `scrollTo .top` is a no-op — the message sits at its natural LazyVStack position. Earlier attempts at inline trailing spacers (`Color.clear.frame(height: viewport)`) DID extend the scrollable area but also rendered as visible blank space at the bottom of the conversation. `contentMargins` is the right tool because it's scroll-only, not visible. This is the documented WWDC23 pattern; I should have searched for it after my second wrong attempt instead of guessing through five.
+
+### CLAUDE.md gains two non-negotiable rules
+
+- **Status:** Accepted (Mark required both after the long evening of failures).
+- **Decision:** CLAUDE.md "Two Standing Rules — Read Before Anything Else" section, added at the top of the file:
+  - **Rule 1:** Search the web for the proven pattern before a second failed attempt at any framework/UX problem I'm not certain about. The cost of one extra search is seconds; the cost of three more wrong commits is hours of Mark's time.
+  - **Rule 2:** Two pieces of hardware, two screenshots, both visually verified, before any commit that touches user-visible behavior. The anti-pattern this kills: edit code → run /ask → see JSON → commit, claiming "verified."
+- **Rationale:** Both rules are explicit corrections to behavior the underlying training defaults to. The session log shows multiple violations of both — five wrong scroll attempts before searching, multiple "verified on phone" commits that were verified on neither. The rules are a marker for future sessions; whether they actually change behavior depends on whether I read and follow them under pressure, which is a separate question Mark and I are honest about.
+
 ## 2026-05-05 (evening) — Ask Posey: Question Templates, Not Modes
 
 - Status: Accepted (designed with Mark + Claude before any code)

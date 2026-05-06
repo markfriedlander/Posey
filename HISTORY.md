@@ -1,5 +1,47 @@
 # Posey History
 
+## 2026-05-06 — Submission day: 7-item punch list closed
+
+Mark's submission-day list, in priority order. Each item fixed, deployed to phone, verified via screenshot or device test before moving on. CLAUDE.md two-rules in effect (search before failing twice; two pieces of hardware + screenshots before commit).
+
+**1. HTML mojibake** (commit `0a2bed3`). NSAttributedString HTML parsing was defaulting to Windows-1252 when the source had no `<meta charset>` declaration, causing UTF-8 multi-byte sequences (em-dash 0xE2 0x80 0x94) to be misread as Latin-1 → "â€"" mojibake visible to users. Fix: pass `.characterEncoding: NSNumber(value: String.Encoding.utf8.rawValue)` explicitly to `NSAttributedString(data:options:)`. Verified across three test variants (no charset, explicit UTF-8 charset, multi-accent). Field Notes on Estuaries, Café/déjà/naïve/résumé all render correctly.
+
+**2. Background audio lock-screen regression** (commit `cf8dd42`). Phone build's Info.plist was missing `UIBackgroundModes` despite `INFOPLIST_KEY_UIBackgroundModes = audio` in build settings AND a Run Script that injected it via PlistBuddy. The Run Script worked on clean builds but Xcode's incremental build cache periodically dropped its output, causing the regression to come back. Durable fix: switched the project from `GENERATE_INFOPLIST_FILE = YES` + Run Script injection to an explicit committed `Info.plist` at the repo root with `UIBackgroundModes = ["audio"]` hardcoded. Removed the "Inject UIBackgroundModes" build phase entirely. Verified: clean build + incremental rebuild both produce a binary with the key. Mark verified end-to-end on phone: started playback, locked screen, audio continued.
+
+**3. Conversation reload on reopen** (commit `fb427f0` + refinement `3d198f7`). When reopening Ask Posey on a doc with prior conversation, the sheet appeared blank to the user — the new invocation's anchor card sat at the top with all prior conversation scrolled off above. Fix: scroll the new anchor to `.top` of the viewport so it's immediately visible (frames the next question), with prior conversation accessible by scrolling up. Per Mark's spec: anchor MUST be visible without scrolling. Verified on phone with 15-turn TXT conversation.
+
+**4. TOC for MD/DOCX/PDF** (commit `8e87903`). Three formats had structural headings but TOC sheet was empty; only EPUB populated. Fixes:
+- MD: Markdown parser already classifies `# / ## / ###` as `.heading(level:)` blocks; importer now emits a `StoredTOCEntry` per heading with its plainText offset. 5 entries on the test MD doc.
+- DOCX: Word XML extractor now tracks `<w:pStyle w:val="HeadingN"/>` and "Title" paragraph styles; captures (level, title, paragraphIndex) at parse time, then maps to plainText offset accounting for visual-page marker stripping. 3 entries on the test DOCX.
+- PDF: Added native PDF outline (`PDFDocument.outlineRoot`) as a fallback when text-pattern TOC detector finds nothing. Walks the outline tree, resolves each entry's destination page, computes plainText offset by summing earlier page lengths plus separators. 187 entries on Cryptography for Dummies.
+- RTF: deferred. Standard RTF has no explicit heading semantics; heuristic detection (bold + larger font + line-leading) is fragile across publishers.
+
+Verified: TOC sheet renders entries correctly + tap-jump navigates to the right offset.
+
+**5. Audio export hidden from UI** (commit `fb94a94`). Removed the "Audio Export" Section from Reader Preferences sheet. Backend (AudioExporter, RemoteAudioExportRegistry, EXPORT_AUDIO API verb) intact and continues to work for testing. Reasons for hiding: no progress indicator during long renders (RTF/EPUB take minutes; user sees a static sheet); export speed observed in testing was ~3.6× faster than live playback. Documented in NEXT.md as coming-soon.
+
+**6. Ask Posey quality** (commits `1ff4f05` + `6539cc4`). Three findings from yesterday's testing:
+- MD repetition (AFM padded "the four things" by repeating an item): mitigated with comma-list dedupe (`dedupeRepeatedListItems`) and numbered-list dedupe (`dedupeNumberedListItems`) in `finalizeAssistantTurn`. Both heuristics are conservative — only fire on items ≥ 3 words long, preserve rhetorical doublings. Plus stronger prompt rule 6a with worked FAILED/SUCCEEDED examples for both repetition and invention padding.
+- RTF false-negative on AI consciousness: now correctly answers (verified on phone — fixed by yesterday's RAG improvements; no change needed today).
+- EPUB subtitle missed: now correctly answers "Surviving the Information Glut" (verified on phone).
+
+Trade-off accepted: count-mismatch questions sometimes produce shorter, more conservative answers instead of risking fabrication. Net win for grounding.
+
+**7. Strip visual-page marker text** (commit `e67d8ed`). The `[[POSEY_VISUAL_PAGE:0:<uuid>]]` placeholder tokens were leaking to the user as literal text in DOCX, EPUB, and HTML rendering. Per Mark's instruction: silent removal for these formats; PDF visual pages stay (they render correctly via the PDFKit thumbnail path). Three changes:
+- HTML: `loadDocument` now applies stripVisualPageMarkers to displayText (previously only to plainText).
+- DOCX: same.
+- EPUB: displayText is now the marker-stripped form.
+
+Bonus: fixed a regex bug shared across all three. The strip patterns used Swift raw-string syntax `\u{000C}?` which ICU regex doesn't recognize. NSRegularExpression silently failed compilation (try? → nil) and the strip function returned input unchanged — markers leaked through. Now uses ICU's `\x{000C}?` syntax explicitly. Images extracted at import remain in `document_images` for future inline-render work; only the user-visible marker text is suppressed in 1.0.
+
+Three Hats verification done on each item — Developer (does it build/work), QA (edges + regressions), User (does it feel right).
+
+## 2026-05-06 (early) — Reader deep test + format parity audit, complete pass
+
+Documented at `submission/test-results-2026-05-06.md`. Full sweep of every Task 5 item × every of 7 formats + Task 8 parity matrix + image rendering audit + multi-turn Ask Posey transcripts. 24 critical findings ranked. Per-format pass/fail tables for items 1-20. Image-bearing test docs sourced for HTML/MD/DOCX/PDF + multi-image DOCX + RTF-with-pict. Audio export verified on all 7 formats. Lock screen via SIMULATE_BACKGROUND on every format. Focus + Motion screenshots per format. Quick-action chrome templates verified. Search edge cases. Corrupted file imports gracefully refused. Conversation persistence DB-validated.
+
+The test report drove today's submission-day punch list above.
+
 ## 2026-05-05 (closing) — Ask Posey scroll: contentMargins + latestUserMessageID + new CLAUDE.md rules
 
 Two interconnected fixes finally got "user message scrolls to top on send" working — after at least five wrong attempts I shipped before searching for the proven pattern.

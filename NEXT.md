@@ -1,19 +1,63 @@
 # Next
 
-## 2026-05-06 — Submission day pass
+## 2026-05-06 — Submission day pass: 7 of 7 complete
 
 Mark's submission-day list, status of each:
 
-1. **HTML mojibake**: FIXED + verified on phone. Commit `0a2bed3`. NSAttributedString now gets explicit UTF-8 character encoding; em-dash, smart quotes, ellipsis all render correctly.
-2. **Background audio lock-screen regression**: FIXED durably. Switched the project from `GENERATE_INFOPLIST_FILE = YES` + Run Script injection to an explicit committed `Info.plist` at the repo root with `UIBackgroundModes = ["audio"]` hardcoded. Verified: clean build + incremental rebuild both produce a binary with the key. The recurring regression caused by Xcode's incremental build cache dropping the script output is gone. Commit `cf8dd42`. **Mark must still verify lock-screen audio continues** — I cannot programmatically lock the device.
-
-3. **Conversation reload on reopen**: FIXED. Commit `fb427f0`. Sheet now scrolls to the last actual message (not the new invocation anchor) so prior conversation is visible.
-
-4. **TOC for MD/DOCX/PDF**: FIXED. Commit `8e87903`. MD extracts `# / ## / ###` headings; DOCX extracts `<w:pStyle Heading*>` paragraphs; PDF falls back to `outlineRoot` when text-pattern detector finds nothing. Verified on phone: MD test doc → 5 entries, DOCX test doc → 3 entries, Cryptography for Dummies PDF → 187 entries.
+1. **HTML mojibake** (Task 8 #41 / format parity): FIXED + verified on phone. Commit `0a2bed3`. NSAttributedString now gets explicit UTF-8 character encoding; em-dash, smart quotes, ellipsis, accented chars all render correctly across three test variants (no charset, explicit charset, multi-accent).
+2. **Background audio lock-screen regression** (Task 8 + standing audio-session work): FIXED durably. Switched the project from `GENERATE_INFOPLIST_FILE = YES` + Run Script injection to an explicit committed `Info.plist` at the repo root with `UIBackgroundModes = ["audio"]` hardcoded. Verified: clean build + incremental rebuild both produce a binary with the key. The recurring regression caused by Xcode's incremental build cache dropping the script output is gone. Commit `cf8dd42`. **Mark verified end-to-end on phone**: started playback, locked screen, audio continued.
+3. **Conversation reload on reopen**: FIXED. Commit `fb427f0` then refined `3d198f7`. Anchor card visible at top of viewport on reopen; prior conversation accessible by scrolling up. Verified with 15-turn TXT conversation on phone.
+4. **TOC for MD/DOCX/PDF** (Task 8 #42): FIXED. Commit `8e87903`. MD extracts `# / ## / ###` headings; DOCX extracts `<w:pStyle Heading*>` paragraphs; PDF falls back to `outlineRoot` when text-pattern detector finds nothing. Verified on phone: MD test doc → 5 entries, DOCX test doc → 3 entries, Cryptography for Dummies PDF → 187 entries, TOC sheet renders correctly + tap navigation jumps the reader to the right offset.
    - **RTF deferred** — RTF doesn't have explicit heading semantics in standard. Heuristic detection (bold + larger font + line-leading) is fragile. Coming in a later release.
-
-5. **Audio export hidden from UI**: DONE. Removed the "Export to Audio File" button + entire Audio Export section from the Preferences sheet. Backend infrastructure (AudioExporter, RemoteAudioExportRegistry, EXPORT_AUDIO API verb) is intact and continues to work for testing. Coming-soon for users.
+5. **Audio export hidden from UI** (Task 7 deferred for 1.0): DONE. Commit `fb94a94`. Removed the "Export to Audio File" button + entire Audio Export section from the Preferences sheet. Backend infrastructure (AudioExporter, RemoteAudioExportRegistry, EXPORT_AUDIO API verb) is intact and continues to work for testing. Coming-soon for users.
    - **Reasons for deferring user-facing UI**: (a) no progress indicator during long renders — RTF/EPUB exports take minutes and the user sees a static sheet; (b) the export speed observed in testing was ~3.6× faster than live playback, suggesting either rate or segment-concatenation differs from playback in a way that needs investigation before users see it.
+6. **Ask Posey quality** (Task 4 #30 — fixes from Task 3 conversation testing): FIXED. Commit `1ff4f05` then `6539cc4`.
+   - MD repetition (AFM padding "the four things" by repeating an item): mitigated with comma-list dedupe + numbered-list dedupe in `finalizeAssistantTurn`, plus a stronger prompt rule with worked FAILED/SUCCEEDED examples for both repetition and invention padding.
+   - RTF false-negative on consciousness: now correctly answers (verified on phone — fixed by yesterday's RAG improvements; no change needed today).
+   - EPUB subtitle missed: now correctly answers "Surviving the Information Glut" (verified on phone).
+   - Trade-off: count-mismatch questions now sometimes produce shorter, more conservative answers instead of risking fabrication. Net win for grounding.
+7. **Strip visual marker text** (Task 8 #43 deferral for 1.0): DONE. Commit `e67d8ed`. `[[POSEY_VISUAL_PAGE:0:<uuid>]]` marker tokens stripped from displayText for HTML, DOCX, EPUB; MD and RTF didn't emit markers (MD reduces image refs to alt text, RTF drops `\pict` silently). Bonus fix: `stripVisualPageMarkers` regex was failing silently because Swift `\u{HHHH}` raw-string syntax isn't ICU regex syntax — switched to `\x{HHHH}`. PDF visual pages stay intact (PDFKit thumbnail path renders correctly). Verified on phone with multi-image DOCX (3 images), HTML test doc, Illuminatus EPUB (large book with native images): zero marker tokens in displayText, clean prose rendering.
+
+## Updated posey_task_sequence.md status
+
+- **Task 0 (API Completeness)** — DONE.
+- **Task 1 (Ask Posey UI Bug Fix)** — DONE.
+- **Task 2 (Ask Posey Remaining UI Bugs)** — DONE. (Markdown rendering, sources persistence, citation chip redesign, motion-permission ordering all shipped over the past sessions.)
+- **Task 3 (Ask Posey Deep Conversation Testing)** — DONE. The `submission/test-data-2026-05-06/` directory has 4-question multi-turn conversations across all 7 formats with cooldown.
+- **Task 4 (Ask Posey Quality Fixes)** — DONE in spirit. Today's work closed the three findings (MD repetition / RTF consciousness / EPUB subtitle) plus the citation-chip / scroll-on-send / sub-40%-relevance fixes from the previous days.
+- **Task 5 (Reader Deep Testing)** — DONE 2026-05-06 morning. Full report at `submission/test-results-2026-05-06.md` with 24 critical findings ranked, per-format pass/fail tables for every Task 5 item × every format.
+- **Task 6 (Reader Quality Fixes)** — TODAY's items 1-7 closed the highest-priority findings from Task 5's report. Remaining lower-priority findings are documented below.
+- **Task 7 (Audio Export)** — Backend complete (works via API). User-facing UI deferred for 1.0 per item 5 above; coming-soon.
+- **Task 8 (Format Parity)** — Largely DONE. #41 (text normalization) ✓ shared `TextNormalizer` + today's HTML / RTF FF / DOCX heading offset pass. #42 (TOC) ✓ today (5 of 7 formats; RTF deferred). #43 (inline images) — image extraction works for DOCX/EPUB/PDF/HTML; inline rendering works for PDF only; for the other formats markers are now suppressed entirely. #46 (position persistence) ✓ verified per format. #47 (search) ✓ verified per format with real match counts. #48 (Ask Posey indexing) ✓ multi-turn conversations on all 7. #49 (audio export) ✓ all 7 formats produce m4a. #50 (Reading Style) ✓ Focus / Motion verified per format. #54 (tap-to-reveal-chrome) ✓ resolved much earlier.
+- **Task 9 (Accessibility Pass)** — needs Mark's hands; prep complete in `submission/task9-accessibility-prep.md`. Not done.
+- **Task 10 (Mac Catalyst)** — DONE earlier (commit `cebff38`).
+- **Task 11 (App Icon)** — Not started; placeholder icon shipping for 1.0 if not addressed before final submit.
+- **Task 12 (Share Feature)** — DONE earlier (`2ac7d78` Markdown export).
+- **Task 13 (Pre-Submission Polish)** — Mostly DONE. #72 (antenna OFF default for release): need verification — antenna currently defaults ON during dev per CLAUDE.md, must flip to OFF for App Store builds. #79 (full qa_battery regression run): not done today. #80 (full reader test on all 7 formats): completed via Task 5 report.
+- **Task 14 (Submission Prep)** — Mark present required for all of these. Privacy policy + App Store metadata draft already in `submission/`.
+
+## Open items still on the board (post-submission-day)
+
+Lower-priority findings from the test report at `submission/test-results-2026-05-06.md` not addressed today:
+
+- RTF form-feed character (`\x0c`) leaks into plain text — TextNormalizer should strip but doesn't. Not user-visible during reading; would only matter if exposed to TTS.
+- RTF paragraph-concatenation bug — "Section 1" merges with following body line into "Section 1is a paragraph...". Visible during reading. RTF importer's `\par` boundary handling needs work.
+- HTML 519 NBSPs in plain text from un-normalized `&nbsp;` entities. Not visible visually (NBSP renders as space) but may affect search and Ask Posey retrieval boundaries.
+- PDF citation `[26]` split across paragraph boundaries (paragraph segmentation broke mid-bracket on Cloud Copyright Law).
+- TOC sheet has no empty-state message when count=0 (just blank). Cosmetic.
+- Saved Annotations preview shows doc title for notes instead of body text (storage is correct; preview UI is wrong).
+- PLAYBACK_RESTART leaves state="finished" instead of "playing"/"idle". Cosmetic state-label nit.
+- Quick-actions in-sheet Menu items not reachable via API TAP (chrome-menu route works; in-sheet sparkle menu uses `.accessibilityIdentifier` only, not registered with RemoteTargetRegistry).
+- Audio export progress indicator + rate parity with playback (gating issues for re-enabling user UI).
+- Inline image rendering for DOCX/EPUB/HTML/MD/RTF — 1.0 hides markers; future release should render images. Underlying `block.imageID` linkage from importer to DisplayBlock missing for non-PDF formats.
+
+## Future-release work (deferred from today)
+
+- App icon (Task 11)
+- Antenna OFF default for App Store release (Task 13 #72)
+- qa_battery.sh full regression run (Task 13 #79)
+- Accessibility pass (Task 9, Mark present)
+- Final submission steps (Task 14, Mark present)
 
 ## 2026-05-05 (closing) — Ask Posey shipped end-to-end on phone
 

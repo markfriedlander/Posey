@@ -1,8 +1,28 @@
 # Next
 
-## Current Target
+## 2026-05-05 (closing) — Ask Posey shipped end-to-end on phone
 
-**2026-05-04 (late evening) — Reader UX overhaul + background audio shipped; Task 5 next, plus a focused punch list.**
+Tonight's late session locked down the Ask Posey citation rendering, the composer affordances, the scroll-on-send behavior (real one — `.contentMargins(.bottom, viewportHeight, for: .scrollContent)` paired with watching the latest user-message ID), the thinking-indicator visibility, and the sub-40% relevance filter on chunks going to AFM. All verified on Mark's iPhone with real AFM responses, multiple times, multiple test cases (short message, long message, multi-citation). See the HISTORY entries from this date for the per-fix breakdown.
+
+The local API now has the verbs needed to drive every Ask Posey UI flow autonomously without Mark's eyes: `SUBMIT_ASK_POSEY`, `SCROLL_ASK_POSEY_TO_LATEST`, `LOGS`, `CLEAR_LOGS`, plus the previously-existing `SCREENSHOT`, `TAP`, `TYPE`, `READ_TREE`, `/open-ask-posey` (now idempotent on re-open).
+
+Two new standing rules added to CLAUDE.md ("Two Standing Rules" section at the top): search before failing twice, two pieces of hardware + two screenshots before commit. They came directly out of how badly tonight went.
+
+**The loop that should be standard practice now:** `CLEAR_ASK_POSEY_CONVERSATION` → `/open-ask-posey` → `SUBMIT_ASK_POSEY:<text>` → `SCREENSHOT` (during AFM) → wait → `SCREENSHOT` (after) → `LOGS` if anything's wrong. Took ~2 minutes per iteration tonight; should be the bar for any future Ask Posey change.
+
+**Open items I deferred while fixing the chip/scroll/indicator regressions:**
+
+- Phase 2 conversation-quality verification across content density (the morning's plan).
+- Phase 3 Lock Screen + Dynamic Island debugging.
+- Phase 4 reader deep test across 7 formats.
+- Phase 5 reader fixes from Phase 4.
+- Cosmetic: user message at the very top of sheet sits slightly under the translucent navigation chrome. Looks fine but a small `.safeAreaInset` adjustment would clean it up.
+- Quick-actions menu items reachable through TAP chain — registered with accessibility IDs but iOS 26 Menu items only register with the registry once the menu is opened; not yet verified that the chain works end-to-end.
+- The `tools/posey_test.py` help output should be updated to mention the new SUBMIT/SCROLL/LOGS verbs.
+- User-facing app documentation / onboarding (still deferred from earlier in the day).
+- Manual metadata-edit feature (still deferred).
+
+## Earlier — 2026-05-04 (late evening) — Reader UX overhaul + background audio shipped; Task 5 next, plus a focused punch list.
 
 The big additions tonight (post-MiniLM): Ask Posey re-scope UI (chrome menu surfaces 4 templated actions, inline first-use banner, sources strip restored, composer placeholder shapes workflow, detents fix for iPhone Plus), reader interaction model switched to single-tap-to-jump (genre standard) with mini-player persistence during chrome auto-fade, background audio fix (UIBackgroundModes via Run Script + AVSpeechSynthesizer.usesApplicationAudioSession = true), Preferences simplification (Standard + Immersive removed for 1.0; Motion Off/On/Auto collapsed to inline Auto toggle in Reading Style section). Plus the anchored-question quality batch (prompt reorder, asymmetric proximity, section clipping, skip-FM-on-anchor, grammatical-meta hint), confidence signal, recommendation + role short-circuits, polish call removal — many of which shipped earlier in the day.
 

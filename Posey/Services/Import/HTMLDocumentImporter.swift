@@ -43,8 +43,13 @@ struct HTMLDocumentImporter {
         let data = try Data(contentsOf: url)
         let baseDirectory = url.deletingLastPathComponent()
         let (markedData, images) = extractInlineImages(from: data, baseDirectory: baseDirectory)
-        let displayText = try loadText(fromData: markedData)
-        let plainText = stripVisualPageMarkers(from: displayText)
+        let rawDisplay = try loadText(fromData: markedData)
+        // 2026-05-06 — Per Mark: strip visual-page markers from
+        // displayText for HTML. Inline image rendering for HTML
+        // isn't supported in 1.0 (markers were leaking as literal
+        // text). Images stay in document_images for future use.
+        let displayText = stripVisualPageMarkers(from: rawDisplay)
+        let plainText = displayText
         return (displayText, plainText, images)
     }
 
@@ -286,7 +291,9 @@ struct HTMLDocumentImporter {
     /// surrounding form-feed separators) from extracted text so
     /// `plainText` is suitable for TTS + embeddings.
     private func stripVisualPageMarkers(from text: String) -> String {
-        let pattern = #"\u{000C}?\[\[POSEY_VISUAL_PAGE:[^\]]+\]\]\u{000C}?"#
+        // ICU-style `\x{HHHH}` for U+000C (Swift raw-string `\u{HHHH}`
+        // is not ICU regex syntax — was failing silently via try?.)
+        let pattern = "\\x{000C}?\\[\\[POSEY_VISUAL_PAGE:[^\\]]+\\]\\]\\x{000C}?"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
         return regex.stringByReplacingMatches(
             in: text,

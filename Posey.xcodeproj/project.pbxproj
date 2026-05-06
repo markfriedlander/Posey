@@ -108,7 +108,6 @@
 				85B4AE992F70864A001A55D8 /* Sources */,
 				85B4AE9A2F70864A001A55D8 /* Frameworks */,
 				85B4AE9B2F70864A001A55D8 /* Resources */,
-				85B4AEAA2F70864D001A55DA /* Inject UIBackgroundModes */,
 			);
 			buildRules = (
 			);
@@ -241,25 +240,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		85B4AEAA2F70864D001A55DA /* Inject UIBackgroundModes */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "Inject UIBackgroundModes";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/bash;
-			shellScript = "# 2026-05-04 — INFOPLIST_KEY_UIBackgroundModes = audio in build\n# settings does not produce a UIBackgroundModes array in the\n# auto-generated Info.plist on this Xcode. Inject via PlistBuddy\n# into BOTH the PROCESSED (intermediate) plist AND the .app's\n# final plist. The PROCESSED plist is the source of truth that\n# Xcode copies to the .app and re-applies on incremental builds;\n# the .app plist is what's already shipping in the bundle. We\n# write to both for safety.\nset -e\nfor PLIST in \"${PROCESSED_INFOPLIST_PATH}\" \\\n             \"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\"; do\n  if [ -z \"${PLIST}\" ] || [ ! -f \"${PLIST}\" ]; then\n    continue\n  fi\n  /usr/libexec/PlistBuddy -c \"Delete :UIBackgroundModes\" \"${PLIST}\" 2>/dev/null || true\n  /usr/libexec/PlistBuddy -c \"Add :UIBackgroundModes array\" \"${PLIST}\"\n  /usr/libexec/PlistBuddy -c \"Add :UIBackgroundModes:0 string audio\" \"${PLIST}\"\n  echo \"UIBackgroundModes injected into ${PLIST}\"\ndone\n";
-		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -430,15 +410,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = FBUNBDS7R7;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Posey uses the local network to accept connections from developer tools for testing and diagnostics.";
-				INFOPLIST_KEY_NSMotionUsageDescription = "Posey reads device motion data on-device to switch between Motion mode and your standard reading style. Motion data never leaves this device.";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = audio;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -466,15 +439,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = FBUNBDS7R7;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Posey uses the local network to accept connections from developer tools for testing and diagnostics.";
-				INFOPLIST_KEY_NSMotionUsageDescription = "Posey reads device motion data on-device to switch between Motion mode and your standard reading style. Motion data never leaves this device.";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = audio;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

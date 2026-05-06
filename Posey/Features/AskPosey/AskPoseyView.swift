@@ -45,16 +45,26 @@ struct AskPoseyView: View {
     @AppStorage("Posey.AskPosey.nonEnglishNoticeDismissed") private var nonEnglishDismissed: Bool = false
     @State private var showFirstUseSheet: Bool = false
 
-    /// Closure invoked when the user taps a Sources-strip pill below
-    /// an assistant bubble. Owned by the host (ReaderView) which
-    /// dismisses the sheet and calls `ReaderViewModel.jumpToOffset`.
+    /// Closure invoked when the user taps a Sources-strip pill OR an
+    /// inline `[ⁿ]` citation in an assistant bubble. Owned by the
+    /// host (ReaderView) which dismisses the sheet and calls
+    /// `ReaderViewModel.jumpToOffset(_:)` or
+    /// `jumpToOffsetFromCitation(_:)` per the `fromCitation` flag.
+    ///
+    /// 2026-05-05 — Signature evolved from `(Int) -> Void` to
+    /// `(Int, Bool) -> Void`. The Bool is `fromCitation`: true for
+    /// inline citations + sources-strip taps (which trigger the
+    /// reader's return-pill flow), false for any non-citation jump.
+    /// Sources-strip taps count as citation-flavored because they
+    /// share the same user intent ("I want to see where this answer
+    /// came from") and need the same return path.
     /// Optional — when nil, the pills render for awareness but don't
-    /// trigger navigation. M7 source attribution surface.
-    let onJumpToChunk: ((Int) -> Void)?
+    /// trigger navigation.
+    let onJumpToChunk: ((Int, Bool) -> Void)?
 
     init(
         viewModel: AskPoseyChatViewModel,
-        onJumpToChunk: ((Int) -> Void)? = nil
+        onJumpToChunk: ((Int, Bool) -> Void)? = nil
     ) {
         self.viewModel = viewModel
         self.onJumpToChunk = onJumpToChunk
@@ -230,7 +240,10 @@ struct AskPoseyView: View {
                       let target = viewModel.messages.first(where: { $0.storageID == storageID }),
                       let offset = target.anchorOffset else { return }
                 viewModel.cancelInFlight()
-                onJumpToChunk?(offset)
+                // Remote anchor-tap dispatch — anchor is the user's
+                // own selected passage (above their question), not a
+                // citation; no return-pill flow.
+                onJumpToChunk?(offset, false)
                 dismiss()
             }
             .onAppear {
@@ -316,7 +329,9 @@ struct AskPoseyView: View {
             let chunk = message.chunksInjected[n - 1]
             guard let onJumpToChunk else { return false }
             viewModel.cancelInFlight()
-            onJumpToChunk(chunk.startOffset)
+            // Inline citation tap — fromCitation = true so the
+            // reader sets up the return-pill flow.
+            onJumpToChunk(chunk.startOffset, true)
             dismiss()
             return true
         }
@@ -379,7 +394,7 @@ private struct BubbleSelectionAndCopy: ViewModifier {
 private struct AskPoseyAnchorRowRemoteRegister: ViewModifier {
     let message: AskPoseyMessage
     let isDocumentScope: Bool
-    let onJumpToChunk: ((Int) -> Void)?
+    let onJumpToChunk: ((Int, Bool) -> Void)?
     let dismiss: DismissAction
     let cancelInFlight: () -> Void
 
@@ -393,7 +408,10 @@ private struct AskPoseyAnchorRowRemoteRegister: ViewModifier {
                 let action: () -> Void = {
                     guard let offset = message.anchorOffset, let onJumpToChunk else { return }
                     cancelInFlight()
-                    onJumpToChunk(offset)
+                    // Anchor tap — user is jumping to their own
+                    // selected passage (the anchor pill above their
+                    // question). Not a citation; no return-pill flow.
+                    onJumpToChunk(offset, false)
                     dismiss()
                 }
                 RemoteTargetRegistry.shared.register(scopedID, action: action)
@@ -486,7 +504,9 @@ private extension AskPoseyView {
                 return
             }
             viewModel.cancelInFlight()
-            onJumpToChunk(offset)
+            // Anchor pill above the user's question — not a
+            // citation jump.
+            onJumpToChunk(offset, false)
             dismiss()
         } label: {
             HStack(alignment: .top, spacing: 8) {
@@ -881,7 +901,11 @@ private extension AskPoseyView {
                 Button {
                     guard let onJumpToChunk else { return }
                     viewModel.cancelInFlight()
-                    onJumpToChunk(card.plainTextOffset)
+                    // Navigation card tap (search-result destination)
+                    // counts as a citation-flavored jump — user is
+                    // navigating from an Ask Posey answer to a passage
+                    // in the document; needs the return-pill flow.
+                    onJumpToChunk(card.plainTextOffset, true)
                     dismiss()
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
@@ -923,41 +947,71 @@ private extension AskPoseyView {
     /// `ask_posey_spec.md` "Source Attribution".
     func sourcesStrip(for chunks: [RetrievedChunk]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
+            HStack(spacing: 14) {
                 Text("SOURCES")
                     .font(.caption2.smallCaps())
                     .foregroundStyle(.secondary)
-                    .padding(.trailing, 2)
                 ForEach(Array(chunks.enumerated()), id: \.offset) { index, chunk in
                     Button {
                         guard let onJumpToChunk else { return }
                         // Cancel any in-flight stream + dismiss the
                         // sheet first so the user lands on the reader
-                        // with the jump already applied.
+                        // with the jump already applied. Sources-strip
+                        // tap is a citation-flavored jump (same user
+                        // intent as inline `[ⁿ]` citation) — pass
+                        // fromCitation = true so the reader sets up
+                        // the return-pill flow.
                         viewModel.cancelInFlight()
-                        onJumpToChunk(chunk.startOffset)
+                        onJumpToChunk(chunk.startOffset, true)
                         dismiss()
                     } label: {
-                        HStack(spacing: 4) {
+                        HStack(spacing: 3) {
                             Text("\(index + 1)")
                                 .font(.caption2.weight(.semibold))
-                            Text(String(format: "%.0f%%", chunk.relevance * 100))
+                            // 2026-05-05 — Single circle glyph,
+                            // three states for confidence:
+                            //   filled (●):     high (>65%)
+                            //   half (◐):       medium (40–65%)
+                            //   empty (○):      low (<40%)
+                            // No pill background — number + glyph
+                            // sits inline against the sheet, all
+                            // monochromatic .secondary.
+                            Image(systemName: confidenceGlyph(for: chunk.relevance))
                                 .font(.caption2)
-                                .foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.thinMaterial, in: Capsule())
+                        .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Source \(index + 1) at offset \(chunk.startOffset), relevance \(String(format: "%.0f", chunk.relevance * 100)) percent. Tap to jump.")
+                    .accessibilityLabel(sourcesAccessibilityLabel(index: index, chunk: chunk))
                     .disabled(onJumpToChunk == nil)
                 }
             }
-            .padding(.leading, 14)
-            .padding(.trailing, 14)
+            .padding(.horizontal, 14)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// SF Symbol name for the confidence-tier circle glyph next to
+    /// each source number. Three states; no in-between rendering.
+    private func confidenceGlyph(for relevance: Double) -> String {
+        if relevance > 0.65 { return "circle.fill" }
+        if relevance >= 0.40 { return "circle.lefthalf.filled" }
+        return "circle"
+    }
+
+    /// Accessibility label for a source. VoiceOver users still get
+    /// the precise relevance number even though the visual is just
+    /// number + circle — no information loss in the alt text.
+    private func sourcesAccessibilityLabel(index: Int, chunk: RetrievedChunk) -> String {
+        let tier: String
+        if chunk.relevance > 0.65 {
+            tier = "high confidence"
+        } else if chunk.relevance >= 0.40 {
+            tier = "medium confidence"
+        } else {
+            tier = "low confidence"
+        }
+        return "Source \(index + 1), \(tier) (\(String(format: "%.0f", chunk.relevance * 100)) percent). Tap to jump."
     }
 
 /// Submit the composer's content. Routes to the live `send()`

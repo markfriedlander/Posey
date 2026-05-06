@@ -132,9 +132,19 @@ struct ReaderView: View {
                                     viewModel.jumpToOffset(block.startOffset)
                                 }
                             }
+                            // 2026-05-05 — Citation-return pill,
+                            // anchored top-trailing so it sits next
+                            // to the first line of the cited block.
+                            .overlay(alignment: .topTrailing) {
+                                if isCitedRow(blockStartOffset: block.startOffset) {
+                                    citationReturnPill()
+                                        .padding(.trailing, 8)
+                                        .padding(.top, 2)
+                                }
+                            }
                         }
                     } else {
-                        ForEach(viewModel.segments) { segment in
+                        ForEach(Array(viewModel.segments.enumerated()), id: \.element.id) { segIdx, segment in
                             Text(segment.text)
                                 .textSelection(.enabled)
                                 .font(.system(size: motionFontSize(forSegment: segment)))
@@ -156,6 +166,16 @@ struct ReaderView: View {
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 viewModel.jumpToOffset(segment.startOffset)
+                            }
+                            // 2026-05-05 — Citation-return pill,
+                            // anchored top-trailing on the cited
+                            // segment row.
+                            .overlay(alignment: .topTrailing) {
+                                if isCitedRow(segmentIndex: segIdx) {
+                                    citationReturnPill()
+                                        .padding(.trailing, 14)
+                                        .padding(.top, 4)
+                                }
                             }
                         }
                     }
@@ -449,11 +469,21 @@ struct ReaderView: View {
             ) { chatVM in
                 AskPoseyView(
                     viewModel: chatVM,
-                    onJumpToChunk: { offset in
+                    onJumpToChunk: { offset, fromCitation in
                         // M7 source-attribution tap: dismiss the
                         // sheet (the AskPoseyView calls dismiss()
                         // before invoking this) and jump the reader.
-                        viewModel.jumpToOffset(offset)
+                        // 2026-05-05 — fromCitation = true triggers
+                        // the citation-return flow (return-pill at
+                        // the cited row, extended chrome dwell,
+                        // pulse animation on the chrome Ask Posey
+                        // button). false is a non-citation jump
+                        // (e.g., user tapped their own anchor pill).
+                        if fromCitation {
+                            viewModel.jumpToOffsetFromCitation(offset)
+                        } else {
+                            viewModel.jumpToOffset(offset)
+                        }
                     }
                 )
             }
@@ -1162,6 +1192,72 @@ struct ReaderView: View {
     private func askSpecificAction() {
         revealChrome()
         openAskPosey(scope: .passage)
+    }
+
+    /// 2026-05-05 — Citation-return action. Triggered when the user
+    /// taps the floating pill that appears next to a cited passage
+    /// after they jumped here via an Ask Posey citation. Clears the
+    /// citation context state and re-opens the Ask Posey sheet on
+    /// the same document. The chat view model loads the persisted
+    /// conversation from SQLite, so the user lands back in the same
+    /// conversation at the most-recent message — "exact scroll
+    /// position" in the practical sense.
+    private func returnToAskPoseyAction() {
+        viewModel.clearCitationReturnContext()
+        openAskPosey(scope: .passage)
+    }
+
+    /// 2026-05-05 — Floating return-to-Ask-Posey pill rendered next
+    /// to the cited row. Per the Phase 1 brief: "small persistent
+    /// button immediately to the right of the first line of the
+    /// cited passage. ... small pill — a back arrow plus the Posey
+    /// sparkle icon — in Posey's accent color." Disappears
+    /// naturally when the cited row scrolls off (the pill is part
+    /// of the row's view tree); tap returns to Ask Posey.
+    @ViewBuilder
+    private func citationReturnPill() -> some View {
+        Button {
+            returnToAskPoseyAction()
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.caption)
+                Image(systemName: "sparkle")
+                    .font(.caption)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.accentColor, in: Capsule())
+            .shadow(color: Color.accentColor.opacity(0.35), radius: 4, x: 0, y: 1)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Return to Ask Posey conversation")
+        .accessibilityIdentifier("reader.citationReturnPill")
+        .remoteRegister("reader.citationReturn") {
+            returnToAskPoseyAction()
+        }
+        .transition(.scale(scale: 0.8).combined(with: .opacity))
+    }
+
+    /// True when this row is the cited row that should host the
+    /// return-pill overlay. Centralises the comparison so the two
+    /// row-rendering branches (displayBlocks + segments) stay in
+    /// sync. Compares by the segment-index resolution that
+    /// jumpToOffsetFromCitation captured, falling back to a
+    /// straight offset match for displayBlocks.
+    private func isCitedRow(segmentIndex: Int) -> Bool {
+        guard let ctx = viewModel.citationReturnContext else { return false }
+        return ctx.citedSentenceIndex == segmentIndex
+    }
+
+    private func isCitedRow(blockStartOffset: Int) -> Bool {
+        guard let ctx = viewModel.citationReturnContext else { return false }
+        // displayBlock branch: a block's start offset matches the
+        // citation when the cited offset falls within this block's
+        // range. We approximate by exact-or-nearby (within 80 chars)
+        // since blocks may not start exactly on the citation offset.
+        return abs(blockStartOffset - ctx.citedOffset) < 80
     }
 
     private func openAskPosey(
@@ -2451,6 +2547,47 @@ final class ReaderViewModel: ObservableObject {
     /// first.
     @Published private(set) var savedAnnotations: [SavedAnnotation] = []
     @Published private(set) var voiceMode: SpeechPlaybackService.VoiceMode = .bestAvailable
+
+    // ========== BLOCK VM-CITATION-RETURN: RETURN-TO-ASK-POSEY STATE - START ==========
+
+    /// 2026-05-05 — Set when the user arrived at the reader by
+    /// tapping an Ask Posey citation (inline `[ⁿ]` or sources strip).
+    /// Drives the floating return-pill rendered alongside the cited
+    /// row. Cleared when the user taps the pill (which returns to
+    /// the Ask Posey conversation). The pill disappears naturally
+    /// when the cited row scrolls off-screen because it's part of
+    /// the row's view tree; the context state itself can stay set
+    /// (no harm — if the user scrolls back, the pill reappears).
+    struct CitationReturnContext: Equatable {
+        let citedOffset: Int       // chunk's startOffset
+        let citedSentenceIndex: Int // resolved row index for stable rendering
+        let arrivedAt: Date
+    }
+    @Published var citationReturnContext: CitationReturnContext?
+
+    /// Citation-arrival jump. Sets up the return-pill state before
+    /// performing the standard jumpToOffset. Called from the Ask
+    /// Posey sheet's onJumpToChunk callback when fromCitation = true
+    /// (both inline citations and sources strip pills count).
+    func jumpToOffsetFromCitation(_ plainTextOffset: Int) {
+        let targetIndex = segments.lastIndex(where: { $0.startOffset <= plainTextOffset }) ?? 0
+        // Set context BEFORE the jump so the pill is in place when
+        // the row renders post-scroll.
+        citationReturnContext = CitationReturnContext(
+            citedOffset: plainTextOffset,
+            citedSentenceIndex: targetIndex,
+            arrivedAt: Date()
+        )
+        jumpToOffset(plainTextOffset)
+    }
+
+    /// Clear the citation-return state. Called when the user taps
+    /// the pill (which then re-opens the Ask Posey conversation).
+    func clearCitationReturnContext() {
+        citationReturnContext = nil
+    }
+
+    // ========== BLOCK VM-CITATION-RETURN: RETURN-TO-ASK-POSEY STATE - END ==========
 
     // ========== BLOCK VM-SEARCH: SEARCH STATE - START ==========
     @Published var searchQuery: String = ""

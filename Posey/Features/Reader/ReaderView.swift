@@ -1208,12 +1208,12 @@ struct ReaderView: View {
     }
 
     /// 2026-05-05 — Floating return-to-Ask-Posey pill rendered next
-    /// to the cited row. Per the Phase 1 brief: "small persistent
-    /// button immediately to the right of the first line of the
-    /// cited passage. ... small pill — a back arrow plus the Posey
-    /// sparkle icon — in Posey's accent color." Disappears
-    /// naturally when the cited row scrolls off (the pill is part
-    /// of the row's view tree); tap returns to Ask Posey.
+    /// to the cited row. Small capsule with back-arrow + sparkle
+    /// glyph. Muted gray (Color(white: 0.45)) with 60% opacity per
+    /// Mark's design feedback — reads as a quiet affordance, not a
+    /// distraction from the document. Disappears naturally when the
+    /// cited row scrolls off (the pill is part of the row's view
+    /// tree); tap returns to Ask Posey.
     @ViewBuilder
     private func citationReturnPill() -> some View {
         Button {
@@ -1225,11 +1225,14 @@ struct ReaderView: View {
                 Image(systemName: "sparkle")
                     .font(.caption)
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(Color.white.opacity(0.85))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.accentColor, in: Capsule())
-            .shadow(color: Color.accentColor.opacity(0.35), radius: 4, x: 0, y: 1)
+            .background(
+                Capsule()
+                    .fill(Color(white: 0.45))
+                    .opacity(0.60)
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Return to Ask Posey conversation")
@@ -1253,11 +1256,11 @@ struct ReaderView: View {
 
     private func isCitedRow(blockStartOffset: Int) -> Bool {
         guard let ctx = viewModel.citationReturnContext else { return false }
-        // displayBlock branch: a block's start offset matches the
-        // citation when the cited offset falls within this block's
-        // range. We approximate by exact-or-nearby (within 80 chars)
-        // since blocks may not start exactly on the citation offset.
-        return abs(blockStartOffset - ctx.citedOffset) < 80
+        // Exact match on the canonical block's startOffset, captured
+        // at citation-jump time. Replaces an earlier fuzzy "within
+        // 80 chars" comparison that produced multiple pills on
+        // densely-packed byline content.
+        return blockStartOffset == ctx.canonicalBlockStartOffset
     }
 
     private func openAskPosey(
@@ -2558,9 +2561,16 @@ final class ReaderViewModel: ObservableObject {
     /// when the cited row scrolls off-screen because it's part of
     /// the row's view tree; the context state itself can stay set
     /// (no harm — if the user scrolls back, the pill reappears).
+    ///
+    /// `canonicalBlockStartOffset` is the EXACT startOffset of the
+    /// single block (in displayBlocks mode) that contains the
+    /// citation. Computed once at citation-jump time so the pill
+    /// renders against exactly one block, not every block within a
+    /// fuzzy radius (which produced the three-pill bug Mark caught).
     struct CitationReturnContext: Equatable {
-        let citedOffset: Int       // chunk's startOffset
-        let citedSentenceIndex: Int // resolved row index for stable rendering
+        let citedOffset: Int            // chunk's startOffset
+        let citedSentenceIndex: Int     // resolved segment row index
+        let canonicalBlockStartOffset: Int  // exact block startOffset
         let arrivedAt: Date
     }
     @Published var citationReturnContext: CitationReturnContext?
@@ -2571,11 +2581,20 @@ final class ReaderViewModel: ObservableObject {
     /// (both inline citations and sources strip pills count).
     func jumpToOffsetFromCitation(_ plainTextOffset: Int) {
         let targetIndex = segments.lastIndex(where: { $0.startOffset <= plainTextOffset }) ?? 0
+        // Resolve the unique block whose startOffset is the largest
+        // value <= plainTextOffset. That's the SINGLE block
+        // containing the cited offset; the pill renders against
+        // this exact block so densely-packed byline-style content
+        // doesn't produce multiple pills.
+        let canonicalBlockOffset = displayBlocks
+            .last(where: { $0.startOffset <= plainTextOffset })?.startOffset
+            ?? plainTextOffset
         // Set context BEFORE the jump so the pill is in place when
         // the row renders post-scroll.
         citationReturnContext = CitationReturnContext(
             citedOffset: plainTextOffset,
             citedSentenceIndex: targetIndex,
+            canonicalBlockStartOffset: canonicalBlockOffset,
             arrivedAt: Date()
         )
         jumpToOffset(plainTextOffset)

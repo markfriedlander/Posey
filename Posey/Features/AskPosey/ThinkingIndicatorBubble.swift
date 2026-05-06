@@ -67,17 +67,35 @@ struct ThinkingIndicatorBubble: View {
     ]
 
     var body: some View {
-        HStack {
+        HStack(spacing: 8) {
+            // Subtle pulsing dot so the user reads "actively working"
+            // even before the rotating phrase is decoded. Renders
+            // crisply on both light and dark backgrounds.
+            Circle()
+                .fill(.tint.opacity(0.85))
+                .frame(width: 6, height: 6)
             Text(Self.phrases[currentIndex])
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                .font(.callout)
+                .foregroundStyle(.primary)
                 .id(currentIndex) // forces a fresh transition on each change
                 .transition(.opacity)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        // 2026-05-05 — Use a tinted-fill bubble so the indicator is
+        // legibly visible on both light and dark sheet backgrounds.
+        // The previous .thinMaterial bubble + .secondary text rendered
+        // as a barely-visible blob in dark mode (Mark caught the
+        // empty-circle look in his phone screenshot).
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.tint.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(.tint.opacity(0.25), lineWidth: 0.5)
+        )
         .task {
             // Rotate while this view is on screen. Cancels naturally
             // when the bubble is replaced by the streaming response

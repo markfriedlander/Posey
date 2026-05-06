@@ -305,24 +305,79 @@ pip3 uninstall fb-idb
 **Autonomous verification via the local API — standing practice:**
 
 Before asking Mark to relay what the screen shows, use the available tools
-to verify correctness yourself:
+to verify correctness yourself. The local API exposes everything needed to
+exercise the running app on the connected iPhone (or simulator) without
+Mark's eyes or hands.
 
-- **Text content**: `GET_TEXT:<doc_id>` returns displayText. Check for
-  visual page markers, correct structure, absence of artifacts.
-- **Import results**: `LIST_DOCUMENTS` or `GET_TEXT` confirm what was
-  stored — character count, title, file type, markers present.
-- **Image storage**: Visual page markers in displayText (`[[POSEY_VISUAL_PAGE:N:uuid]]`)
-  confirm the import path ran. The presence of a UUID (not just N) confirms
-  `renderPageToPNG` succeeded and `saveImages` was called. If the marker
-  has a UUID, the image is in `document_images`.
-- **Rendering**: macOS has PDFKit too. To verify a PDF page renders
-  correctly (not blank/white), render it locally using the same
-  `PDFPage.thumbnail` call and inspect the output image.
+**Data verbs** (no UI involvement)
+- `GET_TEXT:<doc_id>`, `LIST_DOCUMENTS`, `LIST_CHUNKS`, `GET_DOCUMENT_METADATA`,
+  `RAG_FIND`, `EMBED_QUERY` — inspect stored content + retrieval state.
+- `RESET_ALL`, `DELETE_DOCUMENT:<id>`, `CLEAR_ASK_POSEY_CONVERSATION:<id>` —
+  put the app in a known state.
+- `/import` (POST) — push a file from disk to the device.
+- `/ask` (POST) — run the full Ask Posey pipeline end-to-end including AFM,
+  return JSON with `response`, `chunksInjected`, `intent`, token breakdown.
+  **Note**: bypasses the open view model — does NOT fire the UI's
+  `messages.count` onChange. Use `SUBMIT_ASK_POSEY` instead when you need
+  to test scroll-on-send or thinking-indicator visibility.
+- `LIST_REFUSED_CHUNKS`, `LIST_ENHANCED_CHUNKS`, `PHASE_B_STATUS` — Phase B
+  RAG enhancement state.
 
-Only escalate to Mark for things that genuinely require eyes on the
-physical screen: subjective feel, motion behavior, layout at actual device
-scale, accessibility, or anything that requires physically interacting with
-the running app.
+**UI driving**
+- `/open-ask-posey` (POST `{documentID, scope}`) — navigate to a doc and
+  open the Ask Posey sheet. Idempotent; safe to call when the sheet is
+  already open.
+- `SUBMIT_ASK_POSEY:<text>` — drive the live `submit()` path on the open
+  Ask Posey sheet's view model. This is what fires the messages.count
+  onChange + scrollToLatestUserMessage + thinking indicator. Use this for
+  any test that needs to exercise the UI submit flow rather than just the
+  AFM call.
+- `SCROLL_ASK_POSEY_TO_LATEST` — three-pass scroll to the bottom of the
+  open conversation thread.
+- `READER_GOTO:<doc-id>:<offset>`, `READER_DOUBLE_TAP:<doc-id>:<offset>`,
+  `READER_TAP`, `READER_CHROME_STATE`, `READER_STATE` — drive the reader.
+- Playback verbs (play/pause/next/prev/restart), preferences setters
+  (voice mode, rate, font size, reading style, motion).
+- `OPEN_NOTES_SHEET`, `DISMISS_SHEET`, `CREATE_BOOKMARK`, `CREATE_NOTE`.
+- `TAP:<accessibility-id>`, `TYPE:<text>` — generic UI tap + text input
+  via the RemoteTargetRegistry (every interactive element wired with
+  `.remoteRegister(_:action:)` is tappable by id).
+- `TAP_CITATION:<n>`, `TAP_ASKPOSEY_ANCHOR:<storage-id>`,
+  `TAP_SAVED_ANNOTATION:<id>`, `SCROLL_NOTES:<id>` — intent-level
+  dispatch for surfaces where SwiftUI's accessibility bridging is unreliable.
+- `SEED_ASK_POSEY_FIXTURE:<doc-id>` — seed a fixture user/assistant turn
+  pair (with a multi-citation pattern) into a doc's persisted Ask Posey
+  conversation. For testing chip rendering on the simulator without AFM
+  model assets.
+
+**Inspection**
+- `READ_TREE` — JSON dump of the live UIView/accessibility hierarchy across
+  every active window + presented controller.
+- `SCREENSHOT` — UIWindow snapshot of the active key window, returned as
+  base64 PNG. Decode with Python and Read with the screenshot tool to
+  inspect what's actually on screen. **This works on the connected iPhone**
+  — not just the simulator.
+- `LOGS:<limit>:<sinceEpochMs>`, `CLEAR_LOGS` — recent log lines from the
+  in-app circular buffer (DEBUG only). `dbgLog(...)` calls append here.
+  Diagnostic for debugging without Console.app/Xcode.
+
+**The standing practice:**
+
+1. Use `SCREENSHOT` to see what the user sees. Compare against expected.
+2. Use `READ_TREE` to verify structural state (which sheet is presented,
+   which buttons exist, what their labels say).
+3. Use `LOGS` after a failed expectation to see what the app saw.
+4. Use the appropriate UI-driving verb (`SUBMIT_ASK_POSEY`, `READER_GOTO`,
+   etc.) to exercise the path under test, then `SCREENSHOT` again.
+5. Only escalate to Mark for things that truly need eyes you don't have —
+   subjective feel, motion smoothness, anything physically interactive.
+
+**Anti-pattern (do not repeat):** Marking a fix "done" after editing the
+code and running `/ask` to verify the data side, without ever rendering
+the UI through the changed code path. The `/ask` JSON tells you what AFM
+returned — it does NOT tell you what the user sees, what scrolled where,
+whether the indicator appeared, or whether the chips rendered. Take the
+screenshot.
 
 ---
 

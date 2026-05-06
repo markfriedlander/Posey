@@ -173,16 +173,17 @@ struct LibraryView: View {
                 if needsNavigation {
                     path = [document]
                 }
-                // Re-post the notification on a short delay so
-                // ReaderView (just mounted) catches it. Without this,
-                // ReaderView's onReceive registers AFTER the original
-                // post and never fires. Using userInfo.markRedelivered
-                // so the Library observer doesn't re-fire and create
-                // an infinite navigation loop.
-                if needsNavigation,
-                   info["redelivered"] == nil {
+                // 2026-05-05 (revised) — Always redeliver, not just
+                // on first navigation. ReaderView's onReceive may
+                // register after the original post even when the
+                // doc is already loaded (e.g. after a sheet dismiss
+                // tore down the publisher subscription). The
+                // `redelivered` flag still prevents the Library
+                // observer from looping.
+                if info["redelivered"] == nil {
+                    let delay: Int = needsNavigation ? 500 : 100
                     Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(500))
+                        try? await Task.sleep(for: .milliseconds(delay))
                         var redeliveredInfo = info
                         redeliveredInfo["redelivered"] = true
                         NotificationCenter.default.post(
@@ -1622,6 +1623,43 @@ extension LibraryViewModel {
                     NotificationCenter.default.post(name: .remoteDismissPresentedSheet, object: nil)
                 }
                 return json(["status": "posted"])
+
+            case "LOGS":
+                // LOGS, LOGS:<limit>, LOGS:<limit>:<sinceEpochMs>
+                // Returns recent log lines from the in-app circular
+                // buffer (DEBUG-only). Test harness can poll for new
+                // diagnostic output without needing Console.app.
+                var limit = 200
+                var since: Int? = nil
+                if let raw = arg {
+                    let parts = raw.split(separator: ":").map(String.init)
+                    if let l = parts.first.flatMap(Int.init) { limit = l }
+                    if parts.count > 1, let s = Int(parts[1]) { since = s }
+                }
+                let lines = InAppLogBuffer.shared.recent(limit: limit, sinceEpochMs: since)
+                return json(["count": lines.count, "lines": lines])
+
+            case "CLEAR_LOGS":
+                InAppLogBuffer.shared.clear()
+                return json(["cleared": true])
+
+            case "SUBMIT_ASK_POSEY":
+                // SUBMIT_ASK_POSEY:<text> — drive the live submit
+                // path on the open Ask Posey sheet's view model.
+                // Required for testing scroll-on-send and the
+                // thinking indicator: /ask bypasses the live VM and
+                // doesn't fire the UI's onChange.
+                guard let text = arg, !text.isEmpty else {
+                    return #"{"error":"Usage: SUBMIT_ASK_POSEY:<text>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteSubmitAskPoseyMessage,
+                        object: nil,
+                        userInfo: ["text": text]
+                    )
+                }
+                return json(["status": "posted", "text": text])
 
             case "SCROLL_ASK_POSEY_TO_LATEST":
                 // 2026-05-05 — Bring the most recent assistant message

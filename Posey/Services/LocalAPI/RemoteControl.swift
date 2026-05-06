@@ -82,10 +82,16 @@ extension Notification.Name {
     /// No userInfo. AskPoseyView observes; scrolls the conversation
     /// to the bottom (most recent message). Substitute for the
     /// device-side scroll gesture the test driver can't perform.
-    /// Useful for verifying that the latest assistant message — and
-    /// its inline chips + SOURCES strip — render correctly when the
-    /// conversation is taller than the visible sheet area.
     static let remoteScrollAskPoseyToLatest = Notification.Name("PoseyRemoteScrollAskPoseyToLatest")
+
+    /// `userInfo["text"]: String`. AskPoseyView observes; sets the
+    /// composer's text and invokes the view's submit() — same path
+    /// the user's tap on the send button takes. Lets the test harness
+    /// exercise the LIVE submit path (which fires the messages.count
+    /// onChange and triggers scrollToLatestUserMessage + the typing
+    /// indicator) without the keyboard. The /ask endpoint can't do
+    /// this because it bypasses the open view model entirely.
+    static let remoteSubmitAskPoseyMessage = Notification.Name("PoseyRemoteSubmitAskPoseyMessage")
 
     /// `userInfo["citationNumber"]: Int`. AskPoseyView observes;
     /// fires the same dispatch path the inline-citation tap fires

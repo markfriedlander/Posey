@@ -92,8 +92,15 @@ struct DOCXDocumentImporter {
             imagePool: imagePool
         )
 
-        let normalizedDisplay = normalizeDisplay(extracted.displayText)
-        let plainText = stripVisualPageMarkers(from: normalizedDisplay)
+        // 2026-05-06 — Strip visual-page markers from displayText
+        // for DOCX (per Mark's submission-day instruction). Inline
+        // image rendering for DOCX isn't supported in 1.0 — the
+        // marker token was leaking to the reader as literal text.
+        // Images stay in document_images for future use; only the
+        // marker tokens are removed from what the user sees.
+        let rawDisplay = normalizeDisplay(extracted.displayText)
+        let normalizedDisplay = stripVisualPageMarkers(from: rawDisplay)
+        let plainText = normalizedDisplay
         let normalizedPlain = normalizePlain(plainText)
         guard !normalizedPlain.isEmpty else { throw ImportError.emptyDocument }
 
@@ -133,7 +140,7 @@ struct DOCXDocumentImporter {
         // paragraph held a marker. Compute a "marker-loss" prefix
         // sum so each heading's plainText offset = its displayText
         // offset minus the total marker-character length before it.
-        let markerPattern = #"\u{000C}?\[\[POSEY_VISUAL_PAGE:[^\]]+\]\]\u{000C}?"#
+        let markerPattern = "\\x{000C}?\\[\\[POSEY_VISUAL_PAGE:[^\\]]+\\]\\]\\x{000C}?"
         let regex = try? NSRegularExpression(pattern: markerPattern)
         var markerLossPrefix: [Int] = Array(repeating: 0, count: paragraphs.count + 1)
         if let regex {
@@ -181,7 +188,9 @@ struct DOCXDocumentImporter {
     }
 
     private func stripVisualPageMarkers(from text: String) -> String {
-        let pattern = #"\u{000C}?\[\[POSEY_VISUAL_PAGE:[^\]]+\]\]\u{000C}?"#
+        // ICU-style hex escape (no braces) for U+000C form feed; plus
+        // explicit char-class escape for the brackets.
+        let pattern = "\\x{000C}?\\[\\[POSEY_VISUAL_PAGE:[^\\]]+\\]\\]\\x{000C}?"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
         return regex.stringByReplacingMatches(
             in: text,

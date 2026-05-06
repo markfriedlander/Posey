@@ -246,8 +246,16 @@ extension EPUBDocumentImporter {
 
         guard !chapterTexts.isEmpty else { throw ImportError.emptyDocument }
 
-        let displayText = normalizeDisplay(chapterTexts.joined(separator: "\n\n"))
-        let plainText   = buildPlainText(from: displayText)
+        // 2026-05-06 — Per Mark's submission-day instruction: strip
+        // visual-page markers from displayText for EPUB. Image
+        // rendering inline isn't supported in 1.0 (the marker token
+        // was leaking to the reader as literal text — see test
+        // results). Images extracted at import remain in
+        // `document_images` for future use; only the marker tokens
+        // are removed from what the user sees.
+        let rawDisplayText = normalizeDisplay(chapterTexts.joined(separator: "\n\n"))
+        let displayText = buildPlainText(from: rawDisplayText)
+        let plainText   = displayText
 
         // Build TOC entries from nav (EPUB 3) or skip if neither is available.
         var tocEntries = buildTOCEntries(
@@ -393,11 +401,16 @@ extension EPUBDocumentImporter {
     }
 
     /// Strips visual-page markers from displayText to produce plainText for TTS.
+    /// 2026-05-06 — Regex pattern fixed: ICU regex doesn't recognize
+    /// `\u{HHHH}` (Swift raw-string syntax). Use `\x{HHHH}` instead.
+    /// Previously this was silently failing (try? returned nil) and
+    /// markers were leaking through unstripped.
     private func buildPlainText(from displayText: String) -> String {
         var t = displayText
-        // Remove \x0c[[POSEY_VISUAL_PAGE:...]] \x0c sequences.
+        // Remove [[POSEY_VISUAL_PAGE:...]] (with optional surrounding
+        // form-feed separators).
         t = t.replacingOccurrences(
-            of: #"\u{000C}\[\[POSEY_VISUAL_PAGE:[^\]]*\]\]\u{000C}"#,
+            of: "\\x{000C}?\\[\\[POSEY_VISUAL_PAGE:[^\\]]*\\]\\]\\x{000C}?",
             with: "",
             options: .regularExpression
         )

@@ -90,6 +90,16 @@ struct AskPoseyView: View {
     /// can actually park the question at the literal viewport top.
     private static let trailingPadID = "askPosey.trailingPad"
 
+    /// ID of the most-recently-sent user message, used as the
+    /// scroll-on-send trigger. Watched via .onChange so the scroll
+    /// fires exactly when a new user message lands, regardless of
+    /// whether a streaming-placeholder bubble was appended in the
+    /// same SwiftUI update tick (the previous messages.count trigger
+    /// missed this case).
+    private var latestUserMessageID: UUID? {
+        viewModel.messages.last(where: { $0.role == .user })?.id
+    }
+
     /// Scroll the most-recently-sent user message to the top of the
     /// visible scroll area so the question stays anchored at the top
     /// and the streaming response appears below it.
@@ -216,53 +226,58 @@ struct AskPoseyView: View {
                                     .transition(.opacity)
                             }
 
-                            // 2026-05-05 — Trailing breathing room so
-                            // `scrollTo(userMessage.id, anchor: .top)`
-                            // can actually park the user's question at
-                            // the literal viewport top. Without this,
-                            // a SwiftUI ScrollView clamps scroll
-                            // position to "just enough to show all
-                            // content," meaning a short conversation
-                            // can't scroll the user message up to the
-                            // top — the LazyVStack lays out its
-                            // intrinsic height and stops. This invisible
-                            // spacer is sized to the viewport so there's
-                            // always room below the user message for
-                            // the scroll anchor to take effect, even
-                            // when the assistant reply is still empty
-                            // or short. Doesn't appear visually because
-                            // the sheet is the same color as the spacer.
-                            Color.clear
-                                .frame(height: trailingScrollPadHeight)
-                                .id(Self.trailingPadID)
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 12)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear
-                                    .onAppear {
-                                        scrollViewportHeight = proxy.size.height
-                                    }
-                                    .onChange(of: proxy.size.height) { _, newValue in
-                                        scrollViewportHeight = newValue
-                                    }
-                            }
-                        )
                     }
                     .frame(maxHeight: .infinity)
-                    .onChange(of: viewModel.messages.count) { oldValue, newValue in
-                        // After every user send, the most recent user
-                        // message should land at the TOP of the visible
-                        // scroll area so the user sees their question
-                        // and Posey's answer streaming in below. Skip
-                        // the initial population pulse from
-                        // loadHistory() (oldValue == 0).
-                        if oldValue > 0,
-                           viewModel.messages.last?.role == .user {
-                            scrollToLatestUserMessage(proxy: proxy)
+                    // 2026-05-05 — `.contentMargins` (iOS 17+) on the
+                    // BOTTOM extends the scrollable area by `viewportHeight`
+                    // pixels WITHOUT rendering visible empty content.
+                    // This is the standard ChatGPT/Claude pattern: when
+                    // the user sends a message, scrollTo(userMsg.id,
+                    // anchor: .top) needs there to be room below the
+                    // user's message for the scroll position to advance.
+                    // Without contentMargins, SwiftUI ScrollView clamps
+                    // scroll to "just enough to show all content," so
+                    // a short conversation can't actually park the
+                    // question at the literal top — the LazyVStack
+                    // lays out its intrinsic height and stops. Using
+                    // contentMargins instead of an inline trailing
+                    // spacer means there's no visible blank area at
+                    // the bottom of the conversation.
+                    .contentMargins(
+                        .bottom,
+                        max(0, scrollViewportHeight - 80),
+                        for: .scrollContent
+                    )
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear
+                                .onAppear { scrollViewportHeight = geo.size.height }
+                                .onChange(of: geo.size.height) { _, h in
+                                    scrollViewportHeight = h
+                                }
                         }
+                    )
+                    .onChange(of: latestUserMessageID) { oldValue, newValue in
+                        // 2026-05-05 (revised) — Watch the most-recent
+                        // user-message ID, not messages.count. The live
+                        // send() path appends user + streaming
+                        // placeholder in the same SwiftUI update tick,
+                        // so .onChange(of: messages.count) fires ONCE
+                        // with last role = .assistant — the previous
+                        // "last is user" guard returned early and the
+                        // scroll never fired. Mark caught the user
+                        // question staying put on every send. Watching
+                        // the latest user-message ID directly fires
+                        // exactly when a new user message lands and is
+                        // independent of whether a placeholder was
+                        // appended in the same tick.
+                        guard oldValue != nil || newValue != nil,
+                              oldValue != newValue else { return }
+                        scrollToLatestUserMessage(proxy: proxy)
                     }
                     .onChange(of: viewModel.isLoadingHistory) { _, newValue in
                         // Land on the target anchor once history has

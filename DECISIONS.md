@@ -1,5 +1,62 @@
 # Posey Decisions
 
+## 2026-05-05 (evening) — Ask Posey: Question Templates, Not Modes
+
+- Status: Accepted (designed with Mark + Claude before any code)
+- Decision: The four reader-chrome menu options (Explain this passage, Define a term, Find related passages, Ask something specific) are **question templates**, not persistent interaction modes. Picking one either prefills the composer or auto-submits a templated question. After that, the conversation is in normal free-chat mode. There is no "mode" the user is in afterward.
+- Rationale: Trying to model the four options as modes generates a long list of unanswerable design questions — does the mode persist? how do you switch? what does the placeholder say in each mode? what happens if the user types something outside the mode? Mark surfaced the confusion explicitly; Claude wrote up the questions; the resolution turned out to be "remove the mode construct." Templates are sugar over normal conversation. Each send is independently classified by intent; no template state carries between turns. The user always knows what they're doing because they're always doing the same thing — sending a question.
+
+### The four templates and their behavior
+
+| Template | What it does on selection |
+|---|---|
+| Explain this passage | Auto-submits *"Explain this passage in context — what's it saying?"* (passage-anchored) |
+| Define a term | Prefills the composer with `Define ` and focuses it; user types the term and hits send |
+| Find related passages | Auto-submits a doc-wide topic search seeded by the anchor's text |
+| Ask something specific | Opens the sheet with composer focused, no prefill |
+
+### The two entry points expose the same primitives
+
+- **Reader chrome menu** (sparkle icon in transport row) — surfaces the four templates. Picking one OPENS the sheet AND fires/prefills.
+- **In-sheet menu** (sparkle icon in the sheet, next to the composer) — surfaces the same four templates. Picking one creates a NEW templated question without clearing the conversation. It is just another way to send a templated question; no mode switch.
+
+The two entry points use the same icon (sparkle) for visual consistency and parity. The user learns one menu, encounters it in two places.
+
+### Anchor
+
+Anchor is set when the sheet opens (always present — every entry point to Ask Posey has a current passage; document-scope is an internal API path, not a user UI state). Anchor persists across the entire conversation. To work on a different passage, the user dismisses the sheet and reopens on the new selection. The four templates do not change anchor.
+
+### Composer placeholder text
+
+Anchor-aware and conversation-state-aware, never template-aware:
+
+- Sheet just opened: *"Ask about this passage"*
+- After any send completes: *"Ask a follow-up"*
+- When a template prefilled the composer (e.g. `Define `): no placeholder visible because the field has content; user types and sends, then placeholder reverts to *"Ask a follow-up"*
+
+Placeholder never says anything template-specific because there is no mode to label.
+
+### Follow-ups outside the chosen template
+
+No problem by construction. The intent classifier (`AskPoseyIntent`: `.immediate` / `.search` / `.general`) runs on each question independently. There is no concept of "this conversation is in Define mode" — only "this latest question is a Define-flavored question; the next one is something else." Templates do not carry state between turns.
+
+### Why this works
+
+- Coherent across both entry points because both expose the same primitives.
+- Eliminates the mental model that creates all of Claude's design questions.
+- The user always knows what mode they are in because there is no mode — they are always in normal-conversation mode, and templates are just shortcuts to compose questions.
+- Posey always knows what is expected because every send is just a question; templated questions read identically to typed questions in the prompt builder and intent classifier.
+
+### Implementation status
+
+- Reader chrome menu with four templates: already implemented (`ReaderView.swift`, the chrome `Menu` block). Behaviors match the table above.
+- In-sheet menu next to composer: needs implementation. Same four templates, same behaviors as the chrome menu, accessed via a sparkle icon adjacent to the composer.
+- Composer placeholder rules: needs verification + adjustment to match the anchor-aware / conversation-state-aware rules above.
+- Anchor persistence across conversation: already implemented.
+- Per-turn intent classification: already implemented (`AskPoseyService.classifyIntent`).
+
+---
+
 ## 2026-05-04 (evening) — Reader: Single-Tap-To-Jump Replaces Tap-To-Toggle-Chrome
 
 - Status: Accepted

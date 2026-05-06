@@ -68,8 +68,8 @@ EPUB Focus-during screenshot shows the title page with "Surviving the Informatio
 
 - **Voice mode switching audibly.** Tested API toggle on every format; confirming the voice actually changed audibly requires listening, which I can't do.
 - **Rate slider "takes effect at next sentence boundary" specifically.** Tested SET_RATE returns OK on every format and playback continues; the "takes effect at sentence boundary" claim requires audio analysis or listening.
-- **Image audit for RTF.** Not tested; existing RTF doc has no images and I didn't generate one.
-- **Multiple images per format / images interspersed with text / images at start vs middle vs end.** Single-image tests only.
+- **Image audit for RTF: NOW TESTED.** Generated `test_with_image.rtf` with a `{\pict}` block containing a hex-encoded PNG. Result: image DROPPED silently — `LIST_IMAGES` returns 0, no marker in displayText, no placeholder text. **RTF importer ignores `\pict` blocks entirely.** Bonus finding: RTF importer also has a paragraph-concatenation bug — the heading "Section 1" merged with the following body line into "Section 1is a paragraph before an embedded image." with the missing space.
+- **Multi-image case: NOW TESTED.** Generated `test_multi_image.docx` with 3 inline images (red/blue/green) interspersed with 4 text paragraphs. Result: all 3 images extracted (LIST_IMAGES count=3), all 3 markers placed correctly between paragraphs in displayText. All 3 render as **literal marker text** in the reader, exactly matching the single-image case. Confirms the DOCX image-render bug is consistent across image counts, not a single-image fluke.
 
 ### Items NOW verified per format (additions after Mark caught the assumption pattern AGAIN)
 
@@ -119,6 +119,8 @@ After committing the second pass at d76982c I claimed I was done. Mark asked if 
 18. **Motion reading style: no visible difference from Standard in still screenshots.** Motion likely manifests as transitions during sentence-advance only visible in video; difference vs. Standard is undetectable from a still. Verified via rapid-fire screenshots that sentence advances DO happen during Motion playback.
 19. **Conversation does not reload into the Ask Posey sheet on reopen.** TXT has 14 turns persisted in DB but the reopened sheet renders as blank empty area. Composer placeholder correctly reads "Ask a follow-up…" suggesting the VM knows messages exist; the rendering of the message list isn't picking them up on reopen.
 20. **Audio export speed appears ~3.6× faster than live playback.** TXT 32-segment doc exports as 47.4s of audio; expected ~170s at normal speech rate. ffmpeg confirms it's real audio (not silence), but the rate or segment concatenation is much tighter than playback would be. Worth investigation before submission.
+21. **RTF embedded `{\pict}` images dropped silently.** RTF importer doesn't extract or marker-replace images at all. Tested with a hex-encoded PNG inside `{\pict\pngblip}`. Image disappeared.
+22. **RTF importer has paragraph-concatenation bug.** "Section 1\\par This is a paragraph..." renders as "Section 1is a paragraph" with the space eaten. Likely a `\par` boundary handling issue in the RTF parser.
 
 ## Per-format pass/fail tables
 

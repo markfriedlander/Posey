@@ -1845,7 +1845,16 @@ extension AskPoseyChatViewModel {
             // "**NEVER announce the rewrite.**" hard rule. Per
             // Mark's 2026-05-02 (later) directive: "the prompt rule
             // stays, the heuristic catches what AFM misses."
-            let stripped = AskPoseyPromptBuilder.stripPolishPreamble(metadata.finalText)
+            //
+            // 2026-05-06 — Also dedupe repeated comma-separated items
+            // in the response. AFM's count-mismatch hallucination
+            // (e.g. user asks for "four things", doc has three, AFM
+            // pads by repeating an item) survives prompt rules. The
+            // heuristic catches the worst case: when a list of
+            // comma-separated phrases contains duplicates, collapse
+            // the duplicates while preserving order.
+            let depolished = AskPoseyPromptBuilder.stripPolishPreamble(metadata.finalText)
+            let stripped = AskPoseyPromptBuilder.dedupeRepeatedListItems(depolished)
             guard let index = embeddingIndex,
                   !metadata.chunksInjected.isEmpty else { return stripped }
             let chunkRefs = metadata.chunksInjected.enumerated().map { (i, c) in

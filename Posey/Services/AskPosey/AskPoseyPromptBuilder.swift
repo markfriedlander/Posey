@@ -393,6 +393,23 @@ nonisolated enum AskPoseyPromptBuilder {
     finish patterns. Real lists in real documents have specific \
     items; making them up to look complete is fabrication.
 
+    6a. **DON'T HIT A NUMBER BY REPEATING.** If the user asks for \
+    a specific count ("the four things", "the three reasons") and \
+    the document only contains M items where M ≠ N, give the M \
+    actual items and correct the count. NEVER pad to N by \
+    repeating an item, paraphrasing the same idea twice, or \
+    inventing filler. \
+    FAILED: question "what four things happen when you work in \
+    public?" when doc lists three → answer "the work gets better \
+    through outside critique, people you don't know catch errors, \
+    the work gets better through outside critique, and the work \
+    gets better through outside critique." (same item 3 times). \
+    SUCCEEDED: "The document mentions three, not four: (1) the \
+    work gets better through outside critique, (2) you meet \
+    people who care about the same problems, (3) you build a \
+    record of how you think." Repeating a single item to satisfy \
+    a count is a form of fabrication.
+
     5. **NEVER RECOMMEND.** If the user asks "should I read this?" \
     or "is this worth reading?" or "would you recommend this?" — \
     you cannot answer that. The document doesn't make a \
@@ -924,6 +941,84 @@ extension AskPoseyPromptBuilder {
             }
         }
         return result
+    }
+
+    /// 2026-05-06 — Collapse repeated comma-separated items in
+    /// AFM responses. Catches the count-mismatch hallucination
+    /// where AFM is asked for "the four things" but the document
+    /// only has three, and pads to four by repeating an item.
+    /// Splits comma-separated phrases inside each sentence,
+    /// removes duplicates while preserving first-occurrence order,
+    /// then re-joins. Conservative: only fires when the same
+    /// substring appears verbatim two or more times in a single
+    /// sentence's comma-separated list, and the duplicates are
+    /// at least 3 words long (so legitimate repetitions like
+    /// "yes, yes" or "no, no" don't get collapsed).
+    static func dedupeRepeatedListItems(_ text: String) -> String {
+        var result: [String] = []
+        // Split into sentences on .!? followed by space or end.
+        // Keep the terminator with the sentence.
+        let sentencePattern = #"[^.!?]*[.!?]+\s*|[^.!?]+$"#
+        guard let regex = try? NSRegularExpression(pattern: sentencePattern) else {
+            return text
+        }
+        let nsText = text as NSString
+        var pos = 0
+        regex.enumerateMatches(in: text, range: NSRange(location: 0, length: nsText.length)) { match, _, _ in
+            guard let match else { return }
+            let sentence = nsText.substring(with: match.range)
+            result.append(dedupeListInSentence(sentence))
+            pos = match.range.location + match.range.length
+        }
+        if pos < nsText.length {
+            result.append(nsText.substring(from: pos))
+        }
+        return result.joined()
+    }
+
+    private static func dedupeListInSentence(_ sentence: String) -> String {
+        // Only act if the sentence contains a comma-separated list
+        // with at least three commas (so we have ≥ 4 list items —
+        // otherwise repetition can't manifest the way it does).
+        let commaCount = sentence.filter { $0 == "," }.count
+        guard commaCount >= 2 else { return sentence }
+        // Split on commas, trim, dedupe by first occurrence.
+        // Skip the very last segment (it usually contains the
+        // " and X" tail or trailing punctuation; dedupe should
+        // still apply if the tail equals an earlier item, so we
+        // process tail too).
+        let parts = sentence.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        // Strip a leading " and " on the final part for comparison.
+        func normalize(_ s: String) -> String {
+            var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Strip terminal punctuation for comparison.
+            while let last = t.last, ".!?".contains(last) {
+                t.removeLast()
+            }
+            // Strip leading "and " (whitespace-tolerant).
+            let trimmed = t.trimmingCharacters(in: .whitespaces)
+            if trimmed.lowercased().hasPrefix("and ") {
+                t = String(trimmed.dropFirst(4))
+            }
+            return t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        var seen = Set<String>()
+        var keptOriginal: [String] = []
+        for part in parts {
+            let key = normalize(part)
+            // Only dedupe when the normalized key is at least 3 words
+            // — preserves "yes, yes" / "no, no" rhetorical doubling.
+            let wordCount = key.split(whereSeparator: { $0.isWhitespace }).count
+            if wordCount >= 3 {
+                if seen.contains(key) { continue }
+                seen.insert(key)
+            }
+            keptOriginal.append(part)
+        }
+        if keptOriginal.count == parts.count {
+            return sentence  // no dupes found, return original
+        }
+        return keptOriginal.joined(separator: ",")
     }
 }
 

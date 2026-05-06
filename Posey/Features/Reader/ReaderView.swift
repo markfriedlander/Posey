@@ -2761,6 +2761,10 @@ final class ReaderViewModel: ObservableObject {
             rawBlocks = PDFDisplayParser().parse(displayText: document.displayText).blocks
         } else if document.fileType == "epub" {
             rawBlocks = EPUBDisplayParser().parse(displayText: document.displayText)
+        } else if document.fileType == "docx" {
+            rawBlocks = DOCXDisplayParser().parse(displayText: document.displayText)
+        } else if document.fileType == "html" || document.fileType == "htm" {
+            rawBlocks = HTMLDisplayParser().parse(displayText: document.displayText)
         } else {
             rawBlocks = []
         }

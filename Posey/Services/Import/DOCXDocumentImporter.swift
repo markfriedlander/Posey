@@ -92,15 +92,12 @@ struct DOCXDocumentImporter {
             imagePool: imagePool
         )
 
-        // 2026-05-06 — Strip visual-page markers from displayText
-        // for DOCX (per Mark's submission-day instruction). Inline
-        // image rendering for DOCX isn't supported in 1.0 — the
-        // marker token was leaking to the reader as literal text.
-        // Images stay in document_images for future use; only the
-        // marker tokens are removed from what the user sees.
-        let rawDisplay = normalizeDisplay(extracted.displayText)
-        let normalizedDisplay = stripVisualPageMarkers(from: rawDisplay)
-        let plainText = normalizedDisplay
+        // 2026-05-06 (parity #2) — displayText KEEPS the visual-page
+        // markers; DOCXDisplayParser converts them to .visualPlaceholder
+        // blocks at render time. plainText is the marker-stripped form
+        // used for TTS / search / RAG / character count.
+        let normalizedDisplay = normalizeDisplay(extracted.displayText)
+        let plainText = stripVisualPageMarkers(from: normalizedDisplay)
         let normalizedPlain = normalizePlain(plainText)
         guard !normalizedPlain.isEmpty else { throw ImportError.emptyDocument }
 

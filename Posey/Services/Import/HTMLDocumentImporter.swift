@@ -43,13 +43,11 @@ struct HTMLDocumentImporter {
         let data = try Data(contentsOf: url)
         let baseDirectory = url.deletingLastPathComponent()
         let (markedData, images) = extractInlineImages(from: data, baseDirectory: baseDirectory)
-        let rawDisplay = try loadText(fromData: markedData)
-        // 2026-05-06 — Per Mark: strip visual-page markers from
-        // displayText for HTML. Inline image rendering for HTML
-        // isn't supported in 1.0 (markers were leaking as literal
-        // text). Images stay in document_images for future use.
-        let displayText = stripVisualPageMarkers(from: rawDisplay)
-        let plainText = displayText
+        let displayText = try loadText(fromData: markedData)
+        // 2026-05-06 (parity #2) — displayText KEEPS markers;
+        // HTMLDisplayParser converts them to .visualPlaceholder
+        // blocks. plainText is the marker-stripped form for TTS.
+        let plainText = stripVisualPageMarkers(from: displayText)
         return (displayText, plainText, images)
     }
 

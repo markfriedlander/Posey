@@ -45,6 +45,16 @@ struct AskPoseyView: View {
     @AppStorage("Posey.AskPosey.nonEnglishNoticeDismissed") private var nonEnglishDismissed: Bool = false
     @State private var showFirstUseSheet: Bool = false
 
+    /// 2026-05-05 — Dynamic-scroll geometry state for Item 5. The
+    /// scroll-on-send behavior decides between two modes per the
+    /// brief: short user message → scroll to top of viewport; long
+    /// user message (>40% of viewport height) → scroll so the bottom
+    /// of the message sits near the top of the viewport with the
+    /// response area below. Both heights are measured at runtime
+    /// (NOT screen height) via GeometryReader / PreferenceKey.
+    @State private var scrollViewportHeight: CGFloat = 0
+    @State private var lastUserMessageHeight: CGFloat = 0
+
     /// Closure invoked when the user taps a Sources-strip pill OR an
     /// inline `[ⁿ]` citation in an assistant bubble. Owned by the
     /// host (ReaderView) which dismisses the sheet and calls
@@ -85,10 +95,45 @@ struct AskPoseyView: View {
         Task { @MainActor in
             // Brief delay so the LazyVStack realises the new row
             // before scrollTo runs — otherwise the proxy can't find
-            // the id.
-            try? await Task.sleep(for: .milliseconds(60))
-            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                proxy.scrollTo(target.id, anchor: .top)
+            // the id, AND so the GeometryReader inside the user
+            // message bubble has time to post its measured height
+            // through the preference pipeline.
+            try? await Task.sleep(for: .milliseconds(80))
+            // 2026-05-05 — Item 5 dynamic scroll behavior. Decide
+            // between short-message and long-message modes based
+            // on measured viewport + measured user-message heights
+            // (no screen-height fallbacks).
+            //   Short (msg < 40% of viewport): scroll the user
+            //     message to the top of the viewport — they see
+            //     their question and the response streams in below.
+            //   Long (msg >= 40%): scroll the typing indicator to
+            //     a small offset from the top, leaving the bottom
+            //     edge of the user message visible above and the
+            //     response area filling the rest. Per the brief:
+            //     "the response starts streaming right at the fold."
+            // Falls back to short-mode behavior when measurements
+            // aren't available yet (zero / nil) — the worst case is
+            // identical to the previous always-top behavior.
+            let viewport = scrollViewportHeight
+            let msgHeight = lastUserMessageHeight
+            let isLong = (viewport > 0 && msgHeight > viewport * 0.40)
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.20)) {
+                if isLong {
+                    // Long message — scroll the typing indicator to
+                    // sit ~12% down from the top of the viewport.
+                    // The user message above it shows its bottom
+                    // edge with a small gap; the streaming bubble
+                    // appears just below.
+                    proxy.scrollTo(
+                        Self.typingIndicatorID,
+                        anchor: UnitPoint(x: 0.5, y: 0.12)
+                    )
+                } else {
+                    // Short message — top of message at top of
+                    // viewport, with the bubble's natural padding
+                    // providing the small gap above.
+                    proxy.scrollTo(target.id, anchor: .top)
+                }
             }
         }
     }
@@ -175,6 +220,33 @@ struct AskPoseyView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxHeight: .infinity)
+                    // 2026-05-05 — Item 5 viewport measurement.
+                    // ScrollView's actual height = the conversation
+                    // viewport (between anchor area on top and the
+                    // composer + keyboard on bottom). The
+                    // GeometryReader background captures it without
+                    // affecting layout. Updates when the keyboard
+                    // appears/disappears or rotation changes the
+                    // available space.
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear
+                                .onAppear { scrollViewportHeight = geo.size.height }
+                                .onChange(of: geo.size.height) { _, newH in
+                                    scrollViewportHeight = newH
+                                }
+                        }
+                    )
+                    .onPreferenceChange(UserMessageHeightPreferenceKey.self) { h in
+                        // The latest user message bubble's GeometryReader
+                        // posts its measured height through the preference.
+                        // Multiple bubbles can post but the latest one is
+                        // typically the highest-frequency updater (it
+                        // re-lays out as it appears); for our purposes —
+                        // a one-shot read at scroll-on-send time — the
+                        // latest value is the right one.
+                        if h > 0 { lastUserMessageHeight = h }
+                    }
                     .onChange(of: viewModel.messages.count) { oldValue, newValue in
                         // After every user send, the most recent user
                         // message should land at the TOP of the visible
@@ -460,6 +532,28 @@ private extension AskPoseyView {
         case .user, .assistant:
             VStack(alignment: .leading, spacing: 4) {
                 AskPoseyMessageBubble(message: message)
+                    // 2026-05-05 — Item 5 dynamic-scroll measurement.
+                    // User-message bubbles post their measured height
+                    // through UserMessageHeightPreferenceKey; the
+                    // ScrollView reads it via .onPreferenceChange so
+                    // scrollToLatestUserMessage can decide between
+                    // short-mode (top anchor) and long-mode (typing-
+                    // indicator near top, message bottom visible).
+                    // Only user bubbles measure; assistant bubbles
+                    // are irrelevant to the send-scroll decision.
+                    .background(
+                        message.role == .user
+                            ? AnyView(
+                                GeometryReader { geo in
+                                    Color.clear.preference(
+                                        key: UserMessageHeightPreferenceKey.self,
+                                        value: geo.size.height
+                                    )
+                                }
+                                .allowsHitTesting(false)
+                            )
+                            : AnyView(EmptyView())
+                    )
                 // Navigation cards (.search intent results) render as
                 // a separate strip — they're a structurally different
                 // surface from text + inline citations.
@@ -590,33 +684,16 @@ private extension AskPoseyView {
         #endif
     }
 
-    /// "Posey is thinking…" placeholder while a response is in
-    /// flight. Three-dot animation keeps the UI signaling that
-    /// something is happening without committing to a specific
-    /// per-token rendering — M5 streaming will replace this with
-    /// the live response bubble itself.
+    /// Empty-bubble thinking indicator with rotating Posey-voice
+    /// phrases. Renders while `isResponding` is true AND no streaming
+    /// bubble has started yet (typically the 1–8s window between
+    /// send and first token arrival on AFM). Phrases cycle randomly
+    /// every ~2.5s with a soft fade between. Same bubble styling as
+    /// an assistant message so it reads as "Posey, getting ready to
+    /// answer" rather than "loading spinner with words."
     var typingIndicator: some View {
-        HStack(spacing: 6) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .frame(width: 6, height: 6)
-                    .opacity(0.55)
-                    .scaleEffect(1.0)
-                    .animation(
-                        .easeInOut(duration: 0.6)
-                            .repeatForever()
-                            .delay(Double(i) * 0.18),
-                        value: viewModel.isResponding
-                    )
-            }
-            Text("Posey is thinking…")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .accessibilityLabel("Posey is thinking")
+        ThinkingIndicatorBubble()
+            .accessibilityLabel("Posey is thinking")
     }
 
     /// 2026-05-05 — Composer placeholder per the menu interaction
@@ -1252,3 +1329,36 @@ private struct PopulatedAskPoseyPreview: View {
 }
 #endif
 // ========== BLOCK 04: PREVIEWS - END ==========
+
+
+// ========== BLOCK 05: PREFERENCE KEYS (Item 5 dynamic scroll) - START ==========
+
+/// 2026-05-05 — Posts the measured height of the latest user-message
+/// bubble through the SwiftUI preference pipeline so the ScrollView
+/// can read it at scroll-on-send time. See AskPoseyView's
+/// scrollToLatestUserMessage and the .background GeometryReader on
+/// user bubbles.
+struct UserMessageHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        // Last-writer-wins is the right reducer: each user bubble
+        // posts its own height; the latest bubble's value is what
+        // we want to capture, and the last child to be enumerated
+        // is the bottom-most (latest) one in our LazyVStack.
+        value = nextValue()
+    }
+}
+
+/// 2026-05-05 — Reserved for symmetry; the ScrollView height is
+/// captured directly via .background GeometryReader rather than a
+/// preference because we have a single producer (the ScrollView
+/// container). Kept as a documented type for future use if multiple
+/// children need to participate in viewport measurement.
+struct ScrollViewportHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+// ========== BLOCK 05: PREFERENCE KEYS - END ==========

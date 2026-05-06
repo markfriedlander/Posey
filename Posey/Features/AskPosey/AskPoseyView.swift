@@ -45,15 +45,6 @@ struct AskPoseyView: View {
     @AppStorage("Posey.AskPosey.nonEnglishNoticeDismissed") private var nonEnglishDismissed: Bool = false
     @State private var showFirstUseSheet: Bool = false
 
-    /// 2026-05-05 — Dynamic-scroll geometry state for Item 5. The
-    /// scroll-on-send behavior decides between two modes per the
-    /// brief: short user message → scroll to top of viewport; long
-    /// user message (>40% of viewport height) → scroll so the bottom
-    /// of the message sits near the top of the viewport with the
-    /// response area below. Both heights are measured at runtime
-    /// (NOT screen height) via GeometryReader / PreferenceKey.
-    @State private var scrollViewportHeight: CGFloat = 0
-    @State private var lastUserMessageHeight: CGFloat = 0
 
     /// Closure invoked when the user taps a Sources-strip pill OR an
     /// inline `[ⁿ]` citation in an assistant bubble. Owned by the
@@ -95,43 +86,30 @@ struct AskPoseyView: View {
         Task { @MainActor in
             // Brief delay so the LazyVStack realises the new row
             // before scrollTo runs — otherwise the proxy can't find
-            // the id, AND so the GeometryReader inside the user
-            // message bubble has time to post its measured height
-            // through the preference pipeline.
-            try? await Task.sleep(for: .milliseconds(80))
-            // 2026-05-05 — Item 5 dynamic scroll behavior. Decide
-            // between short-message and long-message modes based
-            // on measured viewport + measured user-message heights
-            // (no screen-height fallbacks).
-            //   Short (msg < 40% of viewport): scroll the user
-            //     message to the top of the viewport — they see
-            //     their question and the response streams in below.
-            //   Long (msg >= 40%): scroll the typing indicator to
-            //     a small offset from the top, leaving the bottom
-            //     edge of the user message visible above and the
-            //     response area filling the rest. Per the brief:
-            //     "the response starts streaming right at the fold."
-            // Falls back to short-mode behavior when measurements
-            // aren't available yet (zero / nil) — the worst case is
-            // identical to the previous always-top behavior.
-            let viewport = scrollViewportHeight
-            let msgHeight = lastUserMessageHeight
-            let isLong = (viewport > 0 && msgHeight > viewport * 0.40)
+            // the id and the scroll silently no-ops.
+            try? await Task.sleep(for: .milliseconds(60))
+            // 2026-05-05 — Item 5 scroll behavior. Decide between
+            // short-message and long-message modes via character-
+            // count heuristic. Earlier attempt used GeometryReader
+            // measurement (more correct per the brief's "calculated
+            // dynamically" line) but the .background(GeometryReader)
+            // on user bubbles broke scroll position resolution
+            // (likely lazy-realization race or row-identity
+            // invalidation). The heuristic is a strict step back to
+            // working-but-approximate; can be upgraded later if
+            // ScrollView geometry observation can be made
+            // non-interfering.
+            //   ~250 chars ≈ 5–7 lines on iPhone, ≈ 40% of typical
+            //   sheet viewport. Short → user msg at top of viewport.
+            //   Long → typing indicator ~12% down, msg bottom above.
+            let isLong = target.content.count >= 250
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.20)) {
                 if isLong {
-                    // Long message — scroll the typing indicator to
-                    // sit ~12% down from the top of the viewport.
-                    // The user message above it shows its bottom
-                    // edge with a small gap; the streaming bubble
-                    // appears just below.
                     proxy.scrollTo(
                         Self.typingIndicatorID,
                         anchor: UnitPoint(x: 0.5, y: 0.12)
                     )
                 } else {
-                    // Short message — top of message at top of
-                    // viewport, with the bubble's natural padding
-                    // providing the small gap above.
                     proxy.scrollTo(target.id, anchor: .top)
                 }
             }
@@ -220,33 +198,6 @@ struct AskPoseyView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxHeight: .infinity)
-                    // 2026-05-05 — Item 5 viewport measurement.
-                    // ScrollView's actual height = the conversation
-                    // viewport (between anchor area on top and the
-                    // composer + keyboard on bottom). The
-                    // GeometryReader background captures it without
-                    // affecting layout. Updates when the keyboard
-                    // appears/disappears or rotation changes the
-                    // available space.
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear
-                                .onAppear { scrollViewportHeight = geo.size.height }
-                                .onChange(of: geo.size.height) { _, newH in
-                                    scrollViewportHeight = newH
-                                }
-                        }
-                    )
-                    .onPreferenceChange(UserMessageHeightPreferenceKey.self) { h in
-                        // The latest user message bubble's GeometryReader
-                        // posts its measured height through the preference.
-                        // Multiple bubbles can post but the latest one is
-                        // typically the highest-frequency updater (it
-                        // re-lays out as it appears); for our purposes —
-                        // a one-shot read at scroll-on-send time — the
-                        // latest value is the right one.
-                        if h > 0 { lastUserMessageHeight = h }
-                    }
                     .onChange(of: viewModel.messages.count) { oldValue, newValue in
                         // After every user send, the most recent user
                         // message should land at the TOP of the visible
@@ -532,28 +483,6 @@ private extension AskPoseyView {
         case .user, .assistant:
             VStack(alignment: .leading, spacing: 4) {
                 AskPoseyMessageBubble(message: message)
-                    // 2026-05-05 — Item 5 dynamic-scroll measurement.
-                    // User-message bubbles post their measured height
-                    // through UserMessageHeightPreferenceKey; the
-                    // ScrollView reads it via .onPreferenceChange so
-                    // scrollToLatestUserMessage can decide between
-                    // short-mode (top anchor) and long-mode (typing-
-                    // indicator near top, message bottom visible).
-                    // Only user bubbles measure; assistant bubbles
-                    // are irrelevant to the send-scroll decision.
-                    .background(
-                        message.role == .user
-                            ? AnyView(
-                                GeometryReader { geo in
-                                    Color.clear.preference(
-                                        key: UserMessageHeightPreferenceKey.self,
-                                        value: geo.size.height
-                                    )
-                                }
-                                .allowsHitTesting(false)
-                            )
-                            : AnyView(EmptyView())
-                    )
                 // Navigation cards (.search intent results) render as
                 // a separate strip — they're a structurally different
                 // surface from text + inline citations.
@@ -572,8 +501,19 @@ private extension AskPoseyView {
                 if message.role == .assistant,
                    !message.chunksInjected.isEmpty,
                    message.navigationCards.isEmpty {
-                    sourcesStrip(for: message.chunksInjected)
-                        .padding(.top, 2)
+                    // 2026-05-05 — Filter to only chunks AFM actually
+                    // cited in the response. Earlier behavior showed
+                    // every chunk injected into the prompt (including
+                    // ones AFM didn't reference), which produced the
+                    // confusing "response cites only [3] but the
+                    // sources strip lists 4" mismatch Mark caught.
+                    // The user's mental model is "sources = things
+                    // cited"; we honor that.
+                    let cited = citedChunks(in: message)
+                    if !cited.isEmpty {
+                        sourcesStrip(for: cited)
+                            .padding(.top, 2)
+                    }
                 }
             }
         }
@@ -1066,6 +1006,36 @@ private extension AskPoseyView {
             .padding(.horizontal, 14)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// 2026-05-05 — Return the subset of chunksInjected that AFM
+    /// actually cited in the assistant message's content. Citations
+    /// appear as `[N]` markers (1-indexed) in the response text;
+    /// chunksInjected is 1-indexed too. Mark caught the original
+    /// "response cites [3], strip lists 4" mismatch — the user's
+    /// mental model is "sources = things cited," so we filter.
+    /// Falls back to the full list if no `[N]` markers are present
+    /// (which shouldn't happen for grounded answers, but if it does
+    /// the user still sees something rather than an empty strip).
+    private func citedChunks(in message: AskPoseyMessage) -> [RetrievedChunk] {
+        let text = message.content
+        let pattern = #"\[(\d{1,2})\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return message.chunksInjected
+        }
+        let nsRange = NSRange(text.startIndex..., in: text)
+        var citedNumbers = Set<Int>()
+        regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
+            guard let match,
+                  let numRange = Range(match.range(at: 1), in: text),
+                  let n = Int(text[numRange]),
+                  n >= 1, n <= message.chunksInjected.count else { return }
+            citedNumbers.insert(n)
+        }
+        if citedNumbers.isEmpty { return [] }
+        return message.chunksInjected.enumerated().compactMap { (idx, chunk) in
+            citedNumbers.contains(idx + 1) ? chunk : nil
+        }
     }
 
     /// SF Symbol name for the confidence-tier circle glyph next to

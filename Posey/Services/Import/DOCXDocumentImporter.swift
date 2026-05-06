@@ -49,12 +49,21 @@ struct DOCXDocumentImporter {
     /// content] ... <w:fldChar fldCharType="end"/>`. Without this,
     /// TTS reads the whole TOC aloud (chapter title + page reference
     /// for every entry).
-    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord]) {
+    /// One TOC entry surfaced from a heading-styled paragraph in the
+    /// `.docx`. Title is the paragraph text; offset is the byte offset
+    /// of that paragraph's first character in the final plainText.
+    struct DOCXHeadingEntry {
+        let level: Int
+        let title: String
+        let plainTextOffset: Int
+    }
+
+    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry]) {
         let data = try Data(contentsOf: url)
         return try loadDocument(fromData: data)
     }
 
-    func loadDocument(fromData data: Data) throws -> (displayText: String, plainText: String, images: [PageImageRecord]) {
+    func loadDocument(fromData data: Data) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry]) {
         let archive = try archive(from: data)
         let documentXML = try archive.entryData(named: "word/document.xml")
 
@@ -93,7 +102,57 @@ struct DOCXDocumentImporter {
         let usedImages = extracted.usedImageIDs.compactMap { id -> PageImageRecord? in
             imagePool.values.first(where: { $0.imageID == id })
         }
-        return (normalizedDisplay, normalizedPlain, usedImages)
+
+        // 2026-05-06 — Heading → TOC offset mapping. The extractor
+        // gives us paragraph indexes; the displayText was assembled
+        // by joining paragraphs with "\n\n". Compute each heading's
+        // offset by walking the paragraph list and accumulating
+        // lengths. Then map that to the plainText (which has
+        // visual-page markers stripped — for headings, which sit in
+        // ordinary text paragraphs, the offsets are unchanged).
+        var paragraphStartOffsets: [Int] = []
+        var runningOffset = 0
+        for (idx, p) in extracted.headings.map({ $0.paragraphIndex }).enumerated() { _ = idx; _ = p }  // placeholder; we walk paragraphs below
+        var paragraphs: [String] = []
+        // Re-derive paragraph list by splitting displayText. The
+        // extractor's joined output isn't normalized, so split on the
+        // original "\n\n" separator before normalization for accurate
+        // index mapping.
+        paragraphs = extracted.displayText.components(separatedBy: "\n\n")
+        for (i, p) in paragraphs.enumerated() {
+            paragraphStartOffsets.append(runningOffset)
+            runningOffset += p.count
+            if i < paragraphs.count - 1 {
+                runningOffset += 2 // the "\n\n" separator
+            }
+        }
+        // The normalizedDisplay → plainText transform strips visual-
+        // page markers, which contain the marker substring only. For
+        // heading paragraphs (which never contain markers), offsets
+        // before the heading paragraph could shift if any earlier
+        // paragraph held a marker. Compute a "marker-loss" prefix
+        // sum so each heading's plainText offset = its displayText
+        // offset minus the total marker-character length before it.
+        let markerPattern = #"\u{000C}?\[\[POSEY_VISUAL_PAGE:[^\]]+\]\]\u{000C}?"#
+        let regex = try? NSRegularExpression(pattern: markerPattern)
+        var markerLossPrefix: [Int] = Array(repeating: 0, count: paragraphs.count + 1)
+        if let regex {
+            for (i, p) in paragraphs.enumerated() {
+                let nsP = p as NSString
+                let matches = regex.matches(in: p, range: NSRange(location: 0, length: nsP.length))
+                let markerChars = matches.reduce(0) { $0 + $1.range.length }
+                markerLossPrefix[i + 1] = markerLossPrefix[i] + markerChars
+            }
+        }
+        let docxHeadings: [DOCXHeadingEntry] = extracted.headings.compactMap { h in
+            guard h.paragraphIndex >= 0, h.paragraphIndex < paragraphStartOffsets.count else {
+                return nil
+            }
+            let displayOffset = paragraphStartOffsets[h.paragraphIndex]
+            let plainOffset = max(0, displayOffset - markerLossPrefix[h.paragraphIndex])
+            return DOCXHeadingEntry(level: h.level, title: h.title, plainTextOffset: plainOffset)
+        }
+        return (normalizedDisplay, normalizedPlain, usedImages, docxHeadings)
     }
 // ========== BLOCK 02: ENTRY POINTS - END ==========
 
@@ -206,9 +265,19 @@ private struct RelationshipMapping {
 ///    `[[POSEY_VISUAL_PAGE:0:<imageID>]]`. The pool is built upstream
 ///    from the rels file + media archive entries.
 private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
+    /// One TOC entry candidate captured from a heading-styled paragraph.
+    /// `paragraphIndex` lets us compute the displayText offset after the
+    /// extractor finishes (paragraphs are joined with `\n\n`).
+    struct Heading {
+        let level: Int
+        let title: String
+        let paragraphIndex: Int
+    }
+
     struct Result {
         let displayText: String
         let usedImageIDs: [String]
+        let headings: [Heading]
     }
 
     static func extract(from data: Data, imagePool: [String: PageImageRecord]) throws -> Result {
@@ -220,7 +289,8 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
         }
         return Result(
             displayText: extractor.paragraphs.joined(separator: "\n\n"),
-            usedImageIDs: extractor.usedImageIDs
+            usedImageIDs: extractor.usedImageIDs,
+            headings: extractor.headings
         )
     }
 
@@ -231,6 +301,12 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
     private var insideTextNode = false
     private var insideInstrText = false
     private var currentInstrText = ""
+
+    /// Heading level for the paragraph currently being assembled, or
+    /// nil if it isn't styled as a heading. Set when we encounter
+    /// `<w:pStyle w:val="HeadingN"/>` (or "Heading", "Title").
+    private var currentHeadingLevel: Int?
+    private(set) var headings: [Heading] = []
 
     /// Field nesting depth. Increments on every `<w:fldChar
     /// fldCharType="begin">`, decrements on `"end"`. Independent of
@@ -304,6 +380,24 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
         if matches(elementName, suffix: "t") {
             insideTextNode = true
             currentRun = ""
+            return
+        }
+
+        // 2026-05-06 — Heading style detection. `<w:pStyle w:val="HeadingN"/>`
+        // marks the current paragraph as a heading at level N. Word also
+        // uses `Title` for the document title, treated as level 1.
+        if matches(elementName, suffix: "pStyle") {
+            let raw = (attributeDict["w:val"] ?? attributeDict["val"] ?? "")
+            // Match "Heading1", "Heading2", ..., or "Title" (case-insensitive).
+            // Real-world docs sometimes use "heading1" / "Heading 1" — be tolerant.
+            let lower = raw.lowercased().replacingOccurrences(of: " ", with: "")
+            if lower == "title" {
+                currentHeadingLevel = 1
+            } else if lower.hasPrefix("heading"),
+                      let level = Int(lower.replacingOccurrences(of: "heading", with: "")),
+                      level >= 1 && level <= 9 {
+                currentHeadingLevel = level
+            }
             return
         }
 
@@ -383,9 +477,14 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
         if matches(elementName, suffix: "p") {
             let paragraph = currentParagraph.trimmingCharacters(in: .whitespacesAndNewlines)
             if !paragraph.isEmpty {
+                let paragraphIndex = paragraphs.count
                 paragraphs.append(paragraph)
+                if let level = currentHeadingLevel {
+                    headings.append(Heading(level: level, title: paragraph, paragraphIndex: paragraphIndex))
+                }
             }
             currentParagraph = ""
+            currentHeadingLevel = nil
         }
     }
 

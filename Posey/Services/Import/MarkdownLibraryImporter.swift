@@ -58,6 +58,23 @@ struct MarkdownLibraryImporter {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
 
+        // 2026-05-06 — Build TOC from heading blocks. Markdown
+        // headings are explicit (# / ## / ### lines); the parser
+        // already classifies them as `.heading(level: N)` blocks.
+        // Take all heading blocks and persist as TOC entries with
+        // their plainText offset and parse order.
+        let tocEntries: [StoredTOCEntry] = parsed.blocks.enumerated().compactMap { (idx, block) in
+            guard case .heading = block.kind else { return nil }
+            return StoredTOCEntry(
+                title: block.text,
+                plainTextOffset: block.startOffset,
+                playOrder: idx + 1
+            )
+        }
+        if !tocEntries.isEmpty {
+            try databaseManager.insertTOCEntries(tocEntries, for: document.id)
+        }
+
         // Ask Posey embedding index — best-effort (logs on failure).
         embeddingIndex?.enqueueIndexing(document)
 

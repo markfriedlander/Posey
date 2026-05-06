@@ -698,14 +698,23 @@ private extension AskPoseyView {
     ///     flows since every entry point has an anchor):
     ///     "Tap a sentence in the reader to ask about it"
     var composerPlaceholder: String {
-        if viewModel.anchor == nil {
-            return "Tap a sentence in the reader to ask about it"
-        }
+        // 2026-05-05 (revised again) — Three states only. Ask Posey
+        // is ALWAYS scoped to a specific document; there is no
+        // "floating in space" entry path. Mark called out the
+        // "Tap a sentence in the reader" fallback I'd left as
+        // defensive cruft — a state that can't happen. Removed.
+        //
+        //   1. Mid-conversation (any prior user message): "Ask a follow-up…"
+        //   2. Passage anchor present: "Ask about this passage…"
+        //   3. No passage anchor (document-scope entry): "Ask about this document…"
         let hasUserMessage = viewModel.messages.contains { $0.role == .user }
         if hasUserMessage {
             return "Ask a follow-up…"
         }
-        return "Ask about this passage…"
+        if viewModel.anchor != nil {
+            return "Ask about this passage…"
+        }
+        return "Ask about this document…"
     }
 
     /// 2026-05-04 (revised) — Quick-actions menu replacing the
@@ -1013,13 +1022,18 @@ private extension AskPoseyView {
     /// sheet and jumps the reader to the chunk's offset (when
     /// `onJumpToChunk` is wired). Spec'd in
     /// `ask_posey_spec.md` "Source Attribution".
-    /// A chunk that AFM cited in its response, paired with the
-    /// 1-indexed citation number that appeared in the prompt and
-    /// in the rendered response text. The label rendered in the
-    /// sources strip MUST match this number so the strip aligns
-    /// 1:1 with the inline `[N]` markers in the answer body.
+    /// A chunk that AFM cited in its response, with its DISPLAY
+    /// number (1..N within this message, in body-order of first
+    /// appearance) and its ORIGINAL prompt-injection number (the
+    /// `[N]` AFM emitted, which maps to chunksInjected[N-1]).
+    ///
+    /// 2026-05-05 (revised) — Mark's directive: "each block starts
+    /// with citation 1 and goes through N." So body chips show the
+    /// display number and the strip shows pills 1..N. Tap dispatch
+    /// uses the original chunk's startOffset to jump correctly.
     struct CitedSource {
-        let citationNumber: Int   // matches `[N]` in the response text
+        let displayNumber: Int       // 1..N as shown in body and strip
+        let originalNumber: Int      // the [N] AFM emitted; chunksInjected index = N - 1
         let chunk: RetrievedChunk
     }
 
@@ -1029,33 +1043,26 @@ private extension AskPoseyView {
                 Text("SOURCES")
                     .font(.caption2.smallCaps())
                     .foregroundStyle(.secondary)
-                ForEach(sources, id: \.citationNumber) { source in
+                ForEach(sources, id: \.displayNumber) { source in
                     Button {
                         guard let onJumpToChunk else { return }
-                        // Cancel any in-flight stream + dismiss the
-                        // sheet first so the user lands on the reader
-                        // with the jump already applied. Sources-strip
-                        // tap is a citation-flavored jump (same user
-                        // intent as inline `[ⁿ]` citation) — pass
-                        // fromCitation = true so the reader sets up
-                        // the return-pill flow.
                         viewModel.cancelInFlight()
                         onJumpToChunk(source.chunk.startOffset, true)
                         dismiss()
                     } label: {
                         HStack(spacing: 3) {
-                            // 2026-05-05 (revised) — Display the
-                            // citation number that appeared in the
-                            // response text, NOT the position of
-                            // this chunk inside the filtered list.
-                            // Earlier behavior renumbered to 1, 2,
-                            // 3 from the filtered array, so a
-                            // response citing [4][6] showed pills
-                            // labeled 1, 2 — Mark caught this. The
-                            // user's mental model: "the [4] in the
-                            // text is the same source as the 4 in
-                            // the strip below."
-                            Text("\(source.citationNumber)")
+                            // 2026-05-05 (revised again) — Pills are
+                            // numbered 1..N within this message, in
+                            // body-order of first appearance. Mark's
+                            // directive: "each block starts with
+                            // citation 1 and goes through N." The
+                            // body chips get the same display numbers
+                            // (see CitationFlowText), so pill K and
+                            // chip K in the prose refer to the same
+                            // source. Tap dispatch uses source.chunk
+                            // (the AFM-injected chunk) for navigation,
+                            // independent of the display label.
+                            Text("\(source.displayNumber)")
                                 .font(.caption2.weight(.semibold))
                             // Single circle glyph, three states for
                             // confidence: filled (●) high (>65%),
@@ -1076,7 +1083,7 @@ private extension AskPoseyView {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(sourcesAccessibilityLabel(number: source.citationNumber, chunk: source.chunk))
+                    .accessibilityLabel(sourcesAccessibilityLabel(number: source.displayNumber, chunk: source.chunk))
                     .disabled(onJumpToChunk == nil)
                 }
             }
@@ -1095,15 +1102,26 @@ private extension AskPoseyView {
     /// markers (so the user still sees something rather than an
     /// empty strip).
     private func citedChunks(in message: AskPoseyMessage) -> [CitedSource] {
+        Self.citedSources(for: message)
+    }
+
+    /// 2026-05-05 (revised) — Build the per-message display sequence:
+    /// 1..N pills/chips in BODY ORDER of first appearance. Mark's
+    /// directive: "each block starts with citation 1 and goes
+    /// through N." So if AFM emitted `[2][5][3]`, the user sees
+    /// `[1][2][3]` in the prose (in that order — first encounter of
+    /// each unique original number gets the next display number) and
+    /// `1 2 3` in the strip. Pill K dispatches to the chunk AFM
+    /// originally called `[origN]`, which is `chunksInjected[origN-1]`.
+    static func citedSources(for message: AskPoseyMessage) -> [CitedSource] {
+        guard !message.chunksInjected.isEmpty else { return [] }
         let text = message.content
         let pattern = #"\[(\d{1,2})\]"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return message.chunksInjected.enumerated().map {
-                CitedSource(citationNumber: $0.offset + 1, chunk: $0.element)
-            }
+            return []
         }
         let nsRange = NSRange(text.startIndex..., in: text)
-        var citedNumbers = [Int]()  // ordered, deduped
+        var orderedOriginal: [Int] = []   // first-appearance order
         var seen = Set<Int>()
         regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
             guard let match,
@@ -1111,12 +1129,15 @@ private extension AskPoseyView {
                   let n = Int(text[numRange]),
                   n >= 1, n <= message.chunksInjected.count else { return }
             if seen.insert(n).inserted {
-                citedNumbers.append(n)
+                orderedOriginal.append(n)
             }
         }
-        if citedNumbers.isEmpty { return [] }
-        return citedNumbers.map { n in
-            CitedSource(citationNumber: n, chunk: message.chunksInjected[n - 1])
+        return orderedOriginal.enumerated().map { (idx, origN) in
+            CitedSource(
+                displayNumber: idx + 1,
+                originalNumber: origN,
+                chunk: message.chunksInjected[origN - 1]
+            )
         }
     }
 
@@ -1210,7 +1231,8 @@ struct AskPoseyMessageBubble: View {
         if message.role == .assistant, !message.chunksInjected.isEmpty {
             CitationFlowText(
                 content: message.content,
-                chunkCount: message.chunksInjected.count
+                chunkCount: message.chunksInjected.count,
+                displayMap: AskPoseyView.citedSources(for: message)
             )
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -1371,23 +1393,36 @@ enum AskPoseyCitationRenderer {
 private struct CitationFlowText: View {
     let content: String
     let chunkCount: Int
+    /// Mapping from AFM's original `[N]` markers to the per-message
+    /// display number (1..N). The body chip renders the display
+    /// number; tap dispatches to the chunk via the original number.
+    let displayMap: [AskPoseyView.CitedSource]
 
     @Environment(\.openURL) private var openURL
 
-    enum Segment: Equatable {
+    enum Segment {
         case text(String)
-        case citation(Int)
+        /// `original` is what AFM emitted; `display` is what we show.
+        /// Tap dispatch uses `original` to navigate via the URL scheme.
+        case citation(original: Int, display: Int)
         /// A "tail" prose word bundled with one or more trailing
         /// citation chips so the chips can never wrap alone to a
         /// new line — the chip stays glued to the word it cites.
-        case tailWithCitations(word: String, citations: [Int])
+        /// Each citation carries (original, display).
+        case tailWithCitations(word: String, citations: [(original: Int, display: Int)])
+    }
+
+    private var origToDisplay: [Int: Int] {
+        var m: [Int: Int] = [:]
+        for src in displayMap { m[src.originalNumber] = src.displayNumber }
+        return m
     }
 
     var body: some View {
         let segments = Self.bundleTrailingCitations(
-            Self.parse(content, chunkCount: chunkCount)
+            Self.parse(content, chunkCount: chunkCount, origToDisplay: origToDisplay)
         )
-        CitationFlowLayout(horizontalSpacing: 4, verticalSpacing: 2) {
+        return CitationFlowLayout(horizontalSpacing: 4, verticalSpacing: 2) {
             ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
                 switch seg {
                 case .text(let s):
@@ -1395,16 +1430,16 @@ private struct CitationFlowText: View {
                         .font(.body)
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
-                case .citation(let n):
-                    chipButton(n: n)
+                case .citation(let orig, let display):
+                    chipButton(original: orig, display: display)
                 case .tailWithCitations(let word, let citations):
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text(.init(word))
                             .font(.body)
                             .foregroundStyle(.primary)
                             .fixedSize()
-                        ForEach(citations, id: \.self) { n in
-                            chipButton(n: n)
+                        ForEach(Array(citations.enumerated()), id: \.offset) { _, c in
+                            chipButton(original: c.original, display: c.display)
                         }
                     }
                 }
@@ -1413,13 +1448,16 @@ private struct CitationFlowText: View {
     }
 
     @ViewBuilder
-    private func chipButton(n: Int) -> some View {
+    private func chipButton(original: Int, display: Int) -> some View {
         Button {
-            if let url = URL(string: "\(AskPoseyCitationRenderer.citationURLScheme)://\(n)") {
+            // Tap dispatches via the ORIGINAL number so the URL
+            // handler can look up chunksInjected[original-1]; the
+            // visible label uses the DISPLAY number (1..N).
+            if let url = URL(string: "\(AskPoseyCitationRenderer.citationURLScheme)://\(original)") {
                 openURL(url)
             }
         } label: {
-            Text("\(n)")
+            Text("\(display)")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.tint)
                 .lineLimit(1)
@@ -1440,7 +1478,7 @@ private struct CitationFlowText: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Citation \(n). Tap to jump to source.")
+        .accessibilityLabel("Citation \(display). Tap to jump to source.")
     }
 
     /// Take the last word off any prose run that's immediately
@@ -1451,21 +1489,15 @@ private struct CitationFlowText: View {
         var i = 0
         while i < segments.count {
             let cur = segments[i]
-            // Look ahead: is the next segment a citation? If so,
-            // gather all consecutive citations and bundle with the
-            // last word of `cur` (only if `cur` is .text).
             if case .text(let prose) = cur, i + 1 < segments.count,
                case .citation = segments[i + 1] {
-                // Collect consecutive citations after `cur`.
-                var citations: [Int] = []
+                var citations: [(original: Int, display: Int)] = []
                 var j = i + 1
-                while j < segments.count, case .citation(let n) = segments[j] {
-                    citations.append(n)
+                while j < segments.count, case .citation(let orig, let display) = segments[j] {
+                    citations.append((orig, display))
                     j += 1
                 }
-                // Split prose into (head, tail) at the last
-                // whitespace-then-word boundary.
-                let trimmed = prose // keep trailing punctuation/space inside tail
+                let trimmed = prose
                 if let lastSpace = trimmed.lastIndex(where: { $0.isWhitespace }) {
                     let head = String(trimmed[..<lastSpace])
                     let tail = String(trimmed[trimmed.index(after: lastSpace)...])
@@ -1473,13 +1505,11 @@ private struct CitationFlowText: View {
                         result.append(.text(head + " "))
                     }
                     if tail.isEmpty {
-                        // No tail word — push citations as standalone.
-                        for n in citations { result.append(.citation(n)) }
+                        for c in citations { result.append(.citation(original: c.original, display: c.display)) }
                     } else {
                         result.append(.tailWithCitations(word: tail, citations: citations))
                     }
                 } else {
-                    // Whole prose run is one word — bundle entirely.
                     result.append(.tailWithCitations(word: trimmed, citations: citations))
                 }
                 i = j
@@ -1496,7 +1526,7 @@ private struct CitationFlowText: View {
     /// literal text so they're visible-but-inert (matches the old
     /// markdown renderer's behavior for hallucinated citation
     /// numbers).
-    static func parse(_ text: String, chunkCount: Int) -> [Segment] {
+    static func parse(_ text: String, chunkCount: Int, origToDisplay: [Int: Int] = [:]) -> [Segment] {
         guard chunkCount > 0 else { return [.text(text)] }
         let pattern = #"\[(\d{1,2})\]"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
@@ -1515,15 +1545,16 @@ private struct CitationFlowText: View {
             if !prose.isEmpty {
                 segments.append(.text(prose))
             }
-            segments.append(.citation(n))
+            // If we have a display map, use the mapped display number;
+            // otherwise fall back to the original number (test-only path).
+            let display = origToDisplay[n] ?? n
+            segments.append(.citation(original: n, display: display))
             lastEnd = fullRange.upperBound
         }
         let tail = String(text[lastEnd..<text.endIndex])
         if !tail.isEmpty {
             segments.append(.text(tail))
         }
-        // Defensive: never return an empty array — callers expect
-        // at least one segment to render.
         if segments.isEmpty { segments.append(.text(text)) }
         return segments
     }

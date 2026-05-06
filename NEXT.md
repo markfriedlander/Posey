@@ -49,7 +49,7 @@ Lower-priority findings from the test report at `submission/test-results-2026-05
 - PLAYBACK_RESTART leaves state="finished" instead of "playing"/"idle". Cosmetic state-label nit.
 - Quick-actions in-sheet Menu items not reachable via API TAP (chrome-menu route works; in-sheet sparkle menu uses `.accessibilityIdentifier` only, not registered with RemoteTargetRegistry).
 - Audio export progress indicator + rate parity with playback (gating issues for re-enabling user UI).
-- Inline image rendering for DOCX/EPUB/HTML/MD/RTF — 1.0 hides markers; future release should render images. Underlying `block.imageID` linkage from importer to DisplayBlock missing for non-PDF formats.
+- Inline image rendering for DOCX/EPUB/HTML — fixed in 2026-05-06 afternoon parity pass via shared `VisualPlaceholderSplitter`; markers preserved in displayText, stripped from plainText. EPUB verified visually (Data Smog cover image). DOCX/HTML wired through same code path. MD/RTF remain deferred — RTF importer doesn't extract `\pict` blocks; MD parser doesn't resolve `![alt](url)` to image data.
 
 ## Future-release work (deferred from today)
 

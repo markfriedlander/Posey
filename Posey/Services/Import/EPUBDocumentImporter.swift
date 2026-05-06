@@ -246,16 +246,13 @@ extension EPUBDocumentImporter {
 
         guard !chapterTexts.isEmpty else { throw ImportError.emptyDocument }
 
-        // 2026-05-06 — Per Mark's submission-day instruction: strip
-        // visual-page markers from displayText for EPUB. Image
-        // rendering inline isn't supported in 1.0 (the marker token
-        // was leaking to the reader as literal text — see test
-        // results). Images extracted at import remain in
-        // `document_images` for future use; only the marker tokens
-        // are removed from what the user sees.
-        let rawDisplayText = normalizeDisplay(chapterTexts.joined(separator: "\n\n"))
-        let displayText = buildPlainText(from: rawDisplayText)
-        let plainText   = displayText
+        // 2026-05-06 (parity #2) — displayText KEEPS the visual-page
+        // markers; EPUBDisplayParser converts them to .visualPlaceholder
+        // blocks at render time (the user sees the image, not the
+        // marker text). plainText is the marker-stripped form used for
+        // TTS / search / RAG / character count.
+        let displayText = normalizeDisplay(chapterTexts.joined(separator: "\n\n"))
+        let plainText   = buildPlainText(from: displayText)
 
         // Build TOC entries from nav (EPUB 3) or skip if neither is available.
         var tocEntries = buildTOCEntries(

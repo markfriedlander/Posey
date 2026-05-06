@@ -1,5 +1,24 @@
 # Posey History
 
+## 2026-05-06 (afternoon) — Pre-Release Parity Punch List #2: Inline image rendering on EPUB/DOCX/HTML
+
+Closed Tier 1 #2 of the parity punch list for the three formats whose importers already extract inline images. RTF and MD remain on the open list (RTF doesn't extract `\pict` blocks today; MD needs `![alt](url)` resolution work).
+
+**The problem.** Yesterday's submission-day pass stripped `[[POSEY_VISUAL_PAGE:...]]` markers from `displayText` for EPUB / DOCX / HTML to keep them from leaking to the user as literal text. That cut the only signal the displayBlocks renderer had to know where images go — so `document_images` filled up at import time and nothing rendered.
+
+**The fix.** Three threads.
+
+1. **`displayText` keeps markers; `plainText` strips them.** Reverted the over-zealous strip from yesterday across `EPUBDocumentImporter`, `DOCXDocumentImporter`, `HTMLDocumentImporter`. The split is now consistent: `displayText` is the marker-bearing form fed to the displayBlocks renderer; `plainText` is the marker-stripped form used for TTS, search, RAG, character count, and the existing sentence-row reader.
+
+2. **One shared splitter (`VisualPlaceholderSplitter`).** Replaced format-specific parsers with a regex-based one in `Posey/Services/Import/VisualPlaceholderSplitter.swift`. The earlier per-format split-on-form-feed approach was broken because `TextNormalizer.stripMojibakeAndControlCharacters` strips C0 controls (including U+000C form feed) — by the time the parser ran, the surrounding sentinels were already gone and the marker substring was just sitting between `\n\n` boundaries. The new path scans for the marker pattern via `NSRegularExpression`, emits `visualPlaceholder` blocks at each match, and emits `paragraph` blocks for text in between. `EPUBDisplayParser` / `DOCXDisplayParser` / `HTMLDisplayParser` are now thin wrappers around this single code path.
+
+3. **Fast-path: zero markers → zero blocks.** When a doc has no markers (the common case for plain DOCX / HTML / EPUB with no embedded images), the splitter returns `[]` immediately, leaving the document on the existing sentence-row reader path — no behavior change, no new memory pressure.
+
+**Verification.**
+- Data Smog EPUB (4 markers): HarperCollins e-books logo renders inline between "REVISED AND UPDATED EDITION" and "For Sol Shenk" on the connected iPhone. Screenshot captured.
+- The 4-Hour Body EPUB (1.04 MB displayText, 453 markers, 453 stored images): reader opens to text in ~8 s on iPhone 16 Plus — same order of magnitude as before my changes. The dominant cost is the pre-existing `SentenceSegmenter`/`NLTokenizer` pass that runs `loadContent` on a background queue; the parser regex over the displayText is sub-second on top of that. No choke, no regression.
+- DOCX / HTML use the same `VisualPlaceholderSplitter` code path; documents without markers fall through to the existing sentence-row reader unchanged.
+
 ## 2026-05-06 (afternoon) — Pre-Release Parity Punch List #1: RTF TOC navigation
 
 Closed Tier 1 #1 of the 17-item parity punch list. RTF documents now produce a populated Table of Contents from heading-styled paragraphs.

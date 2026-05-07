@@ -1,5 +1,18 @@
 # Posey History
 
+## 2026-05-06 (evening) — Heading-styling Rule 2 closure: DOCX, EPUB, PDF screenshots on both hardware
+
+Closing out the deferred verification on #3. The original commit landed with two-hardware screenshots for MD/HTML/RTF only; DOCX, EPUB, and PDF were structurally analogous code paths but Rule 2 doesn't carve out exceptions for "structurally identical." Mark called that reasoning out and required dedicated screenshots before moving on.
+
+Captured all six (`/tmp/sshots/sim-{docx,epub,pdf}.png` and `/tmp/sshots/iphone-{docx,epub,pdf}.png`, all resized to ≤800px before reading). Verified visually:
+- **DOCX** — `Posey Test Materials/Proposal_Assistant_Article_Draft.docx`. "How We Built a GPT-Powered Proposal Assistant That Actually Helps" renders as level-1 (large bold). "Introduction: A Real Problem, A New Kind of Partner" renders as level-2 (smaller bold). Top spacing visible above each. Identical rendering on both hardware.
+- **EPUB** — `Posey Test Materials/Data Smog.epub`. The first TOC entry maps to "David Shenk" at offset 0; that row renders as a level-1 heading on both hardware. Subsequent paragraphs (DATA SMOG / Surviving the Information Glut / REVISED AND UPDATED EDITION) are body text, which is correct — only the row at the TOC offset gets heading treatment.
+- **PDF** — `Posey Test Materials/Cryptography for Dummies.pdf` (187 outline entries). The first outline entry happens to be a "ChmMagic" registration notice at offset 0 (an artifact embedded by the PDF authoring tool), and that row renders as a level-1 heading on both hardware. Heading styling pipeline confirmed working on PDF outline-derived TOC.
+
+Also reimported the substantive content on Mark's iPhone since the schema-drop wiped TOC entries: AI Book Collaboration Project.rtf (91 entries), Illuminatus TRILOGY EBOOK.epub (470), The 4-Hour Body.epub (77), Cryptography for Dummies.pdf (187), Data Smog.epub (42), Proposal_Assistant_Article_Draft.docx (7). The Clouds Of High-tech Copyright Law.pdf has no detectable TOC (no PDF outline, no dot-leader text pattern); reimport completed but TOC stays empty — that's the genuine state of the doc, not a regression.
+
+Iphone docs whose source files aren't in `Posey Test Materials/` and therefore couldn't be reimported: How_to_Use_ISES_QR_Generator.docx, Field Notes on Estuaries.html, Notes on Working in Public.md, On Reading Slowly.txt. Their content is intact (the schema drop only touched `document_toc`); they just have no TOC entries until Mark re-imports their source files. TXT has no TOC concept anyway.
+
 ## 2026-05-06 (evening) — Pre-Release Parity Punch List #3: Heading visual styling, level-aware, every format
 
 Closed Tier 1 #3 of the parity punch list. Headings across MD, DOCX, RTF, EPUB, PDF, and HTML now render with one shared visual spec, scaled by heading level so a chapter title and a section subhead actually feel like different kinds of break.

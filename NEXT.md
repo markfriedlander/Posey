@@ -18,6 +18,7 @@ Working through the 17-item Tier 1–4 punch list. Status:
    - If anything is off: debug. The merge step is in `SentenceSegmenter.mergeNumberedListMarkers`. The strip is in `SpeechPlaybackService.utteranceText`.
    - **DOCX numbered → bullet** is a documented v1 limitation (resolving `numId` against `numbering.xml` is out of scope for this pass). Don't try to fix it here.
    - **RTF lists** are deferred (parser hooks not in scope). Don't try to fix here.
+   - Test fixtures persisted at `TestFixtures/parity/HeadingTest.{md,html,rtf}` and `TestFixtures/parity/ListTest.{html,docx}` so they don't depend on `/tmp/` surviving.
 5. Empty-state messages on every modal sheet — pending.
 6. TOC playback skip applies to every format that has a TOC (DOCX/RTF need to write `playback_skip_until_offset`) — pending. Will confirm what's already wired before adding code per Mark's directive.
 

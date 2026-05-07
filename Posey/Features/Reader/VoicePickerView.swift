@@ -117,12 +117,35 @@ struct VoicePickerView: View {
     }
 
     private var visibleGroups: [VoiceList.Group] {
+        // 2026-05-07 (parity #5): test-only override to force the
+        // empty-state code path regardless of installed voices. Lets
+        // the antenna's OPEN_VOICE_PICKER_SHEET verb verify the
+        // empty-state copy on devices that have voices installed for
+        // the current language. Set the env var when launching the
+        // app for testing; without it, normal behavior applies.
+        if ProcessInfo.processInfo.environment["POSEY_DEBUG_VOICE_PICKER_EMPTY"] == "1" {
+            return []
+        }
         guard !showAllLanguages else { return voiceList.groups }
         return voiceList.groups.filter { $0.languageCode == currentLanguageCode }
     }
 
     var body: some View {
         List {
+            if visibleGroups.isEmpty {
+                // 2026-05-07 (parity #5): real empty state when no
+                // voices are available for the current language and
+                // the user hasn't expanded to all languages yet.
+                // The "Show all languages" button below this section
+                // is the natural next step.
+                Section {
+                    Text("No voices for your current language are downloaded. Tap \"Show all languages\" below, or download voices in Settings → Accessibility → Spoken Content → Voices.")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                        .accessibilityIdentifier("voicePicker.empty")
+                }
+            }
+
             ForEach(visibleGroups) { group in
                 Section(group.languageDisplayName) {
                     ForEach(group.voices) { option in

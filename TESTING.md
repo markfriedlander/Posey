@@ -80,6 +80,17 @@ Fixtures live in `TestFixtures/` and are bundled into the test targets.
 - `StructuredSample.epub`: structured EPUB sample for container extraction and library import
 - `StructuredSample.pdf`: structured text-based PDF sample for PDF extraction and library import
 
+### Pre-Release Parity Fixtures (`TestFixtures/parity/`)
+
+Built during the Tier 1 #3 / #4 punch-list pass (2026-05-06/07). Each
+exercises a specific format-parity surface:
+
+- `HeadingTest.md` — six MD heading levels in close proximity (`#`–`######`) plus a level-1 chapter break for the displayBlocks render path.
+- `HeadingTest.html` — h1–h4 plus a second h1 for the sentence-row path through the new `HTMLDocumentImporter.extractHeadings` extractor.
+- `HeadingTest.rtf` — three font-size tiers (`\fs48`, `\fs36`, `\fs28`) plus a second `\fs48` for the existing RTF tokenizer's level classification.
+- `ListTest.html` — `<ul>` followed by `<ol>` with three items each, exercising `injectListMarkers` and the segmenter's numbered-marker merge.
+- `ListTest.docx` — minimal hand-crafted DOCX with three `<w:numPr>` paragraphs to exercise the DOCX list-item detection path.
+
 ## Launch Hooks
 
 Posey supports the following launch-time test hooks:

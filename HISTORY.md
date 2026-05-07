@@ -1,5 +1,31 @@
 # Posey History
 
+## 2026-05-06 (late night) — Pre-Release Parity Punch List #4: bullet/numbered lists across formats (Option C, partial)
+
+Closing the in-flight pass on Tier 1 #4. Code is committed; one verification step remains. Mark needs sleep — picking this up at session start tomorrow.
+
+**The approach (per DECISIONS.md "List markers"):** Inject visible markers (`• ` for bullets, `N. ` for numbered) into the extracted text in HTML and DOCX importers. Markers live in both `displayText` and `plainText` so they show in the reader and survive search + Ask Posey embeddings. On the playback side, a new `SpeechPlaybackService.utteranceText(for:)` strips leading marker patterns before AVSpeechSynthesizer ever sees them — the audio path is guaranteed clean regardless of what AVSpeechSynthesizer would otherwise do with `•` or `1.` (Apple's docs are silent; see DECISIONS.md for the research note).
+
+**Per-format coverage in this pass:**
+- **HTML / EPUB** — `HTMLDocumentImporter.injectListMarkers` walks the HTML token stream tracking `<ul>`/`<ol>` nesting and prepends `• ` or `N. ` immediately after each opening `<li>`. Runs before `injectParagraphMarkers`. EPUB inherits since spine HTML flows through the same `loadText(fromData:)`.
+- **DOCX** — `WordDocumentXMLExtractor` now sets `currentIsListItem = true` whenever it sees `<w:numPr>` inside a paragraph's `<w:pPr>`. At paragraph-flush time, list-item paragraphs that aren't also heading-styled get a `• ` prefix. v1 limitation acknowledged in DECISIONS.md and NEXT.md: every DOCX list item renders as a bullet because reliably distinguishing bullet from numbered requires resolving `numId` against `numbering.xml`. Numbered DOCX lists rendering as bullets is a real Word-fidelity loss documented as known v1 behavior.
+- **RTF** — deferred (parser hooks for `\pntext`/`\listtext` not in scope). Documented in NEXT.md.
+- **PDF** — out of scope (positional list signal, layout-analysis problem).
+
+**Speech path filter:** New `SpeechPlaybackService.utteranceText(for:)` static method applies `^(?:•|\d+\.)\s+` to each utterance text before construction. Both `SpeechPlaybackService.makeUtterance` and `AudioExporter` route through it. Strip is leading-anchor only, so prose mentioning bullet points or numbered steps inline still pronounces them normally.
+
+**Segmenter merge step (caught during sim verification):** NLTokenizer treats `1.` as a sentence terminator, splitting an injected "1. First numbered item" into two segments. Added `SentenceSegmenter.mergeNumberedListMarkers` post-pass that detects an exact `^\d+\.$` segment and merges it with the next segment. Restores visual coherence — one row per list item. Applied generally (any user-authored "1." on its own line gets merged with the following sentence, which is the expected reading behavior for a list).
+
+**Verification status (Rule 2):**
+- HTML on simulator post-merge: bullets and numbered items render correctly on one row each. Visual confirmed via `/tmp/sshots/sim-html-list2.png` (resized to ≤600 per Rule 3).
+- DOCX on simulator post-merge: bullets render correctly. Visual confirmed via `/tmp/sshots/sim-docx-list-now.png`.
+- DOCX on iPhone (pre-merge build): bullets render correctly (DOCX bullets don't trip the segmenter — the merge step isn't needed for the bullet path). Visual confirmed via `/tmp/sshots/iphone-docx-list.png`.
+- HTML on iPhone (pre-merge build): bullets render correctly; numbered items still split per the unfixed segmenter. **iPhone post-merge build install + visual verification is the only remaining step** before this is fully Rule-2-compliant. Device build was in flight when Mark needed to pause; killed cleanly.
+
+**Picking this up tomorrow:** rebuild for device, install the post-merge build, reopen `list-test.html` on iPhone, screenshot, confirm numbered items render on one line each. If yes → write a follow-up HISTORY note and move to Tier 1 #5 (empty-state messages). If anything looks off, debug.
+
+**Audio confirmation pending:** the speech-path strip is implemented and theoretically correct (deterministic regex applied per-utterance), but no one has yet listened to a list-bearing doc playing on hardware. Worth doing once tomorrow on iPhone with `list-test.html` to confirm the markers don't pronounce. This is the one piece that genuinely needs Mark's ears (or a recording test that the antenna doesn't currently expose).
+
 ## 2026-05-06 (evening) — Heading-styling Rule 2 closure: DOCX, EPUB, PDF screenshots on both hardware
 
 Closing out the deferred verification on #3. The original commit landed with two-hardware screenshots for MD/HTML/RTF only; DOCX, EPUB, and PDF were structurally analogous code paths but Rule 2 doesn't carve out exceptions for "structurally identical." Mark called that reasoning out and required dedicated screenshots before moving on.

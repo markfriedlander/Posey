@@ -314,6 +314,16 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
     private var currentHeadingLevel: Int?
     private(set) var headings: [Heading] = []
 
+    /// Whether the paragraph currently being assembled is a list item.
+    /// Set true when we encounter `<w:numPr>` inside the paragraph's
+    /// properties. v1 limitation (per DECISIONS.md "List markers"):
+    /// every list item is rendered as a bullet because reliably
+    /// distinguishing bullet from numbered requires resolving the
+    /// `numId` against the doc's `numbering.xml`, a much larger lift.
+    /// Numbered DOCX lists rendered as bullets is documented as a
+    /// known v1 limitation in NEXT.md.
+    private var currentIsListItem = false
+
     /// Field nesting depth. Increments on every `<w:fldChar
     /// fldCharType="begin">`, decrements on `"end"`. Independent of
     /// TOC tracking — we use it to decide which `end` matches the
@@ -386,6 +396,16 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
         if matches(elementName, suffix: "t") {
             insideTextNode = true
             currentRun = ""
+            return
+        }
+
+        // 2026-05-06 (parity #4) — List item detection. Word writes
+        // `<w:numPr>` inside `<w:pPr>` for any paragraph that
+        // participates in a list (bullet or numbered). When we see it
+        // we mark the in-progress paragraph as a list item; the marker
+        // gets prepended at paragraph-flush time.
+        if matches(elementName, suffix: "numPr") {
+            currentIsListItem = true
             return
         }
 
@@ -483,14 +503,24 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
         if matches(elementName, suffix: "p") {
             let paragraph = currentParagraph.trimmingCharacters(in: .whitespacesAndNewlines)
             if !paragraph.isEmpty {
+                // Prepend a bullet marker for list-item paragraphs.
+                // Skip the marker on heading-styled list items (rare
+                // but possible) so the heading typography still wins.
+                let final: String
+                if currentIsListItem && currentHeadingLevel == nil {
+                    final = "• " + paragraph
+                } else {
+                    final = paragraph
+                }
                 let paragraphIndex = paragraphs.count
-                paragraphs.append(paragraph)
+                paragraphs.append(final)
                 if let level = currentHeadingLevel {
-                    headings.append(Heading(level: level, title: paragraph, paragraphIndex: paragraphIndex))
+                    headings.append(Heading(level: level, title: final, paragraphIndex: paragraphIndex))
                 }
             }
             currentParagraph = ""
             currentHeadingLevel = nil
+            currentIsListItem = false
         }
     }
 

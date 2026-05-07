@@ -7,8 +7,17 @@ Working through the 17-item Tier 1–4 punch list. Status:
 **Tier 1 — Visible parity gaps**
 1. ✅ TOC navigation on RTF — verified existing commit `0397a45`.
 2. ✅ Inline image rendering on EPUB/DOCX/HTML — code in `57472fa`. Verified on iPhone via Data Smog EPUB; sim verification carried over from the in-progress session and confirmed during this pass via the heading-styling smoke runs that exercise the same display-block path.
-3. ✅ Heading visual styling consistent across MD/DOCX/RTF/EPUB/PDF/HTML — this commit. Single-spec typography (1.5×/1.3×/1.15×/1.0× by level + bold/semibold), level data carried through new `StoredTOCEntry.level` schema column, sentence-row + displayBlocks both heading-aware. HTML gets a new heading extractor since it had no TOC path before. Verified MD/HTML/RTF on both simulator and iPhone.
-4. Bullet and numbered list rendering consistent across formats — pending.
+3. ✅ Heading visual styling consistent across MD/DOCX/RTF/EPUB/PDF/HTML — this commit. Single-spec typography (1.5×/1.3×/1.15×/1.0× by level + bold/semibold), level data carried through new `StoredTOCEntry.level` schema column, sentence-row + displayBlocks both heading-aware. HTML gets a new heading extractor since it had no TOC path before. Verified MD/HTML/RTF on both simulator and iPhone (and DOCX/EPUB/PDF in the Rule 2 closure pass).
+4. ⏳ Bullet and numbered list rendering consistent across formats — code committed, sim verified, **iPhone post-merge verification pending**. **RESUME HERE TOMORROW.**
+   - Rebuild for device: `DEVELOPER_DIR="/Applications/Xcode Release.app/Contents/Developer" xcodebuild -scheme Posey -destination 'id=00008140-001A7D001E47001C' -derivedDataPath /tmp/PoseyDeviceDerived build`
+   - Install: `xcrun devicectl device install app --device 00008140-001A7D001E47001C /tmp/PoseyDeviceDerived/Build/Products/Debug-iphoneos/Posey.app` (with DEVELOPER_DIR exported)
+   - Launch + reimport `/tmp/list-test.html` on iPhone (the antenna IP+token: 192.168.12.206:8765, token in `tools/.posey_api_config.json` after `posey_test.py setup`).
+   - Screenshot + visually confirm numbered items render on one row each ("1. First numbered item" not split).
+   - Briefly play the doc to confirm `•` and `1. ` markers don't pronounce. (One audio test on iPhone is the only thing the antenna can't replace.)
+   - If both pass: append a closure note to HISTORY and mark this ✅.
+   - If anything is off: debug. The merge step is in `SentenceSegmenter.mergeNumberedListMarkers`. The strip is in `SpeechPlaybackService.utteranceText`.
+   - **DOCX numbered → bullet** is a documented v1 limitation (resolving `numId` against `numbering.xml` is out of scope for this pass). Don't try to fix it here.
+   - **RTF lists** are deferred (parser hooks not in scope). Don't try to fix here.
 5. Empty-state messages on every modal sheet — pending.
 6. TOC playback skip applies to every format that has a TOC (DOCX/RTF need to write `playback_skip_until_offset`) — pending. Will confirm what's already wired before adding code per Mark's directive.
 

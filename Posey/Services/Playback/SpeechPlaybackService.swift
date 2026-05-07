@@ -213,7 +213,7 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
 
     /// Constructs a mode-aware utterance. This is the single place voice mode is applied.
     private func makeUtterance(for segment: TextSegment) -> AVSpeechUtterance {
-        let utterance = AVSpeechUtterance(string: segment.text)
+        let utterance = AVSpeechUtterance(string: SpeechPlaybackService.utteranceText(for: segment.text))
         switch voiceMode {
         case .bestAvailable:
             utterance.prefersAssistiveTechnologySettings = true
@@ -226,6 +226,31 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
             }
         }
         return utterance
+    }
+
+    /// 2026-05-06 (parity #4) — Strip leading list markers before
+    /// AVSpeechSynthesizer ever sees them. The reader displays `• `
+    /// and `1. ` prefixes for visual list parity across formats, but
+    /// the audio path should not pronounce them: AVSpeechSynthesizer's
+    /// behavior on `•` and `1.` patterns is undocumented (researched
+    /// against Apple docs, WWDC 2018, NSHipster, etc. — all silent on
+    /// per-character behavior). Per DECISIONS.md "List markers" we
+    /// strip at the speech boundary so the audio experience is
+    /// guaranteed clean regardless of what AVSpeechSynthesizer would
+    /// otherwise do.
+    ///
+    /// Strip is leading-anchor only: a sentence whose body talks
+    /// about bullet points or numbered steps in prose still pronounces
+    /// those characters normally. Only the marker prefix at the start
+    /// of an utterance is removed.
+    static func utteranceText(for source: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"^(?:•|\d+\.)\s+"#
+        ) else { return source }
+        let range = NSRange(source.startIndex..., in: source)
+        return regex.stringByReplacingMatches(
+            in: source, range: range, withTemplate: ""
+        )
     }
 
     /// Stops the synthesizer and clears the utterance tracking map.

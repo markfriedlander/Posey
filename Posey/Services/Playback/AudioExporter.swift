@@ -141,7 +141,9 @@ final class AudioExporter: NSObject, ObservableObject {
             return
         }
         let segment = segments[currentIndex]
-        let utterance = AVSpeechUtterance(string: segment.text)
+        // 2026-05-06 (parity #4): strip leading list markers before
+        // synthesis (see SpeechPlaybackService.utteranceText).
+        let utterance = AVSpeechUtterance(string: SpeechPlaybackService.utteranceText(for: segment.text))
         applyVoice(to: utterance)
 
         // Track whether this utterance produced ANY buffers. The

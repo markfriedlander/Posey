@@ -3818,10 +3818,24 @@ final class ReaderViewModel: ObservableObject {
     func rebuildSavedAnnotations() {
         var entries: [SavedAnnotation] = []
         for note in notes {
+            // 2026-05-07 (punch list #7): for notes with a real body,
+            // show the body in the preview row — that's what the user
+            // wrote and what's most useful to scan at a glance. The
+            // expanded row still shows the body (now redundantly) plus
+            // a Jump button. For bookmarks (no body) and notes that
+            // were saved without a body, fall back to the anchor
+            // sentence at the note's offset (the previous behavior).
+            let isBookmark = note.kind == .bookmark
+            let preview: String
+            if !isBookmark, let body = note.body?.trimmingCharacters(in: .whitespacesAndNewlines), !body.isEmpty {
+                preview = body
+            } else {
+                preview = previewText(for: note)
+            }
             entries.append(SavedAnnotation(
                 id: "note:\(note.id.uuidString)",
-                kind: note.kind == .bookmark ? .bookmark : .note,
-                anchorText: previewText(for: note),
+                kind: isBookmark ? .bookmark : .note,
+                anchorText: preview,
                 offset: note.startOffset,
                 timestamp: note.createdAt,
                 body: note.body,

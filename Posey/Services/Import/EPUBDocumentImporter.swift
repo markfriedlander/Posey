@@ -11,6 +11,10 @@ struct EPUBTOCEntry {
     let plainTextOffset: Int
     /// Original play order from the nav/NCX document (1-based).
     let playOrder: Int
+    /// Heading level inferred from nav/NCX nesting depth (1 = top-level
+    /// chapter, 2+ = nested section). Defaults to 1 when no nesting
+    /// signal is available (e.g. spine-fallback synthesized TOCs).
+    let level: Int
 }
 
 struct ParsedEPUBDocument {
@@ -457,7 +461,12 @@ extension EPUBDocumentImporter {
                 .components(separatedBy: "#").first
                 .map { ($0 as NSString).lastPathComponent } ?? ""
             let offset = pathToPlainOffset[bareHref] ?? -1
-            return EPUBTOCEntry(title: raw.title, plainTextOffset: offset, playOrder: raw.playOrder)
+            return EPUBTOCEntry(
+                title: raw.title,
+                plainTextOffset: offset,
+                playOrder: raw.playOrder,
+                level: raw.level
+            )
         }
     }
 
@@ -501,7 +510,8 @@ extension EPUBDocumentImporter {
             entries.append(EPUBTOCEntry(
                 title: title!.trimmingCharacters(in: .whitespacesAndNewlines),
                 plainTextOffset: offset,
-                playOrder: playOrder
+                playOrder: playOrder,
+                level: 1
             ))
         }
         return entries
@@ -783,14 +793,19 @@ private struct RawTOCEntry {
     /// href from the nav/NCX (may include a fragment, e.g. "ch01.xhtml#s1").
     let href: String
     let playOrder: Int
+    /// Nesting depth in the source nav/NCX document. 1 = top-level.
+    let level: Int
 }
 
 /// Parses an EPUB 3 nav document (XHTML) for its `<nav epub:type="toc">` entries.
 /// Returns entries in document order with synthetic 1-based playOrder values.
+/// 2026-05-06 (parity #3): tracks `<ol>`/`<ul>` nesting depth inside the TOC nav
+/// so each anchor's level reflects how deeply nested it is in the outline.
 private final class EPUBNavTOCParser: NSObject, XMLParserDelegate {
     private var entries: [RawTOCEntry] = []
     private var insideTOCNav = false
     private var navDepth = 0
+    private var listDepth = 0
     private var collectingAnchor = false
     private var currentHref = ""
     private var currentTitle = ""
@@ -815,8 +830,13 @@ private final class EPUBNavTOCParser: NSObject, XMLParserDelegate {
             if epubType.lowercased().contains("toc") {
                 insideTOCNav = true
                 navDepth = 0
+                listDepth = 0
             }
             if insideTOCNav { navDepth += 1 }
+            return
+        }
+        if insideTOCNav && (localName == "ol" || localName == "ul") {
+            listDepth += 1
             return
         }
         if insideTOCNav && localName == "a", let href = attributeDict["href"] {
@@ -835,7 +855,14 @@ private final class EPUBNavTOCParser: NSObject, XMLParserDelegate {
         let localName = elementName.components(separatedBy: ":").last ?? elementName
         if localName == "nav" && insideTOCNav {
             navDepth -= 1
-            if navDepth <= 0 { insideTOCNav = false }
+            if navDepth <= 0 {
+                insideTOCNav = false
+                listDepth = 0
+            }
+            return
+        }
+        if insideTOCNav && (localName == "ol" || localName == "ul") {
+            listDepth = max(0, listDepth - 1)
             return
         }
         if insideTOCNav && localName == "a" && collectingAnchor {
@@ -843,7 +870,8 @@ private final class EPUBNavTOCParser: NSObject, XMLParserDelegate {
             let t = currentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
             if !t.isEmpty && !currentHref.isEmpty {
                 playOrder += 1
-                entries.append(RawTOCEntry(title: t, href: currentHref, playOrder: playOrder))
+                let level = max(1, min(6, listDepth))
+                entries.append(RawTOCEntry(title: t, href: currentHref, playOrder: playOrder, level: level))
             }
         }
     }
@@ -851,6 +879,8 @@ private final class EPUBNavTOCParser: NSObject, XMLParserDelegate {
 
 /// Parses an EPUB 2 NCX document for its navPoint entries.
 /// Handles both standard `application/x-dtbncx+xml` and mislabelled `text/xml` NCX files.
+/// 2026-05-06 (parity #3): tracks navPoint nesting depth so each entry's
+/// level reflects how deeply it sits in the outline tree.
 private final class EPUBNCXParser: NSObject, XMLParserDelegate {
     private var entries: [RawTOCEntry] = []
     private var collectingLabel = false
@@ -858,6 +888,12 @@ private final class EPUBNCXParser: NSObject, XMLParserDelegate {
     private var currentSrc   = ""
     private var currentOrder = 0
     private var pendingOrder = 0
+    /// Stack of (pendingOrder, currentSrc, currentLabel) snapshots so a
+    /// child navPoint doesn't clobber its parent's in-progress state
+    /// before the parent's didEnd fires. NCX nesting is allowed and
+    /// commonly used for chapter→section hierarchies.
+    private var stack: [(order: Int, src: String, label: String, level: Int)] = []
+    private var depth = 0
 
     static func parse(_ data: Data) -> [RawTOCEntry] {
         let delegate = EPUBNCXParser()
@@ -877,6 +913,10 @@ private final class EPUBNCXParser: NSObject, XMLParserDelegate {
                 attributes attributeDict: [String: String] = [:]) {
         switch localName(elementName) {
         case "navPoint":
+            // Push the parent's in-progress state so we can restore it
+            // when this child closes.
+            stack.append((pendingOrder, currentSrc, currentLabel, depth))
+            depth += 1
             let orderStr = attributeDict["playOrder"] ?? ""
             pendingOrder = Int(orderStr) ?? (entries.count + 1)
             currentLabel = ""
@@ -901,7 +941,17 @@ private final class EPUBNCXParser: NSObject, XMLParserDelegate {
         case "navPoint":
             let t = currentLabel.trimmingCharacters(in: .whitespacesAndNewlines)
             if !t.isEmpty && !currentSrc.isEmpty {
-                entries.append(RawTOCEntry(title: t, href: currentSrc, playOrder: pendingOrder))
+                let level = max(1, min(6, depth))
+                entries.append(RawTOCEntry(title: t, href: currentSrc, playOrder: pendingOrder, level: level))
+            }
+            // Pop the parent's state back so its label/src/order isn't lost.
+            if let parent = stack.popLast() {
+                pendingOrder = parent.order
+                currentSrc   = parent.src
+                currentLabel = parent.label
+                depth        = parent.level
+            } else {
+                depth = max(0, depth - 1)
             }
         default: break
         }

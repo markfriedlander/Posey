@@ -39,6 +39,10 @@ struct PDFTOCEntry: Sendable {
     /// compute this.
     let plainTextOffset: Int
     let playOrder: Int
+    /// Heading level. From `PDFOutline` traversal depth when the outline
+    /// fallback is used; from the text-pattern detector this is always 1
+    /// (no level signal in the dot-leader pattern).
+    let level: Int
 }
 
 struct PDFDocumentImporter {
@@ -266,7 +270,8 @@ extension PDFDocumentImporter {
             // — better than dropping the entry entirely.
             built.append(PDFTOCEntry(title: entry.title,
                                      plainTextOffset: found ?? postTOCOffset,
-                                     playOrder: index))
+                                     playOrder: index,
+                                     level: 1))
         }
         return built
     }
@@ -306,7 +311,8 @@ extension PDFDocumentImporter {
                     entries.append(PDFTOCEntry(
                         title: title,
                         plainTextOffset: pageStartOffsets[pageIndex],
-                        playOrder: order
+                        playOrder: order,
+                        level: max(1, min(6, depth + 1))
                     ))
                 }
                 walk(child, depth: depth + 1)

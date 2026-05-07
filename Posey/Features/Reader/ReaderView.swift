@@ -106,6 +106,12 @@ struct ReaderView: View {
                                 }
                             }
                             .padding(.horizontal, 14)
+                            // 2026-05-06 (parity #3): extra top space
+                            // above a heading row so the section break
+                            // reads as one. First row in the doc
+                            // doesn't get the extra padding (block.id
+                            // == 0).
+                            .padding(.top, headingTopPadding(for: block))
                             .padding(.vertical, 6)
                             .opacity(blockOpacity(block))
                             .scaleEffect(blockScale(block), anchor: .center)
@@ -145,13 +151,22 @@ struct ReaderView: View {
                         }
                     } else {
                         ForEach(Array(viewModel.segments.enumerated()), id: \.element.id) { segIdx, segment in
+                            // 2026-05-06 (parity #3): sentence-row docs
+                            // (TXT, plain DOCX/HTML/EPUB without images,
+                            // RTF) get heading styling too. The
+                            // viewModel resolves a row's TOC level by
+                            // matching its startOffset against the
+                            // stored TOC; nil means body text.
+                            let segHeadingLevel = viewModel.headingLevel(forSegmentStartOffset: segment.startOffset)
                             Text(segment.text)
                                 .textSelection(.enabled)
-                                .font(.system(size: motionFontSize(forSegment: segment)))
+                                .font(segmentFont(for: segment, headingLevel: segHeadingLevel))
+                                .fontWeight(segmentWeight(headingLevel: segHeadingLevel))
                                 .opacity(segmentOpacity(segment))
                                 .frame(maxWidth: .infinity, alignment: motionAlignment)
                                 .multilineTextAlignment(motionTextAlignment)
                             .padding(.horizontal, 14)
+                            .padding(.top, segmentTopPadding(headingLevel: segHeadingLevel, isFirst: segIdx == 0))
                             .padding(.vertical, 6)
                             .scaleEffect(segmentScale(segment), anchor: .center)
                             .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: viewModel.currentSentenceIndex)
@@ -1064,6 +1079,40 @@ struct ReaderView: View {
         return viewModel.isActive(segment: segment)
             ? viewModel.fontSize * 1.6
             : viewModel.fontSize
+    }
+
+    // MARK: Heading styling on the sentence-row path (parity #3)
+
+    /// Sentence-row font: heading styling overrides Motion's enlarged
+    /// active-sentence size. A chapter title shouldn't enlarge to the
+    /// motion-emphasis size when the user lands on it; the heading
+    /// scale already conveys importance and Motion's purpose is to
+    /// emphasise the active body sentence, not headings.
+    private func segmentFont(for segment: TextSegment, headingLevel: Int?) -> Font {
+        if let level = headingLevel {
+            return .system(size: ReaderViewModel.headingFontSize(body: viewModel.fontSize, level: level))
+        }
+        return .system(size: motionFontSize(forSegment: segment))
+    }
+
+    private func segmentWeight(headingLevel: Int?) -> Font.Weight {
+        guard let level = headingLevel else { return .regular }
+        return ReaderViewModel.headingWeight(level: level)
+    }
+
+    /// Top padding for a sentence row that is a heading. The first
+    /// row in the document gets no extra space (no preceding section
+    /// to separate from).
+    private func segmentTopPadding(headingLevel: Int?, isFirst: Bool) -> CGFloat {
+        guard !isFirst, let level = headingLevel else { return 0 }
+        return ReaderViewModel.headingTopSpacing(level: level)
+    }
+
+    /// Top padding for a displayBlock heading row. Same rule: the
+    /// first block in the document doesn't get extra space.
+    private func headingTopPadding(for block: DisplayBlock) -> CGFloat {
+        guard block.id != 0, case .heading(let level) = block.kind else { return 0 }
+        return ReaderViewModel.headingTopSpacing(level: level)
     }
 
     /// Whether the render path should treat the current state as
@@ -2733,6 +2782,63 @@ final class ReaderViewModel: ObservableObject {
         let visualPauseMap: [Int: Int]
     }
 
+    /// Re-tag paragraph blocks whose `startOffset` matches a TOC
+    /// entry's plainText offset as `.heading(level: N)`, where N is
+    /// the level the importer captured (chapter title, section,
+    /// subsection, …). Applies on the displayBlocks render path: MD
+    /// (always), PDF (with outline), DOCX / HTML / EPUB when they
+    /// emit displayBlocks (with images, or when the parser produces
+    /// blocks for other reasons).
+    ///
+    /// Sentence-row docs (TXT, plain DOCX/HTML/EPUB) are handled by
+    /// `headingLevel(forOffset:)` below, which the renderer consults
+    /// per-row so plain-text formats also get level-aware heading
+    /// styling — the parity policy that matters here.
+    private static func applyHeadingStyling(
+        to blocks: [DisplayBlock],
+        tocEntries: [StoredTOCEntry]
+    ) -> [DisplayBlock] {
+        guard !blocks.isEmpty, !tocEntries.isEmpty else { return blocks }
+        // Map each plainText offset to the deepest level seen at it
+        // (defensive: if two entries collide, the more-specific level
+        // wins so we don't downgrade a section heading to a chapter).
+        var levelByOffset: [Int: Int] = [:]
+        for e in tocEntries {
+            levelByOffset[e.plainTextOffset] = max(levelByOffset[e.plainTextOffset] ?? 0, e.level)
+        }
+        return blocks.map { block in
+            guard let level = levelByOffset[block.startOffset],
+                  case .paragraph = block.kind else { return block }
+            return DisplayBlock(
+                id: block.id,
+                kind: .heading(level: level),
+                text: block.text,
+                displayPrefix: block.displayPrefix,
+                startOffset: block.startOffset,
+                endOffset: block.endOffset,
+                imageID: block.imageID
+            )
+        }
+    }
+
+    /// Heading level for a sentence-row whose `startOffset` matches a
+    /// TOC entry, with a small fuzz window for offset drift caused by
+    /// the segmenter joining a short heading line with the following
+    /// paragraph. Returns nil when the row isn't a heading.
+    func headingLevel(forSegmentStartOffset offset: Int) -> Int? {
+        guard !tocEntries.isEmpty else { return nil }
+        // Cache the offset → level map once; tocEntries doesn't change
+        // after load. Tiny array so the recompute cost is trivial.
+        for entry in tocEntries {
+            // Allow tiny drift; the segmenter sometimes shifts by 1–2
+            // chars when a heading lacks terminal punctuation.
+            if abs(entry.plainTextOffset - offset) <= 2 {
+                return entry.level
+            }
+        }
+        return nil
+    }
+
     /// Heavy synchronous compute. Runs on a background dispatch queue
     /// from `loadContent`. Pure function (only reads from `document`),
     /// no MainActor-isolated state touched. The expensive piece is
@@ -2811,6 +2917,15 @@ final class ReaderViewModel: ObservableObject {
         // 2. DB side dishes (cheap).
         self.tocEntries = (try? databaseManager.tocEntries(for: document.id)) ?? []
         self.pageMap = DocumentPageMap.build(for: document, tocEntries: self.tocEntries)
+
+        // 2a. Heading-styling parity (#3). Re-tag paragraph blocks
+        // whose startOffset matches a TOC entry as .heading so they
+        // render with the unified bold + larger treatment. Cheap pass
+        // over the already-built blocks.
+        self.displayBlocks = ReaderViewModel.applyHeadingStyling(
+            to: self.displayBlocks,
+            tocEntries: self.tocEntries
+        )
 
         // 3. Position restore + playback prepare (depend on segments).
         //    Wrapped so a DB error here doesn't leave the reader
@@ -3323,8 +3438,7 @@ final class ReaderViewModel: ObservableObject {
     func font(for block: DisplayBlock) -> Font {
         switch block.kind {
         case .heading(let level):
-            let size = max(fontSize + CGFloat(10 - level), fontSize + 2)
-            return .system(size: size)
+            return .system(size: ReaderViewModel.headingFontSize(body: fontSize, level: level))
         default:
             return .system(size: fontSize)
         }
@@ -3332,10 +3446,48 @@ final class ReaderViewModel: ObservableObject {
 
     func fontWeight(for block: DisplayBlock) -> Font.Weight {
         switch block.kind {
-        case .heading:
-            return .bold
+        case .heading(let level):
+            return ReaderViewModel.headingWeight(level: level)
         default:
             return .regular
+        }
+    }
+
+    /// 2026-05-06 (parity #3) — single source of truth for heading
+    /// typography across both render paths (displayBlocks rows and
+    /// sentence rows). The scale is intentionally perceptible: a
+    /// chapter title and a subsection should feel like different
+    /// kinds of break, not just slightly different sizes. The 1pt-per-
+    /// level scale that lived here previously was too subtle to read
+    /// as hierarchy at normal reading distance.
+    static func headingFontSize(body: CGFloat, level: Int) -> CGFloat {
+        let multiplier: CGFloat
+        switch max(1, min(6, level)) {
+        case 1: multiplier = 1.50
+        case 2: multiplier = 1.30
+        case 3: multiplier = 1.15
+        default: multiplier = 1.00 // level 4-6 collapse to body size, weight only
+        }
+        return body * multiplier
+    }
+
+    static func headingWeight(level: Int) -> Font.Weight {
+        switch max(1, min(6, level)) {
+        case 1, 2: return .bold
+        default: return .semibold
+        }
+    }
+
+    /// Extra top spacing applied above a heading row so the section
+    /// break reads as one. More breathing room above level 1; less
+    /// for deeper levels. A reader that flips past a chapter break
+    /// should feel a perceptible pause.
+    static func headingTopSpacing(level: Int) -> CGFloat {
+        switch max(1, min(6, level)) {
+        case 1: return 24
+        case 2: return 18
+        case 3: return 12
+        default: return 8
         }
     }
 

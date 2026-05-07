@@ -63,7 +63,12 @@ struct RTFLibraryImporter {
         // (parity item #1). Only insert if at least one heading was found.
         if !headings.isEmpty {
             let stored = headings.enumerated().map { (idx, h) in
-                StoredTOCEntry(title: h.title, plainTextOffset: h.plainTextOffset, playOrder: idx + 1)
+                StoredTOCEntry(
+                    title: h.title,
+                    plainTextOffset: h.plainTextOffset,
+                    playOrder: idx + 1,
+                    level: h.level
+                )
             }
             try databaseManager.insertTOCEntries(stored, for: document.id)
         }

@@ -1,5 +1,18 @@
 # Posey History
 
+## 2026-05-07 (mid-morning) — Tier 2 #7: Saved Annotations preview shows note body
+
+The Saved Annotations list in the Notes sheet was showing the anchor sentence (or document-title fallback when the offset didn't match a segment) for every entry, regardless of kind. Per the punch-list spec, notes should preview their body text — that's what the user wrote and what's most useful to scan.
+
+**Fix.** `ReaderViewModel.rebuildSavedAnnotations` now checks each `Note`. For `.note` kind with a non-empty body, the preview is the body itself. For `.bookmark` (no body) or `.note` saved without a body, the preview falls back to the anchor sentence (previous behavior). Bookmarks behave unchanged.
+
+**Three Hats verification.**
+- **Developer**: built clean for both targets.
+- **QA**: created two notes (different bodies) + one bookmark via the antenna's CREATE_NOTE / CREATE_BOOKMARK verbs, opened the Notes sheet, screenshotted on both hardware. Bookmark row shows the anchor sentence ("Fourth sentence."), each note row shows its own body text. Both screenshots resized to ≤600px before reading.
+- **User**: scanning the saved-annotations list with the new behavior, you immediately see what each note SAYS without expanding it. The previous behavior asked you to remember which document position each note was anchored to in order to recall what you'd written. The new behavior shows the words.
+
+`/tmp/sshots/sim-notes.png` and `/tmp/sshots/iphone-notes.png` captured during verification.
+
 ## 2026-05-07 (mid-morning) — Tier 1 #6 analysis: TOC playback skip is already correct on DOCX; deferred for RTF
 
 Mark's punch list said "DOCX and RTF must also write `playback_skip_until_offset`." Confirming what's actually wired before adding code (per Mark's directive on this item).

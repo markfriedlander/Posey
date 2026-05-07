@@ -1958,6 +1958,17 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "OPEN_VOICE_PICKER_SHEET":
+                // 2026-05-07 (parity #5): present VoicePickerView as a
+                // modal sheet for testing. The user-facing path remains
+                // a NavigationLink inside Preferences (unchanged); this
+                // verb adds a parallel test entry point because the
+                // NavigationLink isn't reachable via the antenna's TAP.
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteOpenVoicePickerSheet, object: nil)
+                }
+                return json(["status": "posted"])
+
             case "OPEN_AUDIO_EXPORT_SHEET":
                 await MainActor.run {
                     NotificationCenter.default.post(name: .remoteOpenAudioExportSheet, object: nil)

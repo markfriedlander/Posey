@@ -1,5 +1,22 @@
 # Posey History
 
+## 2026-05-07 (afternoon) — Tier 1 #5 closed: Voice picker empty state + antenna scaffolding
+
+Closing the deferred half of #5. Added the antenna scaffolding the verification needed and re-applied the Voice picker empty state.
+
+**Antenna scaffolding (per Mark's standing brief: "the local API should be more capable than a human tester at every point").**
+- New verb `OPEN_VOICE_PICKER_SHEET` posts `.remoteOpenVoicePickerSheet`. ReaderView observes and presents `VoicePickerView` as a modal sheet (parallel test entry point; the user-facing NavigationLink in Preferences is unchanged).
+- New env var `POSEY_DEBUG_VOICE_PICKER_EMPTY=1` — when set at launch, `VoicePickerView.visibleGroups` returns `[]` regardless of what voices are installed. Lets the empty-state code path be exercised on devices that have voices for the current language. Without the env var, normal behavior applies.
+
+**Voice picker empty state.** When `visibleGroups.isEmpty`, the picker shows: *"No voices for your current language are downloaded. Tap 'Show all languages' below, or download voices in Settings → Accessibility → Spoken Content → Voices."* The "Show all languages" button is the natural next step and is shown immediately below the empty-state copy.
+
+**Three Hats verification.**
+- **Developer**: builds clean for both targets.
+- **QA**: launched both targets with `POSEY_DEBUG_VOICE_PICKER_EMPTY=1`, opened the picker via `OPEN_VOICE_PICKER_SHEET`, screenshotted on simulator AND iPhone, both screenshots show the empty-state copy + the "Show all languages" affordance. Resized to ≤600px before reading. `/tmp/sshots/sim-vp-empty2.png` and `/tmp/sshots/iphone-vp-empty.png`.
+- **User**: a user opening the Voice picker on a device with no voices for their language now sees a clear explanation and a one-tap path to broaden the list — instead of an apparently-broken empty pane.
+
+#5 fully closed.
+
 ## 2026-05-07 (afternoon) — Tier 1 #5 partial: TOC sheet empty state
 
 Started a proper audit of every modal sheet for empty-state coverage. First closure: TOC sheet now shows "No table of contents in this document." when `viewModel.tocEntries.isEmpty`.

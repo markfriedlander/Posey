@@ -123,6 +123,12 @@ extension Notification.Name {
     static let remoteOpenPreferencesSheet = Notification.Name("PoseyRemoteOpenPreferencesSheet")
     /// No userInfo. ReaderView observes; sets `isShowingTOCSheet`.
     static let remoteOpenTOCSheet = Notification.Name("PoseyRemoteOpenTOCSheet")
+    /// No userInfo. ReaderView observes; presents `VoicePickerView` as a
+    /// modal sheet so the antenna can drive verification of the picker
+    /// without navigating through the Preferences-sheet's NavigationStack
+    /// (which the antenna's TAP verb can't reach via registry or
+    /// accessibility-tree fallback).
+    static let remoteOpenVoicePickerSheet = Notification.Name("PoseyRemoteOpenVoicePickerSheet")
     /// No userInfo. ReaderPreferencesSheet observes; sets the sheet's
     /// internal `isShowingAudioExport` state.
     static let remoteOpenAudioExportSheet = Notification.Name("PoseyRemoteOpenAudioExportSheet")

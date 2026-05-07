@@ -33,6 +33,14 @@ struct ReaderView: View {
     @State private var isShowingNotesSheet = false
     @State private var isShowingPreferencesSheet = false
     @State private var isShowingTOCSheet = false
+    /// 2026-05-07 (parity #5): test-only modal entry point for the
+    /// Voice picker. The user-facing path is the NavigationLink inside
+    /// Preferences, unchanged. This sheet exists so the antenna's
+    /// OPEN_VOICE_PICKER_SHEET verb can drive verification of the
+    /// picker (empty-state, voice-list rendering) without going
+    /// through Preferences-sheet navigation that the antenna can't
+    /// reach. Routed via `.remoteOpenVoicePickerSheet` notification.
+    @State private var isShowingVoicePickerSheet = false
     /// Holds the Ask Posey chat view model while the sheet is open.
     /// `nil` when the sheet is dismissed. Using a value-typed item
     /// (instead of a separate `isShowing` Bool) means the view model
@@ -462,6 +470,28 @@ struct ReaderView: View {
             .sheet(isPresented: $isShowingTOCSheet) {
                 TOCSheet(viewModel: viewModel)
             }
+            // 2026-05-07 (parity #5): test-only modal Voice picker
+            // entry point (see `isShowingVoicePickerSheet` doc).
+            .sheet(isPresented: $isShowingVoicePickerSheet) {
+                NavigationStack {
+                    VoicePickerView(
+                        selectedIdentifier: Binding(
+                            get: {
+                                if case .custom(let id, _) = viewModel.voiceMode { return id }
+                                return ""
+                            },
+                            set: { viewModel.setCustomVoice(identifier: $0) }
+                        )
+                    )
+                    .navigationTitle("Voice")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") { isShowingVoicePickerSheet = false }
+                        }
+                    }
+                }
+            }
             .sheet(item: $expandedImageItem) { item in
                 ExpandedImageSheet(imageID: item.id, viewModel: viewModel)
             }
@@ -539,7 +569,8 @@ struct ReaderView: View {
                 viewModel: viewModel,
                 isShowingNotesSheet: $isShowingNotesSheet,
                 isShowingPreferencesSheet: $isShowingPreferencesSheet,
-                isShowingTOCSheet: $isShowingTOCSheet
+                isShowingTOCSheet: $isShowingTOCSheet,
+                isShowingVoicePickerSheet: $isShowingVoicePickerSheet
             ))
         }
     }
@@ -1541,6 +1572,7 @@ private struct ReaderRemoteControlObservers: ViewModifier {
     @Binding var isShowingNotesSheet: Bool
     @Binding var isShowingPreferencesSheet: Bool
     @Binding var isShowingTOCSheet: Bool
+    @Binding var isShowingVoicePickerSheet: Bool
 
     func body(content: Content) -> some View {
         content
@@ -1552,7 +1584,8 @@ private struct ReaderRemoteControlObservers: ViewModifier {
             .modifier(ReaderRemoteControlSheetObservers(
                 viewModel: viewModel,
                 isShowingPreferencesSheet: $isShowingPreferencesSheet,
-                isShowingTOCSheet: $isShowingTOCSheet
+                isShowingTOCSheet: $isShowingTOCSheet,
+                isShowingVoicePickerSheet: $isShowingVoicePickerSheet
             ))
             .modifier(ReaderRemoteControlPreferencesObservers(viewModel: viewModel))
             .modifier(ReaderRemoteControlSearchObservers(viewModel: viewModel))
@@ -1636,6 +1669,7 @@ private struct ReaderRemoteControlSheetObservers: ViewModifier {
     @ObservedObject var viewModel: ReaderViewModel
     @Binding var isShowingPreferencesSheet: Bool
     @Binding var isShowingTOCSheet: Bool
+    @Binding var isShowingVoicePickerSheet: Bool
 
     func body(content: Content) -> some View {
         content
@@ -1644,6 +1678,9 @@ private struct ReaderRemoteControlSheetObservers: ViewModifier {
             }
             .onReceive(NotificationCenter.default.publisher(for: .remoteOpenTOCSheet)) { _ in
                 isShowingTOCSheet = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteOpenVoicePickerSheet)) { _ in
+                isShowingVoicePickerSheet = true
             }
             .onReceive(NotificationCenter.default.publisher(for: .remoteOpenAudioExportSheet)) { _ in
                 // The Audio Export sheet is a sub-sheet of the

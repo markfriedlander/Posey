@@ -1,5 +1,20 @@
 # Posey Decisions
 
+## 2026-05-06 (evening, late) — List markers: inject into plainText, strip at speech boundary
+
+- **Status:** Accepted (Mark's directive after a research round on AVSpeechSynthesizer punctuation behavior).
+- **Decision:** For non-MD formats that have list structure (HTML `<ul>`/`<ol>`, EPUB spine HTML, DOCX `<w:numPr>` paragraphs), the importer injects visible list markers (`• ` for bullets, `N. ` for numbered) into the extracted text. The markers live in both `displayText` (so the reader shows them) and `plainText` (so search and Ask Posey embeddings see them as ordinary text). On the playback side, `SpeechPlaybackService` strips leading marker patterns (`^•\s+` and `^\d+\.\s+`) from each utterance text before handing it to AVSpeechSynthesizer. The audio path never sees the markers.
+- **Why this shape:**
+  - **Why inject into plainText (not a sidecar table).** A sidecar mechanism (a `document_lists` table mirroring `document_toc`) is cleaner architecturally but adds schema, a parser pass per importer, a renderer hook per render path, and lookup at every render. The injection approach reuses the existing display/plain text pipeline that already works for headings and gets MD parity for free. The sidecar is the right answer if marker filtering at the speech boundary turns out to be insufficient; right now we don't have evidence it would be.
+  - **Why strip at the speech boundary (not at extraction).** The reading-and-listening user is the primary use case. AVSpeechSynthesizer's behavior on `•` and `1. ` patterns is undocumented (researched against Apple docs, WWDC 2018, Apple Developer Forums, NSHipster, useyourloaf, Hacking with Swift, and Deque's screen-reader punctuation reference — all silent on AVSpeechSynthesizer specifically). The closest data point — Deque's empirical test of VoiceOver-on-macOS — shows U+2022 silently swallowed, but **VoiceOver and AVSpeechSynthesizer are different subsystems** and that finding does not authoritatively transfer. Stripping at the speech boundary eliminates the risk without requiring empirical validation, and is cheap enough that the safety is worth more than the slightly noisier embeddings.
+  - **What "strip at boundary" actually does.** The strip is applied per-utterance to leading marker patterns only — the regex matches at start-of-string. A list item "• First bullet item" speaks as "First bullet item." A numbered item "1. First numbered item" speaks as "First numbered item." Embedded markers (e.g. someone writing about bullet points in prose) are not stripped — only leading.
+- **Tradeoffs accepted:**
+  - **Search and Ask Posey embeddings.** Markers are part of the indexed text. Search for "first" still matches "1. First numbered item" — no regression. Embeddings get marginally noisier; numbers like `1. 2. 3. ` could nudge a chunk toward "list-like" similarity. Negligible in practice; the alternative (sidecar) is more code than the noise warrants.
+  - **DOCX numbered lists.** The first pass treats every DOCX `<w:numPr>` paragraph as `• ` because reliably distinguishing bullet from numbered requires resolving `numId` against the doc's `numbering.xml` definition table. That's a real Word-fidelity loss; documented as a v1 limitation in NEXT.md.
+  - **RTF lists.** Deferred. RTF list markers (`\pntext`, `\listtext`) require parser hooks the existing direct tokenizer doesn't have. Documented as deferred work.
+  - **PDF lists.** Out of scope. PDF list signal is positional (indent + tab) and inconsistent; reliable detection is a layout-analysis problem.
+- **Verification plan when implementing:** two hardware × HTML and DOCX, capturing both the visual rendering AND a play test confirming the markers don't speak.
+
 ## 2026-05-06 (evening) — Heading typography: perceptible level scale, single source of truth across render paths
 
 - **Status:** Accepted (designed with Mark before code; visual spec was an explicit design decision Mark delegated to the user-hat).

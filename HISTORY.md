@@ -1,5 +1,24 @@
 # Posey History
 
+## 2026-05-07 (afternoon) — Tier 1 #5 partial: TOC sheet empty state
+
+Started a proper audit of every modal sheet for empty-state coverage. First closure: TOC sheet now shows "No table of contents in this document." when `viewModel.tocEntries.isEmpty`.
+
+**Audit summary** of every modal sheet:
+- **TOC sheet** — was a blank list when no entries; **fixed in this commit**.
+- **Notes sheet > Saved Annotations** — already has "No notes, bookmarks, or conversations yet." (line 2227). No change needed.
+- **Voice picker** — needs an empty state when device has no voices for the current language. **Code change drafted, but verification was deferred.** The Voice picker is a NavigationLink destination inside the Preferences sheet's NavigationStack and the antenna's TAP verb can't reach it through the registry or the UIView accessibility-tree fallback. To verify on iPhone (Rule 2) I'd need either antenna test infrastructure (a programmatic-open verb or a coordinate-tap mechanism) or a way to change device locale to one with no installed voices. Reverting the Voice picker change for now and adding to NEXT.md as a follow-up that needs the antenna scaffolding first.
+- **Preferences sheet** — settings form, content always present. No empty-state concept.
+- **Audio Export sheet** — has "Export not started." when `audioExporter == nil`. No change needed (and currently hidden from the UI for v1 anyway).
+- **Ask Posey sheet** — anchor card always present + composer placeholder ("Ask about this passage…", "Ask about this document…") serves as the natural empty-state. Judgment call: this is correct UX for the surface as designed.
+
+**Three Hats verification on TOC sheet empty state.**
+- **Developer**: built clean for both targets.
+- **QA**: imported `/tmp/short.txt` (TXT, no TOC entries) on simulator AND iPhone, opened the TOC sheet via the antenna's `OPEN_TOC_SHEET` verb (the chrome button only appears when entries exist; the empty state is mostly defensive but reachable). Both screenshots show the empty-state copy correctly. Resized to ≤600px before reading. `/tmp/sshots/sim-toc-empty.png` and `/tmp/sshots/iphone-toc-empty.png`.
+- **User**: the user opens the TOC button (which today only appears when entries exist), but anyone reaching the sheet via API or unusual edge cases sees a clear message instead of an empty pane.
+
+The Voice picker empty-state code is correct (visually verified on simulator before revert) but isn't shipping in this commit because it can't be verified on iPhone without test infrastructure. NEXT.md item #5 captures the follow-up.
+
 ## 2026-05-07 (mid-morning) — Tier 2 #7: Saved Annotations preview shows note body
 
 The Saved Annotations list in the Notes sheet was showing the anchor sentence (or document-title fallback when the offset didn't match a segment) for every entry, regardless of kind. Per the punch-list spec, notes should preview their body text — that's what the user wrote and what's most useful to scan.

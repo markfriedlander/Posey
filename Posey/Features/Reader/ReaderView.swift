@@ -4032,24 +4032,39 @@ private struct TOCSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    // Task 8 (2026-05-03): composite id avoids the
-                    // crash some EPUBs caused when synthesized TOC
-                    // entries shared `playOrder = 0` (e.g. a nav.xhtml
-                    // and a notice.html both starting at 0). Combine
-                    // playOrder + offset + title so duplicates stay
-                    // unique even when one of them is empty.
-                    ForEach(viewModel.tocEntries, id: \.compositeID) { entry in
-                        Button {
-                            viewModel.jumpToTOCEntry(entry)
-                            dismiss()
-                        } label: {
-                            Text(entry.title)
-                                .foregroundStyle(.primary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
+                if viewModel.tocEntries.isEmpty {
+                    // 2026-05-07 (parity #5): real empty state when
+                    // no TOC entries are detected. The button that
+                    // opens this sheet only appears when there are
+                    // entries today, so this is mostly defensive —
+                    // the API can still open the sheet on a doc
+                    // with no TOC, and visible empty-state copy is
+                    // better than a blank list either way.
+                    Section {
+                        Text("No table of contents in this document.")
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("toc.empty")
+                    }
+                } else {
+                    Section {
+                        // Task 8 (2026-05-03): composite id avoids the
+                        // crash some EPUBs caused when synthesized TOC
+                        // entries shared `playOrder = 0` (e.g. a nav.xhtml
+                        // and a notice.html both starting at 0). Combine
+                        // playOrder + offset + title so duplicates stay
+                        // unique even when one of them is empty.
+                        ForEach(viewModel.tocEntries, id: \.compositeID) { entry in
+                            Button {
+                                viewModel.jumpToTOCEntry(entry)
+                                dismiss()
+                            } label: {
+                                Text(entry.title)
+                                    .foregroundStyle(.primary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 if viewModel.pageMap.hasPages {

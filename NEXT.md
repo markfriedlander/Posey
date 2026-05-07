@@ -9,13 +9,12 @@ Working through the 17-item Tier 1–4 punch list. Status:
 2. ✅ Inline image rendering on EPUB/DOCX/HTML — code in `57472fa`. Verified on iPhone via Data Smog EPUB; sim verification carried over from the in-progress session and confirmed during this pass via the heading-styling smoke runs that exercise the same display-block path.
 3. ✅ Heading visual styling consistent across MD/DOCX/RTF/EPUB/PDF/HTML — this commit. Single-spec typography (1.5×/1.3×/1.15×/1.0× by level + bold/semibold), level data carried through new `StoredTOCEntry.level` schema column, sentence-row + displayBlocks both heading-aware. HTML gets a new heading extractor since it had no TOC path before. Verified MD/HTML/RTF on both simulator and iPhone (and DOCX/EPUB/PDF in the Rule 2 closure pass).
 4. ✅ Bullet and numbered list rendering consistent across formats — code in `dd4ba44`; iPhone post-merge visual + audio verification done 2026-05-07. HTML/EPUB inject markers via `HTMLDocumentImporter.injectListMarkers`; DOCX detects `<w:numPr>` paragraphs (every list item bullet for v1); `SpeechPlaybackService.utteranceText` strips leading markers before AVSpeechSynthesizer; `SentenceSegmenter.mergeNumberedListMarkers` rejoins numbered-marker segments NLTokenizer splits. Mark confirmed by ear that markers don't pronounce. v1 limitations: DOCX numbered → bullet (numbering.xml not resolved), RTF lists deferred (parser hooks not in scope), PDF lists out of scope.
-5. Empty-state messages on every modal sheet — pending.
-6. ✅ TOC playback skip — analysis complete. **No code change needed for v1.**
-   - **DOCX** is already correct via a different mechanism: `WordDocumentXMLExtractor.insideTOCContent` strips the entire `<w:fldChar>` TOC field's rendered content from plainText at extract time, so there's nothing to skip past. Empirically verified 2026-05-07 with a synthetic DOCX containing a real Word TOC field — the dot-leader entries never make it into plainText.
-   - **RTF** doesn't need it for the common case: heading-styled paragraphs become `StoredTOCEntry` rows via the new tokenizer (the AI Book RTF has 91 such entries) but there's no separate TOC text region to skip. The niche case (hardcoded dot-leader TOC typed as ordinary paragraphs) is deferred — would need a detector mirroring `PDFTOCDetector` adapted for RTF text.
+5. ⏳ Empty-state messages on every modal sheet — not started. Audit every sheet: TOC, Notes, Voice picker, Preferences, Audio Export, Saved Annotations, Ask Posey, etc. For each, write a real empty-state string when the contents are empty. Two-hardware screenshots per sheet.
+6. ⏳ TOC playback skip — needs proper Three Hats verification on both hardware. Earlier single-hardware DOCX check doesn't satisfy the rules. Re-verify the DOCX TOC field strip on simulator AND iPhone, document RTF deferral with proper user-hat consideration.
+7. ✅ Saved Annotations preview shows note body — `b60bce9`. Three Hats + two hardware verified.
 
 **Tier 2 — Visible bugs in shipped behavior**
-7-12. Pending.
+8-12. ⏳ All pending — need to be redone from zero. Earlier "already fixed" assertions for #8 (PLAYBACK_RESTART), #9 (RTF concat), #11 (HTML NBSPs), #12 (RTF form-feed) were single-hardware empirical checks and don't meet Rule 2 / Three Hats. #10 (PDF citation marker) was tested against the wrong code path (synthetic TXT instead of PDF displayBlocks). Each must be re-verified or actually fixed and verified on both simulator and iPhone with screenshots and three hats.
 
 **Tier 3 — Polish**
 13-17. Pending.

@@ -1,6 +1,34 @@
 # Posey History
 
-## 2026-05-06 (afternoon) — Pre-Release Parity Punch List #2: Inline image rendering on EPUB/DOCX/HTML
+## 2026-05-06 (evening) — Pre-Release Parity Punch List #3: Heading visual styling, level-aware, every format
+
+Closed Tier 1 #3 of the parity punch list. Headings across MD, DOCX, RTF, EPUB, PDF, and HTML now render with one shared visual spec, scaled by heading level so a chapter title and a section subhead actually feel like different kinds of break.
+
+**The visual spec.** Single source of truth in `ReaderViewModel.headingFontSize/headingWeight/headingTopSpacing` (consulted by both render paths). Level 1 is `1.50× body, bold, +24pt top spacing` (chapter title). Level 2 is `1.30× body, bold, +18pt`. Level 3 is `1.15× body, semibold, +12pt`. Levels 4–6 collapse to body size with semibold weight and `+8pt` spacing — real-world docs rarely use h4+ meaningfully and the visual budget is better spent on the upper three. The first row of a doc never gets the extra top spacing (no preceding section to separate from).
+
+The previous renderer had a 1pt-per-level scale (`fontSize + (10 - level)`) which was too subtle to read as hierarchy at normal reading distance — chapter and subsection were essentially the same size. The new scale is perceptible without shouting.
+
+**Schema change.** `StoredTOCEntry` and the `document_toc` table gained a `level: Int` column. Every importer was preserving level data internally (`DOCXHeadingEntry.level`, `RTFHeadingEntry.level`, `MarkdownParser.heading(level:text:)`, EPUB NCX nesting, PDF outline depth) and discarding it at the TOC write boundary. The new column carries it through to render time. Per Mark's call: no migration code; the schema setup detects the missing column on existing DBs, drops `document_toc`, and lets the user re-import to repopulate.
+
+**Per-format coverage.**
+- **MD** — `MarkdownLibraryImporter` now passes the parser's level when building TOC entries. (Already on the displayBlocks render path; gets the new visual spec automatically.)
+- **DOCX** — `DOCXLibraryImporter` passes `DOCXHeadingEntry.level` into the TOC. Sentence-row docs (no images) and displayBlocks docs (with images) both work.
+- **RTF** — `RTFLibraryImporter` passes `RTFHeadingEntry.level` (the font-size-tier classifier already in `RTFDocumentImporter`). Sentence-row path picks it up.
+- **EPUB** — `EPUBNCXParser` now tracks navPoint nesting depth via a parent-state stack so a child navPoint doesn't clobber its parent's in-progress label/src/order. `EPUBNavTOCParser` (EPUB 3) tracks `<ol>`/`<ul>` nesting depth in the same way. Spine-fallback synthesized TOCs default to level 1.
+- **PDF** — `extractOutlineEntries` records traversal depth as level (chapter at 1, section at 2, …). The text-pattern detector path stays at level 1 (no signal in the dot-leader pattern).
+- **HTML** — NEW: `HTMLDocumentImporter.extractHeadings(fromRawData:)` regex-extracts `<h1>`–`<h6>` from raw HTML, strips inner tags, decodes the small set of HTML entities likely to appear in heading text. `HTMLLibraryImporter.resolveHeadingOffsets(...)` does sequential left-to-right search in the post-NSAttributedString plainText so duplicates don't all collapse to the same offset. Works for both URL-based and raw-data-based imports.
+
+**Two render paths.** The displayBlocks renderer (used by MD always, PDF, and DOCX/HTML/EPUB when they have images) re-tags paragraph blocks at TOC offsets as `.heading(level: N)` via `applyHeadingStyling`. The sentence-row renderer (TXT, plain DOCX/HTML/EPUB, RTF) uses a new `headingLevel(forSegmentStartOffset:)` accessor on `ReaderViewModel`, with a 2-char fuzz window for the small offset drift the segmenter produces when a heading lacks terminal punctuation. Both paths feed the same typography helpers.
+
+**Verification.** Two pieces of hardware × three formats:
+- MD on simulator: chapter title with breathing room above, h2 visibly smaller, h3 smaller still, h4-6 body-sized with semibold weight; chapter break shows the designed top-spacing pause.
+- MD on iPhone (dark mode): same rendering, same hierarchy.
+- HTML on simulator + iPhone: new HTML extractor surfaces all four levels correctly through the sentence-row path.
+- RTF on simulator + iPhone: existing font-tier tokenizer's level data flows through; chapter break visible.
+
+Three Hats: Developer (builds clean for both targets, no errors), QA (level-1 chapter break visibly different from level-3 subsection on every format tested), User (the chapter break finally reads as a chapter break — the 1pt-per-level scale was a real readability bug).
+
+
 
 Closed Tier 1 #2 of the parity punch list for the three formats whose importers already extract inline images. RTF and MD remain on the open list (RTF doesn't extract `\pict` blocks today; MD needs `![alt](url)` resolution work).
 

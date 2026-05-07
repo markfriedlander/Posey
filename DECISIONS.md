@@ -1,5 +1,29 @@
 # Posey Decisions
 
+## 2026-05-06 (evening) — Heading typography: perceptible level scale, single source of truth across render paths
+
+- **Status:** Accepted (designed with Mark before code; visual spec was an explicit design decision Mark delegated to the user-hat).
+- **Decision:** Heading rendering across all formats follows one shared spec. Level 1 is `1.50× body, bold, +24pt top spacing`. Level 2 is `1.30× body, bold, +18pt`. Level 3 is `1.15× body, semibold, +12pt`. Levels 4–6 are body-sized, semibold, `+8pt` top spacing. Implemented as static methods on `ReaderViewModel` (`headingFontSize/headingWeight/headingTopSpacing`) consumed by both the displayBlocks render path and the sentence-row render path.
+- **Rationale:** The previous spec was `fontSize + (10 - level)` — 1pt per level. At a 17pt body that meant chapter title was 26pt and a level-3 subsection was 24pt: visually almost identical. A reader couldn't feel the difference between a chapter break and a paragraph subdivision. Mark's framing was the right one: "a chapter title versus a section subhead are different things and a reader should feel that difference." The new scale is perceptible without shouting; levels 4–6 deliberately collapse to body-size-with-weight because real-world docs rarely use h4+ meaningfully and the visual budget is better spent on the upper three. Top spacing matters as much as size — a heading with breathing room above it reads as a section break even when the size delta is modest. The previous code applied no extra spacing to heading rows.
+
+## 2026-05-06 (evening) — Heading level carried through schema, no migration code
+
+- **Status:** Accepted (Mark's explicit call).
+- **Decision:** `StoredTOCEntry` and `document_toc` gain a `level: Int` column. On app launch the schema setup detects whether the existing table has the `level` column via `PRAGMA table_info`; if missing, it drops `document_toc` (recreated empty by the same `CREATE TABLE IF NOT EXISTS` block). Existing documents lose their TOC entries until re-imported. No data-preservation migration code, no version counter, no `ALTER TABLE` upgrade path.
+- **Rationale:** The app is not in the wild. The user is the only person with a Posey database, and is aware of the trade-off. Mark's framing: "drop the table, recreate it with the new schema, and reimport the documents fresh. Don't clutter the codebase with migration logic for data that doesn't need to be preserved." A single conditional drop is the minimum amount of code to keep the app from crashing on import-into-old-schema; anything more would be the cluttering Mark called out. When the app ships, the schema will be its committed shape and this concern goes away.
+
+## 2026-05-06 (evening) — Heading-styling applies on both render paths, not just displayBlocks
+
+- **Status:** Accepted.
+- **Decision:** Sentence-row docs (TXT, plain DOCX/HTML/EPUB without images, RTF) get heading styling per-row via `ReaderViewModel.headingLevel(forSegmentStartOffset:)`, which matches the segment's start offset against stored TOC entries (with a 2-char fuzz window for segmenter offset drift). The displayBlocks render path uses the same level data via `applyHeadingStyling`, which re-tags paragraph blocks at TOC offsets as `.heading(level: N)`.
+- **Rationale:** The previous CC's WIP only re-tagged on the displayBlocks path, with an explicit comment acknowledging that "pure-text DOCX / HTML / EPUB stay on the sentence-row reader which has no heading concept, so the visible behavior there is unchanged. That gap is the cost of keeping plain documents on the existing fast path." That gap is exactly the format-parity policy violation we just fixed — the same heading should look the same way regardless of which render path the doc happens to take. The 2-char fuzz handles the case where `NLTokenizer` glues a heading without terminal punctuation onto the following sentence's start.
+
+## 2026-05-06 (evening) — HTML heading extraction added to import pipeline
+
+- **Status:** Accepted.
+- **Decision:** `HTMLDocumentImporter.extractHeadings(fromRawData:)` regex-extracts `<h1>`–`<h6>` from raw HTML, strips inner tags, decodes the small set of HTML entities likely to appear in heading text (`&nbsp;`, `&amp;`, `&mdash;`, etc.). `HTMLLibraryImporter.resolveHeadingOffsets` does sequential left-to-right search in the post-NSAttributedString plainText to find each heading's offset; left-to-right ensures duplicate text in body paragraphs doesn't snap a heading offset to the wrong place.
+- **Rationale:** HTML had no TOC pipeline before. The format-parity rule said either include it or document why not — and "h1-h6 are right there in the DOM" doesn't satisfy "why not." The regex approach is fragile-by-design (it can't handle headings whose inner content includes nested tags inside attribute values, etc.) but the failure mode is "heading not detected" not "wrong offset" — it degrades gracefully. A real DOM-based extractor would need either a bundled HTML parser (no third-party deps allowed) or a separate XMLParser pass with namespace handling for XHTML; both are larger scope than the parity gap warranted for v1.
+
 ## 2026-05-05 (closing) — Ask Posey: citation chips, 1..N renumbering, sub-40% RAG filter, contentMargins scroll
 
 A cluster of related decisions made tonight while fixing the post-Phase-1 regressions Mark caught.

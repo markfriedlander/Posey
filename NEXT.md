@@ -1,5 +1,28 @@
 # Next
 
+## 2026-05-06 (evening) — Pre-Release Parity Punch List in flight
+
+Working through the 17-item Tier 1–4 punch list. Status:
+
+**Tier 1 — Visible parity gaps**
+1. ✅ TOC navigation on RTF — verified existing commit `0397a45`.
+2. ✅ Inline image rendering on EPUB/DOCX/HTML — code in `57472fa`. Verified on iPhone via Data Smog EPUB; sim verification carried over from the in-progress session and confirmed during this pass via the heading-styling smoke runs that exercise the same display-block path.
+3. ✅ Heading visual styling consistent across MD/DOCX/RTF/EPUB/PDF/HTML — this commit. Single-spec typography (1.5×/1.3×/1.15×/1.0× by level + bold/semibold), level data carried through new `StoredTOCEntry.level` schema column, sentence-row + displayBlocks both heading-aware. HTML gets a new heading extractor since it had no TOC path before. Verified MD/HTML/RTF on both simulator and iPhone.
+4. Bullet and numbered list rendering consistent across formats — pending.
+5. Empty-state messages on every modal sheet — pending.
+6. TOC playback skip applies to every format that has a TOC (DOCX/RTF need to write `playback_skip_until_offset`) — pending. Will confirm what's already wired before adding code per Mark's directive.
+
+**Tier 2 — Visible bugs in shipped behavior**
+7-12. Pending.
+
+**Tier 3 — Polish**
+13-17. Pending.
+
+**Tier 4 — Needs Mark**
+18-20. Pending — for Mark's session.
+
+---
+
 ## 2026-05-06 — Submission day pass: 7 of 7 complete
 
 Mark's submission-day list, status of each:

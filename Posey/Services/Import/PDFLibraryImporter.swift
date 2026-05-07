@@ -123,7 +123,12 @@ extension PDFLibraryImporter {
     /// shared insert path deduplicates and rewrites on every import.
     private func saveTOCEntries(_ entries: [PDFTOCEntry], for documentID: UUID) throws {
         let stored = entries.map {
-            StoredTOCEntry(title: $0.title, plainTextOffset: $0.plainTextOffset, playOrder: $0.playOrder)
+            StoredTOCEntry(
+                title: $0.title,
+                plainTextOffset: $0.plainTextOffset,
+                playOrder: $0.playOrder,
+                level: $0.level
+            )
         }
         try databaseManager.insertTOCEntries(stored, for: documentID)
     }

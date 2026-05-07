@@ -64,11 +64,12 @@ struct MarkdownLibraryImporter {
         // Take all heading blocks and persist as TOC entries with
         // their plainText offset and parse order.
         let tocEntries: [StoredTOCEntry] = parsed.blocks.enumerated().compactMap { (idx, block) in
-            guard case .heading = block.kind else { return nil }
+            guard case .heading(let level) = block.kind else { return nil }
             return StoredTOCEntry(
                 title: block.text,
                 plainTextOffset: block.startOffset,
-                playOrder: idx + 1
+                playOrder: idx + 1,
+                level: level
             )
         }
         if !tocEntries.isEmpty {

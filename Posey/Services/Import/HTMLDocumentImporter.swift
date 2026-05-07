@@ -20,6 +20,15 @@ struct HTMLDocumentImporter {
             }
         }
     }
+
+    /// One `<h1>`..`<h6>` element extracted from the raw HTML.
+    /// 2026-05-06 (parity #3): HTML headings flow into the TOC for
+    /// styling parity with MD/DOCX/RTF/EPUB/PDF. The library importer
+    /// resolves each title to a plainText offset by sequential search.
+    struct HTMLHeadingEntry {
+        let level: Int
+        let title: String
+    }
 // ========== BLOCK 1: ERROR TYPES - END ==========
 
 // ========== BLOCK 2: IMPORT ENTRY POINTS - START ==========
@@ -39,7 +48,7 @@ struct HTMLDocumentImporter {
     ///     ingests.
     ///   - `images` — collected `PageImageRecord` values, one per
     ///     successfully-extracted image, ready for `databaseManager.insertImage`.
-    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord]) {
+    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [HTMLHeadingEntry]) {
         let data = try Data(contentsOf: url)
         let baseDirectory = url.deletingLastPathComponent()
         let (markedData, images) = extractInlineImages(from: data, baseDirectory: baseDirectory)
@@ -48,7 +57,72 @@ struct HTMLDocumentImporter {
         // HTMLDisplayParser converts them to .visualPlaceholder
         // blocks. plainText is the marker-stripped form for TTS.
         let plainText = stripVisualPageMarkers(from: displayText)
-        return (displayText, plainText, images)
+        let headings = extractHeadings(fromRawData: data)
+        return (displayText, plainText, images, headings)
+    }
+
+    /// Pull `<h1>`..`<h6>` elements out of raw HTML for TOC + heading
+    /// styling. Strips inner tags, decodes the small set of entities
+    /// most likely to appear in heading text, trims whitespace. The
+    /// library importer maps each title to a plainText offset by
+    /// sequential search since the post-NSAttributedString plainText
+    /// has no remaining tag boundaries to anchor against.
+    func extractHeadings(fromRawData data: Data) -> [HTMLHeadingEntry] {
+        guard let html = String(data: data, encoding: .utf8) ??
+                         String(data: data, encoding: .isoLatin1) else {
+            return []
+        }
+        // Capture the level digit and the inner content. `(?s)` makes
+        // `.` cross newlines so headings spanning multiple source
+        // lines still match. `?` keeps the inner match non-greedy
+        // so consecutive headings don't merge.
+        let pattern = #"(?si)<h([1-6])\b[^>]*>(.*?)</h\1\s*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(html.startIndex..., in: html)
+        var out: [HTMLHeadingEntry] = []
+        for match in regex.matches(in: html, range: range) {
+            guard match.numberOfRanges == 3,
+                  let lvlR = Range(match.range(at: 1), in: html),
+                  let txtR = Range(match.range(at: 2), in: html),
+                  let level = Int(String(html[lvlR])) else { continue }
+            let raw = String(html[txtR])
+            let stripped = stripHeadingInnerTags(raw)
+            let decoded = decodeMinimalEntities(stripped)
+            let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            out.append(HTMLHeadingEntry(level: level, title: trimmed))
+        }
+        return out
+    }
+
+    private func stripHeadingInnerTags(_ s: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "<[^>]+>") else { return s }
+        let range = NSRange(s.startIndex..., in: s)
+        return regex.stringByReplacingMatches(in: s, range: range, withTemplate: "")
+    }
+
+    private func decodeMinimalEntities(_ s: String) -> String {
+        var t = s
+        // Just the entities most likely to appear in heading text.
+        // Full HTML entity decoding would require a real HTML parser,
+        // and the loaded plainText has already had everything decoded
+        // by NSAttributedString — these match the most common cases
+        // to keep the sequential search succeeding.
+        t = t.replacingOccurrences(of: "&nbsp;", with: " ")
+        t = t.replacingOccurrences(of: "&amp;", with: "&")
+        t = t.replacingOccurrences(of: "&lt;", with: "<")
+        t = t.replacingOccurrences(of: "&gt;", with: ">")
+        t = t.replacingOccurrences(of: "&quot;", with: "\"")
+        t = t.replacingOccurrences(of: "&#39;", with: "'")
+        t = t.replacingOccurrences(of: "&apos;", with: "'")
+        t = t.replacingOccurrences(of: "&mdash;", with: "—")
+        t = t.replacingOccurrences(of: "&ndash;", with: "–")
+        t = t.replacingOccurrences(of: "&hellip;", with: "…")
+        // Collapse any internal whitespace runs into one space so the
+        // search target matches NSAttributedString's whitespace
+        // collapsing.
+        t = t.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        return t
     }
 
     func loadText(from url: URL) throws -> String {

@@ -24,7 +24,8 @@ struct HTMLLibraryImporter {
             fileType: url.pathExtension.lowercased(),
             displayText: parsed.displayText,
             plainText: parsed.plainText,
-            images: parsed.images
+            images: parsed.images,
+            headings: parsed.headings
         )
     }
 
@@ -36,13 +37,18 @@ struct HTMLLibraryImporter {
         // additional code to surface — punted as a Mark-review
         // item if it ever matters. Documented in NEXT.md.
         let plainText = try importer.loadText(fromData: rawData)
+        // 2026-05-06 (parity #3): heading extraction works on raw HTML
+        // and is independent of the inline-image extraction path, so
+        // it works on data-based import too.
+        let headings = importer.extractHeadings(fromRawData: rawData)
         return try importNormalizedDocument(
             title: title,
             fileName: fileName,
             fileType: fileType,
             displayText: plainText,
             plainText: plainText,
-            images: []
+            images: [],
+            headings: headings
         )
     }
 
@@ -52,7 +58,8 @@ struct HTMLLibraryImporter {
         fileType: String,
         displayText: String,
         plainText: String,
-        images: [PageImageRecord]
+        images: [PageImageRecord],
+        headings: [HTMLDocumentImporter.HTMLHeadingEntry]
     ) throws -> Document {
         let now = Date()
         let existingDocument = try databaseManager.existingDocument(
@@ -82,6 +89,19 @@ struct HTMLLibraryImporter {
             try databaseManager.insertImage(id: image.imageID, documentID: document.id, data: image.data)
         }
 
+        // 2026-05-06 (parity #3): persist HTML headings as TOC entries
+        // with their level. The plainText offset is found by sequential
+        // search — each heading is matched left-to-right starting from
+        // the cursor of the previous match so duplicates in the body
+        // (e.g. "Introduction" appearing in both a heading and a later
+        // paragraph) don't all collapse to the same offset.
+        if !headings.isEmpty {
+            let stored = resolveHeadingOffsets(headings, in: plainText)
+            if !stored.isEmpty {
+                try databaseManager.insertTOCEntries(stored, for: document.id)
+            }
+        }
+
         if existingDocument == nil {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
@@ -90,5 +110,36 @@ struct HTMLLibraryImporter {
         embeddingIndex?.enqueueIndexing(document)
 
         return document
+    }
+
+    /// For each `HTMLHeadingEntry`, find its title in `plainText`
+    /// starting from the running cursor. Skips a heading whose title
+    /// can't be located. Returns `StoredTOCEntry` rows in document
+    /// order with sequential `playOrder`.
+    private func resolveHeadingOffsets(
+        _ headings: [HTMLDocumentImporter.HTMLHeadingEntry],
+        in plainText: String
+    ) -> [StoredTOCEntry] {
+        var out: [StoredTOCEntry] = []
+        var cursor = plainText.startIndex
+        var order = 0
+        for h in headings {
+            let needle = h.title
+            guard !needle.isEmpty,
+                  cursor <= plainText.endIndex,
+                  let range = plainText.range(of: needle, range: cursor..<plainText.endIndex) else {
+                continue
+            }
+            let offset = plainText.distance(from: plainText.startIndex, to: range.lowerBound)
+            order += 1
+            out.append(StoredTOCEntry(
+                title: needle,
+                plainTextOffset: offset,
+                playOrder: order,
+                level: h.level
+            ))
+            cursor = range.upperBound
+        }
+        return out
     }
 }

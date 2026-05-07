@@ -588,6 +588,17 @@ struct StoredTOCEntry {
     let title: String
     let plainTextOffset: Int
     let playOrder: Int
+    /// Heading level (1 = top, 6 = deepest). Used by the reader to
+    /// pick the right typographic weight for the heading row. Importers
+    /// that lack a real signal pass 1.
+    let level: Int
+
+    init(title: String, plainTextOffset: Int, playOrder: Int, level: Int = 1) {
+        self.title = title
+        self.plainTextOffset = plainTextOffset
+        self.playOrder = playOrder
+        self.level = max(1, min(6, level))
+    }
 
     /// Task 8 (2026-05-03): composite identifier for SwiftUI `ForEach`
     /// when `playOrder` alone isn't unique (some synthesized EPUBs
@@ -601,8 +612,8 @@ extension DatabaseManager {
     func insertTOCEntries(_ entries: [StoredTOCEntry], for documentID: UUID) throws {
         try execute("DELETE FROM document_toc WHERE document_id = '\(documentID.uuidString)';")
         let sql = """
-        INSERT INTO document_toc (document_id, play_order, title, plain_text_offset)
-        VALUES (?, ?, ?, ?);
+        INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level)
+        VALUES (?, ?, ?, ?, ?);
         """
         // Deduplicate on (title, plainTextOffset) so NCX sub-navPoints that reference
         // the same position don't insert redundant rows.
@@ -616,13 +627,14 @@ extension DatabaseManager {
             sqlite3_bind_int(statement, 2, Int32(entry.playOrder))
             try bind(entry.title, at: 3, for: statement)
             sqlite3_bind_int(statement, 4, Int32(entry.plainTextOffset))
+            sqlite3_bind_int(statement, 5, Int32(entry.level))
             try step(statement)
         }
     }
 
     func tocEntries(for documentID: UUID) throws -> [StoredTOCEntry] {
         let sql = """
-        SELECT title, plain_text_offset, play_order
+        SELECT title, plain_text_offset, play_order, level
         FROM document_toc
         WHERE document_id = ?
         ORDER BY play_order;
@@ -635,7 +647,13 @@ extension DatabaseManager {
             guard let title = sqliteString(statement, index: 0) else { continue }
             let offset = Int(sqlite3_column_int(statement, 1))
             let order  = Int(sqlite3_column_int(statement, 2))
-            entries.append(StoredTOCEntry(title: title, plainTextOffset: offset, playOrder: order))
+            let level  = Int(sqlite3_column_int(statement, 3))
+            entries.append(StoredTOCEntry(
+                title: title,
+                plainTextOffset: offset,
+                playOrder: order,
+                level: level == 0 ? 1 : level
+            ))
         }
         return entries
     }
@@ -1538,6 +1556,29 @@ extension DatabaseManager {
             );
             """)
 
+        // 2026-05-06 (parity #3 — heading styling): document_toc gained
+        // a `level` column. Per Mark's call, no data-preservation
+        // migration; if an existing DB has the table without `level`,
+        // drop it and let the user re-import to repopulate. The check
+        // is one PRAGMA + an optional DROP — runs once per app launch
+        // and short-circuits cleanly when the schema is already current.
+        var hasLevelColumn = true
+        let pragmaSQL = "PRAGMA table_info(document_toc);"
+        if let pragma = try? prepareStatement(sql: pragmaSQL) {
+            defer { sqlite3_finalize(pragma) }
+            var foundTable = false
+            var foundLevel = false
+            while sqlite3_step(pragma) == SQLITE_ROW {
+                foundTable = true
+                if let name = sqliteString(pragma, index: 1), name == "level" {
+                    foundLevel = true
+                }
+            }
+            hasLevelColumn = !foundTable || foundLevel
+        }
+        if !hasLevelColumn {
+            try execute("DROP TABLE IF EXISTS document_toc;")
+        }
         try execute("""
             CREATE TABLE IF NOT EXISTS document_toc (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1545,6 +1586,7 @@ extension DatabaseManager {
                 play_order INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 plain_text_offset INTEGER NOT NULL,
+                level INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
             """)

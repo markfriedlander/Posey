@@ -90,6 +90,22 @@ Implementation:
 
 Do not "fix" this by adding rate-limiting to the app itself. The app is correct; the harness is the place to add politeness.
 
+### Scripted Tests vs Three Hats — Know The Difference
+
+There are two kinds of scripted/automated testing on Posey, and confusing them has burned this project before:
+
+**Legitimate — scripted regression checks.** Fast smoke tests that confirm specific, known-good behaviors haven't regressed across formats. Examples: `tools/verify_synthetic_corpus.py` (47 edge-case docs import correctly), `tools/task3_matrix.py` (Ask Posey behavior matrix across formats), `tools/qa_battery.sh` (the 4-question pattern across three docs with cooldown). These are real engineering tools — as the app grows more complex, automated coverage of known-good behaviors is how regressions get caught quickly. **Use these. Add to them. Run them after non-trivial changes.**
+
+**Illegitimate — scripted tests as a substitute for Three Hats evaluation.** Running a battery of canned questions, counting "passes," and reporting the percentage as if that closed a feature. This produces numbers that look like progress without the judgment a real user brings. Whether an Ask Posey answer is *good* — useful, trustworthy, well-shaped — is not a thing a script can decide. Whether the reader *feels right* on a specific document is not a thing a script can decide. Scripts catch regressions; they do not certify quality.
+
+The distinction in practice:
+- "Did import still produce a non-empty plainText for all 7 formats?" — script can answer.
+- "Does Posey's answer to Q3 on the Cryptography for Dummies PDF actually engage with what the chapter argues?" — Three Hats only.
+- "Do TOC entries still render at the right offsets?" — script can answer.
+- "Does the new heading styling make the chapter break feel like a chapter break?" — Three Hats only.
+
+When you finish a feature, the question is never "did the script pass." It's "have I worn all three hats — Developer, QA, User — on real documents with real interactions." The script is a regression net underneath that, not a replacement for it.
+
 ---
 
 ## Read This First

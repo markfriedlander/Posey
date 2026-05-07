@@ -1,5 +1,33 @@
 # Posey History
 
+## 2026-05-07 (mid-morning) — Tier 1 #6 analysis: TOC playback skip is already correct on DOCX; deferred for RTF
+
+Mark's punch list said "DOCX and RTF must also write `playback_skip_until_offset`." Confirming what's actually wired before adding code (per Mark's directive on this item).
+
+**Empirical verification on DOCX.** Built a synthetic `/tmp/docx-toc-test.docx` with an embedded Word `TOC` field (`<w:fldChar w:fldCharType="begin"/>...<w:instrText> TOC \o "1-3" \h \z \u </w:instrText>...<w:fldChar w:fldCharType="separate"/>...rendered TOC content...<w:fldChar w:fldCharType="end"/>`) followed by real chapter content. Imported on iPhone. Inspected plainText:
+
+```
+Table of Contents
+
+Chapter One
+
+This is the actual chapter one body text.
+
+Chapter Two
+
+This is the actual chapter two body text.
+```
+
+The rendered TOC content ("Chapter One … 1", "Chapter Two … 5", "Chapter Three … 9") is **completely absent from plainText** — the `WordDocumentXMLExtractor.insideTOCContent` flag suppresses it at extraction time. Different mechanism than PDF (which keeps the TOC text in plainText and sets `playbackSkipUntilOffset` past it) but identical user-facing behavior: the TOC isn't read aloud during playback because it's not in the doc Posey indexed at all.
+
+**RTF analysis.** RTF format doesn't have a Word-style TOC field. Two RTF TOC patterns exist in real docs:
+1. Heading-styled paragraphs (`\fs48\b`) — the new RTF tokenizer detects these and writes them as `StoredTOCEntry` rows; there's no separate TOC region of text to skip past.
+2. Hardcoded dot-leader TOC text typed as ordinary paragraphs — would need a detector mirroring `PDFTOCDetector`.
+
+Pattern (1) is what every RTF in the test corpus actually uses. Pattern (2) is rare enough to defer to NEXT.md as a known limitation.
+
+**Conclusion:** No code change needed for #6 in v1. DOCX behaves correctly via TOC field suppression (verified). RTF deferred for the niche dot-leader case.
+
 ## 2026-05-07 (morning) — Tier 1 #4 closure: iPhone post-merge verification + audio confirmation
 
 Closing out the verification that was deferred overnight. Rebuilt for device, installed the post-merge build, reopened `TestFixtures/parity/ListTest.html` on iPhone:

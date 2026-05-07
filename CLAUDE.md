@@ -39,6 +39,12 @@ If the local API is missing a verb you need to drive the test (e.g., couldn't fi
 
 If a change genuinely doesn't touch user-visible behavior (pure refactor of internal types, comment-only changes, doc updates), Rule 2 doesn't apply — but be honest with yourself about what "user-visible" means. A change to a view model is user-visible. A change to a layout helper is user-visible. A change to a data structure that any view reads is user-visible.
 
+### Rule 3 — Resize Screenshots Before Reading Them Into Context
+
+**All screenshots must be resized to under 800px wide before being read into context.** Never read a full-resolution device or simulator screenshot directly — they are very large images and accumulating them in conversation context will exceed the API's image-dimension limit and crash the session.
+
+Standing procedure: after any `SCREENSHOT` verb or simulator screenshot, immediately run `sips -Z 800 <file>.png` (in-place resize, preserves aspect ratio) before invoking the Read tool on it. This rule cost a previous CC instance an entire session — do not repeat it.
+
 ---
 
 ## Three Hats — Developer, QA, and User

@@ -138,6 +138,16 @@ struct HTMLDocumentImporter {
         dispatchPrecondition(condition: .onQueue(.main))
         #endif
 
+        // 2026-05-06 (parity #4) — Inject list markers BEFORE the
+        // paragraph-marker pass so each <li> shows its bullet/number
+        // glyph in the rendered text. NSAttributedString strips the
+        // <ul>/<ol>/<li> structure entirely, so the marker injection
+        // is the only way to preserve list semantics through to
+        // displayText. Per DECISIONS.md "List markers", these
+        // prefixes get stripped at the speech boundary so AVSpeech-
+        // Synthesizer never pronounces them.
+        let listMarkedData = injectListMarkers(data)
+
         // Pre-inject paragraph markers before closing block-level tags.
         // NSAttributedString collapses <p>…</p> boundaries to a single \n,
         // merging consecutive paragraphs into one undifferentiated block.
@@ -151,7 +161,7 @@ struct HTMLDocumentImporter {
         // header and tripped the language detector into flagging the
         // doc as non-English. ASCII sentinels round-trip through any
         // encoding pipeline intact.
-        let markedData = injectParagraphMarkers(data)
+        let markedData = injectParagraphMarkers(listMarkedData)
 
         let attributedString: NSAttributedString
         do {
@@ -205,6 +215,71 @@ struct HTMLDocumentImporter {
     /// block-level tag in the raw HTML so that paragraph boundaries
     /// produce \n\n in the final plain text rather than the single
     /// \n that NSAttributedString emits for each <p> end.
+    /// Walk the HTML token stream tracking `<ul>`/`<ol>` nesting and
+    /// inject a visible marker (`• ` or `N. `) immediately after each
+    /// opening `<li>` tag. Nested lists restart numbering / continue
+    /// to use bullets per their own surrounding tag. Marker characters
+    /// land in both `displayText` and `plainText`; the speech path
+    /// strips them at the AVSpeechSynthesizer boundary so they're
+    /// never pronounced.
+    private func injectListMarkers(_ data: Data) -> Data {
+        guard let html = String(data: data, encoding: .utf8) ??
+                         String(data: data, encoding: .isoLatin1) else {
+            return data
+        }
+        let pattern = #"<(/?)(ul|ol|li)\b[^>]*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return data
+        }
+        let range = NSRange(html.startIndex..., in: html)
+        let matches = regex.matches(in: html, range: range)
+        guard !matches.isEmpty else { return data }
+
+        var result = ""
+        result.reserveCapacity(html.count + matches.count * 4)
+        var stack: [(kind: String, counter: Int)] = []
+        var cursor = html.startIndex
+
+        for match in matches {
+            guard let tagRange = Range(match.range, in: html) else { continue }
+            let isClose: Bool = {
+                guard let r = Range(match.range(at: 1), in: html) else { return false }
+                return !html[r].isEmpty
+            }()
+            guard let nameRange = Range(match.range(at: 2), in: html) else { continue }
+            let tagName = html[nameRange].lowercased()
+
+            // Append source text up to this tag unchanged.
+            result.append(contentsOf: html[cursor..<tagRange.lowerBound])
+            // Append the tag itself unchanged.
+            result.append(contentsOf: html[tagRange])
+
+            if tagName == "ul" || tagName == "ol" {
+                if isClose {
+                    if let top = stack.last, top.kind == tagName {
+                        stack.removeLast()
+                    }
+                } else {
+                    stack.append((kind: tagName, counter: 0))
+                }
+            } else if tagName == "li", !isClose, let top = stack.last {
+                if top.kind == "ul" {
+                    result.append("• ")
+                } else { // ol
+                    let n = top.counter + 1
+                    stack[stack.count - 1] = (kind: "ol", counter: n)
+                    result.append("\(n). ")
+                }
+            }
+
+            cursor = tagRange.upperBound
+        }
+        if cursor < html.endIndex {
+            result.append(contentsOf: html[cursor...])
+        }
+        return result.data(using: .utf8) ?? data
+    }
+
     private func injectParagraphMarkers(_ data: Data) -> Data {
         guard var html = String(data: data, encoding: .utf8) ??
                          String(data: data, encoding: .isoLatin1) else {

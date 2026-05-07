@@ -50,7 +50,50 @@ struct SentenceSegmenter {
             rawSegments = fallbackParagraphSegments(for: text)
         }
 
-        return capOversized(rawSegments)
+        return capOversized(mergeNumberedListMarkers(rawSegments))
+    }
+
+    /// 2026-05-06 (parity #4) — Merge a segment that is just a numbered
+    /// list marker ("1.", "2.", "10.", …) with the segment that
+    /// follows it. NLTokenizer treats the period after a digit as a
+    /// sentence terminator, so an injected list prefix like "1. First
+    /// numbered item" splits into ["1.", "First numbered item"]. The
+    /// merge restores the visual coherence: one row per list item.
+    /// Applied generally — even user-authored "1." on its own line
+    /// gets merged with the following sentence, which is the expected
+    /// behavior for a list.
+    private func mergeNumberedListMarkers(_ segments: [TextSegment]) -> [TextSegment] {
+        guard segments.count > 1 else { return segments }
+        let markerPattern = try? NSRegularExpression(pattern: #"^\d+\.$"#)
+        guard let regex = markerPattern else { return segments }
+
+        var merged: [TextSegment] = []
+        merged.reserveCapacity(segments.count)
+        var i = 0
+        while i < segments.count {
+            let seg = segments[i]
+            let range = NSRange(seg.text.startIndex..., in: seg.text)
+            let isMarker = regex.firstMatch(in: seg.text, range: range) != nil
+            if isMarker, i + 1 < segments.count {
+                let next = segments[i + 1]
+                merged.append(TextSegment(
+                    id: merged.count,
+                    text: "\(seg.text) \(next.text)",
+                    startOffset: seg.startOffset,
+                    endOffset: next.endOffset
+                ))
+                i += 2
+            } else {
+                merged.append(TextSegment(
+                    id: merged.count,
+                    text: seg.text,
+                    startOffset: seg.startOffset,
+                    endOffset: seg.endOffset
+                ))
+                i += 1
+            }
+        }
+        return merged
     }
 }
 

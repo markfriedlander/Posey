@@ -1,5 +1,16 @@
 # Posey History
 
+## 2026-05-07 (morning) — Tier 1 #4 closure: iPhone post-merge verification + audio confirmation
+
+Closing out the verification that was deferred overnight. Rebuilt for device, installed the post-merge build, reopened `TestFixtures/parity/ListTest.html` on iPhone:
+
+- **Visual** — both bullet items and numbered items render on one row each. Merge step in `SentenceSegmenter.mergeNumberedListMarkers` working correctly on device.
+- **Audio (Mark's ears)** — Mark played the doc on iPhone. Reported: "He reads the text only. The bullet is not mentioned nor are the numbers. It only reads the sentences that follow both in the bulleted list and numbered list paragraph before List between List and after list all function as expected."
+
+That's the AVSpeechSynthesizer behavior we were uncertain about resolving exactly as the strip-at-speech-boundary design protected against. `SpeechPlaybackService.utteranceText(for:)` is doing its job; the audio path never sees the marker characters; the listener hears clean item text only. Three Hats: Developer (build clean, sim + device), QA (visual + edge — surrounding paragraphs unaffected), User (Mark confirmed it sounds right).
+
+Tier 1 #4 fully done.
+
 ## 2026-05-06 (late night) — Pre-Release Parity Punch List #4: bullet/numbered lists across formats (Option C, partial)
 
 Closing the in-flight pass on Tier 1 #4. Code is committed; one verification step remains. Mark needs sleep — picking this up at session start tomorrow.

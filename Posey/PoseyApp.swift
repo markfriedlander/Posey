@@ -13,6 +13,14 @@ import UIKit
 // ========== BLOCK 1: APP ENTRY POINT - START ==========
 @main
 struct PoseyApp: App {
+    // 2026-05-08 — UIApplicationDelegate adaptor wires
+    // UNUserNotificationCenterDelegate so taps on Audio Export
+    // completion banners route back into the app and post
+    // .audioExportNotificationTapped (see PoseyAppDelegate.swift).
+    #if canImport(UIKit)
+    @UIApplicationDelegateAdaptor(PoseyAppDelegate.self) private var appDelegate
+    #endif
+
     private let launchConfiguration = AppLaunchConfiguration.current
     @State private var databaseManager: DatabaseManager?
     @State private var databaseErrorMessage: String?

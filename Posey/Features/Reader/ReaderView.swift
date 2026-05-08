@@ -1754,6 +1754,27 @@ private struct ReaderRemoteControlSheetObservers: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .remoteOpenSearchBar)) { _ in
                 viewModel.isSearchActive = true
             }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteBeginAudioExport)) { note in
+                guard matches(note, viewModel: viewModel) else { return }
+                viewModel.beginAudioExport()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .audioExportNotificationTapped)) { note in
+                // Notification-tap routing when the export sheet is
+                // NOT currently presented. Record the URL on the
+                // view model and re-present Preferences → AudioExport
+                // so the user lands on the Share button. Same staged
+                // present pattern as `.remoteOpenAudioExportSheet`.
+                if let url = note.userInfo?[AudioExportNotificationKeys.fileURL] as? URL {
+                    viewModel.acceptDeliveredExportURL(url)
+                }
+                if !viewModel.showAudioExport {
+                    isShowingPreferencesSheet = true
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(350))
+                        viewModel.showAudioExport = true
+                    }
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .remoteJumpToPage)) { note in
                 guard matches(note, viewModel: viewModel),
                       let page = note.userInfo?["page"] as? Int else { return }
@@ -2010,6 +2031,29 @@ private struct ReaderPreferencesSheet: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+
+                // 2026-05-08 — Audio Export re-enabled with the
+                // notification-based UX. Tap kicks off the render
+                // under a UIApplication background task; the export
+                // continues across lock-screen / app-switch and a
+                // local notification fires on completion. Tapping
+                // the notification reopens the share sheet path.
+                Section("Audio Export") {
+                    Button {
+                        viewModel.beginAudioExport()
+                    } label: {
+                        Label("Export to Audio File", systemImage: "waveform.badge.plus")
+                            .frame(minHeight: 44, alignment: .leading)
+                    }
+                    .accessibilityIdentifier("preferences.exportAudio")
+                    .accessibilityHint("Renders this document as an M4A audio file. The export runs in the background and notifies you when complete.")
+                    .remoteRegister("preferences.exportAudio") {
+                        viewModel.beginAudioExport()
+                    }
+                    Text("Renders this document as an M4A file. Continues in the background if you lock your phone or switch apps; you'll get a notification when it's ready.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .navigationTitle("Reader Preferences")
             .navigationBarTitleDisplayMode(.inline)
@@ -2115,6 +2159,11 @@ private struct AudioExportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var isShowingShare: Bool = false
     @State private var shareURL: URL? = nil
+    /// 2026-05-08 redesign — set true when the user taps a delivered
+    /// completion notification. Drives an inline highlight so the
+    /// just-tapped notification's file feels "selected" in the sheet.
+    /// The share sheet still requires an explicit Share-button tap.
+    @State private var notificationDeliveredHighlight: Bool = false
 
     /// Display name of the voice the export is currently rendering
     /// with — surfaced in the progress UI so the user knows which
@@ -2139,8 +2188,15 @@ private struct AudioExportSheet: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Export Audio")
                     .font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 if let exporter = viewModel.audioExporter {
                     body(for: exporter)
+                } else if let url = viewModel.lastCompletedExportURL {
+                    // No active exporter but we've got a previous
+                    // result — typically the user dismissed the sheet
+                    // mid-render and came back via a notification tap
+                    // after completion. Surface the Share button.
+                    finishedBody(for: url)
                 } else {
                     Text("Export not started.")
                         .foregroundStyle(.secondary)
@@ -2152,20 +2208,26 @@ private struct AudioExportSheet: View {
             .navigationTitle("Audio Export")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // 2026-05-08 redesign: Done dismisses the sheet but
+                // does NOT cancel the in-flight export. The export
+                // continues under a UIApplication background task and
+                // notifies on completion. Cancellation is now an
+                // explicit action inside the sheet during rendering.
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        viewModel.audioExporter?.cancel()
-                        dismiss()
-                    }
+                    Button("Done") { dismiss() }
+                        .accessibilityHint("Dismisses this view. Any export in progress keeps running and will notify you when done.")
                 }
             }
-            .sheet(isPresented: $isShowingShare) {
-                if let url = shareURL {
-                    ShareLink(item: url) {
-                        Text("Share \(url.lastPathComponent)")
-                    }
-                    .padding(20)
+            .onReceive(NotificationCenter.default.publisher(for: .audioExportNotificationTapped)) { note in
+                // The user tapped a delivered notification while
+                // the sheet was visible. Light up the highlight and
+                // ensure lastCompletedExportURL reflects the file
+                // the notification carried (it should already, but
+                // be defensive in case of multi-export sequencing).
+                if let url = note.userInfo?[AudioExportNotificationKeys.fileURL] as? URL {
+                    viewModel.acceptDeliveredExportURL(url)
                 }
+                notificationDeliveredHighlight = true
             }
         }
     }
@@ -2180,6 +2242,8 @@ private struct AudioExportSheet: View {
             VStack(alignment: .leading, spacing: 8) {
                 ProgressView(value: progress)
                     .progressViewStyle(.linear)
+                    .accessibilityLabel("Audio export progress")
+                    .accessibilityValue("\(Int(progress * 100)) percent. Segment \(i) of \(total).")
                 Text("Rendering segment \(i) of \(total) — \(Int(progress * 100))%")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -2188,23 +2252,18 @@ private struct AudioExportSheet: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
-                Button("Cancel", role: .destructive) {
+                Text("You can close this view; the export will continue and you'll get a notification when it's done.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                Button("Cancel Export", role: .destructive) {
                     exporter.cancel()
                 }
                 .padding(.top, 8)
+                .accessibilityHint("Stops the audio export in progress.")
             }
         case .finished(let url):
-            VStack(alignment: .leading, spacing: 12) {
-                Label("Export complete", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                Text(url.lastPathComponent)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                ShareLink(item: url) {
-                    Label("Share or Save to Files", systemImage: "square.and.arrow.up")
-                }
-                .buttonStyle(.borderedProminent)
-            }
+            finishedBody(for: url)
         case .failed(let reason):
             VStack(alignment: .leading, spacing: 12) {
                 Label("Export failed", systemImage: "exclamationmark.triangle.fill")
@@ -2212,6 +2271,30 @@ private struct AudioExportSheet: View {
                 Text(reason)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func finishedBody(for url: URL) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Export complete", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            Text(url.lastPathComponent)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            ShareLink(item: url) {
+                Label("Share or Save to Files", systemImage: "square.and.arrow.up")
+                    .frame(minHeight: 44)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("audioExport.share")
+            .remoteRegister("audioExport.share") { /* SwiftUI ShareLink is user-driven; antenna entry point exists for tap-discovery only. */ }
+            if notificationDeliveredHighlight {
+                Text("Opened from notification — tap Share to send the file.")
+                    .font(.caption)
+                    .foregroundStyle(.tint)
+                    .accessibilityIdentifier("audioExport.fromNotification")
             }
         }
     }
@@ -2605,11 +2688,36 @@ final class ReaderViewModel: ObservableObject {
     /// export sheet from the preferences UI.
     @Published var showAudioExport: Bool = false
     @Published private(set) var audioExporter: AudioExporter?
+    /// 2026-05-08 redesign — last successful export URL, retained on
+    /// the view model so a re-presented `AudioExportSheet` (after the
+    /// user dismissed and came back via a notification tap) can show
+    /// the Share button without re-running the export. Survives sheet
+    /// dismissal; cleared on next `beginAudioExport()`.
+    @Published private(set) var lastCompletedExportURL: URL?
+
+    /// Called from the AudioExportSheet's notification observer (and
+    /// the top-level reader observer) to record the URL the most-
+    /// recently-delivered notification carried. Idempotent.
+    func acceptDeliveredExportURL(_ url: URL) {
+        lastCompletedExportURL = url
+    }
 
     /// Kick off an audio export. Builds a fresh AudioExporter,
     /// presents the export sheet, and starts rendering on a
     /// background Task. The sheet observes the exporter's state
     /// directly.
+    ///
+    /// 2026-05-08 redesign (notification flow):
+    /// - Requests `UNUserNotifications` permission first (no-op if
+    ///   already granted/denied).
+    /// - Wraps the render in `UIApplication.beginBackgroundTask`
+    ///   so the export survives lock screen / app switch.
+    /// - On success fires a local notification via
+    ///   `AudioExportNotifications.scheduleCompletionNotification`;
+    ///   tapping the banner posts `.audioExportNotificationTapped`
+    ///   and the sheet (re-)presents with the Share button live.
+    /// - The share sheet **never** appears automatically — the
+    ///   completion path delivers a banner only.
     ///
     /// Task 7 (2026-05-03 — sensible defaults): when the user's
     /// current playback voice is `.bestAvailable`, the export
@@ -2624,20 +2732,78 @@ final class ReaderViewModel: ObservableObject {
     func beginAudioExport() {
         let exporter = AudioExporter()
         audioExporter = exporter
+        lastCompletedExportURL = nil
         showAudioExport = true
         let segmentsCopy = segments
         let exportVoiceMode = Self.audioExportVoiceMode(for: voiceMode)
         let title = document.title
+        let docID = document.id
+
+        // Fire the notification permission request in parallel with
+        // the export. The system prompt blocks ON THE USER, not on
+        // the render — if we awaited it inline the user would see
+        // "Preparing…" frozen until they tapped Allow / Don't Allow.
+        // We re-check `notificationSettings()` at completion time
+        // and only schedule the banner if authorized by then.
         Task { @MainActor in
+            _ = await AudioExportNotifications.shared.requestAuthorizationIfNeeded()
+        }
+
+        Task { @MainActor in
+            // Begin a background task so the export survives lock
+            // screen / foreground swap. Stored ID is ended on every
+            // exit path (success, failure, cancel). If iOS expires
+            // the task before completion, the expirationHandler
+            // cancels the in-flight render so we don't leak.
+            #if canImport(UIKit)
+            var bgTaskID: UIBackgroundTaskIdentifier = .invalid
+            bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "audio-export") { [weak exporter] in
+                Task { @MainActor in
+                    exporter?.cancel()
+                    if bgTaskID != .invalid {
+                        UIApplication.shared.endBackgroundTask(bgTaskID)
+                        bgTaskID = .invalid
+                    }
+                }
+            }
+            #endif
+
+            defer {
+                #if canImport(UIKit)
+                if bgTaskID != .invalid {
+                    UIApplication.shared.endBackgroundTask(bgTaskID)
+                    bgTaskID = .invalid
+                }
+                #endif
+            }
+
             do {
-                _ = try await exporter.render(
+                let url = try await exporter.render(
                     segments: segmentsCopy,
                     voiceMode: exportVoiceMode,
                     documentTitle: title
                 )
+                self.lastCompletedExportURL = url
+                // Re-check auth at completion time — by now the user
+                // has had time to respond to the prompt that fired
+                // in parallel.
+                let canNotify = await AudioExportNotifications.shared.requestAuthorizationIfNeeded()
+                if canNotify {
+                    AudioExportNotifications.shared.scheduleCompletionNotification(
+                        fileURL: url,
+                        documentID: docID,
+                        documentTitle: title
+                    )
+                }
             } catch {
-                // exporter.state already carries .failed(reason:); the
-                // sheet renders that. Nothing else to do here.
+                let canNotify = await AudioExportNotifications.shared.requestAuthorizationIfNeeded()
+                if canNotify, let reason = (error as? LocalizedError)?.errorDescription {
+                    AudioExportNotifications.shared.scheduleFailureNotification(
+                        documentID: docID,
+                        documentTitle: title,
+                        reason: reason
+                    )
+                }
             }
         }
     }

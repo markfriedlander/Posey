@@ -701,6 +701,20 @@ struct ReaderView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
+                // 2026-05-07 (Mark's directive): book-scale documents
+                // (>200K chars — roughly 60+ pages of dense prose) take
+                // ~5-10 seconds to segment + parse. Without explanatory
+                // text, the spinner alone reads as a hang or crash.
+                // Threshold picked from observed timings: 4-Hour Body
+                // (~970K chars) was the trigger case at ~10 seconds.
+                if viewModel.document.characterCount > 200_000 {
+                    Text("Large document — this may take a few seconds.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                        .accessibilityIdentifier("reader.openingOverlay.largeDocHint")
+                }
             }
         }
         .accessibilityElement(children: .combine)
@@ -4184,6 +4198,18 @@ private struct TOCSheet: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: .remoteDismissPresentedSheet)
             ) { _ in
+                dismiss()
+            }
+            // 2026-05-07 (parity #6): tap a TOC entry by playOrder via
+            // the antenna's TAP_TOC_ENTRY verb. Equivalent to a user
+            // tap on the row — same jumpToTOCEntry + dismiss path.
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteTapTOCEntry)
+            ) { note in
+                guard let playOrder = note.userInfo?["playOrder"] as? Int,
+                      let entry = viewModel.tocEntries.first(where: { $0.playOrder == playOrder })
+                else { return }
+                viewModel.jumpToTOCEntry(entry)
                 dismiss()
             }
             .onAppear {

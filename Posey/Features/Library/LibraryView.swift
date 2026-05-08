@@ -1531,6 +1531,22 @@ extension LibraryViewModel {
                 }
                 return json(["documentID": idStr, "count": toc.count, "entries": arr])
 
+            case "GET_PLAYBACK_SKIP":
+                // 2026-05-07 (parity #6): return the document's
+                // playbackSkipUntilOffset so tests can verify the
+                // TOC-skip wiring without inferring from segment
+                // counts.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Missing or invalid document ID"}"#
+                }
+                guard let doc = (try databaseManager.documents()).first(where: { $0.id == id }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                return json([
+                    "documentID": idStr,
+                    "playbackSkipUntilOffset": doc.playbackSkipUntilOffset
+                ])
+
             case "LIST_SEGMENTS_MATCHING":
                 // 2026-05-07 (parity #10): return up to 50 sentence
                 // segments from the currently visible document whose
@@ -2031,6 +2047,24 @@ extension LibraryViewModel {
                     NotificationCenter.default.post(name: .remoteOpenVoicePickerSheet, object: nil)
                 }
                 return json(["status": "posted"])
+
+            case "TAP_TOC_ENTRY":
+                // 2026-05-07 (parity #6): tap a TOC entry by playOrder.
+                // Tests the actual TOC-sheet tap flow (jumpToTOCEntry +
+                // dismiss) which the registry-based TAP can't reach
+                // because TOC rows are SwiftUI buttons inside a List
+                // not registered with `.remoteRegister`.
+                guard let raw = arg, let playOrder = Int(raw) else {
+                    return #"{"error":"Usage: TAP_TOC_ENTRY:<playOrder>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteTapTOCEntry,
+                        object: nil,
+                        userInfo: ["playOrder": playOrder]
+                    )
+                }
+                return json(["status": "posted", "playOrder": playOrder])
 
             case "DEBUG_FORCE_PLAYBACK_STATE":
                 // 2026-05-07 (parity #8): force the playback service

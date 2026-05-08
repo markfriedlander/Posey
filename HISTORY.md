@@ -1,5 +1,59 @@
 # Posey History
 
+## 2026-05-07 (evening) — Tier 1 #6 fully closed: TOC navigation + playback skip on DOCX/RTF, both hardware
+
+The earlier #6 closure was incomplete on two counts: (1) "deferred RTF dot-leader case as niche" was a unilateral decision documented quietly without surfacing — Mark called this out as a CLAUDE.md violation, won't repeat. (2) The actual playback skip wasn't wired for DOCX/RTF, only analyzed.
+
+**This pass implements the full thing** with antenna scaffolding to verify navigation properly.
+
+**Antenna scaffolding added:**
+- `TAP_TOC_ENTRY:<playOrder>` verb — drives the TOC sheet's row-tap path (TOC rows are SwiftUI Buttons inside a List, not registered with `.remoteRegister`, so the TAP fallback path can't reach them).
+- `GET_PLAYBACK_SKIP:<docID>` verb — returns the document's `playbackSkipUntilOffset`. Lets tests verify the skip wiring without inferring from segment counts.
+
+**TOC playback skip — `TOCSkipDetector` (new file):**
+- Path 1: `headings` includes a "Contents" / "Table of Contents" heading → skip past that heading + any contiguous dot-leader region after it (skip = offset of next non-TOC heading).
+- Path 2: no "Contents" heading but plainText still contains a contiguous run of >= 3 dot-leader lines (real-world RTFs frequently put the TOC right after the doc title with no separate "Contents" heading) → skip past the orphan region.
+- Pattern matches both ASCII-period leaders (`Chapter 1 ........ 5`) and tab-separated entries (`Chapter 1\t5`) — Word's most common rendering.
+- DOCXLibraryImporter and RTFLibraryImporter both call into it.
+
+**RTF heading detector — `mapHeadingsToNormalizedOffsets`:**
+- After matching each heading title, advances the search cursor past any contiguous dot-leader lines following it. Without this, chapter-heading titles got matched to TOC dot-leader text (since "Chapter One" appears in the TOC list BEFORE the actual chapter heading) — breaking both nav and skip. The forward-only search now correctly maps heading titles to actual chapter content positions.
+
+**Three Hats verification — both hardware:**
+- DOCX (synthetic with Word `<w:fldChar>` TOC field): skip=19, "Table of Contents" filtered out, segments start at "Chapter One"; `TAP_TOC_ENTRY:3` → offset 75, "Chapter Two" highlighted. Same on simulator and iPhone.
+- DOCX (real `Proposal_Assistant_Article_Draft.docx`): no "Contents" section so skip=0; `TAP_TOC_ENTRY:4` → offset 956, jumps to the right area near "What We Built". Same on both.
+- RTF (synthetic with hand-typed dot-leader TOC): skip=79 (past dot-leader region), TOC entries point at real chapter positions, TAP works.
+- RTF (real `AI Book Collaboration Project.rtf`, 91 entries, no "Contents" heading but hand-typed TOC after doc title): skip=4039, segments start at "Introduction:", `TAP_TOC_ENTRY:5` → offset 8579, "Claude: An AI Assistant Driven by Curiosity and Ethical Principles" highlighted with the actual Claude chapter body text visible. Same on simulator and iPhone.
+
+#6 closed with code change + two-hardware verification.
+
+## 2026-05-07 (evening) — Large-document loading hint
+
+Mark's directive: opening The 4-Hour Body takes ~10s with only a spinner — looks like a hang/crash to a user.
+
+**Fix:** `openingDocumentOverlay` now shows an additional caption "Large document — this may take a few seconds." when `viewModel.document.characterCount > 200_000` (book-scale threshold). The first line ("Opening …") is unchanged; the new line sits below it.
+
+**Three Hats — both hardware:** opened 4-Hour Body EPUB (967K chars). Loading overlay shows the spinner + doc title + "Large document — this may take a few seconds." caption on simulator AND iPhone. Screenshots `/tmp/sshots/sim-large-load.png` and `/tmp/sshots/iphone-large-load.png` both reviewed at ≤600px.
+
+## 2026-05-07 (evening) — Tier 3 #1: LocalAPIServer compiled out of Release builds (verified)
+
+Pre-existing state: `LocalAPIServer.swift` is wrapped entirely in `#if DEBUG` (since 2026-05-03). Verified Release build produces:
+- 0 `LocalAPIServer` symbols (was the directive-required check).
+- 0 antenna verb strings (`LIST_DOCUMENTS`, `EXPORT_AUDIO`, `TAP_TOC_ENTRY`, etc.) — Swift's release optimizer dead-code-eliminates the verb-handler method since its only caller (`#if DEBUG` site in LocalAPIServer's command handler) is gone.
+- Sanity: 704 `ReaderViewModel` symbols present (regular app functionality intact).
+
+**Additional hardening:** `RemoteControlState`, `RemoteTargetRegistry`, and the `.remoteRegister` View extension previously shipped in Release with their full implementations (used internally by ~70 call sites). Replaced with no-op stubs in Release: classes still exist (so call sites compile unchanged) but every operation is inert. Symbol count for the support classes dropped from ~70 to ~67 (Swift class metadata is unavoidable for non-zero classes); the actual instruction count is essentially nothing.
+
+**Tradeoff acknowledged:** truly-zero antenna symbols would require gating ~70 call sites with `#if DEBUG`. Current state ships the support-class shells but has no networked entry point, no port-bind, no token, no test-driver verbs callable from a Release binary. Inert metadata only. Mark's call if stricter compile-out is wanted.
+
+## 2026-05-07 (evening) — Tier 3 #5: in-sheet Ask Posey quick-actions reachable via TAP
+
+Reader-chrome menu items already had `.remoteRegister` chained on the outer sparkle (worked). The in-sheet menu (Ask Posey sheet's composer-adjacent sparkle) didn't.
+
+**Fix:** added `.remoteRegister` chain on the outer sparkle Image (not the inner Buttons — SwiftUI `Menu` items only mount when the menu opens, so per-item registrations never fired). Four registrations: `askPosey.action.explain`, `askPosey.action.define`, `askPosey.action.findRelated`, `askPosey.action.askSpecific`.
+
+**Three Hats — iPhone verified:** opened Ask Posey on AI Book RTF, fired `TAP:askPosey.action.define` via the antenna, composer correctly populated with "Define " prefix and focused. Sim build also clean. Screenshot `/tmp/sshots/iphone-ap-define.png`.
+
 ## 2026-05-07 (evening) — Tier 2 #12 verified + Tier 2 complete
 
 **Test case for #12.** `/tmp/ff-test.rtf` — three paragraphs separated by `\par` and an explicit `\page` (page-break control word).

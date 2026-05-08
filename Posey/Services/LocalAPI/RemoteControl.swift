@@ -135,6 +135,11 @@ extension Notification.Name {
     /// hard to reach (e.g. natural end-of-doc → `.finished` would
     /// require playing through the whole document).
     static let remoteDebugForcePlaybackState = Notification.Name("PoseyRemoteDebugForcePlaybackState")
+    /// 2026-05-07 (parity #6 closure): userInfo `["playOrder": Int]`.
+    /// TOCSheet observes; finds the entry with that playOrder and
+    /// fires jumpToTOCEntry — equivalent to a user tap on the row.
+    /// The TOC sheet must be open for the verb to take effect.
+    static let remoteTapTOCEntry = Notification.Name("PoseyRemoteTapTOCEntry")
     /// No userInfo. ReaderPreferencesSheet observes; sets the sheet's
     /// internal `isShowingAudioExport` state.
     static let remoteOpenAudioExportSheet = Notification.Name("PoseyRemoteOpenAudioExportSheet")
@@ -427,6 +432,18 @@ private extension UIView {
 /// without hopping through SwiftUI environment plumbing. ReaderView
 /// updates these fields on appear, sentence change, and disappear;
 /// the API just reads.
+/// 2026-05-07 (Tier 3 #1): the antenna's support classes (state
+/// snapshot + tap registry) are split into DEBUG-real and Release-
+/// no-op variants. In Release the public API surface is preserved
+/// (so the 70+ `.remoteRegister(_:action:)` and `RemoteControlState
+/// .shared.X = Y` call sites compile unchanged) but the underlying
+/// stores are absent — writes are no-ops, the registry returns
+/// false on every fire, and the snapshot is empty. Combined with
+/// LocalAPIServer being entirely `#if DEBUG`-gated and the verb
+/// handler being dead-code-eliminated, this means a Release build
+/// has no antenna surface that can be activated, no port-bind, no
+/// keychain token, no test-driver entry points.
+#if DEBUG
 @MainActor
 final class RemoteControlState {
     static let shared = RemoteControlState()
@@ -464,6 +481,50 @@ final class RemoteControlState {
         return dict
     }
 }
+#else
+/// Release no-op. Public API surface preserved so existing call
+/// sites compile; every operation is inert.
+@MainActor
+final class RemoteControlState {
+    static let shared = RemoteControlState()
+    private init() {}
+
+    var visibleDocumentID: UUID? {
+        get { nil } set { _ = newValue }
+    }
+    var currentSentenceIndex: Int {
+        get { 0 } set { _ = newValue }
+    }
+    var currentOffset: Int {
+        get { 0 } set { _ = newValue }
+    }
+    var playbackState: String {
+        get { "idle" } set { _ = newValue }
+    }
+    var presentedSheet: String? {
+        get { nil } set { _ = newValue }
+    }
+    var isSearchActive: Bool {
+        get { false } set { _ = newValue }
+    }
+    var searchQuery: String {
+        get { "" } set { _ = newValue }
+    }
+    var searchMatchCount: Int {
+        get { 0 } set { _ = newValue }
+    }
+    var currentSearchMatchPosition: Int {
+        get { 0 } set { _ = newValue }
+    }
+    var segmentTexts: [(index: Int, text: String, startOffset: Int, endOffset: Int)] {
+        get { [] } set { _ = newValue }
+    }
+    var displayBlockTexts: [(index: Int, kind: String, text: String, startOffset: Int, endOffset: Int)] {
+        get { [] } set { _ = newValue }
+    }
+    func snapshot() -> [String: Any] { [:] }
+}
+#endif
 // ========== BLOCK 04: REMOTE-CONTROL STATE BRIDGE - END ==========
 
 
@@ -488,6 +549,7 @@ final class RemoteControlState {
 /// (2026-05-02 directive); the audit identified TAP as the one
 /// generic capability the notification-based intent dispatch
 /// couldn't cover, and this is the long-term fix.
+#if DEBUG
 @MainActor
 final class RemoteTargetRegistry {
     static let shared = RemoteTargetRegistry()
@@ -532,4 +594,25 @@ extension View {
             .onDisappear { RemoteTargetRegistry.shared.unregister(id) }
     }
 }
+#else
+/// Release no-op. Registry stores nothing, fires nothing. The
+/// `.accessibilityIdentifier(id)` call is preserved because it's a
+/// real accessibility benefit (VoiceOver users), not a test hook.
+@MainActor
+final class RemoteTargetRegistry {
+    static let shared = RemoteTargetRegistry()
+    private init() {}
+    func register(_ id: String, action: @escaping () -> Void) {}
+    func unregister(_ id: String) {}
+    @discardableResult
+    func fire(_ id: String) -> Bool { false }
+    func registeredIDs() -> [String] { [] }
+}
+
+extension View {
+    func remoteRegister(_ id: String, action: @escaping () -> Void) -> some View {
+        self.accessibilityIdentifier(id)
+    }
+}
+#endif
 // ========== BLOCK 05: REMOTE TARGET REGISTRY - END ==========

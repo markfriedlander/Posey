@@ -45,6 +45,13 @@ struct RTFLibraryImporter {
             plainText: plainText
         )
 
+        // 2026-05-07 (parity #6 closure): TOC playback skip — same
+        // mechanism as DOCX (see DOCXLibraryImporter).
+        let tocSkipUntilOffset = TOCSkipDetector.skipOffset(
+            for: headings.map { (title: $0.title, plainTextOffset: $0.plainTextOffset) },
+            in: plainText
+        )
+
         let document = Document(
             id: existingDocument?.id ?? UUID(),
             title: title,
@@ -54,7 +61,8 @@ struct RTFLibraryImporter {
             modifiedAt: now,
             displayText: plainText,
             plainText: plainText,
-            characterCount: plainText.count
+            characterCount: plainText.count,
+            playbackSkipUntilOffset: tocSkipUntilOffset
         )
 
         try databaseManager.upsertDocument(document)

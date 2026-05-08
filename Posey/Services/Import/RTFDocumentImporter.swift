@@ -130,6 +130,14 @@ extension RTFDocumentImporter {
     /// Map raw heading paragraphs → normalized-text offsets.
     /// Forward-only search keeps duplicate titles in source order.
     /// Levels 1-3 assigned by font-size tier (largest → 1).
+    ///
+    /// 2026-05-07 (parity #6 closure): when a "Table of Contents" /
+    /// "Contents" heading is detected, advance the search cursor PAST
+    /// the contiguous dot-leader region after it before resuming the
+    /// search. Without this, subsequent chapter-heading titles get
+    /// matched to the dot-leader text inside the TOC ("Chapter One
+    /// ........ 5") instead of the actual chapter heading later in
+    /// the document, breaking both TOC navigation and playback skip.
     fileprivate func mapHeadingsToNormalizedOffsets(_ raw: [RTFRawHeading],
                                                     in normalized: String) -> [RTFHeadingEntry] {
         let sizes = Set(raw.map { $0.pointSize }).sorted(by: >)
@@ -152,8 +160,52 @@ extension RTFDocumentImporter {
             let level = (topThree.firstIndex(of: h.pointSize) ?? 2) + 1
             out.append(RTFHeadingEntry(level: level, title: needleFull, plainTextOffset: offset))
             searchFrom = range.upperBound
+
+            // 2026-05-07 (parity #6 closure): always advance past
+            // any dot-leader-pattern lines that follow a heading
+            // match. Real RTFs with a hand-typed TOC list often have
+            // it appear right after the doc title (no separate
+            // "Contents" heading) — the dot-leader entries would
+            // otherwise shadow the actual chapter headings later in
+            // the document. The advance only consumes lines that
+            // ARE dot-leader pattern; non-dot-leader content stops
+            // the walker, so this is safe for docs without TOCs.
+            searchFrom = advancePastDotLeaderRegion(from: searchFrom, in: normalized)
         }
         return out
+    }
+
+    /// Walk forward through `normalized` from `cursor`, line-by-line
+    /// (single `\n`), skipping any dot-leader-pattern lines. Returns
+    /// the index of the first non-dot-leader, non-empty line.
+    fileprivate func advancePastDotLeaderRegion(
+        from cursor: String.Index,
+        in normalized: String
+    ) -> String.Index {
+        guard let dotLeader = try? NSRegularExpression(pattern: #"^.+?(?:\t+|[ .]{3,})\d+\s*$"#) else {
+            return cursor
+        }
+        var idx = cursor
+        while idx < normalized.endIndex {
+            let lineEnd = normalized.range(of: "\n", range: idx..<normalized.endIndex)?.lowerBound
+                ?? normalized.endIndex
+            let line = String(normalized[idx..<lineEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty {
+                // Skip empty lines and keep walking.
+                idx = lineEnd < normalized.endIndex
+                    ? normalized.index(after: lineEnd) : lineEnd
+                continue
+            }
+            let range = NSRange(line.startIndex..., in: line)
+            if dotLeader.firstMatch(in: line, range: range) == nil {
+                // First non-dot-leader, non-empty line — stop here.
+                return idx
+            }
+            idx = lineEnd < normalized.endIndex
+                ? normalized.index(after: lineEnd) : lineEnd
+        }
+        return idx
     }
 
     fileprivate func normalize(_ text: String) -> String {

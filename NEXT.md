@@ -10,8 +10,10 @@ Working through the 17-item Tier 1–4 punch list. Status:
 3. ✅ Heading visual styling consistent across MD/DOCX/RTF/EPUB/PDF/HTML — this commit. Single-spec typography (1.5×/1.3×/1.15×/1.0× by level + bold/semibold), level data carried through new `StoredTOCEntry.level` schema column, sentence-row + displayBlocks both heading-aware. HTML gets a new heading extractor since it had no TOC path before. Verified MD/HTML/RTF on both simulator and iPhone (and DOCX/EPUB/PDF in the Rule 2 closure pass).
 4. ✅ Bullet and numbered list rendering consistent across formats — code in `dd4ba44`; iPhone post-merge visual + audio verification done 2026-05-07. HTML/EPUB inject markers via `HTMLDocumentImporter.injectListMarkers`; DOCX detects `<w:numPr>` paragraphs (every list item bullet for v1); `SpeechPlaybackService.utteranceText` strips leading markers before AVSpeechSynthesizer; `SentenceSegmenter.mergeNumberedListMarkers` rejoins numbered-marker segments NLTokenizer splits. Mark confirmed by ear that markers don't pronounce. v1 limitations: DOCX numbered → bullet (numbering.xml not resolved), RTF lists deferred (parser hooks not in scope), PDF lists out of scope.
 5. ✅ Empty-state messages on every modal sheet — TOC sheet (two-hardware verified), Voice picker (two-hardware verified via new `OPEN_VOICE_PICKER_SHEET` verb + `POSEY_DEBUG_VOICE_PICKER_EMPTY` launch-time env var), Notes/Saved Annotations (already had one), Audio Export (already had one), Preferences/Ask Posey (no empty-state concept). Antenna scaffolding lives in the codebase as durable test infrastructure.
-6. ⏳ TOC playback skip — needs proper Three Hats verification on both hardware. Earlier single-hardware DOCX check doesn't satisfy the rules. Re-verify the DOCX TOC field strip on simulator AND iPhone, document RTF deferral with proper user-hat consideration.
+6. ✅ TOC navigation + playback skip on DOCX/RTF — fully closed in `d030673`. `TOCSkipDetector` shared helper (handles "Contents" heading + dot-leader region + orphan dot-leader runs). `RTFDocumentImporter.advancePastDotLeaderRegion` fixes the title→offset shadow bug. New `TAP_TOC_ENTRY` and `GET_PLAYBACK_SKIP` antenna verbs. Verified two-hardware on synthetic + real DOCX (Proposal_Assistant) and synthetic + real RTF (AI Book Collaboration).
 7. ✅ Saved Annotations preview shows note body — `b60bce9`. Three Hats + two hardware verified.
+
+**Tier 1 complete.**
 
 **Tier 2 — Visible bugs in shipped behavior**
 8. ✅ PLAYBACK_RESTART → idle — verified two-hardware via new `DEBUG_FORCE_PLAYBACK_STATE` antenna verb. No code change needed.
@@ -23,7 +25,13 @@ Working through the 17-item Tier 1–4 punch list. Status:
 **Tier 2 complete.** Ready for Tier 3.
 
 **Tier 3 — Polish**
-13-17. Pending.
+13. ⏳ Audio export progress indicator + 3.6× speed investigation + re-enable button. Progress IS already wired in `AudioExportSheet` (`ProgressView(value: progress)` driven by `AudioExporter.state = .rendering(progress, ...)`). The 3.6× discrepancy: render speed is by-design (`synthesizer.write` is offline render), but if the FILE plays at 3.6× live-playback rate, that's a sample-rate or frame-count mismatch in `AVAudioFile` writing. Needs Mark to play exported audio on iPhone and time it. Re-enable button DEFERRED until 3.6× resolved per Mark's ordering.
+14. ✅ Quick-actions in-sheet menu items reachable via TAP API — closed in `d030673`. Outer-sparkle `.remoteRegister` chain on `AskPoseyView.quickActionsMenu`.
+15. ✅ Antenna defaults OFF in Release builds — `LocalAPIServer` 0 symbols, verb strings 0, support classes Release no-op stubs. Closed in `d030673`. (Note: ~67 inert support-class symbols still ship — strict zero would need ~70 call-site `#if DEBUG` guards.)
+16. ⏳ App icon. Present at 1024×1024 source with light/dark/tinted variants. Mark needs to eyeball home-screen-scale on iPhone — antenna can't screenshot springboard.
+17. ⏳ qa_battery.sh full run — needs iPhone (real AFM). 12 /ask calls × ~3s + AFM time ≈ 5-10 min runtime.
+
+**Large-document loading hint** (Mark's directive between Tiers 2 and 3) — closed in `d030673`. "Large document — this may take a few seconds." caption shown when `characterCount > 200_000`. Verified on 4-Hour Body EPUB (967K chars), both targets.
 
 **Tier 4 — Needs Mark**
 18-20. Pending — for Mark's session.

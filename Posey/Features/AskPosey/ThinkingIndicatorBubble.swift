@@ -18,6 +18,11 @@ import SwiftUI
 
 struct ThinkingIndicatorBubble: View {
 
+    /// 2026-05-08 a11y — honor system Reduce Motion. The phrase
+    /// crossfade is decorative; users opting out of motion get
+    /// instant text replacement, and the dot's pulse stops.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// Index of the currently-shown phrase. Initial value is random
     /// so the user doesn't see the same opener every time they ask
     /// a question.
@@ -103,14 +108,21 @@ struct ThinkingIndicatorBubble: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.rotationSeconds))
                 if Task.isCancelled { return }
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    var next = Int.random(in: 0..<Self.phrases.count)
+                let computeNext: () -> Int = {
+                    var n = Int.random(in: 0..<Self.phrases.count)
                     // Anti-repeat: skip to the next index if the
                     // random pick collided with the current phrase.
-                    if next == currentIndex {
-                        next = (next + 1) % Self.phrases.count
+                    if n == currentIndex {
+                        n = (n + 1) % Self.phrases.count
                     }
-                    currentIndex = next
+                    return n
+                }
+                if reduceMotion {
+                    currentIndex = computeNext()
+                } else {
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        currentIndex = computeNext()
+                    }
                 }
             }
         }

@@ -848,11 +848,17 @@ private extension AskPoseyView {
             Image(systemName: "sparkle")
                 .font(.title3)
                 .foregroundStyle(.tint)
-                .frame(width: 32, height: 32)
+                // 2026-05-08 a11y — bumped 32→44 so the menu trigger
+                // meets HIG minimum hit area. Visual size unchanged
+                // (the glyph still renders at .title3); the frame
+                // grows the tap target invisibly.
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .accessibilityLabel("Quick actions for this passage")
+        .accessibilityHint("Opens a menu with templated questions.")
         .accessibilityIdentifier("askPosey.quickActions")
         .disabled(viewModel.isResponding)
         // 2026-05-07 (Tier 3 #5): register the four quick-actions on
@@ -896,9 +902,12 @@ private extension AskPoseyView {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3)
                         .foregroundStyle(.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Dismiss")
+                .accessibilityHint("Dismisses this introductory message.")
                 .accessibilityIdentifier("askPosey.firstUseDismiss")
                 .remoteRegister("askPosey.firstUseDismiss") {
                     firstUseDismissed = true
@@ -943,9 +952,12 @@ private extension AskPoseyView {
                     Image(systemName: "xmark.circle.fill")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Dismiss")
+                .accessibilityHint("Dismisses the non-English document notice.")
                 .remoteRegister("askPosey.nonEnglishDismiss") {
                     nonEnglishDismissed = true
                 }
@@ -1028,10 +1040,13 @@ private extension AskPoseyView {
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.title2)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(!viewModel.canSend)
             .accessibilityLabel("Send")
+            .accessibilityHint("Sends your question to Posey.")
             .accessibilityIdentifier("askPosey.send")
         }
         .padding(.horizontal, 14)

@@ -34,7 +34,8 @@ Working through the 17-item Tier 1–4 punch list. Status:
 **Large-document loading hint** (Mark's directive between Tiers 2 and 3) — closed in `d030673`. "Large document — this may take a few seconds." caption shown when `characterCount > 200_000`. Verified on 4-Hour Body EPUB (967K chars), both targets.
 
 **Tier 4 — Needs Mark**
-18-20. Pending — for Mark's session.
+18. ✅ Accessibility audit (2026-05-08, autonomous) — touch-target + Reduce Motion + VoiceOver-label gaps closed; verified on both hardware including Dynamic Type at AccessibilityXXXL and AX-tree inspection of every fix. See HISTORY entry. One known limitation noted (sentence rows are StaticText not Button — chrome Play button is the canonical playback control).
+19-20. Pending — privacy policy + App Store metadata + final submission, for Mark's session.
 
 ---
 

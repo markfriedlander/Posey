@@ -1,5 +1,34 @@
 # Posey History
 
+## 2026-05-07 (evening) — Tier 3 #13 audio export investigation: file is ~2× faster than live playback at same rate
+
+Mark's earlier "3.6× faster" observation was likely with a stored rate setting above 100% (each rate doubling roughly halves duration). At default rate=100% the discrepancy is ~2×.
+
+**Empirical results** (5-sentence TXT `short.txt` = "First sentence. Second sentence. Third sentence. Fourth sentence. Fifth sentence.", same Custom voice, same rate setting throughout):
+
+| Test | Duration | Notes |
+|---|---|---|
+| macOS `say -r 175` baseline (.aiff) | 6.88 s | reference |
+| Posey live playback on iPhone (rate=100%) | 6.86 s | matches `say` baseline — NORMAL listening speed |
+| Posey M4A export on iPhone (rate=100%) | 3.53 s | **~2× faster** than live |
+| Posey M4A export rate=50% (slow) | 4.67 s | scales with rate setting |
+| Posey M4A export rate=200% (fast) | 1.02 s | also scales |
+
+**Where the acceleration comes from.** Confirmed it's NOT in `AVAudioFile` settings:
+- Buffer sample rate: 22050 Hz (from `AVSpeechSynthesizer`)
+- File `AVSampleRateKey`: 22050 Hz (matches buffer — no resampling)
+- File frames math agrees with declared duration (afinfo: 2.76s estimated for stored-rate test, 3.53s for rate=100%)
+- `afplay` plays the file at its declared rate (no playback-side compression)
+
+The acceleration is in `AVSpeechSynthesizer.write(utterance:)` itself. The offline-render API produces audio data that, when played at its declared sample rate, is roughly 2× faster than the same utterance spoken in real-time via `.speak`. This is a known iOS framework behavior — `.write` doesn't preserve the same pacing/inter-word gaps as real-time speech.
+
+**Three options for Mark's call** (no decision made yet):
+1. **Halve the export rate**: when user wants 100%, export at 50% (avRate=0.25). Approximate; output ~4.67s for our test (closer to live's 6.86s but not exact). Easy.
+2. **Time-stretch via `AVAudioEngine`**: preserve pitch, slow audio to match live duration. Quality fix; bigger code change.
+3. **Document and ship as-is**: re-enable with a label like "Audio Export (renders ~2× faster than live)". Honest but UX-mediocre.
+
+Re-enabling the export button is **deferred** pending Mark's call. AudioExporter and antenna verbs (`EXPORT_AUDIO`, `AUDIO_EXPORT_STATUS`, `AUDIO_EXPORT_FETCH`) are intact and tested.
+
 ## 2026-05-07 (evening) — Tier 1 #6 fully closed: TOC navigation + playback skip on DOCX/RTF, both hardware
 
 The earlier #6 closure was incomplete on two counts: (1) "deferred RTF dot-leader case as niche" was a unilateral decision documented quietly without surfacing — Mark called this out as a CLAUDE.md violation, won't repeat. (2) The actual playback skip wasn't wired for DOCX/RTF, only analyzed.

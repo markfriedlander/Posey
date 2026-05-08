@@ -1,5 +1,19 @@
 # Posey History
 
+## 2026-05-07 (afternoon) — Tier 2 #8 verified: PLAYBACK_RESTART → idle on both hardware
+
+The earlier #8 spot-check was iPhone-only and used pre-existing state (the iPhone happened to be in a `.finished` state from a prior session). For proper rule-compliant verification I needed a way to reliably set the playback service into `.finished` without playing through a whole document.
+
+**Antenna scaffolding added:**
+- `SpeechPlaybackService.debugForceState(_)` — public state-forcer.
+- `Notification.Name.remoteDebugForcePlaybackState` — observed by ReaderRemoteControlPlaybackObservers.
+- `ReaderViewModel.debugForcePlaybackState(_:)` — adapter that maps the string state name to the enum and forwards.
+- `DEBUG_FORCE_PLAYBACK_STATE:<idle|playing|paused|finished>` antenna verb in LibraryView.
+
+**Verification.** Imported `/tmp/short.txt` (5 sentences). `READER_GOTO` to last sentence (offset 75 → idx=4). `DEBUG_FORCE_PLAYBACK_STATE:finished`. Confirmed READER_STATE shows `playbackState=finished, currentSentenceIndex=4`. Issued `PLAYBACK_RESTART`. Confirmed READER_STATE shows `playbackState=idle, currentSentenceIndex=0`. Same result on simulator AND iPhone. The transition is correct on the current code (`SpeechPlaybackService.prepare(at:)` flips `.finished` → `.idle` after `restartFromBeginning`'s `stop()` preserves the prior state).
+
+**Three Hats.** Developer: small public method + notification routing. QA: empirical confirmation on both hardware via the new debug verb. User: tapping Restart on a finished document moves the position to the start and shows Play (not "ended") — ready to play again. No code change needed for the bug itself; the fix is the test infrastructure that makes the correctness verifiable.
+
 ## 2026-05-07 (afternoon) — Tier 1 #6 re-verified on both hardware
 
 The earlier #6 commit (DOCX TOC field strip = no code change needed) was empirically verified on iPhone only. Per the rules that's not enough. Re-doing it on both hardware:

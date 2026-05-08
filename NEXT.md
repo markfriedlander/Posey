@@ -14,7 +14,8 @@ Working through the 17-item Tier 1–4 punch list. Status:
 7. ✅ Saved Annotations preview shows note body — `b60bce9`. Three Hats + two hardware verified.
 
 **Tier 2 — Visible bugs in shipped behavior**
-8-12. ⏳ All pending — need to be redone from zero. Earlier "already fixed" assertions for #8 (PLAYBACK_RESTART), #9 (RTF concat), #11 (HTML NBSPs), #12 (RTF form-feed) were single-hardware empirical checks and don't meet Rule 2 / Three Hats. #10 (PDF citation marker) was tested against the wrong code path (synthetic TXT instead of PDF displayBlocks). Each must be re-verified or actually fixed and verified on both simulator and iPhone with screenshots and three hats.
+8. ✅ PLAYBACK_RESTART → idle — verified two-hardware via new `DEBUG_FORCE_PLAYBACK_STATE` antenna verb. No code change needed.
+9-12. ⏳ #9 (RTF concat), #10 (PDF citation marker), #11 (HTML NBSPs), #12 (RTF form-feed) — pending redone-from-zero verification on both hardware with three hats.
 
 **Tier 3 — Polish**
 13-17. Pending.

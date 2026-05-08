@@ -147,6 +147,16 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         activeSegments = []
     }
 
+    /// 2026-05-07 (parity #8): test-only state forcer. Lets the
+    /// antenna drive transitions that are otherwise hard to set up
+    /// (e.g. `.finished` from natural end-of-doc, which would
+    /// require playing through the whole document). Public on
+    /// purpose — there's no harm in exposing this beyond debug
+    /// builds since real users have no way to trigger the antenna.
+    func debugForceState(_ newState: PlaybackState) {
+        state = newState
+    }
+
     // ========== BLOCK 03: PUBLIC API - END ==========
 
     // ========== BLOCK 04: SYSTEM PLAYBACK - START ==========

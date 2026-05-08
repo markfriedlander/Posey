@@ -1969,6 +1969,24 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "DEBUG_FORCE_PLAYBACK_STATE":
+                // 2026-05-07 (parity #8): force the playback service
+                // into a specific state so transitions that take real
+                // playback time (e.g. natural end-of-doc → .finished)
+                // can be exercised in tests.
+                let allowed = ["idle", "playing", "paused", "finished"]
+                guard let value = arg?.lowercased(), allowed.contains(value) else {
+                    return #"{"error":"Usage: DEBUG_FORCE_PLAYBACK_STATE:<idle|playing|paused|finished>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteDebugForcePlaybackState,
+                        object: nil,
+                        userInfo: ["state": value]
+                    )
+                }
+                return json(["status": "posted", "state": value])
+
             case "OPEN_AUDIO_EXPORT_SHEET":
                 await MainActor.run {
                     NotificationCenter.default.post(name: .remoteOpenAudioExportSheet, object: nil)

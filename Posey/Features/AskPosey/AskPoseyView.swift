@@ -855,6 +855,25 @@ private extension AskPoseyView {
         .accessibilityLabel("Quick actions for this passage")
         .accessibilityIdentifier("askPosey.quickActions")
         .disabled(viewModel.isResponding)
+        // 2026-05-07 (Tier 3 #5): register the four quick-actions on
+        // the OUTER sparkle (always mounted while sheet is open).
+        // SwiftUI Menu items only mount when the menu is shown; if
+        // the registrations were on the inner Buttons, the antenna's
+        // TAP verb couldn't fire them without first opening the menu
+        // — defeating the point of the test hook. Registering on the
+        // outer container means TAP works from sheet-open time.
+        .remoteRegister("askPosey.action.explain") {
+            sendTemplated("Explain this passage in context — what's it saying?")
+        }
+        .remoteRegister("askPosey.action.define") {
+            focusComposerWithPrefix("Define ")
+        }
+        .remoteRegister("askPosey.action.findRelated") {
+            sendTemplated("Find other passages in the document that discuss the same topic.")
+        }
+        .remoteRegister("askPosey.action.askSpecific") {
+            focusComposer()
+        }
     }
 
     /// 2026-05-04 (revised) — First-use banner rendered inline at

@@ -53,6 +53,18 @@ struct DOCXLibraryImporter {
             plainText: plainText
         )
 
+        // 2026-05-07 (parity #6 closure): TOC playback skip.
+        // If the doc has a heading whose title is "Contents" or
+        // "Table of Contents" (case-insensitive), set the playback
+        // skip offset to the next heading after it. Mirrors PDF/EPUB
+        // skip-on-playback behavior for DOCX. Without this, TTS reads
+        // "Table of contents" out loud at the start of every doc that
+        // has one.
+        let tocSkipUntilOffset = TOCSkipDetector.skipOffset(
+            for: headings.map { (title: $0.title, plainTextOffset: $0.plainTextOffset) },
+            in: plainText
+        )
+
         let document = Document(
             id: existingDocument?.id ?? UUID(),
             title: title,
@@ -62,7 +74,8 @@ struct DOCXLibraryImporter {
             modifiedAt: now,
             displayText: displayText,
             plainText: plainText,
-            characterCount: plainText.count
+            characterCount: plainText.count,
+            playbackSkipUntilOffset: tocSkipUntilOffset
         )
 
         try databaseManager.upsertDocument(document)

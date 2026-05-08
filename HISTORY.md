@@ -1,5 +1,23 @@
 # Posey History
 
+## 2026-05-07 (evening) — Tier 3 #17 closed: qa_battery.sh green on iPhone
+
+Imported the two missing PDFs (`The Clouds Of High-tech Copyright Law.pdf`, `The Internet Steps to the Beat.pdf`) and ran `tools/qa_battery.sh` end-to-end on iPhone with the standard 4-question pattern (factual / connection / follow-up / not-in-doc) across three docs.
+
+**Results — Three Hats Hat 3 (User) read on every answer:**
+
+| Doc | Q1 factual | Q2 connection | Q3 follow-up | Q4 not-in-doc |
+|---|---|---|---|---|
+| AI Book Collaboration | ✓ Mark Friedlander, ChatGPT, Claude, Gemini | ✓ "Humble Moderator" role | ✓ explains transparency/ethics rationale + cites | ✓ "doesn't say" |
+| The Clouds Of High-tech Copyright Law | ✓ Law Review Article | ✓ ADR sparingly used | ✓ names mp3.com/Napster/Scour | ✓ "doesn't say" |
+| The Internet Steps to the Beat | ✓ mp3.com saga | ✓ structured 5-bullet topic list | ✓ confirms DMCA | ✓ graceful refusal w/ "try selecting a passage" guidance |
+
+12/12 acceptable answers. 4/4 not-in-doc questions answered honestly. Citations attached where appropriate. Follow-ups built on prior turn context (Q3 in each doc references Q2). No hallucinations.
+
+**Note on Rule 2:** qa_battery is gated to iPhone because AFM does not run on the simulator on this Mac. Documenting the constraint per Rule 2's "explain why if it doesn't apply uniformly" clause — there is no second-hardware option for AFM-driven tests today.
+
+#17 closed.
+
 ## 2026-05-07 (evening) — Tier 3 #13 audio export investigation: file is ~2× faster than live playback at same rate
 
 Mark's earlier "3.6× faster" observation was likely with a stored rate setting above 100% (each rate doubling roughly halves duration). At default rate=100% the discrepancy is ~2×.

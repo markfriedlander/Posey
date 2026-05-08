@@ -398,6 +398,7 @@ struct ReaderView: View {
                 publishRemoteState()
                 publishReadingPositionForEnhancement()
             }
+            .modifier(ReaderRemoteSnapshotPublisher(viewModel: viewModel, publish: publishRemoteState))
             .onChange(of: viewModel.focusedDisplayBlockID) { _, _ in
                 lastProgrammaticScrollAt = Date()
                 viewModel.scrollToCurrentSentence(with: proxy, animated: true)
@@ -601,6 +602,23 @@ struct ReaderView: View {
         RemoteControlState.shared.visibleDocumentID = viewModel.document.id
         RemoteControlState.shared.currentSentenceIndex = idx
         RemoteControlState.shared.currentOffset = offset
+        // 2026-05-07 (parity #10): publish flat snapshots so the
+        // antenna's LIST_SEGMENTS_MATCHING verb can search by text.
+        RemoteControlState.shared.segmentTexts = segments.enumerated().map { i, seg in
+            (index: i, text: seg.text, startOffset: seg.startOffset, endOffset: seg.endOffset)
+        }
+        RemoteControlState.shared.displayBlockTexts = viewModel.displayBlocks.enumerated().map { i, block in
+            let kindLabel: String
+            switch block.kind {
+            case .heading(let level): kindLabel = "heading\(level)"
+            case .paragraph: kindLabel = "paragraph"
+            case .bullet: kindLabel = "bullet"
+            case .numbered: kindLabel = "numbered"
+            case .quote: kindLabel = "quote"
+            case .visualPlaceholder: kindLabel = "visualPlaceholder"
+            }
+            return (index: i, kind: kindLabel, text: block.text, startOffset: block.startOffset, endOffset: block.endOffset)
+        }
     }
 
     private func clearRemoteStateIfOurs() {
@@ -1624,6 +1642,23 @@ private struct ReaderRemoteControlAnnotationObservers: ViewModifier {
                 viewModel.noteDraft = body
                 viewModel.saveDraftNoteForCurrentSentence()
             }
+    }
+}
+
+/// 2026-05-07 (parity #10): re-publishes the segments/displayBlocks
+/// snapshot to RemoteControlState whenever either array's count
+/// changes. The initial onAppear publish captures empty arrays
+/// because loadContent runs async; this modifier keeps the snapshot
+/// in sync as content settles. Extracted to its own modifier to keep
+/// the main reader body's type-checker budget under control.
+private struct ReaderRemoteSnapshotPublisher: ViewModifier {
+    @ObservedObject var viewModel: ReaderViewModel
+    let publish: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: viewModel.segments.count) { _, _ in publish() }
+            .onChange(of: viewModel.displayBlocks.count) { _, _ in publish() }
     }
 }
 

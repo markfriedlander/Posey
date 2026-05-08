@@ -1341,8 +1341,10 @@ struct ReaderView: View {
             HStack(spacing: 3) {
                 Image(systemName: "arrow.uturn.backward")
                     .font(.caption)
+                    .accessibilityHidden(true)
                 Image(systemName: "sparkle")
                     .font(.caption)
+                    .accessibilityHidden(true)
             }
             .foregroundStyle(Color.white.opacity(0.85))
             .padding(.horizontal, 10)
@@ -1352,9 +1354,16 @@ struct ReaderView: View {
                     .fill(Color(white: 0.45))
                     .opacity(0.60)
             )
+            // 2026-05-08 a11y — enforce 44pt minimum hit area without
+            // visually inflating the pill. The hit-test rect grows
+            // around the smaller capsule via .contentShape so VoiceOver
+            // / large-finger taps land reliably.
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Return to Ask Posey conversation")
+        .accessibilityHint("Jumps back to the Ask Posey thread that cited this passage.")
         .accessibilityIdentifier("reader.citationReturnPill")
         .remoteRegister("reader.citationReturn") {
             returnToAskPoseyAction()
@@ -2416,7 +2425,11 @@ private struct NotesSheet: View {
                 NotificationCenter.default.publisher(for: .remoteScrollSavedAnnotations)
             ) { note in
                 guard let entryID = note.userInfo?["entryID"] as? String else { return }
-                withAnimation { listProxy.scrollTo(entryID, anchor: .top) }
+                if reduceMotion {
+                    listProxy.scrollTo(entryID, anchor: .top)
+                } else {
+                    withAnimation { listProxy.scrollTo(entryID, anchor: .top) }
+                }
             }
             } // ScrollViewReader
             .navigationTitle("Notes")

@@ -30,6 +30,11 @@ struct SparkleWithProgressRing: View {
     /// chunk.
     let progress: Double?
 
+    /// 2026-05-08 a11y — honor system Reduce Motion. The progress
+    /// ring's tween between values is decorative; users who opt out
+    /// of motion get an instant snap to the new fill instead.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         ZStack {
             // Background ring, faintly visible while progress is
@@ -50,7 +55,7 @@ struct SparkleWithProgressRing: View {
                     )
                     .frame(width: 28, height: 28)
                     .rotationEffect(.degrees(-90))
-                    .animation(.easeInOut(duration: 0.4), value: p)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.4), value: p)
             }
             // Sparkle always present, slightly smaller than the ring
             // so the arc reads cleanly around it.

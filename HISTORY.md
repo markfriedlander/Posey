@@ -1,5 +1,50 @@
 # Posey History
 
+## 2026-05-08 — Accessibility audit (Tier 4 #18) — autonomous pass
+
+Mark's directive: full accessibility audit, autonomous authority, work through every Task 9 item. This pass.
+
+**Survey first.** 109 existing accessibility-* annotations across 9 files; 34 Buttons; 32 system-image glyphs. The reader chrome (mini-player, top controls, playback transport) was already comprehensively labeled with 44×44 frames + remoteRegister hooks from prior work. SearchBarView's chevrons + clear button likewise. LibraryView's antenna toggle + import action labeled. Most existing animation sites correctly checked `\.accessibilityReduceMotion`. The audit found three categories of real gaps.
+
+**Gap 1 — touch targets <44pt** (HIG minimum). Four offenders, all in AskPoseyView and ReaderView's citation surface:
+- `askPosey.send` — `Image arrow.up.circle.fill .font(.title2)` with no frame → ~22pt hit area.
+- `askPosey.firstUseDismiss` — `xmark.circle.fill .font(.title3)` no frame → ~22pt.
+- `askPosey.nonEnglishDismiss` — `xmark.circle.fill .font(.subheadline)` no frame → ~17pt.
+- `askPosey.action.askSpecific` (quick-actions sparkle) — explicit `.frame(width:32, height:32)`. AX tree confirmed 32×32.
+- ReaderView `citationReturnPill` — caption icons + 10×6 padding → ~24pt height.
+
+Fix on each: added `.frame(minWidth: 44, minHeight: 44)` + `.contentShape(Rectangle())` (or `Capsule()` on the pill) so the visible glyph stays the same size but the hit-test rect grows. AX tree on sim post-fix: `askPosey.send` → 44×44, `askPosey.firstUseDismiss` → 44×44, `askPosey.action.askSpecific` → 44×44.
+
+**Gap 2 — Reduce Motion not honored** on three animation sites. Most call sites already used the established pattern (`reduceMotion ? nil : .easeInOut(...)` or `Self.reduceMotionEnabled` static helper). Three were unconditional:
+- `ReaderView.swift:2419` Notes-sheet annotation scroll (`withAnimation { listProxy.scrollTo(...) }`).
+- `SparkleWithProgressRing.swift:53` progress-ring tween (`.animation(.easeInOut(0.4), value: p)`).
+- `ThinkingIndicatorBubble.swift:106` thinking-phrase crossfade (`withAnimation(.easeInOut(0.35))`).
+
+Fix on each: added `@Environment(\.accessibilityReduceMotion) reduceMotion` (where missing) and a `reduceMotion ? <no-anim> : <anim>` branch. The thinking-bubble's per-phrase rotation timer is preserved either way — only the visual transition between phrases is suppressed when Reduce Motion is on.
+
+**Gap 3 — VoiceOver labels + decorative hides + hints**. Most controls already had `.accessibilityLabel`. Added:
+- `accessibilityHint` on Send, the two Dismiss buttons, the citationReturnPill, the quick-actions sparkle, and the redesigned Audio Export Done / Cancel / "Export to Audio File" buttons (the audio-export ones came in via the prior commit's redesign).
+- `.accessibilityHidden(true)` on the citationReturnPill's two decorative icons (the back-arrow and sparkle glyphs inside the pill) so VoiceOver announces only the parent pill's label "Return to Ask Posey conversation" instead of three separate elements.
+
+**Verification on both hardware**:
+- Sim AX tree (`mcp__ios_simulator__ui_find_element` / `ui_describe_all`) confirmed every fix: `askPosey.send` (44×44, label "Send", hint "Sends your question to Posey."); `askPosey.firstUseDismiss` (44×44, label "Dismiss", hint "Dismisses this introductory message."); `askPosey.action.askSpecific` (44×44, label "Quick actions for this passage", hint "Opens a menu with templated questions."); reader chrome buttons (44×44 each, all labeled).
+- iPhone visual screenshot of the reader chrome: 6 icon-only buttons render at 44pt with audible reachable hit areas.
+- **Dynamic Type at AccessibilityXXXL** (sim launched with `-UIPreferredContentSizeCategoryName UICTContentSizeCategoryAccessibilityXXXL`):
+  - Library: titles wrap cleanly across multiple lines, no clipping; "Import File" button readable; document rows scale.
+  - Ask Posey: anchor card "ASKING ABOUT / sim-short / the whole document" displays at full size, properly stacked; composer + Send arrow remain reachable.
+  - Splash: "Starting Posey…" rendered at giant size — confirms env-var injection works and the SwiftUI font resolver is honoring the override.
+  - Reader: uses its own font-size control from Preferences (intentional design — the reader is the user's primary text-reading surface and has dedicated controls). Chrome scales naturally.
+- **Reduce Motion** enabled via plist write (`UIAccessibilityReduceMotionEnabled = true`) at the simulator level; app launches and renders cleanly. The three guarded animations are: Notes-sheet scroll-to-annotation (only fires on `TAP_SAVED_ANNOTATION`), progress ring (only fires during indexing), and thinking-bubble phrase crossfade (only fires during AFM rendering). Each is exercised by user-driven flows that don't reduce to a single still frame; code-level guards verified via `git diff`.
+- **Color contrast** (visual review on captured screenshots, both color schemes):
+  - iPhone dark reader: active sentence — bold white on dark capsule ~7:1 (AAA). Dimmed non-active sentences in Focus mode ~3:1 by deliberate design — Focus is the user's chosen reading style for eye-landing; user can switch to Standard for full body-text contrast.
+  - Library light: black document titles on white ~21:1 (AAA).
+  - Ask Posey light: anchor card black-on-white, body text and Done button at full contrast.
+  - Reader chrome: glyphs on ultraThinMaterial capsules, well above AA in both modes.
+
+**One known limitation acknowledged, not blocking**: the reader sentence rows are AX role `StaticText`, not `Button`. The double-tap-to-play gesture isn't surfaced to VoiceOver as an interactive element. This is consistent with how similar reader apps handle text rows (you wouldn't want VoiceOver announcing every sentence as "Button"); playback control is accessible via the chrome's Play button which IS labeled and traversable. If a future user requests it, the rows could carry an `accessibilityAction(.default)` to expose the double-tap to VoiceOver, but it isn't a default expectation.
+
+Tier 4 #18 closed.
+
 ## 2026-05-08 — Audio Export UX redesign: notification-based flow, background-task wrapped, button re-enabled
 
 Mark's directive (2026-05-08): the auto-popping share sheet on completion was a broken experience. A user might lock the phone or switch apps and be ambushed by a modal share sheet on return. Replaced with a notification-driven flow per spec:

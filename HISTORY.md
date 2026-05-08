@@ -1,5 +1,43 @@
 # Posey History
 
+## 2026-05-08 — Audio Export UX redesign: notification-based flow, background-task wrapped, button re-enabled
+
+Mark's directive (2026-05-08): the auto-popping share sheet on completion was a broken experience. A user might lock the phone or switch apps and be ambushed by a modal share sheet on return. Replaced with a notification-driven flow per spec:
+
+**Architecture**
+- New `AudioExportNotifications` (`Posey/Services/Notifications/`) — singleton coordinator. `requestAuthorizationIfNeeded()` (idempotent, returns Bool), `scheduleCompletionNotification(fileURL:documentID:title:)`, `scheduleFailureNotification(...)`. Identifiers keyed by docID so back-to-back exports replace rather than pile up.
+- New `PoseyAppDelegate` (`Posey/`) — `UIApplicationDelegate` + `UNUserNotificationCenterDelegate`. Sets the UN delegate at launch; foreground `willPresent` returns `[.banner, .sound, .list]` so the banner shows even when Posey is frontmost; tap handler posts `.audioExportNotificationTapped` with `userInfo[fileURL/documentID/documentTitle]`. Wired via `@UIApplicationDelegateAdaptor` in `PoseyApp`.
+- `ReaderViewModel.beginAudioExport()` rewritten:
+  1. Auth request fires in **parallel** with kickoff — never blocks the render on the user's prompt response.
+  2. Render wrapped in `UIApplication.beginBackgroundTask(withName: "audio-export")` with `expirationHandler` that cancels the in-flight exporter so we don't leak. `endBackgroundTask` runs on every exit path via `defer`.
+  3. On success: re-checks auth (the parallel prompt has had time to resolve), schedules completion banner if authorized.
+  4. On failure: same auth re-check, schedules failure banner with the localized reason.
+  5. New published `lastCompletedExportURL` survives sheet dismissal so a re-presented sheet (after notification tap) shows the Share button immediately.
+- `AudioExportSheet` redesign:
+  - "Done" no longer cancels. It dismisses; the export keeps running under the background task. The hint reads "Dismisses this view. Any export in progress keeps running and will notify you when done."
+  - In-render UI explicitly tells the user they can close: "You can close this view; the export will continue and you'll get a notification when it's done."
+  - Cancel is a separate explicit "Cancel Export" button, only visible during rendering, role `.destructive`.
+  - On completion shows a `ShareLink` (user-driven) — the share sheet **never** appears automatically.
+  - Observes `.audioExportNotificationTapped` and lights up an "Opened from notification — tap Share to send the file." caption when the user routed back via the banner.
+- `ReaderView` top-level observer for `.audioExportNotificationTapped` so a tap with the sheet not currently presented re-presents Preferences → Audio Export and surfaces the Share button.
+- Re-added the "Audio Export" Section to the Preferences sheet with an explicit "Export to Audio File" button. 44pt min height, accessibility hint, `.remoteRegister("preferences.exportAudio")`.
+
+**Antenna scaffolding (durable test infrastructure)**
+- `BEGIN_AUDIO_EXPORT:<docID>` — direct kickoff. Bypasses the lazy-mounted Preferences cell that prevented `TAP:preferences.exportAudio` from working when the row was below the fold.
+- `AUDIO_EXPORT_NOTIFICATION_AUTH` — current `UNUserNotificationCenter.notificationSettings().authorizationStatus`.
+- `AUDIO_EXPORT_NOTIFICATION_PENDING` — pending + delivered notifications filtered to `audioExport.*` identifiers, with title/body/userInfo. Lets a verifier confirm the schedule call landed and the notification was delivered.
+- `AUDIO_EXPORT_SIMULATE_NOTIFICATION_TAP:<filePath>` — posts `.audioExportNotificationTapped` so the share-sheet route can be exercised without springboard interaction (system permission dialogs and the lockscreen banner are both outside the antenna's reach on iPhone; this verb is the substitute).
+
+**Three Hats verification — both hardware**
+- **iPhone** (`00008140-001A7D001E47001C`): `BEGIN_AUDIO_EXPORT` on `1A0BAE14` (5-sentence TXT). Permission prompt fired (Mark tapped Allow). Auth = `authorized`. Delivered notification: `audioExport.complete.1A0BAE14...` with body `"\"short\" is ready to share."` and `userInfo.audioExportFileURL = /private/var/mobile/.../tmp/short.m4a`. `AUDIO_EXPORT_SIMULATE_NOTIFICATION_TAP` (with Preferences open) presented the Audio Export sheet showing "Export complete" + green check + "short.m4a" + "Share or Save to Files" button + "Opened from notification" caption. Share sheet did NOT auto-pop. Screenshot `/tmp/sshots/iphone-after-tap2-600.png`.
+- **Simulator** (`7D4E1F1A-E7EC-4C42-BDF1-BF3BC72F4352`, iPhone 17 Pro): same flow on imported `sim-short`. Permission Allow tapped via simulator-MCP (`mcp__ios_simulator__ui_tap`). Identical delivered-notification structure. Identical share-sheet path. Screenshot `/tmp/sshots/sim-after-tap-600.png`.
+- **Background-resilience test (sim)**: deleted prior `.m4a`, kicked `BEGIN_AUDIO_EXPORT`, immediately launched Settings (`com.apple.Preferences`) to background Posey, slept 10s, relaunched Posey. Result: `.m4a` file (47168 bytes) was written during the backgrounded period and the completion notification was delivered. Confirms `beginBackgroundTask` + audio background mode keep the render alive across foreground swap.
+- **iPhone background test (limit)**: not driven this session — locking the iPhone screen requires physical interaction the antenna can't provide. The architecture is identical to the simulator path that did pass, and the iPhone foreground happy path completed successfully under the same code, so confidence is high. The conservative remaining check is: lock-screen completion on the iPhone for a long-duration export (multi-minute), where `beginBackgroundTask`'s ~30s allocation might not cover the full render. For typical shortish docs the audio background mode + bg task is sufficient. Long-doc behavior can be hardened with `BGProcessingTaskRequest` if it becomes an issue in practice.
+
+**Remaining limitation acknowledged**: very long renders (hundreds of MB / hours of audio) may exceed iOS's background-execution allowance. The expiration handler cancels cleanly (no file corruption, no leaked synth resources), but the user would have to re-kick the export with the app foregrounded. Not blocking for v1; revisit if a real user reports it.
+
+Tier 3 #13 closed.
+
 ## 2026-05-07 (evening) — Tier 3 #17 closed: qa_battery.sh green on iPhone
 
 Imported the two missing PDFs (`The Clouds Of High-tech Copyright Law.pdf`, `The Internet Steps to the Beat.pdf`) and ran `tools/qa_battery.sh` end-to-end on iPhone with the standard 4-question pattern (factual / connection / follow-up / not-in-doc) across three docs.

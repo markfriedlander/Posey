@@ -143,6 +143,12 @@ extension Notification.Name {
     /// No userInfo. ReaderPreferencesSheet observes; sets the sheet's
     /// internal `isShowingAudioExport` state.
     static let remoteOpenAudioExportSheet = Notification.Name("PoseyRemoteOpenAudioExportSheet")
+    /// 2026-05-08 — antenna-driven kickoff. `userInfo["documentID"]: UUID`.
+    /// ReaderView observes and calls `viewModel.beginAudioExport()`
+    /// when the IDs match. Bypasses the Preferences-form lazy-cell
+    /// mounting that prevented `.remoteRegister("preferences.exportAudio")`
+    /// from being callable while its row was below the fold.
+    static let remoteBeginAudioExport = Notification.Name("PoseyRemoteBeginAudioExport")
     /// No userInfo. ReaderView observes; sets `isSearchActive` on the
     /// view model so the search bar appears.
     static let remoteOpenSearchBar = Notification.Name("PoseyRemoteOpenSearchBar")

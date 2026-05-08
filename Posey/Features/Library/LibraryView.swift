@@ -4,6 +4,7 @@ import NaturalLanguage
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import UserNotifications
 
 #if canImport(FoundationModels)
 import FoundationModels
@@ -2276,6 +2277,103 @@ extension LibraryViewModel {
                     "bytes": data.count,
                     "base64": data.base64EncodedString()
                 ])
+
+            case "BEGIN_AUDIO_EXPORT":
+                // BEGIN_AUDIO_EXPORT:<docID> — direct kickoff path
+                // for the redesigned UI (notification-based). Bypasses
+                // the lazy-mounted Preferences cell so a verifier can
+                // launch an export without scrolling the form.
+                guard let raw = arg, let docID = UUID(uuidString: raw) else {
+                    return #"{"error":"Usage: BEGIN_AUDIO_EXPORT:<docID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteBeginAudioExport,
+                        object: nil,
+                        userInfo: ["documentID": docID]
+                    )
+                }
+                return json(["status": "posted", "documentID": docID.uuidString])
+
+            // ===== Audio Export notification testing =========================
+            // 2026-05-08 — antenna scaffolding for the notification-
+            // based export UX. Lets the verifier check that:
+            //   (a) the notification permission status is what we
+            //       expect after a kickoff,
+            //   (b) the notification request is actually pending /
+            //       delivered (so we know the schedule call landed),
+            //   (c) tapping the notification (or the simulated tap)
+            //       routes correctly into the share-sheet path
+            //       without requiring the springboard.
+            case "AUDIO_EXPORT_NOTIFICATION_AUTH":
+                let status = await UNUserNotificationCenter.current().notificationSettings()
+                let label: String
+                switch status.authorizationStatus {
+                case .authorized: label = "authorized"
+                case .denied: label = "denied"
+                case .notDetermined: label = "notDetermined"
+                case .provisional: label = "provisional"
+                case .ephemeral: label = "ephemeral"
+                @unknown default: label = "unknown"
+                }
+                return json(["status": label])
+
+            case "AUDIO_EXPORT_NOTIFICATION_PENDING":
+                let center = UNUserNotificationCenter.current()
+                let pending = await center.pendingNotificationRequests()
+                let delivered = await center.deliveredNotifications()
+                let pendingDicts = pending
+                    .filter { $0.identifier.hasPrefix("audioExport.") }
+                    .map { req -> [String: Any] in
+                        [
+                            "identifier": req.identifier,
+                            "title": req.content.title,
+                            "body": req.content.body,
+                            "userInfo": req.content.userInfo
+                        ]
+                    }
+                let deliveredDicts = delivered
+                    .filter { $0.request.identifier.hasPrefix("audioExport.") }
+                    .map { n -> [String: Any] in
+                        [
+                            "identifier": n.request.identifier,
+                            "title": n.request.content.title,
+                            "body": n.request.content.body,
+                            "userInfo": n.request.content.userInfo
+                        ]
+                    }
+                return json([
+                    "pending": pendingDicts,
+                    "delivered": deliveredDicts
+                ])
+
+            case "AUDIO_EXPORT_SIMULATE_NOTIFICATION_TAP":
+                // Simulates the user tapping a delivered completion
+                // notification. arg is the file path; documentID is
+                // best-effort lifted from the most-recent registry
+                // job (so the tap maps back to the right reader).
+                guard let pathArg = arg, !pathArg.isEmpty else {
+                    return #"{"error":"Usage: AUDIO_EXPORT_SIMULATE_NOTIFICATION_TAP:<filePath>"}"#
+                }
+                let url = URL(fileURLWithPath: pathArg)
+                let mostRecentJob = await MainActor.run {
+                    RemoteAudioExportRegistry.shared.all().first
+                }
+                var info: [String: Any] = [
+                    AudioExportNotificationKeys.fileURL: url
+                ]
+                if let job = mostRecentJob {
+                    info[AudioExportNotificationKeys.documentID] = job.documentID.uuidString
+                    info[AudioExportNotificationKeys.documentTitle] = job.documentTitle
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .audioExportNotificationTapped,
+                        object: nil,
+                        userInfo: info
+                    )
+                }
+                return #"{"ok":true}"#
 
             // ===== Discovery =================================================
             case "LIST_REMOTE_TARGETS":

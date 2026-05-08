@@ -15,7 +15,8 @@ Working through the 17-item Tier 1–4 punch list. Status:
 
 **Tier 2 — Visible bugs in shipped behavior**
 8. ✅ PLAYBACK_RESTART → idle — verified two-hardware via new `DEBUG_FORCE_PLAYBACK_STATE` antenna verb. No code change needed.
-9-12. ⏳ #9 (RTF concat), #10 (PDF citation marker), #11 (HTML NBSPs), #12 (RTF form-feed) — pending redone-from-zero verification on both hardware with three hats.
+9. ✅ RTF paragraph concatenation — verified two-hardware. plainText keeps `\n` boundary; sentence-row renderer puts each paragraph on its own row on both targets.
+10-12. ⏳ #10 (PDF citation marker), #11 (HTML NBSPs), #12 (RTF form-feed) — pending.
 
 **Tier 3 — Polish**
 13-17. Pending.

@@ -441,6 +441,13 @@ final class RemoteControlState {
     var searchQuery: String = ""
     var searchMatchCount: Int = 0
     var currentSearchMatchPosition: Int = 0
+    /// 2026-05-07 (parity #10): live snapshot of the reader's segments
+    /// (sentence-row path) and displayBlocks (block path) so the
+    /// `LIST_SEGMENTS_MATCHING` verb can search by text without going
+    /// through the SwiftUI render tree. Reset on every load; populated
+    /// by `ReaderViewModel.loadContent`. Keep tuples flat for JSON.
+    var segmentTexts: [(index: Int, text: String, startOffset: Int, endOffset: Int)] = []
+    var displayBlockTexts: [(index: Int, kind: String, text: String, startOffset: Int, endOffset: Int)] = []
 
     func snapshot() -> [String: Any] {
         var dict: [String: Any] = [

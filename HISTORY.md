@@ -1,5 +1,34 @@
 # Posey History
 
+## 2026-05-07 (afternoon) — Tier 2 #10: PDF citation marker collapse + verification scaffolding
+
+The earlier "no PDF available" handwave on #10 wasn't acceptable. Did the actual work this time.
+
+**Antenna scaffolding added** so the displayBlocks render path can be inspected by external tests:
+- `RemoteControlState.shared.segmentTexts` — flat snapshot of `viewModel.segments` (sentence-row path).
+- `RemoteControlState.shared.displayBlockTexts` — flat snapshot of `viewModel.displayBlocks` (block path).
+- `ReaderRemoteSnapshotPublisher` ViewModifier — re-publishes both whenever either array's count changes (the initial onAppear publish captures empty arrays because loadContent is async; this keeps the snapshot in sync as content settles).
+- `LIST_SEGMENTS_MATCHING:<regex>` antenna verb — returns up to 50 sentence rows whose text matches the regex.
+- `LIST_DISPLAY_BLOCKS_MATCHING:<regex>` antenna verb — same for displayBlocks; each result includes `kind`.
+
+**Real-PDF survey (3 PDFs from `Posey Test Materials/`):**
+- `Measure What Matters - John Doerr.pdf` — 2 segments contain `[N]` (`[2018]`, `[0]`); 0 splits, 0 artifacts.
+- `Antifa, The Anti-Fascist Handbook.pdf` — 0 `[N]` matches anywhere (uses footnote-style citations).
+- `GEBen.pdf` — 0 `[N]` matches in extracted text (the `strings`-grep hits were in PDF metadata/font streams that never extract).
+
+The bug as described in the punch list does not reproduce on these PDFs with the existing code path. PDFKit's text engine usually normalizes a marker that wraps visually across lines to `[1 2]` (single space inside) rather than `[1\n\n2]` (double newline that would split via `PDFDisplayParser`'s paragraph segmenter).
+
+**Synthetic worst-case (`/tmp/cite-test.pdf`):** built via `cupsfilter` from a TXT containing `[1\n\n2]` deliberately. PDFKit extracted it as `[1 2]` — single space inside the marker. This isn't the punch-list split bug exactly, but it's an adjacent real defect: the citation reads aloud as "one two" instead of "twelve" and Ask Posey embeddings see the wrong token.
+
+**Fix.** Added `PDFDocumentImporter.collapseWhitespaceInsideNumericBrackets(_:)` — regex `\[\s*\d[\d\s]*\]` finds any `[…digits + whitespace…]` token, collapses internal whitespace. Applied at importer time to both `displayText` and `plainText` so the canonical `[N]` form propagates through every downstream surface (reader, search, embeddings, TTS). Non-numeric brackets (`[Smith 2003]`) are intentionally left alone — those aren't atomic markers. Also defensively prevents the `[1\n\n2]`-splits-across-paragraphs case if a future PDF produces such text.
+
+**Three Hats verification.**
+- **Developer**: builds clean for both targets.
+- **QA**: imported `/tmp/cite-test.pdf` on simulator AND iPhone. Pre-fix: `[1 2]` in plainText/segment/displayBlock. Post-fix: `[12]` everywhere. `LIST_DISPLAY_BLOCKS_MATCHING:\[[0-9]+$` (split bug pattern) returns 0 on both. `LIST_SEGMENTS_MATCHING:\[\d+\s+\d+\]` (artifact pattern) returns 0 on both.
+- **User**: a citation that visually wraps across PDF lines now reads correctly as a single number both in the rendered text and the spoken audio.
+
+#10 closed. The new antenna verbs are durable test infrastructure.
+
 ## 2026-05-07 (afternoon) — Tier 2 #9 verified: RTF paragraph boundaries clean on both hardware
 
 **Test case.** `/tmp/par-test.rtf` — RTF with `\par` boundary between an unterminated heading-like line ("Section 1") and a continuing paragraph ("is a paragraph that follows…").

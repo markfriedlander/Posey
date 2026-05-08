@@ -1531,6 +1531,69 @@ extension LibraryViewModel {
                 }
                 return json(["documentID": idStr, "count": toc.count, "entries": arr])
 
+            case "LIST_SEGMENTS_MATCHING":
+                // 2026-05-07 (parity #10): return up to 50 sentence
+                // segments from the currently visible document whose
+                // text matches the supplied regex. Drives any test
+                // that needs to verify how the segmenter handles a
+                // specific text pattern (citation markers, abbrevs,
+                // tricky punctuation) without scrolling visually.
+                guard let pattern = arg, !pattern.isEmpty else {
+                    return #"{"error":"Usage: LIST_SEGMENTS_MATCHING:<regex>"}"#
+                }
+                guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                    return #"{"error":"Invalid regex"}"#
+                }
+                let snap = await MainActor.run { RemoteControlState.shared.segmentTexts }
+                let matches = snap.compactMap { entry -> [String: Any]? in
+                    let range = NSRange(entry.text.startIndex..., in: entry.text)
+                    guard regex.firstMatch(in: entry.text, range: range) != nil else { return nil }
+                    return [
+                        "index": entry.index,
+                        "text": entry.text,
+                        "startOffset": entry.startOffset,
+                        "endOffset": entry.endOffset
+                    ]
+                }
+                let capped = Array(matches.prefix(50))
+                return json([
+                    "totalMatched": matches.count,
+                    "returned": capped.count,
+                    "segments": capped
+                ])
+
+            case "LIST_DISPLAY_BLOCKS_MATCHING":
+                // 2026-05-07 (parity #10): same as
+                // LIST_SEGMENTS_MATCHING but for the displayBlocks
+                // render path (MD always, PDF, DOCX/HTML/EPUB with
+                // images). Each result includes the block's `kind`
+                // so paragraph vs heading vs visualPlaceholder is
+                // visible.
+                guard let pattern = arg, !pattern.isEmpty else {
+                    return #"{"error":"Usage: LIST_DISPLAY_BLOCKS_MATCHING:<regex>"}"#
+                }
+                guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                    return #"{"error":"Invalid regex"}"#
+                }
+                let snap = await MainActor.run { RemoteControlState.shared.displayBlockTexts }
+                let matches = snap.compactMap { entry -> [String: Any]? in
+                    let range = NSRange(entry.text.startIndex..., in: entry.text)
+                    guard regex.firstMatch(in: entry.text, range: range) != nil else { return nil }
+                    return [
+                        "index": entry.index,
+                        "kind": entry.kind,
+                        "text": entry.text,
+                        "startOffset": entry.startOffset,
+                        "endOffset": entry.endOffset
+                    ]
+                }
+                let capped = Array(matches.prefix(50))
+                return json([
+                    "totalMatched": matches.count,
+                    "returned": capped.count,
+                    "displayBlocks": capped
+                ])
+
             // ===== Remote-control verbs (2026-05-02) ===========================
             // Build per Mark's directive: the API must be able to do everything
             // a human can do that isn't blocked by Apple security policies.

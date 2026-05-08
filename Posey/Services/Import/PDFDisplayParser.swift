@@ -87,6 +87,7 @@ struct PDFDisplayParser {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+
     private func normalizePage(_ page: String) -> String {
         page
             .replacingOccurrences(of: "\r\n", with: "\n")

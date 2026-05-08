@@ -199,9 +199,21 @@ extension PDFDocumentImporter {
                 }
             }
             .joined(separator: "\u{000C}")
-        let displayText = TextNormalizer.stripLineBreakHyphens(joinedDisplay)
+        let preDisplayText = TextNormalizer.stripLineBreakHyphens(joinedDisplay)
+        let prePlainText = readableTextPages.joined(separator: "\n\n")
 
-        let plainText = readableTextPages.joined(separator: "\n\n")
+        // 2026-05-07 (parity #10): collapse whitespace inside any
+        // numeric bracketed marker (`[12]`, `[1 2]`, `[1\n2]`,
+        // `[1\n\n2]`) so citation markers remain atomic. PDFKit's
+        // text engine often inserts a space between digits when a
+        // marker visually wraps across lines (`[12]` → `[1 2]`),
+        // and rarer `[1\n\n2]` patterns would otherwise be split
+        // across DisplayBlocks by `PDFDisplayParser`'s paragraph
+        // segmenter. Apply to both displayText and plainText so the
+        // marker reads correctly in the rendered text AND through
+        // search / Ask Posey embeddings / TTS.
+        let displayText = Self.collapseWhitespaceInsideNumericBrackets(preDisplayText)
+        let plainText = Self.collapseWhitespaceInsideNumericBrackets(prePlainText)
         let rawTitle = (document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // Discard titles that look like file paths (Windows or Unix) — use filename fallback instead.
@@ -500,6 +512,34 @@ extension PDFDocumentImporter {
     /// Format: `[[POSEY_VISUAL_PAGE:<pageNumber>:<imageID>]]`
     static func visualPageMarker(for pageNumber: Int, imageID: String) -> String {
         "\(visualPageMarkerPrefix)\(pageNumber):\(imageID)\(visualPageMarkerSuffix)"
+    }
+
+    /// 2026-05-07 (parity #10): collapse all whitespace inside any
+    /// numeric bracketed marker (`[12]`, `[1 2]`, `[1\n2]`, …). PDFKit
+    /// frequently inserts spaces and/or newlines inside markers when
+    /// they wrap visually across lines or pages; both produce broken
+    /// markers downstream (a `\n\n` inside `[1\n\n2]` would split the
+    /// marker across two displayBlocks via `PDFDisplayParser`'s
+    /// paragraph segmenter; a single space yields a wrong marker
+    /// `[1 2]` in plainText that's read aloud and indexed). Collapsing
+    /// at the importer means both `displayText` and `plainText`
+    /// contain the canonical `[N]` form. Non-numeric brackets
+    /// (`[Smith 2003]`) are left alone.
+    static func collapseWhitespaceInsideNumericBrackets(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"\[\s*\d[\d\s]*\]"#,
+            options: [.dotMatchesLineSeparators]
+        ) else { return text }
+        var result = text
+        let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+        for match in matches.reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            let collapsed = result[range]
+                .components(separatedBy: .whitespacesAndNewlines)
+                .joined()
+            result.replaceSubrange(range, with: collapsed)
+        }
+        return result
     }
 
     /// Parses both old-format `[[POSEY_VISUAL_PAGE:N]]` and new-format `[[POSEY_VISUAL_PAGE:N:UUID]]`.

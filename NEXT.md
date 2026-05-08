@@ -29,7 +29,7 @@ Working through the 17-item Tier 1–4 punch list. Status:
 14. ✅ Quick-actions in-sheet menu items reachable via TAP API — closed in `d030673`. Outer-sparkle `.remoteRegister` chain on `AskPoseyView.quickActionsMenu`.
 15. ✅ Antenna defaults OFF in Release builds — `LocalAPIServer` 0 symbols, verb strings 0, support classes Release no-op stubs. Closed in `d030673`. (Note: ~67 inert support-class symbols still ship — strict zero would need ~70 call-site `#if DEBUG` guards.)
 16. ⏳ App icon. Present at 1024×1024 source with light/dark/tinted variants. Mark needs to eyeball home-screen-scale on iPhone — antenna can't screenshot springboard.
-17. ⏳ qa_battery.sh full run — needs iPhone (real AFM). 12 /ask calls × ~3s + AFM time ≈ 5-10 min runtime.
+17. ✅ qa_battery.sh full run — executed on iPhone 2026-05-07. 12/12 answers acceptable across AI Book / Copyright PDF / Internet Steps PDF; 4/4 not-in-doc cases produced honest non-answers (3× "the document doesn't say", 1× graceful guidance refusal). No hallucinations, citations attached where appropriate. See HISTORY entry.
 
 **Large-document loading hint** (Mark's directive between Tiers 2 and 3) — closed in `d030673`. "Large document — this may take a few seconds." caption shown when `characterCount > 200_000`. Verified on 4-Hour Body EPUB (967K chars), both targets.
 

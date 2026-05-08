@@ -1,5 +1,19 @@
 # Posey History
 
+## 2026-05-07 (afternoon) — Tier 1 #6 re-verified on both hardware
+
+The earlier #6 commit (DOCX TOC field strip = no code change needed) was empirically verified on iPhone only. Per the rules that's not enough. Re-doing it on both hardware:
+
+**Test case.** `/tmp/docx-toc-test.docx` — synthetic DOCX with an embedded Word `TOC` field (`<w:fldChar w:fldCharType="separate">…<w:fldChar w:fldCharType="end">`) wrapping rendered TOC content (Chapter One … 1, Chapter Two … 5, Chapter Three … 9), followed by real chapter body text.
+
+**Sim result.** plainText = `'Table of Contents\n\nChapter One\n\nThis is the actual chapter one body text.\n\nChapter Two\n\nThis is the actual chapter two body text.'` — TOC-field artifacts (`Chapter One … 1`, `\t1`, `\t5`, `\t9`, `Three`) all absent.
+
+**iPhone result.** plainText identical to sim. Same artifacts absent.
+
+**Three Hats.** Developer: code is `WordDocumentXMLExtractor.insideTOCContent` flag, unchanged. QA: TOC field text is suppressed at extract time, identical behavior on both targets. User: a DOCX with a Word TOC field reads aloud cleanly — the TOC isn't pronounced, only the actual chapter body text. Equivalent to PDF's `tocSkipUntilOffset` mechanism with the difference that the TOC text is removed entirely (DOCX) vs preserved-but-skipped (PDF). Either way the user doesn't hear it.
+
+#6 closed for real this time. RTF deferral note unchanged: niche dot-leader-text-as-paragraphs case is still deferred (would need a `PDFTOCDetector`-style detector adapted for RTF text).
+
 ## 2026-05-07 (afternoon) — Tier 1 #5 closed: Voice picker empty state + antenna scaffolding
 
 Closing the deferred half of #5. Added the antenna scaffolding the verification needed and re-applied the Voice picker empty state.

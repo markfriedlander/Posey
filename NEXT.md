@@ -16,8 +16,11 @@ Working through the 17-item Tier 1–4 punch list. Status:
 **Tier 2 — Visible bugs in shipped behavior**
 8. ✅ PLAYBACK_RESTART → idle — verified two-hardware via new `DEBUG_FORCE_PLAYBACK_STATE` antenna verb. No code change needed.
 9. ✅ RTF paragraph concatenation — verified two-hardware. plainText keeps `\n` boundary; sentence-row renderer puts each paragraph on its own row on both targets.
-10. ✅ PDF citation marker — `PDFDocumentImporter.collapseWhitespaceInsideNumericBrackets` collapses any `[…digits + ws…]` token (including the bug-pattern `[1\n\n2]` that would otherwise split across paragraphs, plus the more common `[1 2]` artifact PDFKit produces when a marker wraps visually). Applied to displayText and plainText. Verified two-hardware via new `LIST_DISPLAY_BLOCKS_MATCHING` / `LIST_SEGMENTS_MATCHING` antenna verbs against three real PDFs and a synthetic worst-case.
-11-12. ⏳ #11 (HTML NBSPs), #12 (RTF form-feed) — pending.
+10. ✅ PDF citation marker — `PDFDocumentImporter.collapseWhitespaceInsideNumericBrackets` collapses any `[…digits + ws…]` token. Two-hardware verified.
+11. ✅ HTML NBSPs — `HTMLDocumentImporter.normalize` strips `\u{00A0}`. Two-hardware verified (fresh import → 0 NBSPs).
+12. ✅ RTF form-feed — `TextNormalizer.stripMojibakeAndControlCharacters` strips all C0 controls including U+000C. Two-hardware verified (RTF with `\page` → 0 form-feeds in plainText).
+
+**Tier 2 complete.** Ready for Tier 3.
 
 **Tier 3 — Polish**
 13-17. Pending.

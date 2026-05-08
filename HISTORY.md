@@ -1,5 +1,37 @@
 # Posey History
 
+## 2026-05-07 (evening) — Tier 2 #12 verified + Tier 2 complete
+
+**Test case for #12.** `/tmp/ff-test.rtf` — three paragraphs separated by `\par` and an explicit `\page` (page-break control word).
+
+**Sim and iPhone both produce:** `plainText` = `'First section.\nSecond section after explicit page break.\nThird section'` — form-feed count (U+000C) = 0 on both. `TextNormalizer.stripMojibakeAndControlCharacters` strips C0 controls (any `v < 0x20`) and the RTF importer routes through it.
+
+**Three Hats.** Developer: TextNormalizer pass already in place. QA: empirical confirmation on both targets. User: an RTF with embedded page breaks reads cleanly without unpronounceable artifacts.
+
+#12 closed.
+
+**Tier 2 complete.** All seven items (#7 through #12) closed with two-hardware Three Hats verification:
+- #7: Saved Annotations preview — body text, code change shipped (`b60bce9`)
+- #8: PLAYBACK_RESTART → idle — verified via `DEBUG_FORCE_PLAYBACK_STATE` antenna verb (`07b199c`)
+- #9: RTF paragraph boundaries clean — verified via empirical inspection (`97c33a2`)
+- #10: PDF citation marker collapse — code change + `LIST_*_MATCHING` antenna verbs (`f29fd1e`)
+- #11: HTML NBSPs stripped — verified
+- #12: RTF form-feed stripped — verified
+
+Net new antenna scaffolding from this Tier 2 pass: `OPEN_VOICE_PICKER_SHEET`, `POSEY_DEBUG_VOICE_PICKER_EMPTY` env var, `DEBUG_FORCE_PLAYBACK_STATE`, `LIST_SEGMENTS_MATCHING`, `LIST_DISPLAY_BLOCKS_MATCHING` — all durable test infrastructure.
+
+## 2026-05-07 (afternoon) — Tier 2 #11 verified: HTML NBSPs stripped at import on both hardware
+
+**Test case.** `/tmp/nbsp-test.html` — three paragraphs containing `&nbsp;` entities, `&#160;` numeric entities, and consecutive `&nbsp;` runs.
+
+**Sim and iPhone both produce:** `plainText` = `'Word with NBSP between each word.\n\nAnd also numeric entity form.\n\nRaw   multiple consecutive.'` — NBSP count = 0 on both. The `HTMLDocumentImporter.normalize()` line `t = t.replacingOccurrences(of: "\u{00A0}", with: " ")` correctly converts at import time.
+
+The 519 NBSPs Mark observed on the Estuaries doc are stored stale data from a pre-fix import — the importer is now correct; old docs need re-import to refresh.
+
+**Three Hats.** Developer: code unchanged (`replacingOccurrences` already in place). QA: empirical confirmation on both targets. User: a fresh HTML import reads naturally without the stuck-token spacing NBSP would produce in TTS.
+
+#11 closed.
+
 ## 2026-05-07 (afternoon) — Tier 2 #10: PDF citation marker collapse + verification scaffolding
 
 The earlier "no PDF available" handwave on #10 wasn't acceptable. Did the actual work this time.

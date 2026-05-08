@@ -129,6 +129,12 @@ extension Notification.Name {
     /// (which the antenna's TAP verb can't reach via registry or
     /// accessibility-tree fallback).
     static let remoteOpenVoicePickerSheet = Notification.Name("PoseyRemoteOpenVoicePickerSheet")
+    /// 2026-05-07 (parity #8): userInfo `["state": <"idle"|"playing"|"paused"|"finished">]`.
+    /// ReaderView observes; calls `playbackService.debugForceState(...)`
+    /// so the antenna can verify state transitions that are otherwise
+    /// hard to reach (e.g. natural end-of-doc → `.finished` would
+    /// require playing through the whole document).
+    static let remoteDebugForcePlaybackState = Notification.Name("PoseyRemoteDebugForcePlaybackState")
     /// No userInfo. ReaderPreferencesSheet observes; sets the sheet's
     /// internal `isShowingAudioExport` state.
     static let remoteOpenAudioExportSheet = Notification.Name("PoseyRemoteOpenAudioExportSheet")

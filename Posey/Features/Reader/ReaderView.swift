@@ -1652,6 +1652,14 @@ private struct ReaderRemoteControlPlaybackObservers: ViewModifier {
                 guard matches(note, viewModel: viewModel) else { return }
                 viewModel.restartFromBeginning()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteDebugForcePlaybackState)) { note in
+                // No doc-id matching — the verb is global; whatever
+                // doc is currently visible gets the state forced. The
+                // viewModel guards by checking its own segments so
+                // nothing breaks if no doc is open.
+                guard let stateName = note.userInfo?["state"] as? String else { return }
+                viewModel.debugForcePlaybackState(stateName)
+            }
             .onReceive(viewModel.$playbackState) { newState in
                 let label: String
                 switch newState {
@@ -3104,6 +3112,22 @@ final class ReaderViewModel: ObservableObject {
         playbackService.stop()
         playbackService.prepare(at: currentSentenceIndex)
         persistPosition()
+    }
+
+    /// 2026-05-07 (parity #8): test-only state forcer. Routes the
+    /// antenna's `DEBUG_FORCE_PLAYBACK_STATE` verb through the view
+    /// model so external tests can set up state transitions that
+    /// would otherwise require playing real audio (e.g. .finished
+    /// from natural end-of-doc).
+    func debugForcePlaybackState(_ stateName: String) {
+        let target: SpeechPlaybackService.PlaybackState
+        switch stateName.lowercased() {
+        case "playing":  target = .playing
+        case "paused":   target = .paused
+        case "finished": target = .finished
+        default:         target = .idle
+        }
+        playbackService.debugForceState(target)
     }
 
     func prepareForNotesEntry() {

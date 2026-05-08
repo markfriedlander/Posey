@@ -1,5 +1,19 @@
 # Posey History
 
+## 2026-05-07 (afternoon) — Tier 2 #9 verified: RTF paragraph boundaries clean on both hardware
+
+**Test case.** `/tmp/par-test.rtf` — RTF with `\par` boundary between an unterminated heading-like line ("Section 1") and a continuing paragraph ("is a paragraph that follows…").
+
+**Sim and iPhone both show:**
+- plainText: `'Section 1\nis a paragraph that follows the section heading without explicit spacing.\n…'` — `\n` between paragraphs, no concatenation
+- Visual rendering: "Section 1" on its own sentence row, "is a paragraph that follows…" on its own row, both on each hardware (`/tmp/sshots/sim-par.png`, `/tmp/sshots/iphone-par.png`)
+- Bug pattern check: `'Section 1is'` is NOT in plainText on either target
+- Correct pattern check: `'Section 1\n'` IS in plainText on both targets
+
+**Three Hats.** Developer: code is `RTFDocumentImporter`'s NSAttributedString-based extraction; nothing changed. QA: both empirical text inspection and visual rendering confirm boundary preservation across hardware. User: `\par` boundaries produce visible row breaks; the dropped-trailing-space artifact described in the punch list does not reproduce on the current code.
+
+#9 closed.
+
 ## 2026-05-07 (afternoon) — Tier 2 #8 verified: PLAYBACK_RESTART → idle on both hardware
 
 The earlier #8 spot-check was iPhone-only and used pre-existing state (the iPhone happened to be in a `.finished` state from a prior session). For proper rule-compliant verification I needed a way to reliably set the playback service into `.finished` without playing through a whole document.

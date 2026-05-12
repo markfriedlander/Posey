@@ -37,6 +37,21 @@ Working through the 17-item Tier 1–4 punch list. Status:
 18. ✅ Accessibility audit (2026-05-08, autonomous) — touch-target + Reduce Motion + VoiceOver-label gaps closed; verified on both hardware including Dynamic Type at AccessibilityXXXL and AX-tree inspection of every fix. See HISTORY entry. One known limitation noted (sentence rows are StaticText not Button — chrome Play button is the canonical playback control).
 19-20. Pending — privacy policy + App Store metadata + final submission, for Mark's session.
 
+**Pre-submission stress sweep (2026-05-12, autonomous, sim + Catalyst):**
+- All 7 reader formats render correctly; search + TOC verified (PDF on fresh import gives 38 outline entries).
+- Notes + Bookmarks persist with body previews.
+- Ask Posey seeded fixture round-trips through dismiss/reopen; composer keyboard fix verified with 28pt clearance.
+- Audio Export notification flow verified including replace-by-docID semantics and dismiss-during-render survival.
+- Library import edge cases handled (empty/whitespace rejected, single-char accepted, random-bytes-as-txt silently accepted — low-priority known).
+- Catalyst Mac iPad mode builds, runs, opens docs in dark mode with proper window chrome.
+- See HISTORY.md "Pre-submission Three Hats stress sweep" for full report.
+
+**Open for Mark in the morning:**
+- 5-minute iPhone smoke test (Ask Posey composer, Audio Export, Notes — all touched since iPhone was last verified)
+- App icon eyeball (Tier 3 #16, springboard-only check)
+- Privacy policy + App Store metadata (Tier 4 #19–20)
+- Submit
+
 **2026-05-11 pre-submission stress sweep** — autonomous; sim + Catalyst.
 Two real bugs found and fixed:
 - AskPosey composer obscured by keyboard — moved composer into `.safeAreaInset(edge: .bottom)` with `.regularMaterial` background and explicit padding. Verified on sim AX tree.

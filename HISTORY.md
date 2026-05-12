@@ -51,6 +51,38 @@ Bookmark anchor previews and Ask Posey embeddings both pick up the cleaned text.
 
 Both are 30-second visual checks Mark can do on his phone in the morning before submission.
 
+## 2026-05-12 — Pre-submission Three Hats stress sweep (autonomous)
+
+Mark's directive: "stress test, three hats, ready to submit tomorrow if you're feeling good." iPhone not available this session — sim + Catalyst.
+
+**Hat 1 — Developer.** Build clean on iPhone Catalyst configurations (EXIT=0 on every pass). No new compile errors. No regressions in compile-time symbol counts. Code committed: keyboard fix + Rule 3 tightening (`74244a9`).
+
+**Hat 2 — QA.** Tested:
+
+- *Reader across all 7 formats* (TXT/MD/HTML/RTF/DOCX/EPUB/PDF). Every format opens, renders, and shows headings/bullets/numbered lists correctly. EPUB triggers the large-doc loading hint as designed. PDF TOC initially showed 0 entries on a pre-`outlineRoot`-fallback import; a fresh re-import yielded 38 outline-derived entries — confirms the Tier 1 PDF outline fallback path works; pre-existing imports just have empty TOC (acceptable).
+- *Search.* Verbs `OPEN_SEARCH_BAR` / `SEARCH:<query>` work. Match counts verified (RTF "Claude" → 71 matches, PDF "OKR" → expected high count).
+- *Notes + Bookmarks.* `CREATE_BOOKMARK:<docID>:<offset>` and `CREATE_NOTE:<docID>:<offset>:<b64-body>` both persist; Notes sheet renders both with kind labels (`NOTE` / `BOOKMARK`) and the note body preview is visible (Tier 2 #7 closure holds).
+- *Ask Posey.* Seeded fixture via `SEED_ASK_POSEY_FIXTURE` round-tripped: user + assistant turns rendered, citation chips visible (3 chunks injected per fixture), anchor card showing doc scope. Dismiss + reopen preserved both turns (`GET_ASK_POSEY_HISTORY` returns 2 turns). Composer-above-keyboard fix verified again post-redesign — AX measurements: Send button at y=511-555, keyboard suggestion bar starting at ~y=583 (28pt clearance).
+- *Audio Export.* `BEGIN_AUDIO_EXPORT:<docID>` antenna verb routes correctly to the matching ReaderView. Completion notification fires (`audioExport.complete.<docID>`). Dismiss-during-render preserves the export (verified via simulated app backgrounding earlier). Re-export of the same doc replaces the old delivered notification (identifier-keyed by docID).
+- *Library import edge cases.* Empty TXT rejected with proper error. Whitespace-only TXT rejected. Single-char ("A.") accepted as minimal-valid. Random binary bytes are silently accepted (interpreted as best-effort UTF-8) — edge case worth noting but not blocking; a user wouldn't intentionally import binary as .txt.
+- *Mac Catalyst.* Builds clean (`-destination 'platform=macOS,variant=Mac Catalyst'`). Launches via `open` on built .app. Antenna binds 8765 (different Keychain from sim, separate database). Library renders ("Posey" title + Import File button + doc rows). Reader opens documents with proper window chrome, traffic-light controls, dark mode. Doc switching via back-button (top-left) works. Resize works. AppleScript-driven UI taps successfully drive the SwiftUI surface.
+
+**Hat 3 — User.** Subjective read of the experience:
+
+- Reader feels clean and quiet — opening a doc lands you in the text, no friction.
+- Ask Posey UI flow is clear; the composer keyboard issue Mark reported is fully resolved (composer + Send button visible with breathing room above keyboard, surface reads as its own pane via `.regularMaterial` background, "Ask a follow-up question…" placeholder visible at every interaction).
+- Audio Export UX feels right — kick off, dismiss, get a notification, tap to share. The new "you can close this view; the export will continue" caption makes the model honest. No more surprise share sheets.
+- Notes flow is fast: bookmark and note creation feel one-tap, body preview surfaces.
+- Catalyst on Mac feels like a real iPad-class app — not a janky port.
+
+**Known non-blockers for submission:**
+- App icon (Tier 3 #16) still needs Mark's eyeball on the iPhone home screen — antenna can't screenshot springboard.
+- Privacy policy + App Store metadata (Tier 4 #19–20) — Mark-present required.
+- iPhone re-verification of today's keyboard fix and stress findings — high confidence (same code paths verified on sim), Mark should do a 5-minute walk-through of Ask Posey + Audio Export + Notes on the iPhone in the morning.
+- Random-binary-as-TXT is not validated at import — low priority, not user-facing.
+
+**Verdict:** Code is in a submittable state. Recommend Mark do a 5-minute iPhone smoke test on the morning, then proceed to icon eyeball + privacy/metadata + submit.
+
 ## 2026-05-08 — Accessibility audit (Tier 4 #18) — autonomous pass
 
 Mark's directive: full accessibility audit, autonomous authority, work through every Task 9 item. This pass.

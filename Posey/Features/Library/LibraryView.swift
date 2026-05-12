@@ -240,6 +240,18 @@ struct LibraryView: View {
                 if viewModel.localAPIEnabled && !viewModel.localAPIServer.isRunning {
                     viewModel.toggleLocalAPI(showConnectionInfo: false)
                 }
+                #else
+                // 2026-05-12 — defense-in-depth: even if a prior DEBUG
+                // install's @AppStorage value for `localAPIEnabled`
+                // persists across to a Release reinstall (TestFlight,
+                // user-built Release, etc.), force-clear it so the
+                // antenna never starts in a Release binary. The
+                // LocalAPIServer file is also #if DEBUG-wrapped so
+                // the antenna can't physically run; this is belt-
+                // and-suspenders.
+                if viewModel.localAPIEnabled {
+                    viewModel.localAPIEnabled = false
+                }
                 #endif
             }
             .onAppear {

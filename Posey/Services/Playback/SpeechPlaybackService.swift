@@ -217,6 +217,10 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         let segment = activeSegments[index]
         let utterance = makeUtterance(for: segment)
         sentenceIndicesByUtteranceID[ObjectIdentifier(utterance)] = segment.id
+        // 2026-05-12 — record the actual string passed to AVSpeechSynthesizer
+        // so PLAYBACK_STOP_BLOCK_TEST can verify no "Visual content on page N"
+        // placeholder text ever reaches TTS. DEBUG-only; Release stub is no-op.
+        RemoteControlState.shared.recordSpokenUtterance(SpeechPlaybackService.utteranceText(for: segment.text))
         synthesizer.speak(utterance)
         nextEnqueueIndex = index + 1
     }

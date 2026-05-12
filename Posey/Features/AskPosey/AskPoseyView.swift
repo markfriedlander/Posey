@@ -360,22 +360,29 @@ struct AskPoseyView: View {
                 // reads as its own surface rather than blending into
                 // the keyboard's white plane.
             }
-            // 2026-05-12 — Mark observed (correctly) that the composer's
-            // bottom edge visually touches the keyboard suggestion bar,
-            // even though the .safeAreaInset technically pins it above.
-            // SwiftUI puts the inset content's bottom flush against the
-            // safe-area boundary (= keyboard top). Add explicit bottom
-            // padding INSIDE the inset content to create breathing room
-            // between the Send button row and the keyboard. 18pt is the
-            // amount that reads as "this is its own surface" without
-            // wasting too much real estate on shorter detents.
+            // 2026-05-12 (v6) — Mark sent an iPhone screenshot showing
+            // the composer's TOP half was covered by the keyboard's
+            // QuickType accessory bar. SwiftUI's `.safeAreaInset`
+            // positions the inset content at the keyboard's "official"
+            // frame top, but iOS overlays the QuickType bar ABOVE
+            // that frame, eating ~50pt of the composer's height.
+            //
+            // Fix: subscribe to UIResponder.keyboardWillChangeFrame
+            // via `KeyboardAccessoryAdditionalInset` which computes the
+            // EXTRA space the keyboard occupies BEYOND what SwiftUI
+            // has already inset for. That delta is applied as bottom
+            // padding INSIDE the safeAreaInset content. When the
+            // keyboard is hidden, delta=0 and the composer sits at
+            // the natural bottom safe area. When the keyboard rises,
+            // delta = (full keyboard frame - what SwiftUI insets)
+            // which on iPhone hardware includes the QuickType bar.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     Divider().opacity(0.4)
                     composer
                 }
-                .padding(.bottom, 18)
                 .background(.regularMaterial)
+                .modifier(KeyboardAccessoryAdditionalInsetModifier())
             }
             .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)

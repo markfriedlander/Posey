@@ -382,7 +382,19 @@ struct AskPoseyView: View {
                     composer
                 }
                 .background(.regularMaterial)
-                .modifier(KeyboardAccessoryAdditionalInsetModifier())
+                // 2026-05-12 (v8) — drive the additional inset off
+                // the composer's @FocusState directly. The earlier
+                // @StateObject + NotificationCenter approach raced
+                // with sheet-presentation auto-focus: the keyboard
+                // notification fired BEFORE the observer's init in
+                // some cases, so the inset never updated. @FocusState
+                // is a reactive SwiftUI binding that updates the view
+                // every time focus changes — robust regardless of
+                // sheet lifecycle timing. 100pt covers iPhone's full
+                // QuickType + Paste/AutoFill accessory chain with
+                // breathing room.
+                .padding(.bottom, composerFocused ? 100 : 0)
+                .animation(.easeInOut(duration: 0.25), value: composerFocused)
             }
             .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)

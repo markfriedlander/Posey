@@ -377,6 +377,24 @@ This section is the Three Hats sign-off for v1 submission. It records what was t
 | **PDF** | Pure-image-page visualPlaceholder generated | ✅ PASS — 36 visualPlaceholder blocks with text "Visual content on page N" |
 | **PDF** | Visual page image renders | ✅ PASS — inline PDF page thumbnail visible at placeholder offset |
 
+### Mark's pushback: real photos, not just synthetic squares (2026-05-12 afternoon)
+
+**Concern:** First-pass DOCX + HTML stress tests used 5 synthetic uniform-color PNGs (red/green/blue/yellow/magenta, 100-1700 bytes each). Those validated the rendering pipeline existed, but didn't exercise JPEG decoding, real photographic data, EXIF metadata, fine detail / gradients, or larger file sizes. EPUB and PDF were already covered with real images (Aesop's JPG plates, Measure What Matters / Crypto book images).
+
+**Re-test:** Built `real-image-stress.docx` + `real-image-stress.html` with 5 real photographic JPEGs from picsum.photos (8KB → 354KB, dimensions 200×100 → 2000×1200, all with EXIF, real gradients and fine detail).
+
+| Format | Test | Result |
+|---|---|---|
+| DOCX (real) | 5 real JPEGs stored | ✅ PASS — `LIST_IMAGES`: 5 |
+| DOCX (real) | Landscape photo (131KB, 1200x800) renders inline | ✅ PASS — bridge/twilight photo with full detail, gradients visible |
+| DOCX (real) | Large photo (354KB, 2000x1200) memory test | ✅ PASS — canyon photo renders, no crash, no truncation |
+| DOCX (real) | Tiny wide banner (8KB, 200x100) | ✅ PASS — wave/ocean photo, wide aspect preserved |
+| HTML (real) | 5 real JPEGs via data URIs stored | ✅ PASS — `LIST_IMAGES`: 5 |
+| HTML (real) | Landscape photo (131KB) renders inline | ✅ PASS — same bridge image, decoded from base64 data URI |
+| HTML (real) | Large photo (354KB) via data URI | ✅ PASS — canyon photo renders correctly from ~470KB base64 payload |
+
+**Verdict:** JPEG decoder, EXIF handling, real photographic data, and memory pressure (up to 354KB single image) all pass cleanly on iPhone. The synthetic-PNG tests still validate alpha-channel handling and edge cases (broken src, consecutive images) that the real-JPEG tests don't, so both sets are complementary.
+
 ### Stop-block playback — partial pass
 
 **Architecture verified:** TTS playback in Measure What Matters progressed 24 → 25 → 27 and **stopped advancing at idx=27 (the visualPlaceholder at offset 3164)**. The cursor stayed pinned indefinitely. Tapping `reader.next` advanced past it to idx=28.

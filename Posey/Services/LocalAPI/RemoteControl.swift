@@ -472,6 +472,21 @@ final class RemoteControlState {
     var segmentTexts: [(index: Int, text: String, startOffset: Int, endOffset: Int)] = []
     var displayBlockTexts: [(index: Int, kind: String, text: String, startOffset: Int, endOffset: Int)] = []
 
+    /// 2026-05-12 — circular log of utterance strings passed to
+    /// `AVSpeechSynthesizer.speak(...)`. Used by `PLAYBACK_STOP_BLOCK_TEST`
+    /// to verify the TTS engine never sees placeholder text like
+    /// "Visual content on page N" — autonomous proxy for Mark's ears.
+    /// Capped at 200 to bound memory; oldest entries fall off.
+    private var _spokenUtterances: [String] = []
+    var spokenUtterances: [String] { _spokenUtterances }
+    func recordSpokenUtterance(_ text: String) {
+        _spokenUtterances.append(text)
+        if _spokenUtterances.count > 200 {
+            _spokenUtterances.removeFirst(_spokenUtterances.count - 200)
+        }
+    }
+    func resetSpokenUtterances() { _spokenUtterances.removeAll() }
+
     func snapshot() -> [String: Any] {
         var dict: [String: Any] = [
             "currentSentenceIndex": currentSentenceIndex,
@@ -528,6 +543,9 @@ final class RemoteControlState {
     var displayBlockTexts: [(index: Int, kind: String, text: String, startOffset: Int, endOffset: Int)] {
         get { [] } set { _ = newValue }
     }
+    var spokenUtterances: [String] { [] }
+    func recordSpokenUtterance(_ text: String) {}
+    func resetSpokenUtterances() {}
     func snapshot() -> [String: Any] { [:] }
 }
 #endif

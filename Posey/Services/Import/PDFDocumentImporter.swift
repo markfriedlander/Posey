@@ -212,8 +212,14 @@ extension PDFDocumentImporter {
         // segmenter. Apply to both displayText and plainText so the
         // marker reads correctly in the rendered text AND through
         // search / Ask Posey embeddings / TTS.
-        let displayText = Self.collapseWhitespaceInsideNumericBrackets(preDisplayText)
-        let plainText = Self.collapseWhitespaceInsideNumericBrackets(prePlainText)
+        // 2026-05-08 — strip PDFKit dimension-metadata artifacts
+        // (e.g. "3.8701 in", "2.4512 in") that leak from cover-page
+        // image alt-text into extracted prose. Discovered on Measure
+        // What Matters first segment. See `stripPDFDimensionArtifacts`.
+        let postDimDisplay = Self.stripPDFDimensionArtifacts(preDisplayText)
+        let postDimPlain = Self.stripPDFDimensionArtifacts(prePlainText)
+        let displayText = Self.collapseWhitespaceInsideNumericBrackets(postDimDisplay)
+        let plainText = Self.collapseWhitespaceInsideNumericBrackets(postDimPlain)
         let rawTitle = (document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // Discard titles that look like file paths (Windows or Unix) — use filename fallback instead.
@@ -525,6 +531,45 @@ extension PDFDocumentImporter {
     /// at the importer means both `displayText` and `plainText`
     /// contain the canonical `[N]` form. Non-numeric brackets
     /// (`[Smith 2003]`) are left alone.
+    /// Strip PDF dimension/positional artifacts that PDFKit's text
+    /// extractor occasionally surfaces from cover-page image metadata.
+    /// Pattern: a decimal number with **3+ fractional digits** followed
+    /// by an inch / cm / mm / pt / px unit. The 3+ fractional digit
+    /// threshold is the discriminator — real English prose almost
+    /// never says "0.123 in"; PDFKit's positional output frequently
+    /// does ("3.8701 in", "2.4512 in", "0.5625 cm").
+    ///
+    /// Discovered 2026-05-08 on `Measure What Matters - John Doerr.pdf`,
+    /// whose first segment surfaced as:
+    /// `"Measure What Matters 3.8701 in How Google, Bono, ... LARRY PAGE 2.4512 in"`.
+    /// Both `3.8701 in` and `2.4512 in` were image-dimension metadata
+    /// from the cover, leaking into the body text and getting both
+    /// read aloud and indexed as if they were prose.
+    ///
+    /// After the artifact strip, collapse the resulting double spaces
+    /// so the surrounding prose reads cleanly.
+    static func stripPDFDimensionArtifacts(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"\s*\b\d+\.\d{3,}\s+(?:in|cm|mm|pt|px)\b"#,
+            options: []
+        ) else { return text }
+        let stripped = regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: ""
+        )
+        // Collapse runs of 2+ ASCII spaces into one (the strip can
+        // leave doubled spaces around the removed artifact). Don't
+        // touch newlines or non-ASCII spaces — those are paragraph /
+        // line structure that other passes care about.
+        guard let wsRegex = try? NSRegularExpression(pattern: #" {2,}"#) else { return stripped }
+        return wsRegex.stringByReplacingMatches(
+            in: stripped,
+            range: NSRange(stripped.startIndex..., in: stripped),
+            withTemplate: " "
+        )
+    }
+
     static func collapseWhitespaceInsideNumericBrackets(_ text: String) -> String {
         guard let regex = try? NSRegularExpression(
             pattern: #"\[\s*\d[\d\s]*\]"#,

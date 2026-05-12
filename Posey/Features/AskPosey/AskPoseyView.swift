@@ -360,11 +360,21 @@ struct AskPoseyView: View {
                 // reads as its own surface rather than blending into
                 // the keyboard's white plane.
             }
+            // 2026-05-12 — Mark observed (correctly) that the composer's
+            // bottom edge visually touches the keyboard suggestion bar,
+            // even though the .safeAreaInset technically pins it above.
+            // SwiftUI puts the inset content's bottom flush against the
+            // safe-area boundary (= keyboard top). Add explicit bottom
+            // padding INSIDE the inset content to create breathing room
+            // between the Send button row and the keyboard. 18pt is the
+            // amount that reads as "this is its own surface" without
+            // wasting too much real estate on shorter detents.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     Divider().opacity(0.4)
                     composer
                 }
+                .padding(.bottom, 18)
                 .background(.regularMaterial)
             }
             .navigationTitle(navigationTitleText)

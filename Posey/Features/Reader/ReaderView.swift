@@ -1460,7 +1460,7 @@ struct ReaderView: View {
         // askPoseyChat is silently swallowed. The /open-ask-posey
         // verb hitting a doc that's already loaded was hitting this.
         let buildAndAssign: () -> Void = {
-            askPoseyChat = AskPoseyChatViewModel(
+            let vm = AskPoseyChatViewModel(
                 documentID: document.id,
                 documentPlainText: document.plainText,
                 documentTitle: document.title,
@@ -1475,6 +1475,15 @@ struct ReaderView: View {
                 initialQuery: initialQuery,
                 autoSubmitInitialQuery: autoSubmitInitialQuery
             )
+            // 2026-05-12 — give the VM a way to ask the IndexingTracker
+            // whether this doc is still indexing. When the weak-RAG
+            // shortcut fires AND indexing is in flight, the VM swaps
+            // its canned refusal for a "still learning" message so
+            // first-time users don't think Posey can't help them.
+            vm.isStillIndexingChecker = { docID in
+                IndexingTracker.sharedForChat.isEnhancing(docID)
+            }
+            askPoseyChat = vm
         }
         // 2026-05-05 — Idempotency: if a sheet is already presenting,
         // a redelivered notification (Library re-posts after delay)

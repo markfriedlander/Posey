@@ -20,6 +20,13 @@ import Combine
 @MainActor
 final class IndexingTracker: ObservableObject {
 
+    /// 2026-05-12 — shared instance for non-View callers (e.g. the
+    /// AskPoseyChatViewModel checking indexing state when deciding
+    /// what message to show on weak retrieval). The View's own
+    /// `@StateObject` instance and this one observe the same
+    /// notifications independently, so values stay in sync.
+    static let sharedForChat = IndexingTracker()
+
     /// Documents currently mid-indexing (background work in flight).
     /// Empty when nothing is being indexed.
     @Published private(set) var indexingDocumentIDs: Set<UUID> = []

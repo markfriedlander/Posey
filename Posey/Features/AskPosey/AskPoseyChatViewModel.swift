@@ -130,6 +130,15 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// so previews/tests can run without a real DB.
     private let databaseManager: DatabaseManager?
 
+    /// 2026-05-12 — Closure the View sets at construction time so the
+    /// VM can ask "is this document still being indexed right now?"
+    /// when deciding what message to surface for a weak-retrieval
+    /// shortcut. Returning true triggers a "Still learning this
+    /// document — try again in a moment" message instead of the
+    /// canned "I'm not finding a strong answer" refusal. View injects
+    /// a closure that calls IndexingTracker.isEnhancing(_:).
+    var isStillIndexingChecker: ((UUID) -> Bool)?
+
     /// Lazily-constructed embedding index for M6 RAG retrieval.
     /// Built on first need from `databaseManager` so M5's empty-RAG
     /// path doesn't pay any setup cost. `nil` whenever the view
@@ -1390,7 +1399,19 @@ extension AskPoseyChatViewModel {
         question: String,
         placeholderID: UUID
     ) async {
-        let answer = "I'm not finding a strong answer to that in the document. I do best when you select a sentence or passage you're curious about and ask me from there — try tapping a line in the reader, then asking again."
+        // 2026-05-12 — distinguish "no good RAG match" (canonical
+        // refusal) from "indexing still in flight" (different message
+        // telling the user to wait, not to rephrase). Indexing race
+        // was a real issue on fresh imports — users would ask Q1, get
+        // the canned refusal, and conclude Posey couldn't help on
+        // their doc. The truth was just: chunks weren't ready yet.
+        let stillIndexing = isStillIndexingChecker?(documentID) ?? false
+        let answer: String
+        if stillIndexing {
+            answer = "I'm still learning this document — chunks are being indexed. Give me a moment and try the same question again. If you have something specific in mind, you can also tap a passage in the reader and ask from there; passage-anchored questions work even before indexing finishes."
+        } else {
+            answer = "I'm not finding a strong answer to that in the document. I do best when you select a sentence or passage you're curious about and ask me from there — try tapping a line in the reader, then asking again."
+        }
         // Replace the streaming placeholder with the honest message.
         if let index = messages.firstIndex(where: { $0.id == placeholderID }) {
             messages[index].content = answer

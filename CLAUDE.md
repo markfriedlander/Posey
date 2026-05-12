@@ -41,9 +41,9 @@ If a change genuinely doesn't touch user-visible behavior (pure refactor of inte
 
 ### Rule 3 — Resize Screenshots Before Reading Them Into Context
 
-**All screenshots must be resized to ≤600px wide before being read into context.** Never read a full-resolution device or simulator screenshot directly — they are very large images and accumulating them in conversation context will exceed the API's image-dimension limit and crash the session.
+**All screenshots must be resized to ≤300px wide (thumbnail) before being read into context.** Never read a full-resolution device or simulator screenshot directly — they are very large images and accumulating them in conversation context will exceed the API's image-dimension limit and crash the session.
 
-Standing procedure: after any `SCREENSHOT` verb or simulator screenshot, immediately run `sips -Z 600 <file>.png` before invoking the Read tool on it. 600px is plenty to verify "the heading is large and bold" or "the bullet rendered" — anything that needs more pixels needs a different verification approach (read accessibility tree, query state via the API), not a bigger image.
+Standing procedure: after any `SCREENSHOT` verb or simulator screenshot, immediately run `sips -Z 300 <file>.png` before invoking the Read tool on it. 300px (thumbnail) is plenty to verify "the heading is large and bold," "the bullet rendered," or "the composer is above the keyboard" — anything that needs more pixels needs a different verification approach (read accessibility tree, query state via the API), not a bigger image. Mark tightened the limit from 600px → 300px on 2026-05-12 after observing that even 600px images accumulated dangerously in context.
 
 Beyond per-image size: don't accumulate screenshots in context unnecessarily. Each one consumed is real budget. Re-read a screenshot only if you need to verify a different thing about it; otherwise trust your first look. This rule cost previous CC instances entire sessions — do not repeat it.
 

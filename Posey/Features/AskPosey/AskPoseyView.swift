@@ -339,19 +339,24 @@ struct AskPoseyView: View {
                     }
                 }
 
-                // 2026-05-12 — Reverted the keyboard-avoidance
-                // "fixes" (v2 through v8) that introduced a regression
-                // Mark caught. The original code — plain `composer`
-                // as the trailing VStack child with a Divider above
-                // it — worked correctly with SwiftUI's default
-                // keyboard inset. Every attempt to "improve" it
-                // (safeAreaInset, additional padding, focus-state
-                // tricks, notification observers) made the visual
-                // worse. Returning to the simple pattern that works.
+                // 2026-05-12 — Mark confirmed (with iPhone screenshot
+                // at 1:19 PM) that even the original simple architecture
+                // (composer as plain VStack child) leaves the composer
+                // partially covered by the keyboard's QuickType bar on
+                // real iPhone hardware. SwiftUI's auto-inset pushes the
+                // composer to the keyboard's primary frame top, but
+                // iOS overlays the QuickType suggestion bar ABOVE that.
+                // The fix is additive: keep SwiftUI's auto-inset AND
+                // add an explicit 60pt bottom padding when the composer
+                // is focused. 60pt covers iPhone's QuickType bar height
+                // with breathing room. Drives off @FocusState so the
+                // padding animates in/out cleanly with focus changes.
 
                 Divider().opacity(0.4)
 
                 composer
+                    .padding(.bottom, composerFocused ? 60 : 0)
+                    .animation(.easeInOut(duration: 0.25), value: composerFocused)
             }
             .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)

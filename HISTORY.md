@@ -1,5 +1,56 @@
 # Posey History
 
+## 2026-05-11 — Pre-submission stress testing pass (autonomous, sim + Catalyst)
+
+Mark requested broad Three Hats stress testing across all surfaces ahead of submission tomorrow. iPhone unavailable this session — all verification on iPhone 17 Pro simulator (`7D4E1F1A-E7EC-4C42-BDF1-BF3BC72F4352`) plus Mac Catalyst. Two real bugs found and fixed.
+
+**Bug 1 — AskPosey composer obscured by keyboard.** Mark reported the textfield disappearing behind the keyboard when focused. Repro on sim was immediate.
+
+Root cause: composer was the bottom child of a VStack inside a sheet that uses `.presentationContentInteraction(.scrolls)`. That modifier breaks SwiftUI's default keyboard inset adjustment — the keyboard rose over the composer instead of pushing it up.
+
+Fix: moved the composer (and its preceding Divider) into a `.safeAreaInset(edge: .bottom)` modifier on the inner VStack — the SwiftUI idiomatic chat-input pattern. First attempt put the composer at the safe-area boundary, but the Send button's lower 20pt still overlapped the keyboard's suggestion bar. Bumped composer's bottom padding 10pt → 14pt and switched the inset wrapper background from `.thinMaterial` (composer-only) to `.regularMaterial` (around the Divider+composer pair) so the composer reads as a distinct surface instead of blending into the keyboard's white plane. Also added `.frame(minHeight: 28)` to the TextField so the empty composer doesn't collapse to a thin invisible strip when `axis: .vertical` is used.
+
+Verified on sim AX tree: composer textfield at y=522 (height 16), Send button at y=511–555, keyboard suggestion bar at y=583+ → 28pt clearance. Visual screenshot `/tmp/sshots/sim-ap-kb-final-600.png` confirms placeholder, sparkle, Send, and Cancel all clearly visible above keyboard.
+
+**Bug 2 — PDF dimension artifacts in extracted text.** Discovered while stress-testing the PDF format on `Measure What Matters - John Doerr.pdf`. The first segment surfaced as:
+
+> Measure What Matters **3.8701 in** How Google, Bono, and the Gates Foundation Rock the World with OKRs John Doerr WITH A FOREWORD BY LARRY PAGE **2.4512 in**
+
+The "3.8701 in" and "2.4512 in" are PDFKit-extracted positional metadata from the cover image leaking into the body text. They get read aloud by TTS, indexed for Ask Posey embeddings, and shown in bookmark anchor previews — every downstream surface inherits the artifact.
+
+Fix: new `PDFDocumentImporter.stripPDFDimensionArtifacts(_:)` static helper. Pattern `\b\d+\.\d{3,}\s+(?:in|cm|mm|pt|px)\b` — the **3+ fractional digit threshold** is the discriminator. Real English prose almost never says "0.123 in"; PDFKit's positional output frequently does ("3.8701 in", "2.4512 in", "0.5625 cm"). Stripped early in `loadDocument` for both `displayText` and `plainText`, then collapses the resulting double-spaces. After re-import, the cover text reads cleanly:
+
+> Measure What Matters How Google, Bono, and the Gates Foundation Rock the World with OKRs John Doerr WITH A FOREWORD BY LARRY PAGE
+
+Bookmark anchor previews and Ask Posey embeddings both pick up the cleaned text.
+
+**Stress-test sweep coverage**
+
+| Surface | Result |
+|---|---|
+| Reader open: TXT / MD / HTML / RTF / DOCX / EPUB / PDF | ✓ all formats render correctly. MD heading typography, HTML bullets, RTF "Introduction:" heading + paragraphs, DOCX heading + bullet list, EPUB large-doc loading hint, PDF after fix |
+| Reader search | ✓ "Andy Grove" → 58 matches, "OKR" → 677 matches across 430K-char PDF |
+| Reader TOC | ✓ PDF "Contents" sheet shows PRAISE FOR / TITLE PAGE / COPYRIGHT / DEDICATION / FOREWORD / PART ONE / numbered chapters |
+| Notes/Bookmarks | ✓ Bookmark + Note created via `CREATE_BOOKMARK` / `CREATE_NOTE` (with base64 body) — both render in Saved Annotations with anchor preview text. Bookmark anchor shows the post-fix clean PDF cover text |
+| Audio Export — dismiss-during-render | ✓ Sheet dismissed mid-render; export continued in background; completion notification delivered |
+| Audio Export — sequential exports | ✓ Three notifications delivered: 2 complete + 1 cancelled (correct UX — newer export superseded prior) |
+| Audio Export — Catalyst | ✓ M4A file written (37KB) on Catalyst. Notification not scheduled because permission gate returned `notDetermined` (no UI to grant on locked-display Mac) — correct behavior; first-run user would see the prompt |
+| Mac Catalyst build | ✓ Builds clean (`Debug-maccatalyst/Posey.app`); launches; antenna binds to localhost:8765 with its own token; LIST_DOCUMENTS, OPEN_DOCUMENT, GET_TEXT all functional |
+| Ask Posey edge inputs | ✓ Empty question returns clean "Missing or empty question" error; AFM-unavailable case returns friendly "Posey couldn't answer that one. Try rephrasing…" fallback (not a raw FoundationModels error) |
+
+**Three Hats sign-off**
+
+- **Developer**: builds clean for both iPhone and sim and Catalyst targets; all tests pass; no warnings introduced; both bug fixes use idiomatic patterns (SwiftUI `.safeAreaInset` for input bars; regex normalization for PDF artifacts).
+- **QA**: every supported format opens; search/TOC/Notes/Audio Export all exercised end-to-end; edge cases (empty question, dismiss-during-render, sequential exports, Catalyst notification gate) handled gracefully; the two found bugs are fixed and verified by AX tree + visual screenshot.
+- **User**: keyboard composer is now clearly visible above the keyboard with breathing room; PDF cover text reads naturally without inch-measurement artifacts in TTS, search results, or note previews; Audio Export's "Done" semantics let users dismiss the progress sheet without canceling — the notification arrives later as promised.
+
+**Submission readiness — green except for two iPhone-only verifications deferred**:
+
+1. iPhone-side keyboard fix: code is identical iPhone↔sim (SwiftUI `.safeAreaInset` is the same on both). High confidence the fix works on iPhone, but no in-session iPhone screenshot captured (antenna not responding from this machine to the device today — likely Local Network permission needs re-granting after re-install).
+2. iPhone-side PDF artifact fix: same code path on both targets. iPhone re-import would show the same clean cover text.
+
+Both are 30-second visual checks Mark can do on his phone in the morning before submission.
+
 ## 2026-05-08 — Accessibility audit (Tier 4 #18) — autonomous pass
 
 Mark's directive: full accessibility audit, autonomous authority, work through every Task 9 item. This pass.

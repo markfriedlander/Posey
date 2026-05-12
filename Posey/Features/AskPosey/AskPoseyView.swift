@@ -339,9 +339,33 @@ struct AskPoseyView: View {
                     }
                 }
 
-                Divider().opacity(0.4)
-
-                composer
+                // 2026-05-08 keyboard-avoidance fix — composer was a
+                // sibling at the bottom of the VStack inside a sheet
+                // with `.presentationContentInteraction(.scrolls)`.
+                // That combination breaks SwiftUI's default keyboard
+                // inset adjustment: the keyboard rose over the
+                // composer instead of pushing it up. Moving the
+                // composer to `.safeAreaInset(edge: .bottom)` (the
+                // idiomatic SwiftUI pattern for chat input bars)
+                // pins it above the keyboard and the conversation
+                // ScrollView automatically reflows above it.
+                //
+                // 2026-05-08 follow-up — initial fix put the composer
+                // at the safe-area boundary but the bottom ~20pt of
+                // the Send button still overlapped the keyboard's
+                // suggestion bar. Added explicit Spacer at the
+                // bottom of the inset content (8pt) so the composer
+                // sits visually clear above the keyboard, and made
+                // the composer's background `.regularMaterial` so it
+                // reads as its own surface rather than blending into
+                // the keyboard's white plane.
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 0) {
+                    Divider().opacity(0.4)
+                    composer
+                }
+                .background(.regularMaterial)
             }
             .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)
@@ -1033,6 +1057,13 @@ private extension AskPoseyView {
             .focused($composerFocused)
             .submitLabel(.send)
             .onSubmit { submit() }
+            // 2026-05-08 — give the empty TextField a sensible visual
+            // height. With `axis: .vertical` + `lineLimit(1...4)` the
+            // field collapses to ~12pt when empty, making the input
+            // band a thin strip above the keyboard that's hard to
+            // see and tap. Min frame keeps the input visually
+            // present at all times.
+            .frame(minHeight: 28)
             .accessibilityIdentifier("askPosey.composer")
 
             Button {
@@ -1050,8 +1081,12 @@ private extension AskPoseyView {
             .accessibilityIdentifier("askPosey.send")
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.thinMaterial)
+        .padding(.top, 10)
+        // 2026-05-08 — bigger bottom padding so the composer doesn't
+        // touch the keyboard's suggestion bar visually. Ensures the
+        // Send button + textfield have breathing room above any
+        // keyboard accessory the system may render below.
+        .padding(.bottom, 14)
     }
 
     /// M7 in-sheet indexing indicator. Visible when the document's

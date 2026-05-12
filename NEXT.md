@@ -37,6 +37,15 @@ Working through the 17-item Tier 1–4 punch list. Status:
 18. ✅ Accessibility audit (2026-05-08, autonomous) — touch-target + Reduce Motion + VoiceOver-label gaps closed; verified on both hardware including Dynamic Type at AccessibilityXXXL and AX-tree inspection of every fix. See HISTORY entry. One known limitation noted (sentence rows are StaticText not Button — chrome Play button is the canonical playback control).
 19-20. Pending — privacy policy + App Store metadata + final submission, for Mark's session.
 
+**2026-05-11 pre-submission stress sweep** — autonomous; sim + Catalyst.
+Two real bugs found and fixed:
+- AskPosey composer obscured by keyboard — moved composer into `.safeAreaInset(edge: .bottom)` with `.regularMaterial` background and explicit padding. Verified on sim AX tree.
+- PDF dimension artifacts ("3.8701 in" leaking from cover image) — new `stripPDFDimensionArtifacts` regex in PDFDocumentImporter, gated on 3+ fractional digits + unit. Re-import of Measure What Matters confirms clean cover text downstream (segments, search, bookmark anchor previews).
+
+Open verification gaps before submission (each <30s on phone):
+- iPhone-side keyboard composer visibility (sim verified; same code).
+- iPhone-side PDF re-import to confirm dimension artifact strip.
+
 ---
 
 ## 2026-05-06 — Submission day pass: 7 of 7 complete

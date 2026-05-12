@@ -339,62 +339,19 @@ struct AskPoseyView: View {
                     }
                 }
 
-                // 2026-05-08 keyboard-avoidance fix — composer was a
-                // sibling at the bottom of the VStack inside a sheet
-                // with `.presentationContentInteraction(.scrolls)`.
-                // That combination breaks SwiftUI's default keyboard
-                // inset adjustment: the keyboard rose over the
-                // composer instead of pushing it up. Moving the
-                // composer to `.safeAreaInset(edge: .bottom)` (the
-                // idiomatic SwiftUI pattern for chat input bars)
-                // pins it above the keyboard and the conversation
-                // ScrollView automatically reflows above it.
-                //
-                // 2026-05-08 follow-up — initial fix put the composer
-                // at the safe-area boundary but the bottom ~20pt of
-                // the Send button still overlapped the keyboard's
-                // suggestion bar. Added explicit Spacer at the
-                // bottom of the inset content (8pt) so the composer
-                // sits visually clear above the keyboard, and made
-                // the composer's background `.regularMaterial` so it
-                // reads as its own surface rather than blending into
-                // the keyboard's white plane.
-            }
-            // 2026-05-12 (v6) — Mark sent an iPhone screenshot showing
-            // the composer's TOP half was covered by the keyboard's
-            // QuickType accessory bar. SwiftUI's `.safeAreaInset`
-            // positions the inset content at the keyboard's "official"
-            // frame top, but iOS overlays the QuickType bar ABOVE
-            // that frame, eating ~50pt of the composer's height.
-            //
-            // Fix: subscribe to UIResponder.keyboardWillChangeFrame
-            // via `KeyboardAccessoryAdditionalInset` which computes the
-            // EXTRA space the keyboard occupies BEYOND what SwiftUI
-            // has already inset for. That delta is applied as bottom
-            // padding INSIDE the safeAreaInset content. When the
-            // keyboard is hidden, delta=0 and the composer sits at
-            // the natural bottom safe area. When the keyboard rises,
-            // delta = (full keyboard frame - what SwiftUI insets)
-            // which on iPhone hardware includes the QuickType bar.
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                VStack(spacing: 0) {
-                    Divider().opacity(0.4)
-                    composer
-                }
-                .background(.regularMaterial)
-                // 2026-05-12 (v8) — drive the additional inset off
-                // the composer's @FocusState directly. The earlier
-                // @StateObject + NotificationCenter approach raced
-                // with sheet-presentation auto-focus: the keyboard
-                // notification fired BEFORE the observer's init in
-                // some cases, so the inset never updated. @FocusState
-                // is a reactive SwiftUI binding that updates the view
-                // every time focus changes — robust regardless of
-                // sheet lifecycle timing. 100pt covers iPhone's full
-                // QuickType + Paste/AutoFill accessory chain with
-                // breathing room.
-                .padding(.bottom, composerFocused ? 100 : 0)
-                .animation(.easeInOut(duration: 0.25), value: composerFocused)
+                // 2026-05-12 — Reverted the keyboard-avoidance
+                // "fixes" (v2 through v8) that introduced a regression
+                // Mark caught. The original code — plain `composer`
+                // as the trailing VStack child with a Divider above
+                // it — worked correctly with SwiftUI's default
+                // keyboard inset. Every attempt to "improve" it
+                // (safeAreaInset, additional padding, focus-state
+                // tricks, notification observers) made the visual
+                // worse. Returning to the simple pattern that works.
+
+                Divider().opacity(0.4)
+
+                composer
             }
             .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)
@@ -1086,12 +1043,13 @@ private extension AskPoseyView {
             .focused($composerFocused)
             .submitLabel(.send)
             .onSubmit { submit() }
-            // 2026-05-08 — give the empty TextField a sensible visual
-            // height. With `axis: .vertical` + `lineLimit(1...4)` the
-            // field collapses to ~12pt when empty, making the input
-            // band a thin strip above the keyboard that's hard to
-            // see and tap. Min frame keeps the input visually
-            // present at all times.
+            // 2026-05-12 — `axis: .vertical` with `lineLimit(1...4)`
+            // collapses to ~12pt when empty. Without this min frame
+            // the composer band reads as an unclickable thin strip.
+            // The Send button is 44pt anyway, so the HStack is 44pt
+            // tall regardless; this just keeps the text field itself
+            // visually present so the placeholder is centered cleanly
+            // and the tap target reads as a proper input row.
             .frame(minHeight: 28)
             .accessibilityIdentifier("askPosey.composer")
 
@@ -1110,12 +1068,8 @@ private extension AskPoseyView {
             .accessibilityIdentifier("askPosey.send")
         }
         .padding(.horizontal, 14)
-        .padding(.top, 10)
-        // 2026-05-08 — bigger bottom padding so the composer doesn't
-        // touch the keyboard's suggestion bar visually. Ensures the
-        // Send button + textfield have breathing room above any
-        // keyboard accessory the system may render below.
-        .padding(.bottom, 14)
+        .padding(.vertical, 10)
+        .background(.thinMaterial)
     }
 
     /// M7 in-sheet indexing indicator. Visible when the document's

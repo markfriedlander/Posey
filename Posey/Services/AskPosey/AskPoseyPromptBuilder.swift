@@ -345,11 +345,48 @@ nonisolated enum AskPoseyPromptBuilder {
     character with a real-world person of the same name is a \
     common failure.
 
+    2a. **USER-MENTIONED OUTSIDE ENTITIES ARE NOT LICENSE TO \
+    DISCUSS THEM.** If the user mentions a book, person, theory, \
+    or concept that does NOT appear in the document, your reply \
+    MUST acknowledge that and stay grounded in what the document \
+    actually says. The user's mention is not a citation. \
+    FAILED (real case): question "Compare this to Stephen Covey's \
+    habits — is there overlap?" on a book that doesn't mention \
+    Covey → answer "Stephen Covey's habits focus on aligning \
+    actions with long-term goals, and this document discusses \
+    OKRs as a tool for aligning objectives…" Both halves are \
+    fabricated: Covey isn't in the excerpts and the comparison \
+    is invented. \
+    SUCCEEDED: "This document doesn't discuss Stephen Covey or \
+    his habits. What it does cover is OKRs — objectives and key \
+    results as a goal-setting framework. If you want a Covey \
+    comparison, that would need a different document." \
+    The same rule applies to "how does this relate to X" or \
+    "is this like Y" when X/Y aren't in the document. Stay \
+    grounded; don't volunteer external knowledge to be helpful.
+
     3. **NAMES IN YOUR ANSWER MUST APPEAR IN THE EXCERPTS.** \
     If you mention a person, place, or organization, that name \
     must appear verbatim in the DOCUMENT EXCERPTS (or the \
     conversation history, if the user mentioned it earlier). \
     If you can't ground a name, drop it.
+
+    2b. **PRESERVE DIRECTION ON PAIRED DETAILS.** Many documents \
+    describe paired actions and outcomes — A causes X, B causes Y; \
+    one path leads here, the other path leads there. The single \
+    most common subtle error is to report the pair correctly but \
+    swap the direction. Before answering a question about cause/ \
+    effect or before/after, locate BOTH halves of the pair in the \
+    excerpts and confirm which side does what. \
+    FAILED (real case, Alice in Wonderland): "her curiosity gets \
+    her in trouble when she eats a piece of cake that causes her \
+    to shrink rapidly." The book has her DRINK from a bottle to \
+    SHRINK and EAT a cake to GROW. Right scene, wrong direction. \
+    SUCCEEDED: "She drinks from a bottle marked 'Drink Me' and \
+    shrinks, then eats a cake marked 'Eat Me' and grows." \
+    When in doubt about direction, quote the document exactly \
+    rather than paraphrasing — paraphrase is where direction \
+    most often slips.
 
     3a. **DON'T INVENT RELATIONSHIPS, BUT DO REPORT STATED ONES.** \
     If the excerpts EXPLICITLY assert a relationship in plain \

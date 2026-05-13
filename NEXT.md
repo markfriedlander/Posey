@@ -52,6 +52,28 @@ Working through the 17-item Tier 1–4 punch list. Status:
 - Privacy policy + App Store metadata (Tier 4 #19–20)
 - Submit
 
+---
+
+## Pre-submission A-tier polish pass (2026-05-13, in flight)
+
+Mark gave a no-pressure mandate to address real gaps before submit.
+24-item list produced 2026-05-13; A-tier items in progress.
+
+**A-tier completed (committed + pushed):**
+- A1 ✅ Motion-aware non-text handling across PDF/EPUB/DOCX/HTML (`e5c28f3`)
+- A1b ✅ Images tab in TOC sheet (`7491a4a`)
+- A2/A7 ✅ Prompt rules for outside-entity grounding + paired-detail direction (`480eaf0`)
+
+**A-tier remaining for after compaction:**
+- A3 — indexing race live trigger verification on sim
+- A4 — confirm M4A speed in standard player + caching + Preferences storage UI
+- A5 — iPhone AX-tree rigorous verification
+- A8 — long-doc background-export survival test
+
+**Discovered during A-tier (surface for review):**
+- EPUB chunker truncates at ~8500 chars on Alice (12% of doc indexed). v1 blocker for EPUB Ask Posey accuracy. See TESTING.md.
+- Hal RAG patterns worth borrowing (B-tier): user-tunable relevance threshold, entity-variation query expansion, content-dedup. See TESTING.md.
+
 **2026-05-11 pre-submission stress sweep** — autonomous; sim + Catalyst.
 Two real bugs found and fixed:
 - AskPosey composer obscured by keyboard — moved composer into `.safeAreaInset(edge: .bottom)` with `.regularMaterial` background and explicit padding. Verified on sim AX tree.

@@ -459,6 +459,8 @@ final class RemoteControlState {
     var currentSentenceIndex: Int = 0
     var currentOffset: Int = 0
     var playbackState: String = "idle"
+    var readingStyle: String = "standard"
+    var focusedDisplayBlockID: Int?
     var presentedSheet: String?
     var isSearchActive: Bool = false
     var searchQuery: String = ""
@@ -492,12 +494,14 @@ final class RemoteControlState {
             "currentSentenceIndex": currentSentenceIndex,
             "currentOffset": currentOffset,
             "playbackState": playbackState,
+            "readingStyle": readingStyle,
             "isSearchActive": isSearchActive,
             "searchQuery": searchQuery,
             "searchMatchCount": searchMatchCount,
             "currentSearchMatchPosition": currentSearchMatchPosition
         ]
         if let id = visibleDocumentID { dict["visibleDocumentID"] = id.uuidString }
+        if let blockID = focusedDisplayBlockID { dict["focusedDisplayBlockID"] = blockID }
         if let s = presentedSheet { dict["presentedSheet"] = s }
         return dict
     }
@@ -521,6 +525,12 @@ final class RemoteControlState {
     }
     var playbackState: String {
         get { "idle" } set { _ = newValue }
+    }
+    var readingStyle: String {
+        get { "standard" } set { _ = newValue }
+    }
+    var focusedDisplayBlockID: Int? {
+        get { nil } set { _ = newValue }
     }
     var presentedSheet: String? {
         get { nil } set { _ = newValue }

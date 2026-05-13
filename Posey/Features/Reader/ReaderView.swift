@@ -1025,35 +1025,60 @@ struct ReaderView: View {
     }
 
     private func visualPlaceholder(block: DisplayBlock) -> some View {
-        Group {
-            if let imageID = block.imageID,
-               let data = viewModel.imageData(for: imageID),
-               let uiImage = UIImage(data: data) {
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .scaledToFit()
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .contentShape(Rectangle())
-                    .onTapGesture { expandedImageItem = ExpandedImageItem(id: imageID) }
-                    .overlay(alignment: .bottomTrailing) {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+        // 2026-05-13 (A1) — show a Continue affordance below the visual
+        // when it's the focused paused block, so non-Motion users have a
+        // clear in-context way to resume playback without hunting for
+        // the chrome's Play button. Hidden in Motion mode (no pause) and
+        // hidden once the user has moved past this block.
+        let isPausedHere = viewModel.focusedDisplayBlockID == block.id
+            && viewModel.playbackState == .paused
+            && viewModel.readingStyle != .motion
+        return VStack(alignment: .leading, spacing: 10) {
+            Group {
+                if let imageID = block.imageID,
+                   let data = viewModel.imageData(for: imageID),
+                   let uiImage = UIImage(data: data) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .contentShape(Rectangle())
+                        .onTapGesture { expandedImageItem = ExpandedImageItem(id: imageID) }
+                        .overlay(alignment: .bottomTrailing) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.caption)
+                                .padding(6)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .padding(8)
+                        }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Visual Element", systemImage: "photo.on.rectangle.angled")
+                            .font(.headline)
+                        Text(block.text)
+                            .font(.body)
+                        Text("Playback pauses here so you can inspect this visual before continuing.")
                             .font(.caption)
-                            .padding(6)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .padding(8)
+                            .foregroundStyle(.secondary)
                     }
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Visual Element", systemImage: "photo.on.rectangle.angled")
-                        .font(.headline)
-                    Text(block.text)
-                        .font(.body)
-                    Text("Playback pauses here so you can inspect this visual before continuing.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .padding()
+                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
                 }
-                .padding()
-                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+            }
+            if isPausedHere {
+                Button {
+                    viewModel.togglePlayback()
+                } label: {
+                    Label("Continue", systemImage: "play.fill")
+                        .font(.callout.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("reader.visualPlaceholder.continue")
+                .remoteRegister("reader.visualPlaceholder.continue") {
+                    viewModel.togglePlayback()
+                }
+                .transition(.opacity)
             }
         }
     }
@@ -1736,6 +1761,17 @@ private struct ReaderRemoteControlPlaybackObservers: ViewModifier {
                 case .finished: label = "finished"
                 }
                 RemoteControlState.shared.playbackState = label
+            }
+            // 2026-05-13 (A1) — mirror readingStyle and the focused
+            // visual block ID into RemoteControlState so the antenna
+            // can confirm the Motion-aware policy is applied correctly
+            // and that the Continue affordance's three gate conditions
+            // (focused block + paused + non-motion) are all true.
+            .onReceive(viewModel.$readingStyle) { style in
+                RemoteControlState.shared.readingStyle = style.rawValue
+            }
+            .onReceive(viewModel.$focusedDisplayBlockID) { id in
+                RemoteControlState.shared.focusedDisplayBlockID = id
             }
     }
 }
@@ -2658,6 +2694,12 @@ final class ReaderViewModel: ObservableObject {
         didSet {
             PlaybackPreferences.shared.readingStyle = readingStyle
             reconcileMotionDetector()
+            // 2026-05-13 (A1) — Motion-aware visual-block policy needs to
+            // re-evaluate on every readingStyle change. Switching from
+            // Motion → Focus mid-read should immediately re-enable
+            // pause-at-image; the reverse should immediately disable it
+            // and switch to "Image." announcements.
+            applyVisualBlockMotionPolicy()
         }
     }
 
@@ -3009,6 +3051,16 @@ final class ReaderViewModel: ObservableObject {
     /// Updated by the loader once segments + displayBlocks land. Empty
     /// until then. Consumers that need the mapping should gate on
     /// `isLoading == false` (or `segments.isEmpty == false`).
+    ///
+    /// 2026-05-13 (A1) — split into two maps activated by readingStyle:
+    ///   - `visualPauseMapAll`: every sentence-after-image, populated
+    ///     once at content load. The active map below filters this
+    ///     based on whether Motion mode is on.
+    ///   - `visualPauseBlockIDsBySentenceIndex`: the ACTIVE pause map.
+    ///     In Motion mode, empty (no pausing). In every other mode,
+    ///     equals `visualPauseMapAll` (PDF + EPUB + DOCX + HTML all
+    ///     follow the same Motion-aware logic now).
+    private var visualPauseMapAll: [Int: Int] = [:]
     private var visualPauseBlockIDsBySentenceIndex: [Int: Int] = [:]
     private var cancellables: Set<AnyCancellable> = []
     private var didRunAutomationActions = false
@@ -3194,7 +3246,13 @@ final class ReaderViewModel: ObservableObject {
         // 1. Heavy results.
         self.segments = computed.segments
         self.displayBlocks = computed.displayBlocks
-        self.visualPauseBlockIDsBySentenceIndex = computed.visualPauseMap
+        self.visualPauseMapAll = computed.visualPauseMap
+        // 2026-05-13 (A1) — apply Motion-aware filter immediately so the
+        // pause behavior matches the user's current readingStyle from the
+        // moment content lands. `applyVisualBlockMotionPolicy()` is the
+        // single source of truth; called again on every readingStyle
+        // change so switching modes mid-read takes effect right away.
+        self.applyVisualBlockMotionPolicy()
 
         // 2. DB side dishes (cheap).
         self.tocEntries = (try? databaseManager.tocEntries(for: document.id)) ?? []
@@ -4003,6 +4061,42 @@ final class ReaderViewModel: ObservableObject {
         acknowledgedVisualBlockIDs.insert(visualBlock.id)
         focusedDisplayBlockID = visualBlock.id
         playbackService.pause()
+    }
+
+    /// 2026-05-13 (A1) — applies the Motion-aware non-text-element policy.
+    ///
+    /// Posey reads + listens in two distinct user contexts that the Motion
+    /// reading style explicitly separates:
+    ///
+    /// **Motion ON (`readingStyle == .motion`)** — user is moving (walking,
+    /// commuting). Pausing playback at every image breaks flow. Instead:
+    ///   - The active pause map is empty (no stop blocks)
+    ///   - The speech engine gets an "Image." prefix on the first sentence
+    ///     after each visualPlaceholder so the listener hears an audible
+    ///     cue without losing prose continuity
+    ///
+    /// **Every other reading style** — user is stationary (Standard, Focus,
+    /// Immersive). Inspecting visuals is desirable. The pause map is
+    /// populated; reaching the sentence after a visualPlaceholder pauses
+    /// the synthesizer. User taps the inline Continue affordance (or the
+    /// chrome's Play button) to resume.
+    ///
+    /// This unifies behavior across every format. PDF used to ALWAYS pause
+    /// at visual pages regardless of readingStyle — this method changes
+    /// that so PDF follows the same Motion-aware logic as EPUB/DOCX/HTML.
+    /// Called once at content load and again on every `readingStyle` change.
+    func applyVisualBlockMotionPolicy() {
+        if readingStyle == .motion {
+            visualPauseBlockIDsBySentenceIndex = [:]
+            var announcements: [Int: String] = [:]
+            for (sentenceIndex, _) in visualPauseMapAll {
+                announcements[sentenceIndex] = "Image."
+            }
+            playbackService.visualAnnouncementText = announcements
+        } else {
+            visualPauseBlockIDsBySentenceIndex = visualPauseMapAll
+            playbackService.visualAnnouncementText = [:]
+        }
     }
 
     nonisolated private static func buildVisualPauseIndexMap(displayBlocks: [DisplayBlock], segments: [TextSegment]) -> [Int: Int] {

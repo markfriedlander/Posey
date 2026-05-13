@@ -4421,53 +4421,72 @@ private struct TOCSheet: View {
     @State private var pageInputErrorMessage: String? = nil
     @FocusState private var pageInputFocused: Bool
 
+    /// 2026-05-13 (A1b) — top-of-sheet tab between Contents (existing
+    /// chapter list) and Images (thumbnails of every visualPlaceholder
+    /// in the doc with the surrounding sentence as context). Hidden
+    /// when the doc has zero images so the picker doesn't appear on
+    /// text-only docs.
+    enum TOCTab: String, CaseIterable, Identifiable {
+        case contents = "Contents"
+        case images = "Images"
+        var id: String { rawValue }
+    }
+    @State private var selectedTab: TOCTab = .contents
+
+    /// Image entries derived from displayBlocks at render time. Each
+    /// entry pairs an imageID with the document offset and a context
+    /// sentence (the prose sentence at or just before the image
+    /// placeholder). Tap → jumpToOffset(offset) + dismiss.
+    private struct ImageEntry: Identifiable {
+        let id: Int            // displayBlock.id (stable per load)
+        let imageID: String?   // nil for text-only placeholders
+        let offset: Int
+        let contextSentence: String
+    }
+    private var imageEntries: [ImageEntry] {
+        let segments = viewModel.segments
+        return viewModel.displayBlocks
+            .filter { $0.kind == .visualPlaceholder }
+            .map { block in
+                // Context: prefer the segment whose startOffset is
+                // closest to the placeholder, with a slight preference
+                // for the segment AFTER (which the image flows into).
+                let context: String
+                if let afterIdx = segments.firstIndex(where: { $0.startOffset >= block.startOffset }) {
+                    context = segments[afterIdx].text
+                } else if let beforeIdx = segments.lastIndex(where: { $0.startOffset < block.startOffset }) {
+                    context = segments[beforeIdx].text
+                } else {
+                    context = block.text
+                }
+                return ImageEntry(
+                    id: block.id,
+                    imageID: block.imageID,
+                    offset: block.startOffset,
+                    contextSentence: context
+                )
+            }
+    }
+
     var body: some View {
         NavigationStack {
-            List {
-                if viewModel.tocEntries.isEmpty {
-                    // 2026-05-07 (parity #5): real empty state when
-                    // no TOC entries are detected. The button that
-                    // opens this sheet only appears when there are
-                    // entries today, so this is mostly defensive —
-                    // the API can still open the sheet on a doc
-                    // with no TOC, and visible empty-state copy is
-                    // better than a blank list either way.
-                    Section {
-                        Text("No table of contents in this document.")
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("toc.empty")
-                    }
-                } else {
-                    Section {
-                        // Task 8 (2026-05-03): composite id avoids the
-                        // crash some EPUBs caused when synthesized TOC
-                        // entries shared `playOrder = 0` (e.g. a nav.xhtml
-                        // and a notice.html both starting at 0). Combine
-                        // playOrder + offset + title so duplicates stay
-                        // unique even when one of them is empty.
-                        ForEach(viewModel.tocEntries, id: \.compositeID) { entry in
-                            Button {
-                                viewModel.jumpToTOCEntry(entry)
-                                dismiss()
-                            } label: {
-                                Text(entry.title)
-                                    .foregroundStyle(.primary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
+            VStack(spacing: 0) {
+                if !imageEntries.isEmpty {
+                    Picker("View", selection: $selectedTab) {
+                        ForEach(TOCTab.allCases) { tab in
+                            Text(tab.rawValue).tag(tab)
                         }
                     }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .accessibilityIdentifier("toc.tabPicker")
                 }
-                if viewModel.pageMap.hasPages {
-                    Section {
-                        goToPageRow
-                    } header: {
-                        Text("Go to page")
-                    } footer: {
-                        Text(goToPageFooter)
-                            .font(.caption2)
-                    }
+
+                if selectedTab == .images && !imageEntries.isEmpty {
+                    imagesList
+                } else {
+                    contentsList
                 }
             }
             .navigationTitle("Contents")
@@ -4482,9 +4501,6 @@ private struct TOCSheet: View {
             ) { _ in
                 dismiss()
             }
-            // 2026-05-07 (parity #6): tap a TOC entry by playOrder via
-            // the antenna's TAP_TOC_ENTRY verb. Equivalent to a user
-            // tap on the row — same jumpToTOCEntry + dismiss path.
             .onReceive(
                 NotificationCenter.default.publisher(for: .remoteTapTOCEntry)
             ) { note in
@@ -4500,6 +4516,104 @@ private struct TOCSheet: View {
             .onDisappear {
                 if RemoteControlState.shared.presentedSheet == "toc" {
                     RemoteControlState.shared.presentedSheet = nil
+                }
+            }
+        }
+    }
+
+    /// 2026-05-13 (A1b) — image-tab list. Small leading thumbnail
+    /// (44×44, scaledToFit, rounded) plus the surrounding sentence
+    /// as caption. Tap → jumpToOffset + dismiss.
+    private var imagesList: some View {
+        List {
+            ForEach(imageEntries) { entry in
+                Button {
+                    viewModel.jumpToOffset(entry.offset)
+                    dismiss()
+                } label: {
+                    HStack(alignment: .top, spacing: 12) {
+                        thumbnail(for: entry)
+                            .frame(width: 56, height: 56)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                        Text(entry.contextSentence)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("toc.image.\(entry.id)")
+                .accessibilityHint("Jump to this image in the document.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func thumbnail(for entry: ImageEntry) -> some View {
+        if let imageID = entry.imageID,
+           let data = viewModel.imageData(for: imageID),
+           let uiImage = UIImage(data: data) {
+            Image(uiImage: uiImage)
+                .resizable()
+                .scaledToFill()
+        } else {
+            ZStack {
+                Color.secondary.opacity(0.12)
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var contentsList: some View {
+        List {
+            if viewModel.tocEntries.isEmpty {
+                // 2026-05-07 (parity #5): real empty state when
+                // no TOC entries are detected. The button that
+                // opens this sheet only appears when there are
+                // entries today, so this is mostly defensive —
+                // the API can still open the sheet on a doc
+                // with no TOC, and visible empty-state copy is
+                // better than a blank list either way.
+                Section {
+                    Text("No table of contents in this document.")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("toc.empty")
+                }
+            } else {
+                Section {
+                    // Task 8 (2026-05-03): composite id avoids the
+                    // crash some EPUBs caused when synthesized TOC
+                    // entries shared `playOrder = 0` (e.g. a nav.xhtml
+                    // and a notice.html both starting at 0). Combine
+                    // playOrder + offset + title so duplicates stay
+                    // unique even when one of them is empty.
+                    ForEach(viewModel.tocEntries, id: \.compositeID) { entry in
+                        Button {
+                            viewModel.jumpToTOCEntry(entry)
+                            dismiss()
+                        } label: {
+                            Text(entry.title)
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            if viewModel.pageMap.hasPages {
+                Section {
+                    goToPageRow
+                } header: {
+                    Text("Go to page")
+                } footer: {
+                    Text(goToPageFooter)
+                        .font(.caption2)
                 }
             }
         }

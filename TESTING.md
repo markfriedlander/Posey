@@ -488,6 +488,7 @@ In progress as of context handoff. Commits this session:
 - A4 — confirm M4A speed in standard player + implement caching + Preferences storage UI
 - A5 — iPhone AX-tree rigorous verification
 - A8 — long-doc background-export survival test
+- **A9 — EPUB chunker truncation fix** (promoted from discovery to A-tier per Mark 2026-05-13). A user asking Posey about chapter 15 of a long EPUB and getting "I can't find that" when the content exists is a trust-breaking failure, not a polish gap. Treat with same priority as A3/A4/A5/A8. Investigate, fix, verify on Alice AND at least one other long EPUB (4-Hour Body or Illuminatus).
 
 ## Discovered during A-tier — surface for next session
 

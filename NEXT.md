@@ -69,10 +69,13 @@ Mark gave a no-pressure mandate to address real gaps before submit.
 - A4 — confirm M4A speed in standard player + caching + Preferences storage UI
 - A5 — iPhone AX-tree rigorous verification
 - A8 — long-doc background-export survival test
+- **A9 — EPUB chunker truncation fix.** Discovered during A7. Alice in Wonderland (71,847 chars) indexed only to offset 8568 (~12% of doc). A user asking Posey about content past chapter 1 of a long EPUB will get a "can't find that" refusal even when the content exists — trust-breaking failure, not a polish gap. Promoted from "discovered, B-tier" to A-tier per Mark 2026-05-13. Investigate the chunker ceiling (likely NLTokenizer enumerateTokens in `DocumentEmbeddingIndex.chunk(_:configuration:)` line 1309), fix, verify on Alice AND at least one other long EPUB (4-Hour Body or Illuminatus).
 
-**Discovered during A-tier (surface for review):**
-- EPUB chunker truncates at ~8500 chars on Alice (12% of doc indexed). v1 blocker for EPUB Ask Posey accuracy. See TESTING.md.
-- Hal RAG patterns worth borrowing (B-tier): user-tunable relevance threshold, entity-variation query expansion, content-dedup. See TESTING.md.
+**Hal RAG patterns worth borrowing (B-tier, separate from A9):**
+- User-tunable relevance threshold (Posey hardcodes 0.35)
+- Entity-variation query expansion (catches singular/plural, possessives)
+- Explicit content-dedup before top-N selection
+See TESTING.md for source pointers.
 
 **2026-05-11 pre-submission stress sweep** — autonomous; sim + Catalyst.
 Two real bugs found and fixed:

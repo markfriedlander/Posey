@@ -48,6 +48,17 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
     private var sentenceIndicesByUtteranceID: [ObjectIdentifier: Int] = [:]
     /// Full segment array for the active document.
     private var activeSegments: [TextSegment] = []
+
+    /// 2026-05-13 (A1) — sidecar map: sentence index → announcement text to
+    /// prepend when speaking that segment. Populated by the ReaderViewModel
+    /// in Motion reading style for sentences that follow a visualPlaceholder.
+    /// The announcement reads as the start of the same utterance ("Image.
+    /// First sentence after the image...") so playback flows without an
+    /// extra pause, accomplishing Mark's Motion-mode spec: image displays
+    /// inline, TTS says "Image", playback continues without stopping.
+    /// Empty in non-Motion modes (where the visual block triggers a pause
+    /// via `pauseForVisualBlockIfNeeded` instead).
+    var visualAnnouncementText: [Int: String] = [:]
     /// Next segment index to feed into the synthesizer window.
     private var nextEnqueueIndex: Int = 0
 
@@ -123,16 +134,31 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
     func pause() {
         switch mode {
         case .system:
-            guard synthesizer.isSpeaking else { return }
-            // .immediate halts the synthesizer mid-word, which feels truly
-            // responsive to a tap. .word waits for the next word boundary,
-            // which on the Best Available (Siri-tier) audio path can take
-            // hundreds of ms — long enough to feel broken. Reading apps
-            // resume from the saved sentence anyway, so a clean cut is
-            // preferable to a polished-sounding lag.
-            if synthesizer.pauseSpeaking(at: .immediate) {
-                state = .paused
+            // 2026-05-13 (A1) — published state now reflects the user's
+            // INTENT to pause, not just whether the synthesizer happened
+            // to be mid-utterance at this exact moment.
+            //
+            // Background: pauseForVisualBlockIfNeeded fires when the
+            // sentence index advances to one that follows a visual
+            // placeholder. That transition often happens BETWEEN
+            // utterances (after sentence N finished, before sentence
+            // N+1 starts), where `synthesizer.isSpeaking` returns
+            // false. The earlier code guarded on isSpeaking and
+            // returned early, leaving state as `.playing` even though
+            // playback was effectively halted. The Continue button on
+            // the inline visualPlaceholder gated on state == .paused
+            // and never appeared. Fixed by always setting state to
+            // `.paused` and calling pauseSpeaking when applicable.
+            // .immediate halts mid-word, which feels truly
+            // responsive to a tap. .word would wait for the next word
+            // boundary — hundreds of ms on Siri-tier voices, long
+            // enough to feel broken. Reading apps resume from the
+            // saved sentence anyway, so a clean cut beats a polished-
+            // sounding lag.
+            if synthesizer.isSpeaking {
+                synthesizer.pauseSpeaking(at: .immediate)
             }
+            state = .paused
         case .simulated:
             guard state == .playing else { return }
             invalidateSimulatedTimer()
@@ -220,14 +246,27 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         // 2026-05-12 — record the actual string passed to AVSpeechSynthesizer
         // so PLAYBACK_STOP_BLOCK_TEST can verify no "Visual content on page N"
         // placeholder text ever reaches TTS. DEBUG-only; Release stub is no-op.
-        RemoteControlState.shared.recordSpokenUtterance(SpeechPlaybackService.utteranceText(for: segment.text))
+        RemoteControlState.shared.recordSpokenUtterance(spokenText(for: segment))
         synthesizer.speak(utterance)
         nextEnqueueIndex = index + 1
     }
 
+    /// Builds the spoken text for a segment, prepending any
+    /// visual-announcement prefix the ReaderViewModel set on this
+    /// sentence index. The base utteranceText strips list markers
+    /// (• / 1. ); the announcement prefix is added BEFORE that
+    /// stripped text so it reads as "Image. <sentence>".
+    private func spokenText(for segment: TextSegment) -> String {
+        let base = SpeechPlaybackService.utteranceText(for: segment.text)
+        if let prefix = visualAnnouncementText[segment.id], !prefix.isEmpty {
+            return "\(prefix) \(base)"
+        }
+        return base
+    }
+
     /// Constructs a mode-aware utterance. This is the single place voice mode is applied.
     private func makeUtterance(for segment: TextSegment) -> AVSpeechUtterance {
-        let utterance = AVSpeechUtterance(string: SpeechPlaybackService.utteranceText(for: segment.text))
+        let utterance = AVSpeechUtterance(string: spokenText(for: segment))
         switch voiceMode {
         case .bestAvailable:
             utterance.prefersAssistiveTechnologySettings = true
@@ -430,8 +469,19 @@ extension SpeechPlaybackService: AVSpeechSynthesizerDelegate {
     ) {
         let utteranceID = ObjectIdentifier(utterance)
         Task { @MainActor in
-            self.currentSentenceIndex = self.sentenceIndicesByUtteranceID[utteranceID]
+            // 2026-05-13 (A1) — set state BEFORE currentSentenceIndex.
+            // Why: subscribers to $currentSentenceIndex
+            // (ReaderViewModel.pauseForVisualBlockIfNeeded) may call
+            // playbackService.pause() synchronously during their sink.
+            // If we set state = .playing AFTER currentSentenceIndex,
+            // the pause's state mutation to .paused gets overwritten
+            // when the Task continues. Setting state first means
+            // pauseForVisualBlockIfNeeded sees state == .playing
+            // (correctly — the synthesizer DID just start utterance),
+            // calls pause(), pause sets state = .paused, and nothing
+            // overwrites it after.
             self.state = .playing
+            self.currentSentenceIndex = self.sentenceIndicesByUtteranceID[utteranceID]
         }
     }
 

@@ -475,6 +475,38 @@ This section is the Three Hats sign-off for v1 submission. It records what was t
 - Privacy policy + App Store metadata finalization (Tier 4 #19-20)
 - Antenna defaults: flip DEBUG-on default → RELEASE-off (Task 13 #72)
 
+## A-tier session findings (2026-05-13)
+
+In progress as of context handoff. Commits this session:
+- `e5c28f3` — A1: Motion-aware non-text element handling across all 4 image-bearing formats. Verified PLAYBACK_STOP_BLOCK_TEST pass on PDF + DOCX + HTML + EPUB on iPhone. Continue affordance verified.
+- `7491a4a` — A1b: Images tab in TOC sheet with thumbnails + context sentences. 8 entries surfaced on Measure What Matters; tap-to-jump verified.
+- `480eaf0` — A2/A7: prompt rules. Rule 2a (USER-MENTIONED OUTSIDE ENTITIES) fixes the Stephen Covey hallucination on Measure What Matters — verified on iPhone. Rule 2b (PRESERVE DIRECTION ON PAIRED DETAILS) addresses the Alice cake/bottle reversal.
+
+## A-tier remaining when compaction lifts
+
+- A3 — indexing race live trigger verification on sim
+- A4 — confirm M4A speed in standard player + implement caching + Preferences storage UI
+- A5 — iPhone AX-tree rigorous verification
+- A8 — long-doc background-export survival test
+
+## Discovered during A-tier — surface for next session
+
+### Critical: EPUB chunker truncates at ~8500 chars
+While investigating A7 paired-detail accuracy, found that Alice in Wonderland (71,847 chars) was indexed with only 20 chunks covering offsets 0-8568 (~12% of doc). `RAG_FIND` for "cake" returned 0 chunks because the relevant passages (Alice eats cake to grow, ~12% in) aren't in the index at all. `REINDEX_DOCUMENT` does not change the chunk count. The chunker appears to stop at the chapter 1 / chapter 2 boundary.
+
+This is a v1 blocker for EPUB Ask Posey accuracy — most of any book-length EPUB is unsearchable. Affects paired-detail accuracy because retrieval cannot find passages outside the first chapter.
+
+Investigation path: NLTokenizer enumerateTokens behavior in `DocumentEmbeddingIndex.chunk(_:configuration:)` (line 1309) against the Alice plainText. The 4-Hour Body EPUB (967K chars) needs the same audit — it's likely also truncated.
+
+### Borrowable from Hal RAG pipeline (B-tier)
+Hal's `unifiedSearch` (Hal.swift line 1100ish) does several things Posey doesn't:
+1. **User-tunable relevance threshold** — `@AppStorage relevanceThreshold` default 0.65, surfaced as a Preferences slider. Posey hardcodes 0.35 weak-retrieval cutoff.
+2. **Entity-variation query expansion** — `expandQueryWithEntityVariations(query)` runs multiple normalized-form LIKE searches in addition to semantic. Catches phrase mismatches (singular/plural, possessives, etc.).
+3. **Hybrid scoring with entity-match boost** — keyword match defaults to 0.75 relevance; dual-match (semantic + keyword) sorted ahead of single-match.
+4. **Content-based dedup before top-N selection** — `seenContent: Set<String>` prevents the same passage taking multiple slots in the context window.
+
+Posey already has some of this (entity index per Task 4 #6) but the user-tunable threshold and explicit dedup are cleanly portable improvements.
+
 ## Verdict
 
 Code is in good shape for submission. Image rendering works cleanly across all 4 image-bearing formats including edge cases. Keyboard regression fixed at the root. Accessibility passes. Audio Export UX is honest. Non-scripted conversations show Posey behaves like an honest reading companion. If the smoke test passes cleanly and the four submission items above check out: ship it.

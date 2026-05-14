@@ -475,6 +475,14 @@ final class LibraryViewModel: ObservableObject {
         do {
             try databaseManager.deleteDocument(document)
             loadDocuments()
+            // 2026-05-13 — A4: invalidate any cached audio export
+            // tied to this document. AudioExportCache.shared
+            // listens for this notification and removes the file.
+            NotificationCenter.default.post(
+                name: AudioExportCache.documentDidDelete,
+                object: nil,
+                userInfo: [AudioExportCache.notificationDocumentIDKey: document.id]
+            )
         } catch {
             present(error)
         }
@@ -692,12 +700,21 @@ extension LibraryViewModel {
                 }
                 try databaseManager.deleteDocument(doc)
                 loadDocuments()
+                // 2026-05-13 — A4: invalidate cached audio export.
+                NotificationCenter.default.post(
+                    name: AudioExportCache.documentDidDelete,
+                    object: nil,
+                    userInfo: [AudioExportCache.notificationDocumentIDKey: doc.id]
+                )
                 return json(["deleted": true, "id": id.uuidString])
 
             case "RESET_ALL":
                 let docs = try databaseManager.documents()
                 for doc in docs { try databaseManager.deleteDocument(doc) }
                 loadDocuments()
+                // 2026-05-13 — A4: nuke the entire audio-export cache
+                // when every document is wiped.
+                AudioExportCache.shared.deleteAll()
                 return json(["deleted": docs.count])
 
             case "SEED_ASK_POSEY_FIXTURE":
@@ -2344,6 +2361,42 @@ extension LibraryViewModel {
                     "bytes": data.count,
                     "base64": data.base64EncodedString()
                 ])
+
+            case "LIST_AUDIO_CACHE":
+                // 2026-05-13 — A4 diagnostic. Dumps every cached
+                // export with its doc title (looked up from the
+                // library) and the cache total in bytes.
+                let entries = AudioExportCache.shared.listCached()
+                let docs = (try? databaseManager.documents()) ?? []
+                let titleByID = Dictionary(uniqueKeysWithValues:
+                    docs.map { ($0.id, $0.title) }
+                )
+                var items: [[String: Any]] = []
+                for e in entries {
+                    items.append([
+                        "documentID": e.documentID.uuidString,
+                        "documentTitle": titleByID[e.documentID] ?? "(deleted)",
+                        "path": e.url.path,
+                        "bytes": Int(e.bytes),
+                        "createdAt": e.createdAt.timeIntervalSince1970
+                    ])
+                }
+                return json([
+                    "count": items.count,
+                    "totalBytes": Int(AudioExportCache.shared.totalBytes()),
+                    "entries": items
+                ])
+
+            case "DELETE_AUDIO_CACHE":
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: DELETE_AUDIO_CACHE:<docID>"}"#
+                }
+                AudioExportCache.shared.delete(for: id)
+                return json(["deleted": true, "documentID": id.uuidString])
+
+            case "DELETE_AUDIO_CACHE_ALL":
+                AudioExportCache.shared.deleteAll()
+                return json(["deletedAll": true])
 
             case "BEGIN_AUDIO_EXPORT":
                 // BEGIN_AUDIO_EXPORT:<docID> — direct kickoff path

@@ -2108,6 +2108,16 @@ private struct ReaderPreferencesSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                // 2026-05-13 — A4: Cached Audio Files section.
+                // Lists every M4A currently in the persistent cache
+                // (one entry per document that's been exported).
+                // Files live under Library/Caches/Posey/AudioExports,
+                // so iOS may purge them under storage pressure; a
+                // re-export will regenerate them. Each row has its
+                // own Delete; the section footer shows total used
+                // and offers Delete All when non-empty.
+                CachedAudioFilesSection(databaseManager: viewModel.databaseManager)
             }
             .navigationTitle("Reader Preferences")
             .navigationBarTitleDisplayMode(.inline)

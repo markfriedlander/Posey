@@ -71,7 +71,19 @@ Mark gave a no-pressure mandate to address real gaps before submit.
   complete" during indexing. Screenshot in `Art/qa-evidence/2026-05-13-A3/`.
   The Menu's "Still learning…" Section shares one source of truth with the
   verified chrome banner. See HISTORY entry.
-- A4 — confirm M4A speed in standard player + caching + Preferences storage UI
+- ~~A4~~ — done. M4A speed reconfirmed (244 WPM at rate=100%, ~1.6× natural;
+  framework-level issue in `AVSpeechSynthesizer.write` — three resolution
+  options from May 7 investigation remain Mark's call, no code change in
+  this pass). New `AudioExportCache` service backs one cached `.m4a` per
+  doc under `Library/Caches/Posey/AudioExports/` (iOS-clearable). Headless
+  export consults cache first → 1.37s cache-hit vs 65s render on iPhone.
+  Doc-delete invalidates cache via notification. Preferences "Cached Audio
+  Files" section lists rows with size + per-row delete, Total footer + a
+  destructive "Delete All Cached Audio" button. Both hardware verified;
+  one eyeball-it piece deferred to Mark: scroll the iPhone Preferences
+  sheet and confirm the visual matches the sim screenshot in
+  `Art/qa-evidence/2026-05-13-A4/`. New antenna verbs:
+  `LIST_AUDIO_CACHE`, `DELETE_AUDIO_CACHE:<docID>`, `DELETE_AUDIO_CACHE_ALL`.
 - A5 — iPhone AX-tree rigorous verification
 - A8 — long-doc background-export survival test
 - ~~A9~~ — retracted (phantom; see below)

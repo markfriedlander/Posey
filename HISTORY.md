@@ -1,5 +1,52 @@
 # Posey History
 
+## 2026-05-13 — A4 audio export cache + "Cached Audio Files" Preferences UI
+
+Mark's A4 directive had two parts: (1) confirm whether the rendered M4A still plays at incorrect speed in a standard player, and (2) implement one-cached-export-per-document with iOS-clearable storage, source-doc-deletion invalidation, and a Preferences section showing per-file sizes/delete buttons + Delete All + total used.
+
+**Part 1 — M4A speed.** Reconfirmed via headless export of `heading-test.rtf` (500 chars, 86 words) on iPhone at Custom voice / rate=100%:
+- Duration: 21.10 sec → **244 WPM**, vs natural speech ~150 WPM
+- AAC at 22050 Hz, frame math agrees with declared duration
+- File plays at its declared rate in afinfo / afplay; the issue is in `AVSpeechSynthesizer.write()` itself producing audio that's ~1.6× faster than `.speak`-mode live playback (down from the earlier 2× finding, but still meaningfully faster than natural reading pace). This matches the May 7 investigation conclusions; the three options Mark gave then (halve rate, AVAudioEngine time-stretch, or label-and-ship) remain his call. No code change in this pass.
+
+**Part 2 — Cache + UI.**
+
+New file `Posey/Services/Playback/AudioExportCache.swift`:
+- Singleton (`AudioExportCache.shared`) backed by `Library/Caches/Posey/AudioExports/` (iOS-clearable; doesn't count as user-managed in Settings → iPhone Storage).
+- Filename convention `<docUUID>.m4a` — one cached file per document.
+- API: `intendedURL(for:)`, `cachedURL(for:)`, `store(_:for:)`, `delete(for:)`, `deleteAll()`, `listCached()`, `totalBytes()`. All file-system backed; no separate index, no SQL.
+- Observer wired in init listens for `AudioExportCache.documentDidDelete` and removes the matching cached file.
+
+Integration:
+- `runHeadlessAudioExport` (`RemoteAudioExportRegistry.swift`): cache fast-path before rendering — if a cached `.m4a` exists for this document, return its URL immediately. After successful render, move the temp `.m4a` into the cache. Failed move falls back to surfacing the temp URL so the user still gets a usable file.
+- `LibraryViewModel.deleteDocument(_:)` and the `DELETE_DOCUMENT` antenna verb both post `AudioExportCache.documentDidDelete` after the DB row is removed, triggering the observer.
+- `RESET_ALL` antenna verb calls `AudioExportCache.shared.deleteAll()` after wiping the library.
+
+New file `Posey/Features/Reader/CachedAudioFilesSection.swift`: SwiftUI Section dropped into `ReaderPreferencesSheet` below the existing Audio Export section. Renders one row per cached entry with doc title + size + per-row trash button; section footer shows total used + a destructive "Delete All Cached Audio" button. Empty state explains the cache lives in iOS-clearable storage.
+
+New antenna verbs (test infrastructure): `LIST_AUDIO_CACHE`, `DELETE_AUDIO_CACHE:<docID>`, `DELETE_AUDIO_CACHE_ALL`.
+
+**Verification:**
+
+Simulator (iPhone 17 Pro, 10C6DB49-…):
+- Fresh `cache-test.txt` (65 chars) → first export: 3.5s wall; second export: **0.38s wall** with `totalSegments: 0` proving the cache fast-path skipped the render loop.
+- Cache file written to `Library/Caches/Posey/AudioExports/<uuid>.m4a` (correct location per Mark's iOS-clearable directive).
+- `DELETE_DOCUMENT:<docID>` → `LIST_AUDIO_CACHE` count went from 1 → 0 (deletion notification observer fired).
+- Preferences sheet renders the new Section correctly. AX tree confirms: "Cached Audio Files" header, "cache-test" row with "43 KB" size, "Delete cached audio for cache-test" trash button, "Total: 43 KB" footer, "Delete All Cached Audio" destructive button. Screenshot in `Art/qa-evidence/2026-05-13-A4/sim-cached-audio-files-section.png`.
+
+iPhone (D24FB384-…):
+- Same flow on a 203-char DOCX → first export populated cache, second export resolved in 1.37s wall with `totalSegments: 0` (cache fast-path hit).
+- Cache file at `var/mobile/.../Library/Caches/Posey/AudioExports/<uuid>.m4a`.
+- `DELETE_AUDIO_CACHE:<docID>` → cache emptied.
+- Prefs sheet opens (screenshot in `Art/qa-evidence/2026-05-13-A4/iphone-prefs-top.png`); the new Section sits below the visible viewport. Could not drive a scroll over the antenna (no SCROLL_PREFERENCES verb; `idb` only works against simulators). The same code path is verified by AX tree on sim; iPhone build + antenna both confirm the verbs and cache plumbing work. **One eyeball-it-yourself piece deferred to Mark in the morning**: scroll the Reader Preferences sheet on the phone and confirm the "Cached Audio Files" section renders the same way it does on sim.
+
+Three Hats:
+- Developer: compiles for sim + iPhone, follows LEGO block convention, file lives under iOS-clearable Caches, deletion notifications wired through every doc-delete path (UI + antenna + RESET_ALL).
+- QA: cache populated + fast-path verified on both hardware; deletion-on-doc-delete verified end-to-end on sim; per-doc cache-delete verb verified on iPhone; cache total size accurate.
+- User: re-exporting a doc no longer re-renders (1.37s vs 65s on iPhone); Preferences shows a clear list with per-row delete + Delete All + total bytes; honest empty-state message about iOS purge behavior.
+
+---
+
 ## 2026-05-13 — A3 indexing-race live trigger verified on simulator
 
 Added `INDEXING_STATE` antenna verb (`LibraryView.swift`) that reads the live `IndexingTracker.sharedForChat` and reports per-document `isIndexing`, `isEnhancing`, `unifiedProgress(for:)`, and per-stage counts. Test infrastructure only — no user-visible behavior change.

@@ -103,6 +103,21 @@ final class RemoteAudioExportRegistry {
 /// `AUDIO_EXPORT_STATUS:<jobID>` for granular progress.
 @MainActor
 func runHeadlessAudioExport(jobID: String, plainText: String, title: String) async {
+    // 2026-05-13 — Cache fast-path. If a cached export already exists
+    // for this document, return its URL immediately without
+    // re-rendering. The cache is invalidated automatically when the
+    // source document is deleted (see AudioExportCache observer).
+    let documentID = RemoteAudioExportRegistry.shared.get(jobID)?.documentID
+    if let docID = documentID,
+       let cachedURL = AudioExportCache.shared.cachedURL(for: docID) {
+        RemoteAudioExportRegistry.shared.update(jobID) { job in
+            job.status = .finished
+            job.progress = 1.0
+            job.resultURL = cachedURL
+        }
+        return
+    }
+
     let segmenter = SentenceSegmenter()
     let segments = segmenter.segments(for: plainText)
     let voiceMode = PlaybackPreferences.shared.voiceMode
@@ -151,10 +166,19 @@ func runHeadlessAudioExport(jobID: String, plainText: String, title: String) asy
             outputDirectory: FileManager.default.temporaryDirectory,
             documentTitle: title
         )
+        // 2026-05-13 — Move the freshly rendered file into the
+        // persistent cache so future exports of the same document hit
+        // the cache fast-path. Move failures fall back to surfacing
+        // the temp URL directly; the user still gets a usable file.
+        var finalURL = url
+        if let docID = RemoteAudioExportRegistry.shared.get(jobID)?.documentID,
+           let cachedURL = try? AudioExportCache.shared.store(url, for: docID) {
+            finalURL = cachedURL
+        }
         RemoteAudioExportRegistry.shared.update(jobID) { job in
             job.status = .finished
             job.progress = 1.0
-            job.resultURL = url
+            job.resultURL = finalURL
         }
     } catch {
         RemoteAudioExportRegistry.shared.update(jobID) { job in

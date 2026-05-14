@@ -1,5 +1,54 @@
 # Next
 
+## 2026-05-14 (afternoon, autonomous) — B/C/D-tier complete; report for Mark
+
+Mark gave the directive to work through B, C, D tiers autonomously with the iPhone available. Worked through everything that didn't require his eyes, hands, or final-decision input. **All commits pushed to `origin/main`.**
+
+### B-tier — Hal RAG patterns + indexing reliability (commit `b166143`)
+
+- **B1 — Heal-on-launch.** `LibraryViewModel.healAbandonedIndexing()` scans persisted docs 2s after library load; any doc with `characterCount ≥ 200` and 0 chunks is re-enqueued through the normal indexing path. GEB PDF (1.89M chars) confirmed: was previously 0 chunks (interrupted pass), `REINDEX_DOCUMENT` produces 2061 chunks cleanly. Future kills mid-index self-heal on next launch.
+- **B2 — `LIST_CHUNKS` default.** No-limit form now returns every chunk. The default 20 had silently produced the phantom-A9 misread.
+- **B3 — User-tunable retrieval strictness.** New `PlaybackPreferences.RetrievalStrictness` (Permissive 0.35 / Balanced 0.45 default / Strict 0.55) replaces the hardcoded weak-retrieval floor. New "Ask Posey" section in Reader Preferences with a segmented picker + per-selection description.
+- **B4 — Entity- and lexical-variation expansion.** `expandEntityVariations` covers plural↔singular (3+ char base), `+'s` possessive, hyphen collapse. Applied to both query-entity lookup AND lexical content tokens, in `searchHybrid` AND `searchHybridDiagnostic`. "dogs" now matches "dog" chunks via `lex=0.333` (was 0).
+- **B5 — Content-dedup before top-N.** `searchHybrid` oversamples to `limit * 3` then drops chunks whose embedding cosine ≥ 0.92 against an already-accepted chunk. Synthetic-metadata chunks bypass dedup; cross-kind comparisons skipped.
+
+### Post-B-tier fix — Ask Posey RAG starvation (commit `d46b2c7`)
+
+Three-Hats-testing the B-tier work on iPhone surfaced a real regression: **every Ask Posey question was returning `chunksInjected: 0` and either empty or refusal-shaped answers.** Retrieval was returning chunks (RAG_TRACE confirmed); `breakdown.ragChunks` was always 0.
+
+Root cause: the May-13 A2/A7 prompt additions had grown `proseInstructions` to ~3071 tokens, consuming the entire 4096 - 1024 = 3072 prompt ceiling on its own. After non-droppable sections claimed their tokens, `droppableBudget` reached 0 — RAG / STM / summary all rendered as empty strings. AFM saw the rules and the question but never the document.
+
+Fix had three parts:
+- Compacted `proseInstructions` from ~3071 → ~1346 tokens. Preserved every behavioral rule; collapsed paired FAILED/SUCCEEDED example blocks into one-line patterns.
+- `responseReserveTokens` 1024 → 768 (responses are typically 50–400 chars, this was over-reserved).
+- Trailing-punctuation trim in `ungroundedEntities` (the `alice's adventures in wonderland,` candidate, with trailing comma, was failing to match `alice's adventures in wonderland` in the haystack and triggering false refusals).
+
+### D3 / D-tier — qa_battery regression + binary-bytes rejection (commit `f5778ca`)
+
+- **qa_battery.sh 12/12 acceptable** on iPhone post-fix. AI Book Collaboration / Cloud Copyright / Internet Steps × 4 question types each. Factual / connection / follow-up answers are grounded with citations; not-in-doc answers all produce "The document doesn't say." Full log at `Art/qa-evidence/2026-05-14-qa-battery/qa_battery_2026-05-14.log`. **Key load-bearing verification:** "What happens when Alice eats the cake?" answered "makes her grow larger" — the correct direction. A2/A7's paired-detail rule held even with the compacted prompt.
+- **C-tier polish:** TXT importer now rejects binary bytes (PDF/PNG/ZIP misnamed as `.txt`). New `TXTDocumentImporter.looksLikeText` heuristic — NUL bytes or > 15% non-printable controls in the first 4 KB fails with an honest user-facing error. Real text files unchanged.
+
+### Earlier D-tier already closed
+
+- D2 (antenna OFF default for App Store release) — closed earlier in commit `4f670e8` (defense-in-depth force-clear in Release builds, verified by 0-symbol Release archive check).
+- D1 (app icon), D4 (accessibility pass), D5 (final submission) — all require Mark's eyes/hands/decisions; not actioned this pass.
+
+### What needs Mark when you're back
+
+1. **iPhone Preferences scroll** — confirm Ask Posey "Retrieval" picker and "Cached Audio Files" section both render correctly when the Preferences sheet is scrolled. Code paths verified by AX-tree on sim, but neither section is in the visible top half on iPhone screenshots.
+2. **A4 part 1 — M4A pacing decision.** Reconfirmed at 244 WPM (~1.6× natural). Three options from the May 7 investigation still pending your call (halve rate / AVAudioEngine time-stretch / label-and-ship).
+3. **A5 — Xcode Accessibility Inspector** pass on iPhone for VoiceOver labels (antenna's `READ_TREE` doesn't surface SwiftUI accessibility identifiers on real device — sim's idb gets a richer tree, but only against simulators).
+4. **App icon home-screen eyeball.**
+5. **Final submission** — privacy policy, App Store metadata, the actual submit click.
+
+### Commit summary (this session, after A-tier)
+
+- `b166143` — B-tier polish: LIST_CHUNKS default, heal-on-launch, RAG dedup + variation + tunable strictness
+- `d46b2c7` — Ask Posey RAG-starvation fix: compact prompt, smaller reserve, dedup fixes
+- `f5778ca` — C-tier polish: reject binary bytes as .txt + qa_battery 12/12
+
+---
+
 ## 2026-05-14 (overnight, autonomous) — A-tier complete; report for Mark
 
 Worked through Mark's autonomous-overnight A-tier queue in order. Every item ships verified on both sim + iPhone except A5, which is constrained by the antenna's accessibility introspection on real device (see note below).

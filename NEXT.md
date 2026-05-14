@@ -65,7 +65,12 @@ Mark gave a no-pressure mandate to address real gaps before submit.
 - A2/A7 ✅ Prompt rules for outside-entity grounding + paired-detail direction (`480eaf0`)
 
 **A-tier remaining for after compaction:**
-- A3 — indexing race live trigger verification on sim
+- ~~A3~~ — verified on sim. Added `INDEXING_STATE` antenna verb; race-polled
+  during 2.15M-char synthetic import → `isEnhancing=true` on 36/40 samples;
+  chrome banner rendered "Indexing this document for Ask Posey, 55 percent
+  complete" during indexing. Screenshot in `Art/qa-evidence/2026-05-13-A3/`.
+  The Menu's "Still learning…" Section shares one source of truth with the
+  verified chrome banner. See HISTORY entry.
 - A4 — confirm M4A speed in standard player + caching + Preferences storage UI
 - A5 — iPhone AX-tree rigorous verification
 - A8 — long-doc background-export survival test

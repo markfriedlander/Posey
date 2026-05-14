@@ -1,5 +1,24 @@
 # Posey History
 
+## 2026-05-13 — A3 indexing-race live trigger verified on simulator
+
+Added `INDEXING_STATE` antenna verb (`LibraryView.swift`) that reads the live `IndexingTracker.sharedForChat` and reports per-document `isIndexing`, `isEnhancing`, `unifiedProgress(for:)`, and per-stage counts. Test infrastructure only — no user-visible behavior change.
+
+**Race-trigger verification on sim** (iPhone 17 Pro, `10C6DB49-…`):
+
+1. RESET_ALL → import a 2.15M-char synthetic doc (Alice repeated 30×) via `/import`.
+2. Race-polled `INDEXING_STATE:<doc>` every 200ms in a tight loop while import was in flight. `isEnhancing=true` observed on 36/40 consecutive samples covering the chunking window. `unifiedProgress` stayed non-nil throughout.
+3. Opened the doc → tapped to surface chrome → observed live "Indexing this document for Ask Posey, 55 percent complete" via AX-tree (`AXUniqueId: reader.indexingBanner`).
+4. Screenshot at 51% — `Art/qa-evidence/2026-05-13-A3/sim-reader-chrome-during-indexing.png` — shows the banner overlaid on the rendered document while indexing was actively running.
+
+**Why this verifies the menu's "Still learning…" message without unfurling it:** the reader's Menu Section is conditionally rendered on `unifiedProgress(for: viewModel.document.id) != nil` (`ReaderView.swift:902-907`). The same `unifiedProgress` function is what drives the chrome's indexing banner. Both surfaces share one source of truth in `IndexingTracker`. The screenshot shows the banner rendering live progress data; therefore SwiftUI's Menu, evaluating the same condition at render time, will render its "Still learning this document — N%" Section under the same in-flight state.
+
+**Sim availability caveat:** `AskPoseyAvailability.isAvailable` returns false on this sim (no AFM model assets), so the sparkle Menu itself is hidden in the chrome. The Menu code IS in the build; tapping the sparkle on a real iPhone (where AFM is available) would unfurl the menu with the Section rendered. The data condition that gates the Section was the verifiable thing — done on sim per Mark's A3 scope.
+
+**Status:** A3 closed. Verb is durable test infrastructure for any future race-window regression. Proceeding to A4.
+
+---
+
 ## 2026-05-13 — A9 retracted as phantom bug; chunker verified healthy
 
 Resumed post-compaction with A9 (EPUB chunker truncation) flagged as a v1 blocker. Investigation closed it as a phantom: the "Alice indexed only to ~12% of its content" observation was an artifact of the `LIST_CHUNKS` antenna verb's default 20-row limit (`LibraryView.swift:1202`), not a real index ceiling.

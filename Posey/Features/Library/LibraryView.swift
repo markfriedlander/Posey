@@ -2398,6 +2398,23 @@ extension LibraryViewModel {
                 AudioExportCache.shared.deleteAll()
                 return json(["deletedAll": true])
 
+            case "SIMULATE_AUDIO_EXPORT_BG_EXPIRATION":
+                // 2026-05-13 — A8 test hook. Drives the same
+                // `.backgroundTimeExpired` failure path the iOS
+                // `beginBackgroundTask` expirationHandler would
+                // trigger after ~30s of being backgrounded, without
+                // having to actually background-and-wait. The export
+                // Task in ReaderView.beginAudioExport observes this
+                // notification and calls
+                // `exporter.cancelDueToBackgroundExpiration()`.
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteSimulateAudioExportExpiration,
+                        object: nil
+                    )
+                }
+                return json(["status": "posted"])
+
             case "BEGIN_AUDIO_EXPORT":
                 // BEGIN_AUDIO_EXPORT:<docID> — direct kickoff path
                 // for the redesigned UI (notification-based). Bypasses

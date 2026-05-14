@@ -1,5 +1,33 @@
 # Posey History
 
+## 2026-05-13 — A8 long-doc background-export expiration becomes an honest failure
+
+Mark's A8 concern was that on a long-running export, iOS expires the `beginBackgroundTask` window (~30s on iOS 16+) and the current code path silently routed the user-facing notification to "Export cancelled." — same as a user-triggered cancel. Users couldn't tell whether they had cancelled, the app had crashed, or iOS had killed it.
+
+**Fix.**
+
+1. New error case `AudioExportError.backgroundTimeExpired` with `errorDescription` = "Posey couldn't finish exporting in the background. Open Posey and try again — staying in the app keeps it running." Cleanly separates iOS-forced timeout from user cancel.
+
+2. New `AudioExporter.cancelDueToBackgroundExpiration()` — same shape as `cancel()` but routes the failure with `.backgroundTimeExpired`.
+
+3. `ReaderView.beginAudioExport`'s `beginBackgroundTask` expirationHandler now calls `cancelDueToBackgroundExpiration()` instead of plain `cancel()`. The existing failure-notification scheduling path in the catch block picks up the new errorDescription automatically.
+
+4. Test hook: new notification `.remoteSimulateAudioExportExpiration` and antenna verb `SIMULATE_AUDIO_EXPORT_BG_EXPIRATION` let autonomous tests drive the timeout path without waiting the actual ~30s while backgrounded. The export Task adds a NotificationCenter observer at launch and removes it via `defer` so the hook is auto-cleaned.
+
+**Verification (both hardware):**
+
+- **Sim** (iPhone 17 Pro): Imported a 359K-char synthetic doc; `BEGIN_AUDIO_EXPORT` started rendering (sheet showed "Rendering segment 234 of 4,760 — 4%"); fired `SIMULATE_AUDIO_EXPORT_BG_EXPIRATION`. The system delivered a local notification with title "Audio Export Failed" and body **"longexport: Posey couldn't finish exporting in the background. Open Posey and try again — staying in the app keeps it running."** Pending+delivered payload saved at `Art/qa-evidence/2026-05-13-A8/notification-delivered.json`.
+- **iPhone** (D24FB384-…): Same flow on the existing Alice EPUB (71,847 chars). `BEGIN_AUDIO_EXPORT` → `SIMULATE_AUDIO_EXPORT_BG_EXPIRATION` → notification delivered with body **"Alice's Adventures in Wonderland: Posey couldn't finish exporting in the background. Open Posey and try again — staying in the app keeps it running."** Saved at `Art/qa-evidence/2026-05-13-A8/iphone-failure-notification.json`.
+
+User-initiated `cancel()` still routes through `.cancelled` with errorDescription "Export cancelled." — the two paths are now distinguishable and only the iOS-killed one schedules the long-form recovery message.
+
+Three Hats:
+- Developer: targeted change (one new error case + one new method + one expirationHandler swap); compiles for both targets; observer cleaned via defer.
+- QA: end-to-end verified on both hardware via the delivered-notification queue.
+- User: an export that runs past the OS time limit now produces a clear, actionable banner instead of looking like a user-cancel or a crash.
+
+---
+
 ## 2026-05-13 — A4 audio export cache + "Cached Audio Files" Preferences UI
 
 Mark's A4 directive had two parts: (1) confirm whether the rendered M4A still plays at incorrect speed in a standard player, and (2) implement one-cached-export-per-document with iOS-clearable storage, source-doc-deletion invalidation, and a Preferences section showing per-file sizes/delete buttons + Delete All + total used.

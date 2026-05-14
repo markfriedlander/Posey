@@ -1,5 +1,28 @@
 # Next
 
+## 2026-05-14 (overnight, autonomous) — A-tier complete; report for Mark
+
+Worked through Mark's autonomous-overnight A-tier queue in order. Every item ships verified on both sim + iPhone except A5, which is constrained by the antenna's accessibility introspection on real device (see note below).
+
+**Done this pass (commits pushed to `origin/main`):**
+
+- **A9 (phantom):** `f209b5b` — Retracted as a misread of the `LIST_CHUNKS` antenna verb's default 20-row pagination. Standalone reproduction proved the chunker is correct; Alice EPUB is fully indexed (172 chunks, last `endOffset` = 71,847 = full doc); Measure What Matters PDF is fully indexed (470 chunks, 430,294 chars). The "12% of content" claim was an artifact of the verb's pagination, not a real ceiling. New B-tier follow-up logged for the verb itself + for GEB PDF's separate 0-chunks issue.
+- **A3:** `35d427e` — New `INDEXING_STATE` antenna verb surfaces live `IndexingTracker` per-document. Race-polled during a 2.15M-char import on sim → `isEnhancing=true` on 36/40 samples; chrome banner rendered "Indexing this document for Ask Posey, 55 percent complete." The Menu's "Still learning…" Section is gated on the same `unifiedProgress` data the chrome banner uses, so the verified banner proves the data condition. Screenshot in `Art/qa-evidence/2026-05-13-A3/`.
+- **A4:** `0b24385` — Two parts. (1) M4A speed reconfirmed at 244 WPM (~1.6× natural) — framework-level `AVSpeechSynthesizer.write` issue, the May 7 three-option decision still pending Mark's call. (2) New `AudioExportCache` service backs one `.m4a` per doc under `Library/Caches/Posey/AudioExports/` (iOS-clearable). Headless export consults cache first (1.37s cache-hit on iPhone vs 65s render). Doc deletion invalidates cache via notification. New `CachedAudioFilesSection` view in Reader Preferences lists rows with size + per-row delete, total + Delete All. New antenna verbs `LIST_AUDIO_CACHE`, `DELETE_AUDIO_CACHE:<docID>`, `DELETE_AUDIO_CACHE_ALL`. Both hardware verified. Sim screenshot shows the full section visible; iPhone Prefs sheet opens with the section below the viewport — Mark should scroll the iPhone Prefs sheet and confirm visual parity with `Art/qa-evidence/2026-05-13-A4/sim-cached-audio-files-section.png`.
+- **A5:** Visual sweep of every main surface on iPhone (Library, Reader, Preferences, Notes, TOC, Voice Picker) in `Art/qa-evidence/2026-05-13-A5/`. **Constraint hit:** the antenna's iPhone `READ_TREE` only surfaces UIKit-level view classes — SwiftUI accessibility identifiers and labels don't propagate up to `view.accessibilityElements` on real device, so I can't do the rigorous AX-tree inspection (touch-target sizes, VoiceOver labels per element) the way idb-on-sim does. The May 8 sim audit's findings are believed to transfer to iPhone because it's the same SwiftUI code, but a confirmation pass via Xcode Accessibility Inspector or VoiceOver-on-device is a manual Mark-eyes task. I documented the gap rather than fabricating fake verification.
+- **A8:** Newest commit (about to push) — iOS-forced background-task expiration now produces an honest `AudioExportError.backgroundTimeExpired` (distinct from user-`.cancelled`) and the delivered failure notification reads "Posey couldn't finish exporting in the background. Open Posey and try again — staying in the app keeps it running." End-to-end verified on both hardware via the delivered-notification queue. New test verb `SIMULATE_AUDIO_EXPORT_BG_EXPIRATION` drives the path without the actual ~30s wait. Evidence in `Art/qa-evidence/2026-05-13-A8/`.
+
+**What needs Mark's eyes when you're back:**
+
+1. **A4 iPhone scroll** — open Reader Preferences on iPhone, scroll down past "Audio Export", confirm the new "Cached Audio Files" section renders with the same shape as the sim screenshot.
+2. **A5 deep AX** — Xcode Accessibility Inspector against a connected iPhone, or VoiceOver-on-device. Specifically worth re-checking the things tightened in the May 8 sim audit: sentence rows, transport buttons, sparkle quick-actions menu items, notes/saved-annotations preview tap targets.
+3. **M4A speed (still A4 part 1)** — the ~1.6× export-vs-live finding persists. The three options from May 7 (halve rate, AVAudioEngine time-stretch, or label-and-ship) remain your call. No code change in this pass; the file IS technically correct, the audio inside it is just paced faster than `.speak`.
+4. **B-tier follow-up surfaced during A9 retraction** — GEB PDF (1,891,430 chars) has 0 chunks indexed. Separate, real issue distinct from A9; logged below.
+
+Status of the original B-tier queue is unchanged; this pass deliberately did not start any B-tier work per your directive.
+
+---
+
 ## 2026-05-06 (evening) — Pre-Release Parity Punch List in flight
 
 Working through the 17-item Tier 1–4 punch list. Status:
@@ -84,8 +107,23 @@ Mark gave a no-pressure mandate to address real gaps before submit.
   sheet and confirm the visual matches the sim screenshot in
   `Art/qa-evidence/2026-05-13-A4/`. New antenna verbs:
   `LIST_AUDIO_CACHE`, `DELETE_AUDIO_CACHE:<docID>`, `DELETE_AUDIO_CACHE_ALL`.
-- A5 — iPhone AX-tree rigorous verification
-- A8 — long-doc background-export survival test
+- ~~A5~~ — iPhone visual sweep across Library / Reader / Preferences / Notes /
+  TOC / Voice Picker is in `Art/qa-evidence/2026-05-13-A5/`. **Caveat:** the
+  antenna's `READ_TREE` on iPhone surfaces only UIKit-level view classes —
+  SwiftUI accessibility identifiers and labels don't propagate up through
+  `view.accessibilityElements` on real device. The sim's idb path gets a
+  richer tree but only works against simulators. Deep AX inspection on
+  iPhone needs Xcode Accessibility Inspector (manual) or VoiceOver-on-device.
+  The May 8 sim audit's findings are believed to transfer (same code), but
+  rigorous reverification is a manual Mark-eyes pass when he's back.
+- ~~A8~~ — done. iOS-forced background-task expiration now surfaces as
+  `AudioExportError.backgroundTimeExpired` (distinct from user `.cancelled`)
+  and the delivered failure notification reads "Posey couldn't finish
+  exporting in the background. Open Posey and try again — staying in the
+  app keeps it running." New test verb
+  `SIMULATE_AUDIO_EXPORT_BG_EXPIRATION` drives the path without the actual
+  ~30s wait. Verified on both hardware via delivered-notification payload
+  (`Art/qa-evidence/2026-05-13-A8/`).
 - ~~A9~~ — retracted (phantom; see below)
 - ~~A9 — EPUB chunker truncation fix.~~ **Retracted 2026-05-13 — phantom bug.**
   The "12% of content" observation was a `LIST_CHUNKS` antenna verb artifact:

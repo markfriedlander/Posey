@@ -756,7 +756,17 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         guard !candidates.isEmpty else { return nil }
 
         var ungrounded: Set<String> = []
-        for entity in candidates {
+        // 2026-05-14 (B-tier) — Trim trailing punctuation before
+        // haystack comparison. Without this, a candidate like
+        // `alice's adventures in wonderland,` (from a quoted-string
+        // capture that grabbed a sentence-terminating comma) fails
+        // to match the haystack's `alice's adventures in wonderland`
+        // and the entire grounded answer gets flagged. The trimmed
+        // form is also what we'd use to display the entity, so
+        // normalizing the candidate is the right move.
+        let trailingPunctuation = CharacterSet(charactersIn: ",.;:!?\"' \t\n\u{201C}\u{201D}\u{2018}\u{2019}")
+        for raw in candidates {
+            let entity = raw.trimmingCharacters(in: trailingPunctuation)
             if entity.count < 4 { continue }   // ignore "AI", "Mr"
             if haystackLower.contains(entity) { continue }
             ungrounded.insert(entity)

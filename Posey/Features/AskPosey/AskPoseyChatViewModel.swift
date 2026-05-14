@@ -950,9 +950,18 @@ private extension AskPoseyChatViewModel {
         // and can't cite it. Synthetic metadata chunks (startOffset
         // < 0) are exempt — their relevance is artificially set and
         // they're curated content, not retrieval results.
-        return merged
+        let final = merged
             .filter { $0.startOffset < 0 || $0.relevance >= 0.40 }
             .sorted { $0.relevance > $1.relevance }
+        // 2026-05-14 (B-tier diagnostic) — Log retrieval pipeline
+        // stats so the antenna's LOGS verb can show why a question
+        // wound up with `chunksInjected: 0`. results = searchHybrid
+        // output; frontMatter = unconditional first-N chunks;
+        // translated = post-conversation-dedup organic chunks;
+        // final = post-relevance-filter merged list.
+        dbgLog("retrieveRAGChunks: results=%d frontMatter=%d translated=%d final=%d",
+               results.count, frontMatter.count, translated.count, final.count)
+        return final
     }
 
     /// 2026-05-04 — DEPRECATED. Kept temporarily so any test code

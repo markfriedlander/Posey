@@ -1021,6 +1021,61 @@ extension LibraryViewModel {
                     return json(["stopped": false, "reason": "scheduler nil"])
                 }
 
+            case "INDEXING_STATE":
+                // 2026-05-13 — A3 verification verb. Surfaces the live
+                // IndexingTracker state for autonomous race-trigger tests.
+                // Optional arg: <doc-id> to scope to one document. With
+                // no arg, dumps state for every in-flight document across
+                // all three enhancement stages.
+                //
+                // The reader's Ask Posey menu shows
+                //   "Still learning this document — N%"
+                // iff `IndexingTracker.unifiedProgress(for:)` returns a
+                // non-nil value (which itself requires `isEnhancing` to
+                // be true). This verb proves that condition is observable
+                // during the import → index race window without needing
+                // to AX-scrape the unfurled menu.
+                let tracker = IndexingTracker.sharedForChat
+                func snapshot(for id: UUID) -> [String: Any] {
+                    var dict: [String: Any] = [
+                        "documentID": id.uuidString,
+                        "isIndexing": tracker.isIndexing(id),
+                        "isEnhancing": tracker.isEnhancing(id)
+                    ]
+                    if let prog = tracker.unifiedProgress(for: id) {
+                        dict["unifiedProgress"] = prog
+                        dict["unifiedProgressPercent"] = Int((prog * 100).rounded())
+                    }
+                    if let p = tracker.indexingProgress[id] {
+                        dict["stage1"] = [
+                            "processed": p.processed,
+                            "total": p.total,
+                            "fraction": p.fraction
+                        ]
+                    }
+                    dict["stage2MetadataRunning"] = tracker
+                        .metadataExtractingDocumentIDs.contains(id)
+                    if let s = tracker.chunkEnhancementSnapshots[id] {
+                        dict["stage3"] = [
+                            "enhanced": s.enhanced,
+                            "total": s.total,
+                            "fraction": s.fraction
+                        ]
+                    }
+                    return dict
+                }
+                if let idStr = arg, !idStr.isEmpty,
+                   let id = UUID(uuidString: idStr) {
+                    return json(snapshot(for: id))
+                }
+                let active = tracker.indexingDocumentIDs
+                    .union(tracker.metadataExtractingDocumentIDs)
+                    .union(Set(tracker.chunkEnhancementSnapshots.keys))
+                return json([
+                    "activeCount": active.count,
+                    "documents": active.map { snapshot(for: $0) }
+                ])
+
             case "ENHANCE_CHUNK_NOW":
                 // 2026-05-05 — Diagnostic: run the chunk enhancer on
                 // ONE chunk in isolation and report what AFM said

@@ -95,13 +95,20 @@ nonisolated struct AskPoseyTokenBudget: Sendable, Equatable {
 
     /// Tokens reserved for the model's response. Bumped from 512 →
     /// 1024 on 2026-05-02 after real Q&A revealed AFM's actual token
-    /// count exceeded our estimate by ~14% — even with the prompt
-    /// builder reporting "well under budget" we were hitting AFM's
-    /// 4096 context window with `exceededContextWindowSize` errors.
-    /// 1024-token reserve plus the tightened chars-per-token estimate
-    /// (3.0 instead of 3.5) gives ~25% headroom for tokenizer
-    /// disagreement.
-    var responseReserveTokens: Int = 1024
+    /// count exceeded our estimate by ~14%.
+    ///
+    /// 2026-05-14 (B-tier): Lowered 1024 → 768 to recover RAG
+    /// budget after the May-13 A2/A7 prompt-rule additions pushed
+    /// the system prompt from ~2350 to ~3070 tokens. With
+    /// `contextWindowTokens = 4096`, the ceiling minus system +
+    /// user-question often left zero droppable budget — RAG, STM,
+    /// and summary all rendered as empty, AFM saw only the rules.
+    /// 768 reserve preserves enough headroom for typical Posey
+    /// responses (rarely > 400 chars / ~135 tokens of generation)
+    /// while restoring meaningful droppable budget. Pair with the
+    /// system-prompt trim in `AskPoseyPromptBuilder.proseInstructions`
+    /// committed in the same pass.
+    var responseReserveTokens: Int = 768
 
     // MARK: - Section sub-budgets (sum ≈ prompt ceiling)
 

@@ -1083,8 +1083,28 @@ nonisolated final class DocumentEmbeddingIndex {
         accepted.reserveCapacity(take)
         for candidate in scored {
             if accepted.count >= take { break }
+            // 2026-05-14 — Synthetic-metadata chunks (title-page
+            // distillations) bypass dedup entirely. They're short,
+            // their embeddings live in a separate :syn-meta kind
+            // band, and their content is the doc's title beacon
+            // which the anti-fabrication entity check relies on to
+            // ground answers about the work itself. Letting them be
+            // deduped against content chunks broke "what is this
+            // book?" by dropping the only chunk that named the
+            // title.
+            if isSyntheticKind(candidate.0.embeddingKind) {
+                accepted.append(candidate)
+                continue
+            }
             var isDuplicate = false
             for already in accepted {
+                // Skip cross-kind comparisons — vectors from
+                // different embedding kinds don't share a meaningful
+                // similarity scale. Dedup only applies within a
+                // kind family.
+                guard candidate.0.embeddingKind == already.0.embeddingKind else {
+                    continue
+                }
                 let sim = cosine(candidate.0.embedding, already.0.embedding)
                 if sim >= threshold {
                     isDuplicate = true

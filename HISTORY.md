@@ -1,5 +1,34 @@
 # Posey History
 
+## 2026-05-14 — Ask Posey RAG-starvation root cause + fix (post-B-tier)
+
+While Three-Hats-testing the B-tier work on iPhone, surfaced a serious regression: **every Ask Posey question on the iPhone was returning `chunksInjected: 0` and either an empty answer or an honest-refusal**. Retrieval was returning chunks correctly (RAG_TRACE confirmed 8 strong matches), but `breakdown.ragChunks` was always 0.
+
+**Root cause:** the May-13 A2/A7 prompt-rule additions (outside-entity grounding + paired-detail direction) pushed `proseInstructions` from ~2350 tokens to ~3071. With `contextWindowTokens = 4096` and `responseReserveTokens = 1024`, that left a prompt ceiling of 3072 — almost exactly the system-prompt size. Once user-question + scaffolding overhead consumed the rest, the prompt builder's `droppableBudget` reached 0 and RAG / STM / summary all rendered as empty strings. AFM saw the rules and the question but never the document. The anti-fabrication entity check then flagged "Alice's Adventures in Wonderland" (the doc title appearing in AFM's answer) as ungrounded — because the chunks weren't in the haystack — and the system retried with a refusal framing, producing the silent-failure behavior.
+
+**Three things changed to fix this:**
+
+1. **Compacted `proseInstructions` from ~3071 → ~1346 tokens.** Preserved every behavioral rule. The compaction:
+   - Collapsed paired FAILED/SUCCEEDED examples into single-sentence patterns naming the failure mode.
+   - Merged related rules (NEVER FABRICATE + NEVER USE OUTSIDE KNOWLEDGE + NAMES IN ANSWER → one stronger Rule 1+2+3).
+   - Kept the rare-case examples (Alice "drink shrinks, eat grows" direction, OKRs-vs-Covey outside-entity, list padding) but in one-line form rather than full quote blocks.
+
+2. **`responseReserveTokens` 1024 → 768.** AFM responses are typically 50–400 chars (~135 tokens). 1024 was wildly over-reserved; 768 still gives generous headroom and adds 256 tokens of usable prompt budget.
+
+3. **Punctuation-trim in `ungroundedEntities`.** The fabrication-check candidate `"alice's adventures in wonderland,"` (with trailing comma from a quoted-string capture) was failing to match the haystack's `"alice's adventures in wonderland"` (no comma). Added a `trimmingCharacters` pass over a punctuation set before the haystack-contains check. This was the proximate reason "Who is Alice?" produced an empty response: the original answer mentioned the doc title, the title was in the haystack but with a comma, the substring check failed, retry was forced, and the retry also fabricated, surfacing `informativeRefusalFailure`.
+
+**Three Hats verification on iPhone (Alice EPUB, fresh conversation):**
+
+- Q: "What is this book about?" → "This book is about a young girl named Alice who falls down a rabbit hole into a fantastical world filled with peculiar characters and whimsical situations." (chunksInjected: 1 synthetic; ragChunks: 400 tokens)
+- Q: "Who is Alice?" → "Alice is the protagonist of 'Alice's Adventures in Wonderland,' a story by Lewis Carroll. She is a young girl who finds herself in a fantastical world..." (chunksInjected: 7; ragChunks: 1339 tokens)
+- Q: "What happens when Alice eats the cake?" → "Alice eats a cake, and it makes her grow larger." **(correct direction!)** (chunksInjected: 6; ragChunks: 1389 tokens)
+
+The last question is a load-bearing verification: A2/A7 specifically guarded against "Alice eats cake to shrink" (wrong direction — she drinks the bottle to shrink). Even with the compacted prompt, the paired-detail rule held — AFM produced the correct "eat → grow" answer.
+
+Also added a diagnostic `dbgLog("retrieveRAGChunks: results=%d frontMatter=%d translated=%d final=%d", ...)` so future surfaces of this class of bug can be debugged via the antenna's LOGS verb without rebuilding.
+
+---
+
 ## 2026-05-14 — B-tier polish pass: chunk-list display fix, heal-on-launch, RAG dedup + entity/lexical variation + tunable strictness
 
 Took Mark's "B/C/D autonomous" directive and worked through the explicitly logged B-tier items.

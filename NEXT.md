@@ -65,7 +65,7 @@ Working through the 17-item Tier 1–4 punch list. Status:
 - Notes + Bookmarks persist with body previews.
 - Ask Posey seeded fixture round-trips through dismiss/reopen; composer keyboard fix verified with 28pt clearance.
 - Audio Export notification flow verified including replace-by-docID semantics and dismiss-during-render survival.
-- Library import edge cases handled (empty/whitespace rejected, single-char accepted, random-bytes-as-txt silently accepted — low-priority known).
+- Library import edge cases handled (empty/whitespace rejected, single-char accepted, ~~random-bytes-as-txt silently accepted — low-priority known~~ → closed 2026-05-14 via `TXTDocumentImporter.looksLikeText`).
 - Catalyst Mac iPad mode builds, runs, opens docs in dark mode with proper window chrome.
 - See HISTORY.md "Pre-submission Three Hats stress sweep" for full report.
 

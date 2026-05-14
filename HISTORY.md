@@ -1,5 +1,19 @@
 # Posey History
 
+## 2026-05-14 — C-tier polish + qa_battery 12/12 verification
+
+After fixing the Ask Posey RAG-starvation issue, ran `tools/qa_battery.sh` end-to-end on iPhone — the canonical Three-Hats QA driver, 4 questions × 3 documents (AI Book Collaboration / Cloud Copyright PDF / Internet Steps PDF) with cooldown. **All 12 answers acceptable:**
+- Factual Qs grounded with correct citations.
+- Connection Qs build on the retrieved chunks with substantive explanations.
+- Follow-up Qs reference prior turns correctly.
+- Not-in-doc Qs all return "The document doesn't say." (the prompt-rule-driven honest refusal pattern).
+
+Full log saved at `Art/qa-evidence/2026-05-14-qa-battery/qa_battery_2026-05-14.log`. This validates that the compacted prompt preserves the behavioral intent of every rule the verbose version had — including the paired-detail direction rule (verified separately by the Alice cake question).
+
+**C-tier polish item closed:** Random binary bytes imported as `.txt`. The TXT importer's Latin-1 fallback accepts any byte sequence, so misnamed PDFs / PNGs / archives would "import" silently as garbage. Added `TXTDocumentImporter.looksLikeText(_:)` heuristic: rejects content with NULs OR with > 15% non-printable / non-whitespace control characters in the first 4 KB. New `.notTextLikeContent` error case with a user-friendly explanation. Pure-ASCII text passes; UTF-8 / UTF-16 / Latin-1 prose passes; PDF / PNG / ZIP / random-binary fails with an honest error.
+
+---
+
 ## 2026-05-14 — Ask Posey RAG-starvation root cause + fix (post-B-tier)
 
 While Three-Hats-testing the B-tier work on iPhone, surfaced a serious regression: **every Ask Posey question on the iPhone was returning `chunksInjected: 0` and either an empty answer or an honest-refusal**. Retrieval was returning chunks correctly (RAG_TRACE confirmed 8 strong matches), but `breakdown.ragChunks` was always 0.

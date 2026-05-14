@@ -196,6 +196,73 @@ final class PlaybackPreferences {
         }
     }
 
+    /// 2026-05-14 (B3) — User-tunable retrieval strictness for the
+    /// Ask Posey weak-retrieval gate. Three levels chosen so the
+    /// label space is meaningful to non-engineers and the underlying
+    /// threshold range matches the empirical 2026-05-04 sweep that
+    /// pinned 0.45 as a fabrication-vs-grounded boundary.
+    ///
+    /// - `permissive` → 0.35: more attempts, occasional fabrication
+    ///   on tangential questions.
+    /// - `balanced` → 0.45 (the prior hardcoded default): tight enough
+    ///   to refuse fabrication-prone tangents, loose enough to attempt
+    ///   genuine-but-low-confidence questions.
+    /// - `strict` → 0.55: only attempt when retrieval is high-
+    ///   confidence; more honest refusals.
+    enum RetrievalStrictness: String, CaseIterable, Equatable {
+        case permissive
+        case balanced
+        case strict
+
+        /// Cosine threshold a non-front-matter chunk must clear for
+        /// `isWeakRetrieval` to return `false` (i.e. to attempt an
+        /// AFM answer). Returned as a `Double` so it can be compared
+        /// directly against `RetrievedChunk.relevance`.
+        var weakRetrievalThreshold: Double {
+            switch self {
+            case .permissive: return 0.35
+            case .balanced:   return 0.45
+            case .strict:     return 0.55
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .permissive: return "Permissive"
+            case .balanced:   return "Balanced"
+            case .strict:     return "Strict"
+            }
+        }
+
+        var description: String {
+            switch self {
+            case .permissive:
+                return "Posey attempts more questions, sometimes guessing when retrieval is weak."
+            case .balanced:
+                return "Posey attempts genuine questions and refuses the rest. Recommended."
+            case .strict:
+                return "Posey only answers when retrieval is high-confidence; more honest refusals."
+            }
+        }
+    }
+
+    /// Current retrieval-strictness preference. Default `.balanced`
+    /// (matches the 0.45 floor hard-coded before this preference
+    /// existed, so existing behavior is preserved for users who
+    /// don't visit Preferences).
+    var retrievalStrictness: RetrievalStrictness {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: "posey.askposey.retrievalStrictness"),
+                  let value = RetrievalStrictness(rawValue: raw) else {
+                return .balanced
+            }
+            return value
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "posey.askposey.retrievalStrictness")
+        }
+    }
+
     /// The document the user was last reading. Restored at cold launch so the
     /// app reopens to the reader instead of the library list.
     /// Cleared when the user explicitly navigates back to the library.

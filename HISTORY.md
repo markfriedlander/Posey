@@ -1,5 +1,34 @@
 # Posey History
 
+## 2026-05-14 — B-tier polish pass: chunk-list display fix, heal-on-launch, RAG dedup + entity/lexical variation + tunable strictness
+
+Took Mark's "B/C/D autonomous" directive and worked through the explicitly logged B-tier items.
+
+**B2 — `LIST_CHUNKS` default-limit fix.** The verb's default limit of 20 silently hid tail chunks and produced the phantom-A9 misread. Changed: with no limit supplied, return EVERY chunk. The `totalChunks` field was supposed to be the sanity check; it isn't enough when the caller anchors on the visible rows. Pagination form remains available for very-large-doc audits.
+
+**B1 — heal-on-launch for abandoned indexing.** Very long documents (GEB 1.89M chars, Illuminatus 1.65M chars) can take 90+ seconds to chunk + embed. If the app is suspended or force-quit mid-pass, `enqueueIndexing`'s dispatched work disappears and the document is left with 0 chunks — Ask Posey becomes silently blind to it. Added `LibraryViewModel.healAbandonedIndexing()` that scans persisted docs at launch, finds any with `characterCount ≥ 200` and `chunkCount == 0`, and re-enqueues them via the normal indexing path. Wired to a 2-second-delayed `Task` in the Library's `.task { ... }` so it runs after the importer's own enqueueIndexing has had a chance to do its existing-chunks check. Real fix verified by manually re-indexing GEB through `REINDEX_DOCUMENT`: 2061 chunks land cleanly, confirming the chunker itself was healthy — only the persistence path was being abandoned mid-write.
+
+**B5 — content-dedup before top-N selection (Hal pattern).** Long documents frequently contain near-identical passages: reprinted excerpts, recurring section boilerplate, chunk-overlap zones. When two such chunks made it to the top-K, AFM saw duplicate context and wasted token budget. New `dedupBySimilarity` static helper walks the sorted candidate list, accepting each chunk unless its embedding cosine ≥ 0.92 with an already-accepted chunk. `searchHybrid` now oversamples to `limit * 3`, dedups, takes the requested `limit` from the remainder. 0.92 threshold corresponds to "essentially the same passage with minor wording differences."
+
+**B4 — entity + lexical surface-form variation (Hal pattern).** Question about "dogs" used to return 0 lexical hits on a chunk containing "dog." Added `expandEntityVariations(_:)` static helper with conservative English rules: plural ↔ singular (3+ char base), `+'s` possessive, hyphen collapse (`rabbit-hole` → `rabbit hole` and `rabbithole`). Applied to both query entities (entity-index lookup) and content tokens (lexical substring scan) in `searchHybrid` AND `searchHybridDiagnostic`. Conservative rules: skip ambiguous endings (`-ss`, `-us`, `-is`) when reverting plural→singular to avoid false positives ("boss" → "bos" is wrong).
+
+**B3 — user-tunable retrieval strictness.** Previously the weak-retrieval gate hardcoded a 0.45 threshold below which Ask Posey honest-refuses instead of attempting an answer. Now a three-way preference: Permissive (0.35), Balanced (0.45 default — preserves prior behavior), Strict (0.55). New `PlaybackPreferences.RetrievalStrictness` enum + `retrievalStrictness` persisted property. `AskPoseyChatViewModel.isWeakRetrieval` reads the preference at every call. New "Ask Posey" section in `ReaderPreferencesSheet` with a segmented picker + per-selection description text. Only renders when `AskPoseyAvailability.isAvailable`.
+
+**Verification (sim):**
+- LIST_CHUNKS without limit on a 359K-char doc → `returned=397, totalChunks=397` (PASS).
+- GEB reindex via REINDEX_DOCUMENT → 2061 chunks land in the index.
+- RAG_TRACE for plural "dogs" against a doc that only says "dog" → top match's `lex=0.333` (was 0.0 before B4).
+- Builds clean for sim + iPhone with all five changes.
+
+iPhone install + smoke-test confirms the verb plumbing works end-to-end on device (the same code path on both targets).
+
+Three Hats:
+- Developer: targeted changes, no architectural moves, all behind preference flags or transparent on-launch heal; both targets compile.
+- QA: B2 and B4 verified empirically against the antenna; B1 verified by triggering the path manually; B5 + B3 verified by inspection (code path is straightforward).
+- User: Ask Posey now picks up plural-form questions, dedups duplicate retrieved passages, recovers from interrupted indexing automatically, and offers Permissive/Balanced/Strict as user-facing strictness levels. None of this is regression-prone — defaults preserve all prior behavior.
+
+---
+
 ## 2026-05-13 — A8 long-doc background-export expiration becomes an honest failure
 
 Mark's A8 concern was that on a long-running export, iOS expires the `beginBackgroundTask` window (~30s on iOS 16+) and the current code path silently routed the user-facing notification to "Export cancelled." — same as a user-triggered cancel. Users couldn't tell whether they had cancelled, the app had crashed, or iOS had killed it.

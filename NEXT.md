@@ -142,21 +142,34 @@ Mark gave a no-pressure mandate to address real gaps before submit.
   shipped remain the correct improvement layer; no chunker change needed.
 
 **Hal RAG patterns worth borrowing (B-tier, separate from A9):**
-- User-tunable relevance threshold (Posey hardcodes 0.35)
-- Entity-variation query expansion (catches singular/plural, possessives)
-- Explicit content-dedup before top-N selection
+- ~~User-tunable relevance threshold (Posey hardcodes 0.35).~~ Closed
+  2026-05-14 (B3). `PlaybackPreferences.RetrievalStrictness` with three
+  levels (Permissive 0.35 / Balanced 0.45 / Strict 0.55), default
+  Balanced preserves prior behavior. UI in Reader Preferences sheet
+  under a new "Ask Posey" section.
+- ~~Entity-variation query expansion.~~ Closed 2026-05-14 (B4). New
+  `expandEntityVariations` helper covers plural↔singular,
+  `+'s` possessive, hyphen collapse. Wired into both query-entity
+  lookup and lexical content-token scoring in `searchHybrid` and
+  `searchHybridDiagnostic`. Verified: "dogs" query now hits a chunk
+  containing "dog" via `lex=0.333` (was 0.0).
+- ~~Explicit content-dedup before top-N selection.~~ Closed 2026-05-14
+  (B5). `searchHybrid` now oversamples the candidate pool to
+  `limit * 3` then runs `dedupBySimilarity` (cosine ≥ 0.92 against
+  any already-accepted chunk → drop) before returning the top
+  `limit`. Cuts duplicate context injection.
 See TESTING.md for source pointers.
 
 **B-tier follow-up surfaced during A9 retraction (2026-05-13):**
-- GEB PDF (1,891,430 chars) has 0 chunks. The chunker either bailed silently
-  on very large docs or the long-document indexing path failed mid-run. Repro
-  with a second 1M+ char doc, instrument `enqueueIndexing`, find the ceiling.
-  Distinct from the A9 phantom — this is a real, observable hole at the very
-  long-document end of the spectrum. Affects Ask Posey only (reader works
-  fine without an index).
-- `LIST_CHUNKS` default limit of 20 is misleading for human inspection. Either
-  default to "all" (it already returns `totalChunks` for sanity) or rename to
-  `LIST_CHUNKS_PAGE`. Trivial fix; would have prevented this whole detour.
+- ~~GEB PDF (1,891,430 chars) has 0 chunks.~~ Closed 2026-05-14. Root cause:
+  not a chunker bug — indexing was abandoned mid-pass when the app was
+  suspended/killed during the original import. `REINDEX_DOCUMENT` produces
+  2061 chunks cleanly. Added `LibraryViewModel.healAbandonedIndexing()` to
+  re-enqueue any persisted doc with `characterCount ≥ 200` and 0 chunks on
+  every library load, so this self-heals going forward.
+- ~~`LIST_CHUNKS` default limit of 20.~~ Closed 2026-05-14. Default is now
+  "every chunk" when no limit is supplied; the pagination form
+  `LIST_CHUNKS:<id>:<offset>:<limit>` remains available.
 
 **2026-05-11 pre-submission stress sweep** — autonomous; sim + Catalyst.
 Two real bugs found and fixed:

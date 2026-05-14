@@ -216,6 +216,14 @@ struct LibraryView: View {
                     didAttemptInitialRestore = true
                     maybeRestoreLastOpenedDocument()
                 }
+                // 2026-05-14 (B1) — heal-on-launch for docs left with
+                // 0 chunks by an interrupted prior indexing pass.
+                // Cheap: one COUNT(*) per doc + a re-enqueue for the
+                // small set (typically zero) that need it.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s
+                    viewModel.healAbandonedIndexing()
+                }
                 // Phase B — kick off background contextual enhancement
                 // after a short delay so the library/reader appear is
                 // smooth before background AFM work begins competing
@@ -468,6 +476,46 @@ final class LibraryViewModel: ObservableObject {
             documents = try databaseManager.documents()
         } catch {
             present(error)
+        }
+    }
+
+    /// 2026-05-14 (B1) — Heal-on-launch for documents whose Ask Posey
+    /// indexing pass didn't finish before the app was killed.
+    ///
+    /// Background: very long documents (GEB at 1.89M chars, Illuminatus
+    /// at 1.65M chars) can take 90+ seconds to chunk + embed. If the
+    /// app is suspended or force-quit mid-pass, `enqueueIndexing`'s
+    /// dispatched work disappears and the document is left with 0
+    /// chunks — Ask Posey becomes silently blind to it. There's no
+    /// surfaced error; users hit "I can't find that in the document"
+    /// for content that obviously exists.
+    ///
+    /// This pass scans every persisted document, finds any with
+    /// plain-text content but no chunks (a strong signal of an
+    /// abandoned indexing pass), and re-enqueues them via the normal
+    /// `enqueueIndexing` path. The library's regular `enqueueIndexing`
+    /// already skips documents that ARE indexed, so this is safe to
+    /// call unconditionally.
+    func healAbandonedIndexing() {
+        do {
+            let docs = try databaseManager.documents()
+            for doc in docs {
+                // Skip empty / tiny docs — they may genuinely produce
+                // zero chunks (single sentence, all-whitespace, etc.).
+                // 200 chars is the smallest realistic content boundary.
+                guard doc.characterCount >= 200 else { continue }
+                let count = (try? databaseManager.chunkCount(for: doc.id)) ?? 0
+                if count == 0 {
+                    dbgLog("LibraryViewModel: heal-on-launch — re-enqueueing %@ (%d chars, 0 chunks)",
+                           doc.title, doc.characterCount)
+                    embeddingIndex.enqueueIndexing(doc)
+                }
+            }
+        } catch {
+            // Don't `present` — heal is best-effort, not a user-facing
+            // failure. Worst case is the doc stays unindexed and Ask
+            // Posey reports "I can't find that" the way it does today.
+            dbgLog("LibraryViewModel: heal-on-launch aborted: %@", "\(error)")
         }
     }
 
@@ -1261,19 +1309,30 @@ extension LibraryViewModel {
 
             case "LIST_CHUNKS":
                 // 2026-05-04 — RAG audit verb. Args:
-                //   <doc-id>:<offset>:<limit>
-                // Returns chunk metadata + text preview for the
-                // given range. Used by the Layer 1 chunking audit
-                // to inspect what's actually in the index per format.
+                //   <doc-id>[:offset[:limit]]
+                // Returns chunk metadata + text preview. Used by the
+                // Layer 1 chunking audit to inspect what's actually
+                // in the index per format.
+                //
+                // 2026-05-14 (B2) — Default behavior changed: returns
+                // EVERY chunk when no offset/limit is supplied,
+                // because the previous default of 20 silently hid
+                // tail chunks and produced a phantom-truncation
+                // misread that wasted hours on A9. The `totalChunks`
+                // field in the response was supposed to be the
+                // sanity check; it isn't enough when the caller
+                // anchors on the visible rows. The pagination form
+                // remains available for very-large-document audits.
                 let parts = (arg ?? "").split(separator: ":", maxSplits: 2,
                                               omittingEmptySubsequences: false)
                 guard parts.count >= 1, let id = UUID(uuidString: String(parts[0])) else {
-                    return #"{"error":"Usage: LIST_CHUNKS:<doc-id>[:offset:limit]"}"#
+                    return #"{"error":"Usage: LIST_CHUNKS:<doc-id>[:offset[:limit]]"}"#
                 }
                 let offset: Int = parts.count >= 2 ? (Int(parts[1]) ?? 0) : 0
-                let limit: Int  = parts.count >= 3 ? (Int(parts[2]) ?? 20) : 20
                 let stored = try databaseManager.chunks(for: id)
                 let total = stored.count
+                // limit unset → return every remaining chunk.
+                let limit: Int = parts.count >= 3 ? (Int(parts[2]) ?? total) : total
                 let slice = Array(stored.dropFirst(offset).prefix(limit))
                 let items: [[String: Any]] = slice.map { c in
                     [

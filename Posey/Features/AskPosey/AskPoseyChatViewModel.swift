@@ -1352,20 +1352,27 @@ extension AskPoseyChatViewModel {
 
     /// 2026-05-04 — Weak-retrieval check used by the confidence
     /// signal in send(). Returns true when no chunk outside the
-    /// front-matter prepend has relevance >= 0.35 — meaning RAG
-    /// retrieved nothing meaningful for this question, and AFM is
-    /// going to either refuse or substitute summary boilerplate.
-    /// Threshold and front-matter band derived from the
-    /// 2026-05-04 conversational sweep (see commit 68ad883).
+    /// front-matter prepend has relevance ≥ the configured
+    /// strictness threshold — meaning RAG retrieved nothing
+    /// meaningful for this question, and AFM is going to either
+    /// refuse or substitute summary boilerplate. Front-matter band
+    /// derived from the 2026-05-04 conversational sweep (see commit
+    /// 68ad883).
+    ///
+    /// 2026-05-14 (B3) — Threshold is now read from
+    /// `PlaybackPreferences.shared.retrievalStrictness`
+    /// (Permissive 0.35 / Balanced 0.45 / Strict 0.55). Default
+    /// `.balanced` preserves the prior 0.45 behavior for users who
+    /// don't visit Preferences.
     static func isWeakRetrieval(chunks: [RetrievedChunk]) -> Bool {
-        // Threshold tuned 2026-05-04 from real-conversation data:
+        // Empirical band per 2026-05-04 sweep:
         // 0.50+ chunks consistently produce real answers; 0.40 chunks
         // can produce confident fabrication when the chunk is
         // semantically near the question but doesn't actually answer
-        // it (MD "big question" → cosine 0.4 against memory-architecture
-        // chunk → fabricated framing). 0.45 catches the fabrication
-        // band while preserving strong-signal answers.
-        let strongThreshold = 0.45
+        // it. The user-tunable strictness lets them slide that floor
+        // up (more honest refusals) or down (more attempts).
+        let strongThreshold = PlaybackPreferences.shared
+            .retrievalStrictness.weakRetrievalThreshold
         // Front-matter prepend is the first 4 chunks (or 1 for long
         // docs); always relevance 1.0; injected regardless of the
         // question. Conservatively skip the first 4 chunkIDs.

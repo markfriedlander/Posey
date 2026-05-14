@@ -924,7 +924,16 @@ nonisolated final class DocumentEmbeddingIndex {
         let rawTokens = query.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
-        let contentTokens = rawTokens.filter { !stopwords.contains($0) && $0.count >= 3 }
+        let baseTokens = rawTokens.filter { !stopwords.contains($0) && $0.count >= 3 }
+        // 2026-05-14 (B4) — Lexical content tokens also receive
+        // conservative singular/plural variation so a question about
+        // "dogs" can match a chunk that says "dog" (and vice versa),
+        // and so possessive surface forms ("Posey's") collapse to
+        // their bare form for the substring scan. Common-noun queries
+        // don't get NLTagger entity coverage; this is the equivalent
+        // win for plain-vocabulary scoring.
+        let tokenVariations = Self.expandEntityVariations(Set(baseTokens))
+        let contentTokens = Array(tokenVariations)
 
         // ── Score every chunk.
         let queryEntities = Self.extractEntities(from: query)
@@ -984,7 +993,17 @@ nonisolated final class DocumentEmbeddingIndex {
 
         // ── Entity-index lookup for question-side entities. Boosts
         //   chunks that contain any of those entities.
-        let queryEntitiesArray = Array(queryEntities)
+        //
+        // 2026-05-14 (B4) — Entity-variation expansion (Hal pattern).
+        // Before hitting the entity index, expand each entity to
+        // common English surface variations (singular/plural,
+        // possessive, hyphen-collapse). Lets a question about
+        // "cake" pick up chunks that say "cakes" or "cake's";
+        // a question about "rabbit-hole" picks up "rabbit hole".
+        // The expansion is conservative — see
+        // `expandEntityVariations` doc for the exact rules.
+        let expandedEntities = Self.expandEntityVariations(queryEntities)
+        let queryEntitiesArray = Array(expandedEntities)
         if !queryEntitiesArray.isEmpty {
             do {
                 let mentioned = try database.chunkIndicesMentioningEntities(
@@ -1004,15 +1023,77 @@ nonisolated final class DocumentEmbeddingIndex {
             }
         }
 
-        // ── Sort by combined, take top `limit`. We attach the
-        //   `combined` value as `similarity` so downstream UI
-        //   (relevance pills, citation attribution thresholds)
-        //   sees a meaningful 0..1 number.
+        // ── Sort by combined, then dedup by vector similarity before
+        //   taking the top `limit`.
+        //
+        // 2026-05-14 (B5) — Content-dedup before top-N selection
+        // (Hal pattern). Long documents frequently contain near-
+        // identical passages: reprinted excerpts, recurring section
+        // boilerplate, or chunk-overlap zones where the same
+        // sentence lands in two consecutive chunks. If both make it
+        // to the top-K, AFM sees the same content twice in the
+        // injected context and we wasted token budget that could
+        // have carried a distinct supporting passage.
+        //
+        // Dedup walks the sorted candidate list and drops any
+        // chunk whose embedding cosine ≥ 0.92 against an already-
+        // accepted chunk's embedding. 0.92 is "this is essentially
+        // the same passage with minor wording differences"; <0.85
+        // is "related but distinct content."
+        //
+        // We oversample the pre-dedup pool to 3× the requested
+        // limit so dedup has headroom to drop near-dupes without
+        // starving the final top-K of distinct content. The
+        // dropped-similarity threshold is kept in code (not a
+        // user setting) — too low and good distinct chunks get
+        // collapsed; too high and dedup becomes a no-op.
         let sorted = scored.sorted { $0.3 > $1.3 }
-        let top = sorted.prefix(limit).map { (chunk, _, _, combined) in
+        let dedupPool = Array(sorted.prefix(limit * 3))
+        let dedupedChunks = Self.dedupBySimilarity(
+            dedupPool, threshold: 0.92, take: limit
+        )
+        let top = dedupedChunks.map { (chunk, _, _, combined) in
             DocumentEmbeddingSearchResult(chunk: chunk, similarity: combined)
         }
-        return Array(top)
+        return top
+    }
+
+    /// 2026-05-14 (B5) — Greedy dedup over already-sorted candidates.
+    ///
+    /// Walks the candidate list in score order (highest first),
+    /// accepting each chunk unless its embedding cosine against any
+    /// already-accepted chunk's embedding meets or exceeds
+    /// `threshold`. The first instance of a near-duplicate wins;
+    /// later instances are dropped.
+    ///
+    /// `take` is the requested final size; iteration stops as soon
+    /// as we've accepted `take` chunks. The caller is responsible
+    /// for oversampling the input to leave headroom for dropped
+    /// near-dupes.
+    ///
+    /// Threshold 0.92 corresponds to "essentially the same passage."
+    /// 0.85+ is "closely related." Below ~0.7 is "different topics."
+    static func dedupBySimilarity(
+        _ scored: [(StoredDocumentChunk, Double, Double, Double)],
+        threshold: Double,
+        take: Int
+    ) -> [(StoredDocumentChunk, Double, Double, Double)] {
+        guard take > 0, !scored.isEmpty else { return [] }
+        var accepted: [(StoredDocumentChunk, Double, Double, Double)] = []
+        accepted.reserveCapacity(take)
+        for candidate in scored {
+            if accepted.count >= take { break }
+            var isDuplicate = false
+            for already in accepted {
+                let sim = cosine(candidate.0.embedding, already.0.embedding)
+                if sim >= threshold {
+                    isDuplicate = true
+                    break
+                }
+            }
+            if !isDuplicate { accepted.append(candidate) }
+        }
+        return accepted
     }
 
     // ========== BLOCK 03b: HYBRID SEARCH DIAGNOSTIC - START ==========
@@ -1072,15 +1153,20 @@ nonisolated final class DocumentEmbeddingIndex {
         let rawTokens = query.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
-        let contentTokens = rawTokens.filter { !stopwords.contains($0) && $0.count >= 3 }
+        let baseTokens = rawTokens.filter { !stopwords.contains($0) && $0.count >= 3 }
+        // 2026-05-14 (B4) — singular/plural expansion on lexical
+        // tokens too. Matches searchHybrid.
+        let contentTokens = Array(Self.expandEntityVariations(Set(baseTokens)))
 
-        // Entity-index hits.
+        // Entity-index hits. 2026-05-14 (B4): expand entities to
+        // surface variations before lookup, matching searchHybrid.
         let queryEntities = Self.extractEntities(from: query)
         var entityChunkIndices: Set<Int> = []
         if !queryEntities.isEmpty {
+            let expanded = Self.expandEntityVariations(queryEntities)
             let mentioned = (try? database.chunkIndicesMentioningEntities(
                 documentID: documentID,
-                entitiesLower: Array(queryEntities))) ?? []
+                entitiesLower: Array(expanded))) ?? []
             entityChunkIndices = Set(mentioned)
         }
 
@@ -1204,6 +1290,86 @@ nonisolated final class DocumentEmbeddingIndex {
             return true
         }
         return result
+    }
+
+    /// 2026-05-14 (B4) — Conservative entity-variation expansion.
+    ///
+    /// Hal-style query-side expansion: for each entity in the
+    /// query, add common English variations so the entity-index
+    /// lookup catches chunks that mention the same entity in a
+    /// different surface form (singular/plural, possessive).
+    ///
+    /// The risk is over-expansion: aggressive rules pull unrelated
+    /// chunks (e.g., `rate → rates → rated → rating`). This
+    /// implementation is deliberately narrow:
+    /// - Original token is always kept.
+    /// - Add `+s` plural for any entity ≥ 4 chars not ending in `s`,
+    ///   `sh`, `ch`, `x`, or `z`.
+    /// - Add `+es` for words ending in `s`, `sh`, `ch`, `x`, `z`.
+    /// - Add `+'s` possessive for any entity ≥ 3 chars.
+    /// - Strip trailing `'s` / `'` to add the bare base form when
+    ///   present (catches `"Alice's"` → `alice`).
+    /// - Skip if the entity is already a known plural (ends in `s`
+    ///   AND base form without `s` is ≥ 3 chars; both forms get
+    ///   added so the lookup catches either).
+    /// - Hyphen-collapse: `"rabbit-hole"` → also try `rabbithole`
+    ///   and `rabbit hole`.
+    ///
+    /// Returns the union of all surface forms, lowercased.
+    static func expandEntityVariations(_ entitiesLower: Set<String>) -> Set<String> {
+        var out = Set<String>()
+        for raw in entitiesLower {
+            let e = raw.lowercased()
+            guard !e.isEmpty else { continue }
+            out.insert(e)
+
+            // Strip trailing 's / ' possessive marker.
+            if e.hasSuffix("'s") && e.count >= 4 {
+                out.insert(String(e.dropLast(2)))
+            } else if e.hasSuffix("'") && e.count >= 3 {
+                out.insert(String(e.dropLast(1)))
+            }
+
+            // Singular ⇄ plural pivot from the bare base form.
+            let bare: String = {
+                if e.hasSuffix("'s") { return String(e.dropLast(2)) }
+                if e.hasSuffix("'")  { return String(e.dropLast(1)) }
+                return e
+            }()
+
+            if bare.count >= 3, !bare.hasSuffix("s") {
+                if bare.hasSuffix("sh") || bare.hasSuffix("ch")
+                    || bare.hasSuffix("x") || bare.hasSuffix("z") {
+                    out.insert(bare + "es")
+                } else {
+                    out.insert(bare + "s")
+                }
+            }
+            // Plural → singular (drop trailing s when the remaining
+            // base is at least 3 chars). Conservative: don't apply
+            // when bare ends in "ss" (boss / mess), "us" (cactus),
+            // or "is" (analysis / basis) — these don't trim cleanly
+            // with a single -s rule.
+            if bare.hasSuffix("s") && bare.count >= 4 {
+                let stem = String(bare.dropLast())
+                let suspiciousEnd = stem.hasSuffix("s") || stem.hasSuffix("u") || stem.hasSuffix("i")
+                if !suspiciousEnd { out.insert(stem) }
+            }
+
+            // Possessive form (add only when not present and base is
+            // a likely noun — we already gate by NLTagger name types
+            // upstream, so this is just a surface-form variation).
+            if bare.count >= 3 {
+                out.insert(bare + "'s")
+            }
+
+            // Hyphen-collapse variations.
+            if bare.contains("-") {
+                out.insert(bare.replacingOccurrences(of: "-", with: ""))
+                out.insert(bare.replacingOccurrences(of: "-", with: " "))
+            }
+        }
+        return out
     }
 
     /// Jaccard similarity of two sets — `|intersection| / |union|`,

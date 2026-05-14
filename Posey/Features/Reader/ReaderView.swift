@@ -1921,6 +1921,10 @@ private struct ReaderPreferencesSheet: View {
     /// Committed to the viewModel only on drag end to avoid rapid re-enqueue.
     @State private var draftRatePercentage: Float = 100.0
 
+    /// 2026-05-14 (B3) — Draft retrieval-strictness selection.
+    /// Mirrored to `PlaybackPreferences.shared` on change.
+    @State private var draftStrictness: PlaybackPreferences.RetrievalStrictness = .balanced
+
     private var isCustomMode: Bool {
         if case .custom = viewModel.voiceMode { return true }
         return false
@@ -2086,6 +2090,34 @@ private struct ReaderPreferencesSheet: View {
                     }
                 }
 
+                // 2026-05-14 (B3) — Ask Posey retrieval strictness.
+                // User-tunable floor on how strong a RAG match must
+                // be before Posey attempts an answer. Default
+                // Balanced (0.45) preserves the prior hardcoded
+                // behavior; Permissive (0.35) is more willing to
+                // attempt at the cost of occasional fabrication;
+                // Strict (0.55) refuses more aggressively but the
+                // answers it does give are more reliable.
+                if AskPoseyAvailability.isAvailable {
+                    Section {
+                        Picker("Retrieval", selection: $draftStrictness) {
+                            ForEach(PlaybackPreferences.RetrievalStrictness.allCases, id: \.self) { s in
+                                Text(s.displayName).tag(s)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("preferences.retrievalStrictness")
+                        .onChange(of: draftStrictness) { _, newValue in
+                            PlaybackPreferences.shared.retrievalStrictness = newValue
+                        }
+                        Text(draftStrictness.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } header: {
+                        Text("Ask Posey")
+                    }
+                }
+
                 // 2026-05-08 — Audio Export re-enabled with the
                 // notification-based UX. Tap kicks off the render
                 // under a UIApplication background task; the export
@@ -2133,6 +2165,7 @@ private struct ReaderPreferencesSheet: View {
             }
             .onAppear {
                 draftRatePercentage = viewModel.customRatePercentage
+                draftStrictness = PlaybackPreferences.shared.retrievalStrictness
                 RemoteControlState.shared.presentedSheet = "preferences"
             }
             .onDisappear {

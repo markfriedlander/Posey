@@ -69,13 +69,39 @@ Mark gave a no-pressure mandate to address real gaps before submit.
 - A4 — confirm M4A speed in standard player + caching + Preferences storage UI
 - A5 — iPhone AX-tree rigorous verification
 - A8 — long-doc background-export survival test
-- **A9 — EPUB chunker truncation fix.** Discovered during A7. Alice in Wonderland (71,847 chars) indexed only to offset 8568 (~12% of doc). A user asking Posey about content past chapter 1 of a long EPUB will get a "can't find that" refusal even when the content exists — trust-breaking failure, not a polish gap. Promoted from "discovered, B-tier" to A-tier per Mark 2026-05-13. Investigate the chunker ceiling (likely NLTokenizer enumerateTokens in `DocumentEmbeddingIndex.chunk(_:configuration:)` line 1309), fix, verify on Alice AND at least one other long EPUB (4-Hour Body or Illuminatus).
+- ~~A9~~ — retracted (phantom; see below)
+- ~~A9 — EPUB chunker truncation fix.~~ **Retracted 2026-05-13 — phantom bug.**
+  The "12% of content" observation was a `LIST_CHUNKS` antenna verb artifact:
+  the verb has a default limit of 20 chunks (line 1202 of `LibraryView.swift`)
+  while `totalChunks` in the response shows the true count. Verified on device:
+  - **Alice EPUB** (71,847 chars) → **172 chunks**, last real `endOffset` = 71,847
+    (full doc), "Alice" keyword RAG_FIND yields 175 matches spanning offsets
+    31 → 53,538 (everything past 53,538 is Gutenberg license boilerplate that
+    doesn't contain "Alice"). Index is healthy.
+  - **Measure What Matters PDF** (430,294 chars) → **470 chunks**, last real
+    `endOffset` = 430,294 (full doc). Index is healthy.
+  - GEB PDF (1,891,430 chars) → **0 chunks**. Separate, real issue (chunker
+    likely skipped or failed on 1.89M-char doc). Logged as B-tier follow-up
+    below — distinct from the phantom A9 claim.
+  Chunker logic + persistence path are sound. The A2/A7 prompt rules already
+  shipped remain the correct improvement layer; no chunker change needed.
 
 **Hal RAG patterns worth borrowing (B-tier, separate from A9):**
 - User-tunable relevance threshold (Posey hardcodes 0.35)
 - Entity-variation query expansion (catches singular/plural, possessives)
 - Explicit content-dedup before top-N selection
 See TESTING.md for source pointers.
+
+**B-tier follow-up surfaced during A9 retraction (2026-05-13):**
+- GEB PDF (1,891,430 chars) has 0 chunks. The chunker either bailed silently
+  on very large docs or the long-document indexing path failed mid-run. Repro
+  with a second 1M+ char doc, instrument `enqueueIndexing`, find the ceiling.
+  Distinct from the A9 phantom — this is a real, observable hole at the very
+  long-document end of the spectrum. Affects Ask Posey only (reader works
+  fine without an index).
+- `LIST_CHUNKS` default limit of 20 is misleading for human inspection. Either
+  default to "all" (it already returns `totalChunks` for sanity) or rename to
+  `LIST_CHUNKS_PAGE`. Trivial fix; would have prevented this whole detour.
 
 **2026-05-11 pre-submission stress sweep** — autonomous; sim + Catalyst.
 Two real bugs found and fixed:

@@ -1,5 +1,30 @@
 # Posey History
 
+## 2026-05-13 — A9 retracted as phantom bug; chunker verified healthy
+
+Resumed post-compaction with A9 (EPUB chunker truncation) flagged as a v1 blocker. Investigation closed it as a phantom: the "Alice indexed only to ~12% of its content" observation was an artifact of the `LIST_CHUNKS` antenna verb's default 20-row limit (`LibraryView.swift:1202`), not a real index ceiling.
+
+**Evidence the chunker is healthy:**
+
+- Standalone reproduction of `DocumentEmbeddingIndex.chunk` on Alice's full 71,847-char plainText produced 171 sentence chunks covering the entire document (NLTokenizer enumerated all 1,258 sentences; last `endOffset` = 71,847). Chunker logic in isolation is correct.
+- On-device verification with explicit large limit (`LIST_CHUNKS:<id>:0:500`) on the running iPhone build:
+  - **Alice EPUB** (71,847 chars) → **172 chunks** (171 content + 1 synthetic metadata chunk with `startOffset=-1`). Last real `endOffset` = 71,847 = full doc length.
+  - **Measure What Matters PDF** (430,294 chars) → **470 chunks**, last real `endOffset` = 430,294 = full doc length.
+- Keyword RAG_FIND for "Alice" on the Alice doc → **175 hits spanning offsets 31 → 53,538**. Everything past 53,538 is Project Gutenberg license boilerplate that genuinely doesn't say "Alice." Coverage is correct.
+
+**What the original observation actually was:** earlier in the pre-compaction session, `LIST_CHUNKS:<alice-id>` was called without offset/limit, returned 20 rows with last `endOffset` around 8,568, and was read as "chunker truncated at offset 8568." The response did include a `totalChunks` field (would have shown 172), but the visible chunk list was anchored to instead of the count. The Usage-hint string in the verb's error message (`LIST_CHUNKS:<doc-id>[:offset:limit]`) was the missed giveaway.
+
+**Rule 1 calibration:** the second time a "truncation" couldn't be reproduced through any code path, that was the signal to audit the observation itself, not double down on the chunker. Note for future sessions: always check whether a diagnostic verb is showing everything or a default page.
+
+**Follow-ups created, distinct from A9:**
+
+- GEB PDF (1,891,430 chars) has **0 chunks** in the index. Real but separate — chunker either bailed silently on very large docs or long-document indexing failed mid-run. B-tier per Mark's earlier guidance; logged in NEXT.md.
+- `LIST_CHUNKS` default limit of 20 is human-misleading. Either default to "all" (it already returns `totalChunks` for sanity) or rename to `LIST_CHUNKS_PAGE`. Trivial. Logged in NEXT.md.
+
+**Status:** A9 closed. Proceeding to A3 (indexing race live trigger verification on sim) per the autonomous A-tier queue. No chunker change needed; the A2/A7 prompt-rule improvements already shipped remain the correct quality layer for Ask Posey.
+
+---
+
 ## 2026-05-11 — Pre-submission stress testing pass (autonomous, sim + Catalyst)
 
 Mark requested broad Three Hats stress testing across all surfaces ahead of submission tomorrow. iPhone unavailable this session — all verification on iPhone 17 Pro simulator (`7D4E1F1A-E7EC-4C42-BDF1-BF3BC72F4352`) plus Mac Catalyst. Two real bugs found and fixed.

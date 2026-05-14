@@ -149,6 +149,12 @@ extension Notification.Name {
     /// mounting that prevented `.remoteRegister("preferences.exportAudio")`
     /// from being callable while its row was below the fold.
     static let remoteBeginAudioExport = Notification.Name("PoseyRemoteBeginAudioExport")
+    /// 2026-05-13 — A8 test hook. No userInfo. The audio-export Task
+    /// in `ReaderView.beginAudioExport` observes this and calls
+    /// `exporter.cancelDueToBackgroundExpiration()` so an autonomous
+    /// test can drive the iOS `beginBackgroundTask` expiration path
+    /// without waiting the actual time window while backgrounded.
+    static let remoteSimulateAudioExportExpiration = Notification.Name("PoseyRemoteSimulateAudioExportExpiration")
     /// No userInfo. ReaderView observes; sets `isSearchActive` on the
     /// view model so the search bar appears.
     static let remoteOpenSearchBar = Notification.Name("PoseyRemoteOpenSearchBar")

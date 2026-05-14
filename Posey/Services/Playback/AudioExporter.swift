@@ -24,6 +24,12 @@ enum AudioExportError: LocalizedError, Sendable {
     case audioFileSetupFailed(String)
     /// User cancelled while rendering.
     case cancelled
+    /// 2026-05-13 — iOS expired the `beginBackgroundTask` window
+    /// while the render was still in flight. The UI distinguishes
+    /// this from user-cancel so the failure notification reads
+    /// "Couldn't finish in the background" instead of the misleading
+    /// "Export cancelled."
+    case backgroundTimeExpired
     /// Anything else from AVFoundation we couldn't classify.
     case unknown(String)
 
@@ -35,6 +41,8 @@ enum AudioExportError: LocalizedError, Sendable {
             return "Couldn't create the audio file: \(s)"
         case .cancelled:
             return "Export cancelled."
+        case .backgroundTimeExpired:
+            return "Posey couldn't finish exporting in the background. Open Posey and try again — staying in the app keeps it running."
         case .unknown(let s):
             return "Audio export failed: \(s)"
         }
@@ -125,6 +133,17 @@ final class AudioExporter: NSObject, ObservableObject {
         guard !didFinish else { return }
         synthesizer.stopSpeaking(at: .immediate)
         finish(with: .failure(AudioExportError.cancelled))
+    }
+
+    /// 2026-05-13 — Specifically end the render because iOS expired
+    /// the calling site's `beginBackgroundTask` window. Distinct
+    /// from `cancel()` so the resulting failure notification reads
+    /// "Posey couldn't finish exporting in the background" instead
+    /// of the misleading "Export cancelled."
+    func cancelDueToBackgroundExpiration() {
+        guard !didFinish else { return }
+        synthesizer.stopSpeaking(at: .immediate)
+        finish(with: .failure(AudioExportError.backgroundTimeExpired))
     }
 
     private func renderNextSegment() {

@@ -2832,18 +2832,35 @@ final class ReaderViewModel: ObservableObject {
             #if canImport(UIKit)
             var bgTaskID: UIBackgroundTaskIdentifier = .invalid
             bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "audio-export") { [weak exporter] in
+                // 2026-05-13 — A8: surface iOS-forced expiration as
+                // its own error so the failure notification doesn't
+                // misreport this as a user cancellation.
                 Task { @MainActor in
-                    exporter?.cancel()
+                    exporter?.cancelDueToBackgroundExpiration()
                     if bgTaskID != .invalid {
                         UIApplication.shared.endBackgroundTask(bgTaskID)
                         bgTaskID = .invalid
                     }
                 }
             }
+            // 2026-05-13 — A8 test hook. Posting
+            // `.remoteSimulateAudioExportExpiration` (via the antenna
+            // verb of the same name) drives the same .backgroundTime
+            // Expired error path that iOS would trigger when the
+            // beginBackgroundTask window runs out, without having to
+            // wait the real ~30s while backgrounded. Test-only.
+            let expirationObserver = NotificationCenter.default.addObserver(
+                forName: .remoteSimulateAudioExportExpiration,
+                object: nil,
+                queue: .main
+            ) { [weak exporter] _ in
+                exporter?.cancelDueToBackgroundExpiration()
+            }
             #endif
 
             defer {
                 #if canImport(UIKit)
+                NotificationCenter.default.removeObserver(expirationObserver)
                 if bgTaskID != .invalid {
                     UIApplication.shared.endBackgroundTask(bgTaskID)
                     bgTaskID = .invalid

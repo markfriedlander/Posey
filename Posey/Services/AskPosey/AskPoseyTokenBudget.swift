@@ -166,6 +166,22 @@ nonisolated struct AskPoseyTokenBudget: Sendable, Equatable {
     /// own reply.
     var promptCeilingTokens: Int { contextWindowTokens - responseReserveTokens }
 
+    /// 2026-05-14 — Hard upper bound for `AskPoseyPromptBuilder.proseInstructions`,
+    /// asserted at first-use in DEBUG.
+    ///
+    /// Background: across May 6–13 the prose grew from ~2350 → ~3070
+    /// tokens via cumulative FAILED/SUCCEEDED example additions,
+    /// silently consuming the entire 4096 - 1024 = 3072 prompt ceiling
+    /// on its own. RAG, STM, and summary all started rendering as
+    /// empty strings — AFM saw only the rules, never the document.
+    ///
+    /// Current compacted prose is ~1346 tokens. 2000 is a generous
+    /// ceiling that leaves room for legitimate rule additions but
+    /// trips far before the symptom returns. **Raise this number
+    /// intentionally** if a future rule genuinely needs the headroom,
+    /// alongside a note in HISTORY explaining why.
+    static let proseInstructionsBudgetTokens: Int = 2000
+
     /// Sum of the explicit section budgets. Useful for diagnostics
     /// — the difference between this and `promptCeilingTokens` is
     /// the slack the builder has for the user question and HelPML

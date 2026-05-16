@@ -14,6 +14,8 @@ struct EPUBLibraryImporter {
     }
 
     func importDocument(from url: URL) throws -> Document {
+        // 2026-05-16 (B8) — Reject anything that isn't ZIP-shaped.
+        try FormatPrecheck.checkEPUB(url: url)
         let parsed = try importer.loadDocument(from: url)
         let doc = try persistParsedDocument(
             title: parsed.title ?? url.deletingPathExtension().lastPathComponent,

@@ -144,3 +144,17 @@ ask $INTERNET_STEPS "What is this document about?" "Q1 broad"
 ask $INTERNET_STEPS "What aspects of copyright does it cover?" "Q2 connection"
 ask $INTERNET_STEPS "Following from copyright, does the document mention DMCA?" "Q3 follow-up"
 ask $INTERNET_STEPS "Who is the author's spouse?" "Q4 not-in-doc"
+
+# 2026-05-16 (B9) — Image-extraction regression. Imports every fixture
+# in TestFixtures/parity/images/, calls LIST_IMAGES on each, asserts
+# the importer extracted at least the expected count per format.
+# Catches silent regressions in inline-image rendering that ask-style
+# questions wouldn't surface. Runs as a sub-process so its exit code
+# surfaces back to qa_battery's failure semantics.
+echo
+echo "===== IMAGE-CORPUS REGRESSION (B9) ====="
+if command -v python3 >/dev/null 2>&1; then
+  python3 tools/verify_image_corpus.py || echo "[B9] image regression FAILED"
+else
+  echo "[B9] python3 not found; skipping image regression"
+fi

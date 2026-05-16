@@ -1,0 +1,10 @@
+=== Image-corpus regression — 127.0.0.1:8765 ===
+  PASS               image-stress.docx              5 images extracted
+  PASS               image-stress.html              5 images extracted
+  PASS               real-image-stress.docx         5 images extracted
+  PASS               real-image-stress.html         5 images extracted
+  PASS               illustrated.epub               55 images extracted
+  PASS               adversarial.docx               3 images extracted
+  PASS               adversarial.html               8 images extracted
+
+=== Summary: 7 pass, 0 fail, 0 skip ===

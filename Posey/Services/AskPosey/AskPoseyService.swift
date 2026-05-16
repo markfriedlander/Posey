@@ -752,6 +752,15 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         }
         candidates.formUnion(extractQuotedStrings(from: answer))
         candidates.formUnion(extractTitleCasePhrases(from: answer))
+        // 2026-05-16 (B10) — Versioned product / model names. NLTagger
+        // typically doesn't tag "GPT-5" / "GPT-4" / "Claude-3" /
+        // "LLaMA-2" as named entities; they slip past the title-case
+        // phrase extractor too because they're one token. Without
+        // catching them, AFM fabricates confidently-cited answers
+        // about model versions the document never mentions (verified
+        // on AI Book Collaboration RTF: 0 mentions of "GPT-5", answer
+        // included "GPT-5 is a next-generation language model…[7][2]").
+        candidates.formUnion(extractVersionedProductNames(from: answer))
 
         guard !candidates.isEmpty else { return nil }
 
@@ -792,6 +801,36 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                 let inner = nsText.substring(with: m.range(at: 1))
                 let lowered = inner.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
                 if lowered.count >= 4 { out.insert(lowered) }
+            }
+        }
+        return out
+    }
+
+    /// 2026-05-16 (B10) — Extract versioned product / model names.
+    /// Patterns matched: `GPT-5`, `GPT 4`, `Claude 3`, `Claude-2.1`,
+    /// `LLaMA-2`, `iPhone 17`, `Stable Diffusion 3`, `Gemini 1.5`.
+    /// The pattern is intentionally tight: 2-12 letter uppercase
+    /// run followed by an optional dash/space then a digit (with
+    /// optional `.N` minor). Catches the common "fabricated model
+    /// version" case from B10 testing without flagging legitimate
+    /// English (which rarely has all-caps tokens followed by digits).
+    private func extractVersionedProductNames(from text: String) -> Set<String> {
+        var out = Set<String>()
+        let patterns = [
+            // ALL-CAPS-ACRONYM + optional dash/space + digit(s) + optional .digits
+            #"\b([A-Z][A-Za-z]{1,11})[- ](\d+(?:\.\d+)?)\b"#,
+        ]
+        for pat in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pat) else { continue }
+            let nsText = text as NSString
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            for m in matches where m.numberOfRanges >= 3 {
+                let name = nsText.substring(with: m.range(at: 1))
+                let ver = nsText.substring(with: m.range(at: 2))
+                let combined = "\(name)-\(ver)".lowercased()
+                let combined2 = "\(name) \(ver)".lowercased()
+                out.insert(combined)
+                out.insert(combined2)
             }
         }
         return out

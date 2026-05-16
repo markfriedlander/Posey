@@ -280,6 +280,13 @@ struct ReaderView: View {
                     .allowsHitTesting(isChromeVisible)
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
             }
+            // 2026-05-16 — Ambient progress meter. Always-visible thin
+            // bar + "~N min left" sits at the very bottom of the
+            // reading area, below the (overlay) chrome strip. Quiet
+            // typography so it never pulls focus from the document.
+            .safeAreaInset(edge: .bottom) {
+                ReaderProgressMeter(viewModel: viewModel)
+            }
             // 2026-05-04 — Mini-player. When chrome auto-fades during
             // playback, the play/pause button alone stays visible so
             // the user can pause without summoning full chrome (the

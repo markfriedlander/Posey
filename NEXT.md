@@ -1,5 +1,137 @@
 # Next
 
+## 2026-05-16 (afternoon, autonomous) — Mark's spec sheet + B6/B9/B9b/B10/C1
+
+Long autonomous session against the iPhone 17 Pro + Pro Max simulators
+(phone in use by another session). All commits pushed to `origin/main`.
+
+### Mark's explicit decisions, applied
+
+- **Retrieval Strictness picker → "How Posey Searches"** (Broad /
+  Balanced / Precise) with descriptions that talk about search
+  breadth, not Posey's willingness to answer. Raw enum values kept
+  as `permissive` / `balanced` / `strict` so persisted UserDefaults
+  don't reset. Commit `fe68f99`.
+- **Reading-style picker removed** — Posey now has one reading style
+  (the default clean reader). `readingStyle` getter always returns
+  `.standard`; setter no-ops. `Reading Style` Section, Motion Auto
+  toggle, and Motion Consent sheet all removed from Preferences.
+  `motionPreference` always `.off`; `MotionDetector.start()` is
+  never called. Commit `0050d06`.
+- **Image-pause preference** replaces the implicit Motion-on rule.
+  New `PlaybackPreferences.ImageHandling: { pauseAtImages, skipImages }`
+  with a UserDefault + segmented picker in the new "Images" Section.
+  Default is Pause-at-images. Commit `0050d06`.
+- **App icon (Posey 1.0)** — dark near-black background, warm amber-
+  gold radial glow, serif lowercase 'p' (Baskerville) in cream,
+  glow behind the letter. Three variants generated: standard, dark,
+  tinted. Generator script `Art/qa-evidence/2026-05-16-icon/gen_icon.py`
+  is reproducible. Home-scale preview captured at 60px + 120px —
+  both legible. Commit `c9ec7ee`.
+- **Progress meter** — thin 2pt bar + "~N min left" label at the
+  bottom of the reader, below the chrome overlay. Always visible.
+  Caption typography, secondary foreground. 155 wpm baseline scaled
+  by the user's rate setting. `ReaderProgressEstimate` is a pure-calc
+  struct so the math is testable. Commit `c9ec7ee`.
+- **A4 voice + speed**: confirmed via export at rate=100 (4.03s) and
+  rate=150 (1.62s) on the same text. Voice + speed both flow through
+  to the rendered M4A. A4 closed per Mark's spec.
+
+### Items from previous prompt picked up
+
+- **B5** — search noise/empty short-circuit (`looksLikeNoise`) +
+  Posey-voiced redirect for single-char / pure-punctuation /
+  repeated-char input. Commit `fe68f99`.
+- **B5b** — falafel easter egg: word-boundary "falafel" → canonical
+  Party Girl line with citation chip + Party Girl, 1995 attribution.
+  Commit `fe68f99`.
+- **B6** — annotations export + Ask Posey anchor card placement
+  verified end-to-end. Bookmark + note + Ask Posey transcript all
+  render correctly in the exported Markdown; anchor card appears at
+  the top of the conversation area above the composer. No code
+  change — verified behavior.
+- **B7/B10** — qa_battery on RTF + AI literature surfaced a real
+  fabrication on the AI Book Collaboration RTF: "What does GPT-5 do?"
+  answered confidently with fake `[7][2]` citations though "GPT-5"
+  appears 0 times in the doc. **B10 fix shipped** in commit `6e4a6bb` —
+  new `extractVersionedProductNames` catches `GPT-5` / `Claude-3` /
+  `LLaMA-2` / etc. via `[A-Z][a-zA-Z]{1,11}[- ]\d+(?:\.\d+)?`.
+  Post-fix that question returns empty instead of fabricating.
+  **Smaller follow-up surfaced**: empty-bubble UX after a successful
+  ungrounded-retry should render "The document doesn't discuss
+  [entity]" instead of an empty assistant message.
+- **B8** — binary-bytes import rejection extended to all 7 formats.
+  New `FormatPrecheck` utility gates each LibraryImporter on
+  magic-byte detection (PDF: `%PDF-`, DOCX/EPUB: `PK\x03\x04`,
+  RTF: `{\rtf`, TXT/MD/HTML: text-shape heuristic). PDF needed
+  wiring in both user-driven and API import paths. Sim-verified 7/7
+  binary fixtures rejected with friendly Posey-voiced errors;
+  LIST_DOCUMENTS confirmed zero writes to SQLite. Commit `fe68f99`.
+- **B9** — image fixtures wired into qa_battery via new
+  `tools/verify_image_corpus.py`. Sim-verified 5/5 core fixtures
+  (image-stress.docx + .html, real-image-stress.docx + .html,
+  illustrated.epub at 55 figures). Commit `3b55728`.
+- **B9b** — adversarial image corpus generator + fixtures:
+  1px solid, 1px transparent, 64×64 fully-transparent, 128×128
+  transparent-bg with fg, 2048×2048 huge, three consecutive PNGs
+  with no text between; DOCX with image-in-table-cell + three
+  consecutive drawings. All passed `verify_image_corpus.py --adversarial`
+  on sim. Commit `3b55728`.
+- **C1** — screenshot 07 redone at 1320×2868 on iPhone 17 Pro Max
+  sim. Clean Ask Posey conversation with anchor card + user
+  question + assistant answer (with citation chips [2][3]) +
+  composer, NO keyboard. Original at `submission/07-ask-posey-OLD.png`
+  for reference. Commit `3b55728`.
+
+### New items
+
+- **Mac config investigation** — currently Catalyst
+  (`SUPPORTS_MACCATALYST = YES`, no `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD`).
+  Recommendation: switch to Designed for iPad (matches Pure Phase /
+  Reflect / Hal). One-line setting flip + verify nothing relies on
+  Catalyst-only APIs. **Decision deferred to Mark — no code change.**
+- **GEB end-to-end** — imported on sim (1.89M chars), 2060 chunks
+  indexed via REINDEX. "Hofstadter" keyword retrieval finds 9
+  matches. Broad open-ended questions ("central thesis", "who wrote
+  this book?") return 0 chunks at default Balanced (0.45) — RAG
+  quality is weak on this scale of doc with these question shapes.
+  Tortoise-specific question retrieves 1625 chunks (too many — the
+  character permeates the book). Real B7-class concern; not blocked
+  on a code fix yet.
+- **Prompt token budget assertion** — new
+  `AskPoseyTokenBudget.proseInstructionsBudgetTokens = 2000` cap,
+  DEBUG-only assert in `AskPoseyPromptBuilder.proseInstructions`'s
+  initializer. NSLog reports actual count every Ask Posey call.
+  Sim-verified: `proseInstructions: 1242 / 2000 tokens (62% of budget)`.
+  No more silent prompt-bloat regressions like the May 13 incident.
+  Commit `fe68f99`.
+
+### What needs Mark when you're back
+
+1. **App icon home-screen eyeball** on iPhone — 1024 standalone reads
+   well; needs Mark's judgment at springboard scale on real hardware.
+2. **iPhone Preferences scroll** — Mark already cleared this; just
+   confirm "Images" Section + "How Posey Searches" picker render
+   correctly on Pro Max-class hardware.
+3. **A4 — closed per Mark's spec.** No further action.
+4. **A5 — closed per Mark's spec.** Simulator AX accepted.
+5. **B7/B10 deeper RAG tuning** — Q1/Q2 broad-question over-refusal
+   still real; empty-bubble UX after B10's ungrounded-retry is the
+   smaller follow-up worth fixing.
+6. **Mac Catalyst → Designed for iPad** decision.
+7. **App Store metadata + privacy + final submission**.
+
+### Commit summary (this session)
+
+- `fe68f99` — Search picker rename + budget assertion + B5 + B5b + B8
+- `0050d06` — Reading-style simplification + Image-handling preference
+- `c9ec7ee` — Progress meter + Posey 1.0 app icon
+- `6e4a6bb` — B10 versioned-product fabrication catch
+- `3b55728` — B9 image regression + B9b adversarial corpus + C1
+  screenshot 07
+
+---
+
 ## 2026-05-14 (afternoon, autonomous) — B/C/D-tier complete; report for Mark
 
 Mark gave the directive to work through B, C, D tiers autonomously with the iPhone available. Worked through everything that didn't require his eyes, hands, or final-decision input. **All commits pushed to `origin/main`.**

@@ -117,57 +117,82 @@ final class PlaybackPreferences {
         }
     }
 
-    /// User-chosen reading style. Defaults to `.standard` for new
-    /// installs (the current Posey behavior). Stored as the raw
-    /// string so future cases append cleanly.
+    /// 2026-05-16 — Reading-style picker removed (Mark spec). Posey
+    /// now has one reading style: the default clean reader. The
+    /// getter always returns `.standard` regardless of any persisted
+    /// UserDefault — existing installs that had `.focus` / `.motion`
+    /// silently migrate to the new single mode. The setter no-ops so
+    /// nothing in the codebase can re-introduce a non-standard style.
+    /// The enum itself is kept so existing call sites in ReaderView's
+    /// render code (switch statements over `readingStyle`) keep
+    /// compiling without per-call-site edits.
     var readingStyle: ReadingStyle {
-        get {
-            guard let raw = UserDefaults.standard.string(forKey: Keys.readingStyle),
-                  let style = ReadingStyle(rawValue: raw) else {
-                return .focus
-            }
-            // 2026-05-04 — Migrate styles hidden from the 1.0 UI
-            // (`.standard`, `.immersive`) to the closest selectable
-            // style (`.focus`) so users who had those selected don't
-            // get stuck on a style they can't re-pick from the
-            // picker. The persisted raw value is left untouched —
-            // if we ever re-introduce those styles, the user's
-            // original choice surfaces again.
-            switch style {
-            case .standard, .immersive:
-                return .focus
-            case .focus, .motion:
-                return style
+        get { .standard }
+        set { /* no-op; reading style picker removed 2026-05-16 */ }
+    }
+
+    /// 2026-05-16 — Motion-mode + CoreMotion auto-detection removed
+    /// (Mark spec). Getter always returns `.off`; the setter no-ops.
+    /// `MotionDetector` is no longer wired into the reader; the file
+    /// remains for now but its `start()` will never be called.
+    var motionPreference: MotionPreference {
+        get { .off }
+        set { /* no-op; motion auto-detection removed 2026-05-16 */ }
+    }
+
+    /// 2026-05-16 — CoreMotion consent no longer asked for. Always
+    /// false; the consent sheet is unreachable from the UI.
+    var motionAutoConsent: Bool {
+        get { false }
+        set { /* no-op; motion auto-detection removed 2026-05-16 */ }
+    }
+
+    /// 2026-05-16 — Image handling preference replaces the prior
+    /// Motion-mode automatic detection. The user picks once in
+    /// Preferences how Posey should treat inline images during
+    /// playback: pause for them, or skip past them with a brief
+    /// announcement. Replaces the implicit "pause if Motion is on"
+    /// rule from the M8 design.
+    enum ImageHandling: String, CaseIterable, Equatable {
+        /// Playback stops at each image; the image displays inline
+        /// and a Continue affordance appears. User taps to resume.
+        case pauseAtImages = "pause"
+        /// Playback continues past images uninterrupted; a brief
+        /// "Image — tap to view" announcement plays. Image still
+        /// visible inline.
+        case skipImages    = "skip"
+
+        var displayName: String {
+            switch self {
+            case .pauseAtImages: return "Pause at images"
+            case .skipImages:    return "Skip images"
             }
         }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: Keys.readingStyle)
+
+        var description: String {
+            switch self {
+            case .pauseAtImages:
+                return "Playback stops at each image. Tap Continue to resume."
+            case .skipImages:
+                return "Playback continues past images without stopping. The image is still visible inline."
+            }
         }
     }
 
-    /// User-chosen Motion sub-preference. Defaults to `.off` so new
-    /// installs never engage CoreMotion implicitly. Honored only when
-    /// `readingStyle == .motion`.
-    var motionPreference: MotionPreference {
+    /// Current image-handling preference. Defaults to `.pauseAtImages`
+    /// — the safer choice for serious reading where users want to
+    /// notice the visual content rather than be carried past it.
+    var imageHandling: ImageHandling {
         get {
-            guard let raw = UserDefaults.standard.string(forKey: "posey.reader.motionPreference"),
-                  let value = MotionPreference(rawValue: raw) else {
-                return .off
+            guard let raw = UserDefaults.standard.string(forKey: "posey.reader.imageHandling"),
+                  let value = ImageHandling(rawValue: raw) else {
+                return .pauseAtImages
             }
             return value
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: "posey.reader.motionPreference")
+            UserDefaults.standard.set(newValue.rawValue, forKey: "posey.reader.imageHandling")
         }
-    }
-
-    /// Whether the user has explicitly consented to CoreMotion
-    /// monitoring for the Motion-mode Auto path. Required because
-    /// CoreMotion is a privacy-sensitive sensor; we never engage it
-    /// without an opt-in screen the user has acknowledged.
-    var motionAutoConsent: Bool {
-        get { UserDefaults.standard.bool(forKey: "posey.reader.motionAutoConsent") }
-        set { UserDefaults.standard.set(newValue, forKey: "posey.reader.motionAutoConsent") }
     }
 
     private enum ModeToken {

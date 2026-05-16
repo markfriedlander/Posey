@@ -2305,27 +2305,21 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted", "fontSize": size])
 
-            case "SET_READING_STYLE":
-                guard let raw = arg?.lowercased(),
-                      ["standard", "focus", "immersive", "motion"].contains(raw) else {
-                    return #"{"error":"Usage: SET_READING_STYLE:<standard|focus|immersive|motion>"}"#
-                }
-                await MainActor.run {
-                    NotificationCenter.default.post(name: .remoteSetReadingStyle, object: nil,
-                                                    userInfo: ["readingStyle": raw])
-                }
-                return json(["status": "posted", "readingStyle": raw])
+            // 2026-05-16 — SET_READING_STYLE and SET_MOTION_PREFERENCE
+            // verbs removed. Reading-style picker + Motion-mode auto-
+            // detection retired. The notification names stay declared
+            // so older receivers don't fail to compile.
 
-            case "SET_MOTION_PREFERENCE":
+            case "SET_IMAGE_HANDLING":
                 guard let raw = arg?.lowercased(),
-                      ["off", "on", "auto"].contains(raw) else {
-                    return #"{"error":"Usage: SET_MOTION_PREFERENCE:<off|on|auto>"}"#
+                      ["pause", "skip"].contains(raw) else {
+                    return #"{"error":"Usage: SET_IMAGE_HANDLING:<pause|skip>"}"#
                 }
                 await MainActor.run {
-                    NotificationCenter.default.post(name: .remoteSetMotionPreference, object: nil,
-                                                    userInfo: ["motionPreference": raw])
+                    PlaybackPreferences.shared.imageHandling =
+                        (raw == "skip") ? .skipImages : .pauseAtImages
                 }
-                return json(["status": "posted", "motionPreference": raw])
+                return json(["status": "posted", "imageHandling": raw])
 
             // ===== TOC + search ==============================================
             case "JUMP_TO_PAGE":

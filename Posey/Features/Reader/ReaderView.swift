@@ -1854,16 +1854,11 @@ private struct ReaderRemoteControlPreferencesObservers: ViewModifier {
                 guard let size = note.userInfo?["fontSize"] as? Double else { return }
                 viewModel.fontSize = CGFloat(size)
             }
-            .onReceive(NotificationCenter.default.publisher(for: .remoteSetReadingStyle)) { note in
-                guard let raw = note.userInfo?["readingStyle"] as? String,
-                      let style = PlaybackPreferences.ReadingStyle(rawValue: raw) else { return }
-                viewModel.readingStyle = style
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .remoteSetMotionPreference)) { note in
-                guard let raw = note.userInfo?["motionPreference"] as? String,
-                      let pref = PlaybackPreferences.MotionPreference(rawValue: raw) else { return }
-                viewModel.motionPreference = pref
-            }
+            // 2026-05-16 — remoteSetReadingStyle + remoteSetMotionPreference
+            // observers removed. The picker + the antenna verbs that
+            // posted them are also gone. Notification names remain
+            // declared so any stragglers (e.g. test fixtures persisted
+            // to disk) don't fail to compile if they reference them.
     }
 }
 
@@ -1952,71 +1947,28 @@ private struct ReaderPreferencesSheet: View {
                     }
                 }
 
-                // 2026-05-04 — Reading Style section, simplified
-                // (Mark's directive). Only Focus + Motion exposed
-                // (Standard barely a style; Immersive overlaps
-                // Motion). Auto-switch toggle inline with the
-                // picker so it's visually grouped — was previously
-                // a separate "Motion Mode" Section lower down,
-                // disconnected from the picker. Redundant footer
-                // describing each style removed (the in-picker
-                // selection itself is the description; users learn
-                // by trying).
+                // 2026-05-16 — Reading Style picker + Motion Auto toggle
+                // removed (Mark spec). Posey now has one reading style:
+                // the default clean reader. Image handling is now an
+                // explicit user preference (replaces the implicit
+                // pause-when-Motion-on rule).
                 Section {
-                    Picker("Reading Style", selection: $viewModel.readingStyle) {
-                        ForEach(PlaybackPreferences.ReadingStyle.userSelectableCases, id: \.self) { style in
-                            Text(style.displayName).tag(style)
+                    Picker("Images during playback",
+                           selection: $viewModel.imageHandling) {
+                        ForEach(PlaybackPreferences.ImageHandling.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
-                    .accessibilityIdentifier("preferences.readingStyle")
+                    .accessibilityIdentifier("preferences.imageHandling")
 
-                    // 2026-05-04 — Per-selection description below
-                    // the picker (restored after I overshot in the
-                    // previous pass and dropped both this AND the
-                    // redundant footer; only the redundant footer
-                    // should have been removed).
-                    Text(viewModel.readingStyle.description)
+                    Text(viewModel.imageHandling.description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-
-                    Toggle(isOn: Binding(
-                        get: { viewModel.motionPreference == .auto },
-                        set: { newValue in
-                            viewModel.motionPreference = newValue ? .auto : .off
-                        }
-                    )) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Switch to Motion automatically")
-                                .font(.body)
-                            Text("When the device detects you're moving, switch to Motion mode and back when still.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .accessibilityIdentifier("preferences.motionAutoSwitch")
-
-                    if viewModel.motionPreference == .auto && !viewModel.motionAutoConsent {
-                        Button {
-                            viewModel.showMotionConsent = true
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(.orange)
-                                Text("Auto needs your permission to read motion sensors. Tap to review.")
-                                    .font(.callout)
-                                    .foregroundStyle(.primary)
-                            }
-                        }
-                        .remoteRegister("preferences.motionConsentReview") {
-                            viewModel.showMotionConsent = true
-                        }
-                    }
                 } header: {
-                    Text("Reading Style")
+                    Text("Images")
                 }
 
-                // Motion sub-settings (only visible when Motion is the chosen Reading Style)
                 // 2026-05-06 — Audio export section hidden from UI for
                 // 1.0 submission. The backend (AudioExporter,
                 // RemoteAudioExportRegistry, EXPORT_AUDIO API verb) is
@@ -2173,9 +2125,8 @@ private struct ReaderPreferencesSheet: View {
             .onChange(of: viewModel.voiceMode) { _, _ in
                 draftRatePercentage = viewModel.customRatePercentage
             }
-            .sheet(isPresented: $viewModel.showMotionConsent) {
-                MotionConsentSheet(viewModel: viewModel)
-            }
+            // 2026-05-16 — Motion consent sheet removed (Mark spec).
+            // CoreMotion auto-detection retired entirely.
             .sheet(isPresented: $viewModel.showAudioExport) {
                 AudioExportSheet(viewModel: viewModel)
             }
@@ -2185,60 +2136,10 @@ private struct ReaderPreferencesSheet: View {
 // ========== BLOCK P1: READER PREFERENCES SHEET - END ==========
 
 
-// ========== BLOCK P1B: MOTION CONSENT SHEET - START ==========
-/// M8 Motion-Auto consent screen. Surfaces the privacy contract for
-/// CoreMotion monitoring before the user can pick Auto. Per
-/// `DECISIONS.md` "Motion Mode Three-Setting Design" (2026-05-01)
-/// CoreMotion monitoring is privacy-sensitive and never engages
-/// without explicit opt-in.
-private struct MotionConsentSheet: View {
-    @ObservedObject var viewModel: ReaderViewModel
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Image(systemName: "figure.walk.motion")
-                        .font(.system(size: 44))
-                        .foregroundStyle(.tint)
-                        .padding(.top, 8)
-                    Text("Auto Motion Mode")
-                        .font(.title2.weight(.semibold))
-                    Text("To switch automatically between Motion mode and your standard reading style based on whether you're moving, Posey reads movement data from your iPhone's motion sensors via CoreMotion.")
-                        .font(.body)
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("Motion data stays on this device.", systemImage: "lock.shield")
-                        Label("Posey doesn't send movement data anywhere — no analytics, no servers.", systemImage: "wifi.slash")
-                        Label("You can switch Motion to Off or On at any time and the monitoring stops immediately.", systemImage: "hand.raised")
-                    }
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    HStack {
-                        Button("Cancel") {
-                            // User declined — revert Auto to Off so
-                            // CoreMotion never engages. The picker
-                            // re-renders accordingly.
-                            viewModel.motionPreference = .off
-                            dismiss()
-                        }
-                        .buttonStyle(.bordered)
-                        Spacer()
-                        Button("Allow Motion Monitoring") {
-                            viewModel.motionAutoConsent = true
-                            dismiss()
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-                .padding(20)
-            }
-            .navigationTitle("Motion Permission")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-}
+// ========== BLOCK P1B: MOTION CONSENT SHEET - REMOVED 2026-05-16 ==========
+// Mark spec removed Motion reading style + CoreMotion auto-detection
+// entirely. The consent sheet is no longer reachable from the UI;
+// `MotionDetector` remains in the codebase but is never started.
 // ========== BLOCK P1B: MOTION CONSENT SHEET - END ==========
 
 
@@ -2726,65 +2627,43 @@ final class ReaderViewModel: ObservableObject {
         didSet { PlaybackPreferences.shared.fontSize = fontSize }
     }
 
-    /// M8 Reading Style preference. Reflects the user's choice from
-    /// the preferences sheet; persisted via `PlaybackPreferences`.
-    /// `didSet` writes back so the choice survives launches and
-    /// across documents.
-    @Published var readingStyle: PlaybackPreferences.ReadingStyle = PlaybackPreferences.shared.readingStyle {
+    /// 2026-05-16 — Reading Style picker removed (Mark spec). The
+    /// underlying `PlaybackPreferences.readingStyle` getter always
+    /// returns `.standard` and the setter no-ops. This stored
+    /// property exists so the existing switch sites in the render
+    /// path keep compiling; the value is effectively a constant
+    /// `.standard` going forward.
+    @Published var readingStyle: PlaybackPreferences.ReadingStyle = .standard
+
+    /// 2026-05-16 — Motion-auto detection removed. Constant `.off`.
+    @Published var motionPreference: PlaybackPreferences.MotionPreference = .off
+
+    /// 2026-05-16 — CoreMotion consent no longer requested. Constant
+    /// `false`.
+    @Published var motionAutoConsent: Bool = false
+
+    /// 2026-05-16 — Consent sheet unreachable; kept to satisfy any
+    /// remaining `viewModel.showMotionConsent` references during the
+    /// transitional period.
+    @Published var showMotionConsent: Bool = false
+
+    /// 2026-05-16 — Motion detector no longer engaged. `isDeviceMoving`
+    /// is always false. `motionDetector` / cancellable removed; the
+    /// `MotionDetector` service still ships in the binary but its
+    /// `start()` is never called.
+    @Published private(set) var isDeviceMoving: Bool = false
+
+    /// 2026-05-16 — New explicit image-handling preference replacing
+    /// the prior implicit pause-when-Motion-on rule. didSet writes
+    /// through to PlaybackPreferences and re-applies the visual-block
+    /// policy so the change takes effect immediately mid-read.
+    @Published var imageHandling: PlaybackPreferences.ImageHandling
+        = PlaybackPreferences.shared.imageHandling {
         didSet {
-            PlaybackPreferences.shared.readingStyle = readingStyle
-            reconcileMotionDetector()
-            // 2026-05-13 (A1) — Motion-aware visual-block policy needs to
-            // re-evaluate on every readingStyle change. Switching from
-            // Motion → Focus mid-read should immediately re-enable
-            // pause-at-image; the reverse should immediately disable it
-            // and switch to "Image." announcements.
+            PlaybackPreferences.shared.imageHandling = imageHandling
             applyVisualBlockMotionPolicy()
         }
     }
-
-    /// M8 Motion sub-preference (Off / On / Auto). Honored only when
-    /// `readingStyle == .motion`. Persisted via PlaybackPreferences.
-    @Published var motionPreference: PlaybackPreferences.MotionPreference = PlaybackPreferences.shared.motionPreference {
-        didSet {
-            PlaybackPreferences.shared.motionPreference = motionPreference
-            reconcileMotionDetector()
-            // Task 2 #26 — when the user picks Auto without prior
-            // consent, surface the in-app consent sheet immediately
-            // (one tap, not two). Previously the user had to pick
-            // Auto, see a "Tap to review" warning, then tap that to
-            // open the sheet — Mark called this out as feeling like
-            // the app was "asking on launch" the moment the prefs
-            // sheet was opened.
-            if motionPreference == .auto && !motionAutoConsent {
-                showMotionConsent = true
-            }
-        }
-    }
-
-    /// M8 Motion-Auto consent. Required before CoreMotion monitoring
-    /// engages. The preferences sheet routes the user through a
-    /// dedicated consent screen the first time they pick Auto.
-    @Published var motionAutoConsent: Bool = PlaybackPreferences.shared.motionAutoConsent {
-        didSet {
-            PlaybackPreferences.shared.motionAutoConsent = motionAutoConsent
-            reconcileMotionDetector()
-        }
-    }
-
-    /// Drives the Motion-consent sheet's presentation from the
-    /// preferences UI. Set to true when the user taps "review
-    /// permission"; cleared when they accept or dismiss.
-    @Published var showMotionConsent: Bool = false
-
-    /// CoreMotion-backed detector for the Motion-Auto path. Started
-    /// only when the user has chosen .motion + .auto + consented.
-    /// Observed by the render path's `isMotionRenderActive` so the
-    /// reading style flips between large-centered and the user's
-    /// last non-Motion style as they walk / stop.
-    @Published private(set) var isDeviceMoving: Bool = false
-    private let motionDetector = MotionDetector()
-    private var motionDetectorCancellable: AnyCancellable?
 
     /// M8 audio export. The exporter is recreated on each kickoff so
     /// the UI's progress observation always sees a fresh state
@@ -3742,34 +3621,10 @@ final class ReaderViewModel: ObservableObject {
         segment.id == currentSentenceIndex
     }
 
-    /// Start or stop the CoreMotion-backed motion detector based on
-    /// the current readingStyle + motionPreference + consent state.
-    /// Called from the property `didSet` hooks of all three so the
-    /// detector is always in the right state without an explicit
-    /// "rebuild" lifecycle. Safe to call repeatedly.
+    /// 2026-05-16 — Motion detector removed (Mark spec). The function
+    /// remains as a no-op so callers compile; CoreMotion never engages.
     private func reconcileMotionDetector() {
-        let shouldRun = readingStyle == .motion
-            && motionPreference == .auto
-            && motionAutoConsent
-        if shouldRun {
-            // Subscribe to the detector's published flag if we
-            // haven't yet — once subscribed, we mirror the value to
-            // our own @Published `isDeviceMoving` so the render path
-            // can re-evaluate without dipping into a sub-object.
-            if motionDetectorCancellable == nil {
-                motionDetectorCancellable = motionDetector.$isMoving
-                    .receive(on: RunLoop.main)
-                    .sink { [weak self] value in
-                        self?.isDeviceMoving = value
-                    }
-            }
-            motionDetector.start(consented: motionAutoConsent)
-        } else {
-            motionDetector.stop()
-            motionDetectorCancellable?.cancel()
-            motionDetectorCancellable = nil
-            isDeviceMoving = false
-        }
+        // intentionally empty — motion auto-detection removed 2026-05-16
     }
 
     /// M8 Immersive/Motion render distance — how many rows away the
@@ -4142,15 +3997,21 @@ final class ReaderViewModel: ObservableObject {
     /// at visual pages regardless of readingStyle — this method changes
     /// that so PDF follows the same Motion-aware logic as EPUB/DOCX/HTML.
     /// Called once at content load and again on every `readingStyle` change.
+    /// 2026-05-16 — Now keyed off the explicit `imageHandling`
+    /// preference (Pause vs Skip), replacing the prior implicit
+    /// pause-when-Motion-on rule. `.skipImages` plays a brief
+    /// "Image." announcement; `.pauseAtImages` stops playback at the
+    /// image and surfaces the inline Continue affordance.
     func applyVisualBlockMotionPolicy() {
-        if readingStyle == .motion {
+        switch imageHandling {
+        case .skipImages:
             visualPauseBlockIDsBySentenceIndex = [:]
             var announcements: [Int: String] = [:]
             for (sentenceIndex, _) in visualPauseMapAll {
                 announcements[sentenceIndex] = "Image."
             }
             playbackService.visualAnnouncementText = announcements
-        } else {
+        case .pauseAtImages:
             visualPauseBlockIDsBySentenceIndex = visualPauseMapAll
             playbackService.visualAnnouncementText = [:]
         }

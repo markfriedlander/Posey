@@ -16,6 +16,8 @@ struct PDFLibraryImporter {
     /// Full synchronous import — parse and persist in one call.
     /// Used for formats where OCR is not needed (fast path).
     func importDocument(from url: URL) throws -> Document {
+        // 2026-05-16 (B8) — Reject anything that isn't a PDF at the door.
+        try FormatPrecheck.checkPDF(url: url)
         let parsed = try importer.loadDocument(from: url)
         return try persistParsedDocument(parsed, from: url)
     }

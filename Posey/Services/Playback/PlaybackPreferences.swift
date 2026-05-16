@@ -202,17 +202,23 @@ final class PlaybackPreferences {
     /// threshold range matches the empirical 2026-05-04 sweep that
     /// pinned 0.45 as a fabrication-vs-grounded boundary.
     ///
-    /// - `permissive` → 0.35: more attempts, occasional fabrication
-    ///   on tangential questions.
-    /// - `balanced` → 0.45 (the prior hardcoded default): tight enough
-    ///   to refuse fabrication-prone tangents, loose enough to attempt
-    ///   genuine-but-low-confidence questions.
-    /// - `strict` → 0.55: only attempt when retrieval is high-
-    ///   confidence; more honest refusals.
+    /// Relabeled 2026-05-14 per Mark — the picker now describes
+    /// **search breadth**, not Posey's willingness to answer.
+    ///
+    /// - `broad` (was permissive) → 0.35: searches widely; attempts
+    ///   answers from loosely related passages.
+    /// - `balanced` → 0.45 (default): searches thoroughly; answers when
+    ///   it finds relevant content. Recommended.
+    /// - `precise` (was strict) → 0.55: only matches closely related
+    ///   passages. Best for technical / legal documents.
+    ///
+    /// `rawValue`s remain `permissive` / `balanced` / `strict` so
+    /// users' persisted preference doesn't reset across upgrade —
+    /// only the UI labels change.
     enum RetrievalStrictness: String, CaseIterable, Equatable {
-        case permissive
-        case balanced
-        case strict
+        case broad     = "permissive"
+        case balanced  = "balanced"
+        case precise   = "strict"
 
         /// Cosine threshold a non-front-matter chunk must clear for
         /// `isWeakRetrieval` to return `false` (i.e. to attempt an
@@ -220,28 +226,28 @@ final class PlaybackPreferences {
         /// directly against `RetrievedChunk.relevance`.
         var weakRetrievalThreshold: Double {
             switch self {
-            case .permissive: return 0.35
-            case .balanced:   return 0.45
-            case .strict:     return 0.55
+            case .broad:    return 0.35
+            case .balanced: return 0.45
+            case .precise:  return 0.55
             }
         }
 
         var displayName: String {
             switch self {
-            case .permissive: return "Permissive"
-            case .balanced:   return "Balanced"
-            case .strict:     return "Strict"
+            case .broad:    return "Broad"
+            case .balanced: return "Balanced"
+            case .precise:  return "Precise"
             }
         }
 
         var description: String {
             switch self {
-            case .permissive:
-                return "Posey attempts more questions, sometimes guessing when retrieval is weak."
+            case .broad:
+                return "Posey searches widely and attempts answers even from loosely related passages."
             case .balanced:
-                return "Posey attempts genuine questions and refuses the rest. Recommended."
-            case .strict:
-                return "Posey only answers when retrieval is high-confidence; more honest refusals."
+                return "Posey searches thoroughly and answers when she finds relevant content. Recommended."
+            case .precise:
+                return "Posey only answers from closely matched passages. Best for technical or legal documents."
             }
         }
     }

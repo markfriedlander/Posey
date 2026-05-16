@@ -401,6 +401,40 @@ nonisolated enum AskPoseyPromptBuilder {
     lists only when the question is structurally asking for one.
     """
 
+    /// 2026-05-14 — DEBUG-only assertion that runs once, at first
+    /// access of `proseInstructions`. Fires loudly if the prose has
+    /// grown past `AskPoseyTokenBudget.proseInstructionsBudgetTokens`,
+    /// so future prompt-rule additions can't silently starve RAG/STM
+    /// /summary the way the May-13 A2/A7 additions did. The check
+    /// runs once per process — Swift caches `static let` initializers.
+    /// In Release the closure compiles to a no-op (assert is inert).
+    static let proseInstructionsBudgetCheck: Bool = {
+        let actual = AskPoseyTokenEstimator.tokens(in: proseInstructions)
+        let budget = AskPoseyTokenBudget.proseInstructionsBudgetTokens
+        #if DEBUG
+        // NSLog so the line appears in the unified log (visible via
+        // `xcrun simctl spawn ... log show`) — `print()` only reaches
+        // stdout which is invisible without an attached terminal.
+        // The budget-check initializer is non-isolated; NSLog is
+        // free-standing and safe to call from any context.
+        let pct = (actual * 100) / max(1, budget)
+        NSLog("AskPoseyPromptBuilder.proseInstructions: %d / %d tokens (%d%% of budget)",
+              actual, budget, pct)
+        #endif
+        assert(
+            actual <= budget,
+            """
+            AskPoseyPromptBuilder.proseInstructions has grown to \
+            \(actual) tokens — exceeds the documented budget of \
+            \(budget). Compact rules or raise \
+            AskPoseyTokenBudget.proseInstructionsBudgetTokens \
+            intentionally (with a HISTORY note). Bloat here starved \
+            RAG/STM/summary in May 2026 — do not let it happen again.
+            """
+        )
+        return true
+    }()
+
     /// Surrounding-sentence window in tokens, keyed off intent. Tight
     /// for `.immediate` (anchor is the answer's source); zero for
     /// `.search` (the answer is "where" — surrounding doesn't help);
@@ -449,6 +483,10 @@ nonisolated enum AskPoseyPromptBuilder {
         // ====================================================
 
         // -------- SYSTEM (instructions) --------
+        // Touch the budget-check `static let` so its lazy initializer
+        // runs once per process; in DEBUG it asserts the prose hasn't
+        // bloated past `AskPoseyTokenBudget.proseInstructionsBudgetTokens`.
+        _ = proseInstructionsBudgetCheck
         let instructions = proseInstructions
         breakdown.system = AskPoseyTokenEstimator.tokens(in: instructions)
 

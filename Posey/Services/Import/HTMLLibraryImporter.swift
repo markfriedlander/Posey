@@ -12,6 +12,8 @@ struct HTMLLibraryImporter {
     }
 
     func importDocument(from url: URL) throws -> Document {
+        // 2026-05-16 (B8) — Reject binary content at the door.
+        try FormatPrecheck.checkTextLike(url: url, declaredType: "html")
         // Task 8 #4 (2026-05-03): URL-based import resolves inline
         // <img> references against the file's containing directory.
         // The resulting document carries a separate displayText (with

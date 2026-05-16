@@ -2090,17 +2090,14 @@ private struct ReaderPreferencesSheet: View {
                     }
                 }
 
-                // 2026-05-14 (B3) — Ask Posey retrieval strictness.
-                // User-tunable floor on how strong a RAG match must
-                // be before Posey attempts an answer. Default
-                // Balanced (0.45) preserves the prior hardcoded
-                // behavior; Permissive (0.35) is more willing to
-                // attempt at the cost of occasional fabrication;
-                // Strict (0.55) refuses more aggressively but the
-                // answers it does give are more reliable.
+                // 2026-05-14 (B3) — Ask Posey search-breadth picker.
+                // Relabeled 2026-05-14 per Mark: the picker describes
+                // **how widely Posey searches**, not how willing she is
+                // to answer. Broad → 0.35, Balanced → 0.45 (default),
+                // Precise → 0.55.
                 if AskPoseyAvailability.isAvailable {
                     Section {
-                        Picker("Retrieval", selection: $draftStrictness) {
+                        Picker("How Posey Searches", selection: $draftStrictness) {
                             ForEach(PlaybackPreferences.RetrievalStrictness.allCases, id: \.self) { s in
                                 Text(s.displayName).tag(s)
                             }

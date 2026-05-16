@@ -12,6 +12,8 @@ struct DOCXLibraryImporter {
     }
 
     func importDocument(from url: URL) throws -> Document {
+        // 2026-05-16 (B8) — Reject anything that isn't ZIP-shaped.
+        try FormatPrecheck.checkDOCX(url: url)
         let parsed = try textLoader.loadDocument(from: url)
         return try importNormalizedDocument(
             title: url.deletingPathExtension().lastPathComponent,

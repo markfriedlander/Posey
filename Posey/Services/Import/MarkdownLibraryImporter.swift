@@ -12,6 +12,8 @@ struct MarkdownLibraryImporter {
     }
 
     func importDocument(from url: URL) throws -> Document {
+        // 2026-05-16 (B8) — Reject binary content at the door.
+        try FormatPrecheck.checkTextLike(url: url, declaredType: "md")
         let parsed = try importer.loadDocument(from: url)
         return try importParsedDocument(
             title: url.deletingPathExtension().lastPathComponent,

@@ -595,6 +595,9 @@ extension LibraryViewModel {
                 pdfImportStatusMessage = nil
             }
             do {
+                // 2026-05-16 (B8) — Reject binary-misnamed-as-PDF
+                // before kicking the heavy parse off thread.
+                try FormatPrecheck.checkPDF(url: url)
                 let parsed = try await parsePDFOffMainThread(url: url) { [weak self] message in
                     Task { @MainActor [weak self] in
                         self?.pdfImportStatusMessage = message
@@ -2714,6 +2717,10 @@ extension LibraryViewModel {
 
             let doc: Document
             if ext == "pdf" {
+                // 2026-05-16 (B8) — Same precheck as the user-driven
+                // import path. Catches PNG/PDF/random-bytes misnamed
+                // as .pdf via the API.
+                try FormatPrecheck.checkPDF(url: tempURL)
                 pdfImportStatusMessage = "API: Importing \(cleanFilename)\u{2026}"
                 defer { pdfImportStatusMessage = nil }
                 let parsed = try await parsePDFOffMainThread(url: tempURL) { [weak self] msg in

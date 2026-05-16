@@ -1326,6 +1326,104 @@ extension AskPoseyChatViewModel {
     /// The X/Y/Z list is empty here — we don't have time to extract
     /// chunks for this branch and using a generic phrasing is
     /// safer than risking a hallucinated topic list.
+    // ============================================================
+    // 2026-05-16 — B5 / B5b short-circuits
+    // ============================================================
+
+    /// Word-boundary, case-insensitive check for "falafel" anywhere
+    /// in the user input. B5b. Used at the very top of `send()` so
+    /// the easter egg fires regardless of document scope.
+    static func containsFalafelToken(_ text: String) -> Bool {
+        let pattern = #"\bfalafel\b"#
+        return text.range(of: pattern,
+                          options: [.regularExpression, .caseInsensitive])
+            != nil
+    }
+
+    /// Posts the canonical Party Girl line as if it were a citation
+    /// hit. Persists the turn so dismissing + reopening the sheet
+    /// keeps the joke in the history.
+    func handleFalafelEasterEgg(question: String) async {
+        let userMessage = AskPoseyMessage(role: .user, content: question)
+        messages.append(userMessage)
+        inputText = ""
+        isResponding = true
+        lastError = nil
+
+        persistTurn(
+            role: .user, content: question, intent: nil,
+            chunksInjected: [], fullPromptForLogging: nil
+        )
+
+        // Wrapped to look like a real Posey answer with a citation
+        // chip. The chip text is the source attribution; the prose
+        // is the actual line as a quote.
+        let answer = "“Can I have a falafel with hot sauce, a side order of baba ghanoush, and a seltzer, please?”[1]\n\n— *Party Girl*, 1995"
+        let assistantMessage = AskPoseyMessage(
+            role: .assistant, content: answer,
+            isStreaming: false, timestamp: Date()
+        )
+        messages.append(assistantMessage)
+        persistTurn(
+            role: .assistant, content: answer, intent: nil,
+            chunksInjected: [],
+            fullPromptForLogging: "[falafel-easter-egg]"
+        )
+        isResponding = false
+    }
+
+    /// True when the input is so short or so non-textual that there's
+    /// nothing meaningful to feed AFM. Catches: single non-letter
+    /// character, repeated single character (`...`, `aaaaa`, `???`),
+    /// fewer than two alphabetic characters total, or pure
+    /// punctuation/symbols. False on any reasonable short question
+    /// (e.g. "ok?", "why", "how" — these get the regular pipeline).
+    static func looksLikeNoise(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        // Letters-only count. "why" → 3, "??" → 0, "ok?" → 2.
+        let letterCount = trimmed.unicodeScalars
+            .filter { CharacterSet.letters.contains($0) }
+            .count
+        if letterCount < 2 { return true }
+        // Repeated single character ignoring case ("aaa", "....").
+        let normalized = trimmed.lowercased()
+        if let first = normalized.first,
+           normalized.allSatisfy({ $0 == first }) {
+            return true
+        }
+        return false
+    }
+
+    /// Personality-light response for nonsense input. Doesn't refuse
+    /// — invites the user to try again with a real question. Persists
+    /// so the conversation history accurately reflects the exchange.
+    func handleNoiseShortCircuit(question: String) async {
+        let userMessage = AskPoseyMessage(role: .user, content: question)
+        messages.append(userMessage)
+        inputText = ""
+        isResponding = true
+        lastError = nil
+
+        persistTurn(
+            role: .user, content: question, intent: nil,
+            chunksInjected: [], fullPromptForLogging: nil
+        )
+
+        let answer = "I'm not sure what you're asking. Try a question about the document — like \"what's this chapter about\" or \"who is the main character\"."
+        let assistantMessage = AskPoseyMessage(
+            role: .assistant, content: answer,
+            isStreaming: false, timestamp: Date()
+        )
+        messages.append(assistantMessage)
+        persistTurn(
+            role: .assistant, content: answer, intent: nil,
+            chunksInjected: [],
+            fullPromptForLogging: "[noise-short-circuit]"
+        )
+        isResponding = false
+    }
+
     func handleRecommendationShortCircuit(question: String) async {
         let userMessage = AskPoseyMessage(role: .user, content: question)
         messages.append(userMessage)
@@ -1370,9 +1468,11 @@ extension AskPoseyChatViewModel {
     ///
     /// 2026-05-14 (B3) — Threshold is now read from
     /// `PlaybackPreferences.shared.retrievalStrictness`
-    /// (Permissive 0.35 / Balanced 0.45 / Strict 0.55). Default
+    /// (Broad 0.35 / Balanced 0.45 / Precise 0.55). Default
     /// `.balanced` preserves the prior 0.45 behavior for users who
-    /// don't visit Preferences.
+    /// don't visit Preferences. Raw-value strings remain
+    /// `permissive`/`balanced`/`strict` for backward-compat with
+    /// already-persisted UserDefaults.
     static func isWeakRetrieval(chunks: [RetrievedChunk]) -> Bool {
         // Empirical band per 2026-05-04 sweep:
         // 0.50+ chunks consistently produce real answers; 0.40 chunks
@@ -1605,6 +1705,27 @@ extension AskPoseyChatViewModel {
             // No live deps — degrade to echo so previews/tests keep
             // working.
             await sendEchoStub()
+            return
+        }
+
+        // 2026-05-16 (B5b) — Falafel easter egg. Mark's quiet wink at
+        // Parker Posey's character in Party Girl. Word-boundary match,
+        // case-insensitive. Returns the canonical line as if it were
+        // a citation hit — feels like a real search result, not a
+        // sight gag. Runs BEFORE any pipeline work so it never touches
+        // AFM or RAG.
+        if Self.containsFalafelToken(trimmedInput) {
+            await handleFalafelEasterEgg(question: trimmedInput)
+            return
+        }
+
+        // 2026-05-16 (B5) — Nonsense / noise short-circuit. Single
+        // punctuation, repeated single character, or extremely short
+        // non-word input gets a personality response rather than
+        // entering the AFM pipeline where it'd waste tokens and
+        // typically produce a confused refusal anyway.
+        if Self.looksLikeNoise(trimmedInput) {
+            await handleNoiseShortCircuit(question: trimmedInput)
             return
         }
 

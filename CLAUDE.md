@@ -47,6 +47,26 @@ Standing procedure: after any `SCREENSHOT` verb or simulator screenshot, immedia
 
 Beyond per-image size: don't accumulate screenshots in context unnecessarily. Each one consumed is real budget. Re-read a screenshot only if you need to verify a different thing about it; otherwise trust your first look. This rule cost previous CC instances entire sessions — do not repeat it.
 
+### Rule 4 — Zero Warnings, Zero Errors, Always. Clean Release Build Before Any Submission Claim.
+
+The bar is zero warnings, zero errors. Not "tolerable," not "mostly clean," not "we'll fix it later" — **zero**. This applies on every commit, not just before submission. Warnings are real defects. Every one points to a real problem: a concurrency hazard, a dead code path, a misunderstanding of what an API does, an unused `try`/`await` that signals the author didn't know what they were calling. Compilers don't warn about nothing. If the compiler thought it was worth saying, you do not get to decide it isn't.
+
+**Standing requirements:**
+
+1. **Run a clean Release build before declaring any feature "done."** Not an incremental build. Not Debug. A full `xcodebuild ... -configuration Release clean build`. Read every line of output. Warnings only fully re-emit on a clean build — incremental builds hide cumulative pile-ups across files you didn't touch.
+
+2. **Never say the word "ready" — for a commit, a feature, a milestone, and absolutely never for a submission — without that clean Release build showing 0 warnings and 0 errors.** "Ready to submit" without a clean build is a lie, even if you don't mean it to be. The submission paperwork being staged is not the same thing as the code being ready. If you find yourself saying "let's archive" or "let's submit" without having run the clean build yourself in the current session, stop.
+
+3. **After any IDE or toolchain upgrade (Xcode minor/major bump, Swift version change, new build setting), run a clean Release build immediately.** A new Xcode revision can amplify existing latent warnings from a handful into dozens overnight. The first session on a new toolchain audits the build before doing anything else.
+
+4. **A warning introduced in your session is your warning to fix in your session.** Don't leave them for "later" or "the next person." Later doesn't come; pile-ups happen. If you introduce code that warns, fix it before you commit. If you can't, the commit isn't ready.
+
+5. **Build-system noise (e.g. AppIntents metadata-processor warnings) counts as a warning until proven otherwise.** Either suppress it correctly via the appropriate build setting, or document in DECISIONS.md exactly why it can't be suppressed. "It's just noise" is not a documented exemption.
+
+The specific failure that produced this rule (2026-05-19): the session reached "ready to submit," paperwork was staged, screenshots were captured, docs were synced, and the archive button was about to be pressed in Xcode — without anyone having run a clean Release build in days. The build that finally happened revealed 63 warnings including a real duplicate-switch-case bug and three Swift 6 concurrency hazards flagged as "this is an error in the Swift 6 language mode." Mark caught it. I had not. I had been ready to submit defective code to the App Store. The cost would have been a rejected build, public embarrassment, or worse — an approved build with real concurrency bugs landing in users' hands.
+
+Submission is the moment the bar is highest, not lowest. Zero warnings is the bar.
+
 ---
 
 ## Three Hats — Developer, QA, and User

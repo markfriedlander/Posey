@@ -1,5 +1,20 @@
 # Posey Decisions
 
+## 2026-05-19 — Mac config: Designed for iPad, not Mac Catalyst
+
+- Decision: `SUPPORTS_MACCATALYST = NO` + `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES`.
+- Rationale: Posey matches Mark's other apps (Pure Phase, Reflect, Hal). iOS-first, runs on iPad natively, runs on Apple Silicon Macs unmodified as a "Designed for iPad" app. App Store lists it as "Designed for iPad. Not verified for macOS." — consistent family.
+- Implementation: two pbxproj lines per config. The two `#if targetEnvironment(macCatalyst)` window-frame blocks in `PoseyApp.swift` become inert harmlessly.
+- Commit `b006273`.
+
+## 2026-05-19 — Posey 1.0 ships without Ask Posey
+
+- Decision: hide Ask Posey UI from Release builds via `POSEY_ENABLE_ASK_POSEY` compilation flag (Debug-only). Codebase preserved intact.
+- Rationale: Hal Universal 2.0 just shipped a proven embedder switcher + LLM switcher architecture. v1.1 will port that infrastructure into Posey for meaningfully better RAG. 1.0 ships the rock-solid reading core (TTS, reader, search, notes, bookmarks) without an under-delivered Ask Posey surface.
+- Implementation pattern mirrors Hal's `HAL_ENABLE_EMBEDDING_GEMMA` — central chokepoint at `AskPoseyAvailability.isAvailable` + per-site `#if` wraps as belt-and-suspenders. Antenna (which exposes Ask Posey verbs) is already OFF in Release per D2.
+- v1.1 estimate: 5–7 focused days for embedder + LLM switching. Embedder is the harder axis (corpus migration, asymmetric retrieval, per-backend threshold calibration). LLM switching is largely per-model prompt tuning.
+- Commit `a875208`.
+
 ## 2026-05-06 (evening, late) — List markers: inject into plainText, strip at speech boundary
 
 - **Status:** Accepted (Mark's directive after a research round on AVSpeechSynthesizer punctuation behavior).

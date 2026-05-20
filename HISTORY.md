@@ -1,5 +1,71 @@
 # Posey History
 
+## 2026-05-19 — 1.0 submission prep: Ask Posey hidden, Mac config flip, screenshots, GitHub Pages refresh
+
+Mark's strategic decision: Posey 1.0 ships as a pure reading app — TTS, reader, search, notes, bookmarks — with Ask Posey hidden from the UI but kept in the codebase for v1.1 when Hal Universal's upgraded RAG infrastructure (embedder switcher + LLM switcher) ports in. Hal Universal 2.0 was submitted ~20 minutes before this session began; its proven embedder/LLM switching architecture is the v1.1 reference.
+
+### Build flag — Ask Posey gated for Release (commit `a875208`)
+
+`POSEY_ENABLE_ASK_POSEY` added to `SWIFT_ACTIVE_COMPILATION_CONDITIONS` Debug-only (Release leaves the flag absent). Mirrors Hal's `HAL_ENABLE_EMBEDDING_GEMMA` pattern.
+
+- `AskPoseyAvailability.isAvailable` returns false unconditionally in Release — central chokepoint.
+- Four per-site `#if` wraps as belt-and-suspenders: `ReaderView.swift` lines 647 (indexing banner), 894 (sparkle Menu + remoteRegister), 2061 (Preferences "How Posey Searches" picker), 4169 (Saved Annotations conversation rows).
+- `NSMotionUsageDescription` removed from `Info.plist` (Motion code was retired earlier in `0050d06`; stale description would have prompted App Store review).
+- Sim Release verified — AX-tree dump shows zero Ask Posey elements anywhere. iPhone Release built + installed + launched cleanly. Antenna OFF in Release (per D2 from earlier).
+- Code paths preserved — `AskPoseyService`, `AskPoseyView`, `AskPoseyChatViewModel`, `DocumentEmbeddingIndex`, the entire RAG pipeline all still compile in both configs. v1.1 lights the flag back up.
+
+### docs/ + GitHub Pages refresh with imagery (commit `90175fb`)
+
+SC's parallel task: study Hal Universal's Pages site for family conventions, introduce imagery to Posey pages for the first time using the new app icon as anchor.
+
+Visual language: dark near-black (`#0f0c06`) with a warm amber radial wash behind every page, Georgia serif throughout, "posey" lowercase wordmark in amber, cream body. Hero icon at 168×168 with soft amber glow + iOS rounded-square mask on the landing page; 56×56 brand mark in the header of privacy + support pages.
+
+- `docs/index.html` — landing page rewritten. Six-card feature grid (2 cols tablet, 1 col mobile), italic pull-quote closing.
+- `docs/privacy.html` — 1.0-clean (Ask Posey + Apple Intelligence references removed), brand-mark header.
+- `docs/support.html` — same treatment, no Ask Posey section.
+- `docs/privacy/index.html` + `docs/support/index.html` — subdirectory variants with adjusted `../assets/` paths so the App Store Connect URL pattern (`/Posey/privacy`, no extension) resolves cleanly.
+- `docs/assets/` — `posey-icon-512.png`, `posey-icon-256.png`, `favicon-32.png`, `apple-touch-icon.png`.
+- Root `README.md` replaced — Apple Intelligence reference removed.
+- Rendering verified on iPhone 17 Pro sim + iPad Pro 13" sim across all three pages. Evidence in `Art/qa-evidence/2026-05-19-docs/`.
+
+### Mac config — Catalyst → Designed for iPad (commit `b006273`)
+
+Mark's preference: Posey matches Pure Phase / Reflect / Hal — iOS first, runs on iPad natively, runs on Apple Silicon Macs unmodified as a "Designed for iPad" app. No Catalyst build target.
+
+- `SUPPORTS_MACCATALYST = NO`
+- `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES`
+- Both Debug + Release configs.
+- The two `#if targetEnvironment(macCatalyst)` blocks in `PoseyApp.swift` (window-frame sizing) compile out cleanly.
+- Release iOS Simulator build verified clean (Universal binary 20 MB).
+
+### App Store screenshots (commit `fdb7344`)
+
+All captured from Release build. Content is public-domain only (Alice's Adventures in Wonderland from Project Gutenberg) plus Mark-original (AI Book Collaboration Project draft + a small "Posey Quick Guide" written for this purpose). Zero copyrighted third-party content.
+
+**Support change:** `ReaderView.revealChrome()` now skips the 3-second auto-fade when `isTestMode` is true, so automated screenshot capture can rely on chrome controls staying visible. Zero impact on end-user behavior.
+
+iPhone 17 Pro Max (1320×2868) — `submission/screenshots/`:
+- `01-library-empty.png` — first-run empty state
+- `02-library-documents.png` — 3 docs across 3 formats
+- `03-reader-text.png` — Alice ch.1 with inline Tenniel illustration
+- `04-reader-playing.png` — active sentence highlighted
+- `05-notes.png` — Notes sheet with bookmark + note
+- `06-preferences.png` — full prefs sheet (no Ask Posey section, confirms Release UI matches v1.0 spec)
+
+iPad Pro 13" (2064×2752) — `submission/screenshots/ipad/`:
+- `02-library-documents.png` — minimum required iPad shot
+
+### Status going into submission
+
+Ready for App Store Connect. Everything Mark needs:
+- App Store metadata draft at `docs/maybe new versions/posey_ASC_metadata.md` (paste-ready)
+- Privacy URL: `https://markfriedlander.github.io/Posey/privacy`
+- Support URL: `https://markfriedlander.github.io/Posey/support`
+- Screenshots: `submission/screenshots/` (iPhone) + `submission/screenshots/ipad/`
+- Production build: archive from Xcode at `Posey/Posey.xcodeproj`, Release config
+
+---
+
 ## 2026-05-14 — C-tier polish + qa_battery 12/12 verification
 
 After fixing the Ask Posey RAG-starvation issue, ran `tools/qa_battery.sh` end-to-end on iPhone — the canonical Three-Hats QA driver, 4 questions × 3 documents (AI Book Collaboration / Cloud Copyright PDF / Internet Steps PDF) with cooldown. **All 12 answers acceptable:**

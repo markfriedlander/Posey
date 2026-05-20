@@ -1,5 +1,43 @@
 # Next
 
+## 2026-05-19 — Ready to submit 1.0
+
+Strategic pivot: Posey 1.0 ships as a pure reading app. Ask Posey is gated behind `POSEY_ENABLE_ASK_POSEY` (Debug-only) — present in the codebase, hidden from Release UI. v1.1 will re-enable Ask Posey with Hal Universal's proven embedder switcher + LLM switcher ported in.
+
+### Submission queue (Mark + CC next session)
+
+1. Mark archives Release from Xcode + uploads via Organizer
+2. Mark opens App Store Connect in Chrome; CC drives via Claude-in-Chrome MCP
+3. CC pastes metadata field-by-field from `docs/maybe new versions/posey_ASC_metadata.md`
+4. CC uploads `submission/screenshots/*.png` (iPhone 6.9") + `submission/screenshots/ipad/02-library-documents.png` (iPad 13")
+5. Verify GitHub Pages URLs render (privacy.html + support.html — already pushed to `origin/main`)
+6. Answer privacy questionnaire: Data Not Collected (per §14 of `posey_ASC_metadata.md`)
+7. Mark hits Submit for Review
+
+### Today's pre-submission work — all committed and pushed to `origin/main`
+
+- `a875208` — Ask Posey gated behind `POSEY_ENABLE_ASK_POSEY` build flag (Debug only). Stale `NSMotionUsageDescription` removed from `Info.plist`.
+- `90175fb` — `docs/` + GitHub Pages refresh with imagery. Three pages + subdirectory variants + icon assets. Hero icon + brand-mark headers + warm-dark visual language.
+- `b006273` — Mac config switched from Catalyst to Designed for iPad.
+- `fdb7344` — App Store screenshots (6 iPhone Pro Max + 1 iPad Pro 13"). Public-domain content only.
+- This commit (TBD) — final docs sync + scratch drafts committed for completeness.
+
+### Hal Universal handoff brief for v1.1
+
+Detailed answers to the four planning questions are preserved verbatim in the session transcript (`~/.claude/projects/...`) — embedder/LLM switching architecture analysis, integration complexity assessment, time estimates. The Hal Universal `EmbeddingBackend.swift` / `EmbeddingProvider.swift` / `EmbedderMigrationCoordinator.swift` / `MLXModelDownloader` are the reference. Per the planning conversation:
+
+- Embedder switch (Nomic via swift-embeddings preferred — no MLX Metal init crash): 3–5 days. Includes schema migration to drop NOT NULL on `document_chunks.embedding`, asymmetric retrieval threading, per-backend threshold calibration on document-chunk content.
+- LLM switch (Gemma / Qwen / Llama / Dolphin via MLX-LM): 2–3 days additional. Mostly per-model prompt tuning + token-budget scaling per context-window.
+- Combined v1.1: 5–7 focused days.
+
+### Items deliberately not done
+
+- Mac App Store screenshots — Designed for iPad mode + 1 iPad shot satisfies the iPad slot.
+- `SCREENSHOT` antenna verb on physical iPhone — already exists in `LibraryView.swift:2041` and documented in CLAUDE.md.
+- GitHub Pages live verification — URLs work in sim Safari; GitHub Pages publishes ~1 min after push. Mark to spot-check before submission.
+
+---
+
 ## 2026-05-16 (afternoon, autonomous) — Mark's spec sheet + B6/B9/B9b/B10/C1
 
 Long autonomous session against the iPhone 17 Pro + Pro Max simulators

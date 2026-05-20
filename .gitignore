@@ -27,3 +27,26 @@ __pycache__/
 # Claude Code session state (per-machine, scheduled tasks, local prefs)
 .claude/
 tools/.posey_api_config.*.json
+
+# ---------------------------------------------------------------------------
+# GitHub Pages working drafts — never commit. The published pages live
+# at docs/{index,privacy,support}.html. The "maybe new/old versions"
+# directories are scratch drafts and would otherwise be served publicly.
+docs/maybe new versions/
+docs/maybe old versions/
+
+# Internal working documents — NEVER commit to the public repo.
+# These expose product roadmap, internal process, architectural decisions,
+# and working methodology. They live locally only.
+# ---------------------------------------------------------------------------
+CLAUDE.md
+CONSTITUTION.md
+ARCHITECTURE.md
+TESTING.md
+REQUIREMENTS.md
+NEXT.md
+HISTORY.md
+DECISIONS.md
+ask_posey_spec.md
+ask_posey_implementation_plan.md
+posey_task_sequence.md

@@ -64,8 +64,20 @@ public struct AskPoseyAvailability {
     }
 
     /// Convenience boolean. Equivalent to `current.isAvailable`.
+    ///
+    /// 2026-05-16 — Posey 1.0 ships as a pure reading app with Ask
+    /// Posey hidden from the UI but not deleted from the codebase.
+    /// `POSEY_ENABLE_ASK_POSEY` is set in the Debug configuration's
+    /// `SWIFT_ACTIVE_COMPILATION_CONDITIONS`; Release builds compile
+    /// the flag off and this getter returns false unconditionally,
+    /// so every UI surface gated on `isAvailable` disappears. The
+    /// flag returns when v1.1 ships with the upgraded RAG infra.
     public static var isAvailable: Bool {
-        current.isAvailable
+        #if POSEY_ENABLE_ASK_POSEY
+        return current.isAvailable
+        #else
+        return false
+        #endif
     }
 
     /// Human-readable explanation suitable for diagnostic logging. Not for

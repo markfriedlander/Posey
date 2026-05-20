@@ -37,8 +37,6 @@
 	<dict/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Posey uses the local network to accept connections from developer tools for testing and diagnostics.</string>
-	<key>NSMotionUsageDescription</key>
-	<string>Posey reads device motion data on-device to switch between Motion mode and your standard reading style. Motion data never leaves this device.</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

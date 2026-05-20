@@ -644,6 +644,7 @@ struct ReaderView: View {
     /// surface is silent.
     @ViewBuilder
     private var indexingBannerView: some View {
+        #if POSEY_ENABLE_ASK_POSEY
         if AskPoseyAvailability.isAvailable,
            indexingTracker.isIndexing(viewModel.document.id) {
             let progress = indexingTracker.indexingProgress[viewModel.document.id]
@@ -688,6 +689,7 @@ struct ReaderView: View {
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.25),
                        value: progress)
         }
+        #endif
     }
 
     /// Full-screen loading affordance that covers the reader while
@@ -889,6 +891,7 @@ struct ReaderView: View {
             // resolved decision 5. The glyph sits OUTSIDE the
             // existing transport HStack — no collision with
             // Previous / Play / Next / Restart spacing.
+            #if POSEY_ENABLE_ASK_POSEY
             if AskPoseyAvailability.isAvailable {
                 // 2026-05-04 — Quick-actions menu replaces the
                 // single-tap Button. Surfaces the four scoped
@@ -956,6 +959,7 @@ struct ReaderView: View {
 
                 Spacer(minLength: 24)
             }
+            #endif
 
             Button {
                 revealChrome()
@@ -2054,6 +2058,7 @@ private struct ReaderPreferencesSheet: View {
                 // **how widely Posey searches**, not how willing she is
                 // to answer. Broad → 0.35, Balanced → 0.45 (default),
                 // Precise → 0.55.
+                #if POSEY_ENABLE_ASK_POSEY
                 if AskPoseyAvailability.isAvailable {
                     Section {
                         Picker("How Posey Searches", selection: $draftStrictness) {
@@ -2073,6 +2078,7 @@ private struct ReaderPreferencesSheet: View {
                         Text("Ask Posey")
                     }
                 }
+                #endif
 
                 // 2026-05-08 — Audio Export re-enabled with the
                 // notification-based UX. Tap kicks off the render
@@ -4160,6 +4166,15 @@ final class ReaderViewModel: ObservableObject {
                 noteID: note.id
             ))
         }
+        // 2026-05-16 — Belt-and-suspenders: Ask Posey conversation rows
+        // only surface in Saved Annotations when the Ask Posey UI is
+        // compiled in (POSEY_ENABLE_ASK_POSEY). Posey 1.0 ships without
+        // Ask Posey enabled; a user who somehow has pre-existing
+        // conversation rows in their database (e.g. TestFlight upgrade)
+        // would otherwise still see them surface here even though the
+        // sheet is gone. The rows remain on disk — the build flag
+        // controls visibility, not data deletion.
+        #if POSEY_ENABLE_ASK_POSEY
         if let anchorRows = try? databaseManager.askPoseyAnchorRows(for: document.id) {
             for row in anchorRows {
                 let display = row.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4175,6 +4190,7 @@ final class ReaderViewModel: ObservableObject {
                 ))
             }
         }
+        #endif
         entries.sort { $0.timestamp > $1.timestamp }
         savedAnnotations = entries
     }

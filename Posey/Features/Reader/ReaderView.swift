@@ -149,6 +149,11 @@ struct ReaderView: View {
                             // 2026-05-05 — Citation-return pill,
                             // anchored top-trailing so it sits next
                             // to the first line of the cited block.
+                            // 2026-05-19 — Wrapped in #if so the pill
+                            // (including its "Return to Ask Posey
+                            // conversation" a11y label) is fully
+                            // stripped from Release binaries.
+                            #if POSEY_ENABLE_ASK_POSEY
                             .overlay(alignment: .topTrailing) {
                                 if isCitedRow(blockStartOffset: block.startOffset) {
                                     citationReturnPill()
@@ -156,6 +161,7 @@ struct ReaderView: View {
                                         .padding(.top, 2)
                                 }
                             }
+                            #endif
                         }
                     } else {
                         ForEach(Array(viewModel.segments.enumerated()), id: \.element.id) { segIdx, segment in
@@ -193,6 +199,9 @@ struct ReaderView: View {
                             // 2026-05-05 — Citation-return pill,
                             // anchored top-trailing on the cited
                             // segment row.
+                            // 2026-05-19 — Wrapped in #if so the pill
+                            // is fully stripped from Release binaries.
+                            #if POSEY_ENABLE_ASK_POSEY
                             .overlay(alignment: .topTrailing) {
                                 if isCitedRow(segmentIndex: segIdx) {
                                     citationReturnPill()
@@ -200,6 +209,7 @@ struct ReaderView: View {
                                         .padding(.top, 4)
                                 }
                             }
+                            #endif
                         }
                     }
                 }
@@ -732,6 +742,7 @@ struct ReaderView: View {
         .transition(.opacity)
     }
 
+    #if POSEY_ENABLE_ASK_POSEY
     private func indexingBannerPrimaryText(
         progress: IndexingTracker.IndexingProgress?
     ) -> String {
@@ -759,6 +770,7 @@ struct ReaderView: View {
         }
         return "Indexing this document for Ask Posey"
     }
+    #endif
 
     private static func formattedChunkCount(_ value: Int) -> String {
         let formatter = NumberFormatter()
@@ -1361,10 +1373,12 @@ struct ReaderView: View {
     /// conversation from SQLite, so the user lands back in the same
     /// conversation at the most-recent message — "exact scroll
     /// position" in the practical sense.
+    #if POSEY_ENABLE_ASK_POSEY
     private func returnToAskPoseyAction() {
         viewModel.clearCitationReturnContext()
         openAskPosey(scope: .passage)
     }
+    #endif
 
     /// 2026-05-05 — Floating return-to-Ask-Posey pill rendered next
     /// to the cited row. Small capsule with back-arrow + sparkle
@@ -1373,6 +1387,7 @@ struct ReaderView: View {
     /// distraction from the document. Disappears naturally when the
     /// cited row scrolls off (the pill is part of the row's view
     /// tree); tap returns to Ask Posey.
+    #if POSEY_ENABLE_ASK_POSEY
     @ViewBuilder
     private func citationReturnPill() -> some View {
         Button {
@@ -1410,6 +1425,7 @@ struct ReaderView: View {
         }
         .transition(.scale(scale: 0.8).combined(with: .opacity))
     }
+    #endif
 
     /// True when this row is the cited row that should host the
     /// return-pill overlay. Centralises the comparison so the two

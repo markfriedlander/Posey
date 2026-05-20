@@ -1,5 +1,22 @@
 # Posey Decisions
 
+## 2026-05-19 — Default actor isolation: `nonisolated` (not `MainActor`)
+
+- Decision: `SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated` in every build configuration. Previously `MainActor` (Xcode 26's default for new iOS 26 projects).
+- Rationale: Posey is written with **explicit** `@MainActor` on UI types (views, view models, SwiftUI surfaces) and **explicit** background work in services (importers, indexers, embedding pipelines, SQLite writes routed back to main). The codebase was never written assuming everything defaults to `MainActor`. The Xcode-26 default amplified ~5–10 latent warnings into 63 because every background-thread call into an unannotated method was treated as a main-actor-isolation violation. Flipping to `nonisolated` restores the design's intent and removes ~50 false-positive warnings in one change.
+- Verified: clean Release build with the change shows 0 Swift warnings (down from 63). The 3 "this is an error in the Swift 6 language mode" warnings (one duplicate switch case, two `[weak self]`-into-`Task` captures in BackgroundEnhancementScheduler, and two non-Sendable captures into `@Sendable` closures in DocumentEmbeddingIndex) were genuine and fixed properly — not silenced by the isolation flip.
+- Standing rule: see CLAUDE.md Rule 4 — zero warnings, zero errors, clean Release build before any submission claim. The 2026-05-19 incident (63 warnings discovered at the moment of submission because no clean Release build had been run since the Xcode 26.5 upgrade) is what produced this rule.
+
+## 2026-05-19 — `appintentsmetadataprocessor` "Metadata extraction skipped" build-tool noise: documented, not suppressible
+
+- Observation: Apple's `appintentsmetadataprocessor` build-phase tool emits an NSLog line to stderr — `"warning: Metadata extraction skipped. No AppIntents.framework dependency found."` — on every build because Posey does not link `AppIntents.framework`.
+- Per Rule 4 (CLAUDE.md), build-system noise counts as a warning until either suppressed via an appropriate build setting or documented here. This entry documents it.
+- Attempted suppressions that **did not work** in Xcode 26.5:
+  - `LM_ENABLE_APP_INTENTS_METADATA_EXTRACTION = NO` — setting was added to all build configs; the tool still ran and still emitted the line. Setting removed as ineffective.
+- Why we are not adding a stub AppIntents conformance to silence it: Posey 1.0 ships no Siri/Shortcuts integration. Adding an unused AppIntents framework dependency to silence a stderr line would be cargo-culted weight.
+- Where this line appears: only in raw `xcodebuild` terminal output (stderr). **It does not appear in Xcode's Issues navigator** (which is what Mark's "63 issues" screenshot was counting). The user-facing warning count after the cleanup pass is 0.
+- Action if Apple ever provides a documented suppression in a future Xcode release: apply it and delete this DECISIONS entry.
+
 ## 2026-05-19 — Mac config: Designed for iPad, not Mac Catalyst
 
 - Decision: `SUPPORTS_MACCATALYST = NO` + `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES`.

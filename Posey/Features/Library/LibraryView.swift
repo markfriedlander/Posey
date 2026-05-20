@@ -2581,21 +2581,13 @@ extension LibraryViewModel {
                 await MainActor.run { RemoteControlState.shared.resetSpokenUtterances() }
                 return #"{"ok":true}"#
 
-            case "SIMULATE_BACKGROUND":
-                // Posts UIApplication.didEnterBackgroundNotification.
-                // Used by AUDIO_EXPORT_LOCK_TEST to verify the export
-                // survives backgrounding without requiring a physical
-                // screen lock. iOS's system listeners on this notification
-                // (including SwiftUI's @Environment(\.scenePhase) plumbing
-                // and any URLSession/AVAudio infrastructure) fire as if
-                // the app had actually backgrounded.
-                await MainActor.run {
-                    NotificationCenter.default.post(
-                        name: UIApplication.didEnterBackgroundNotification,
-                        object: nil
-                    )
-                }
-                return #"{"ok":true,"posted":"didEnterBackground"}"#
+            // Note: a second "SIMULATE_BACKGROUND" case used to live here
+            // for the audio-export lock test. It was unreachable because
+            // the earlier case (~line 1855) matched first; removed
+            // 2026-05-19 to silence the duplicate-pattern warning. The
+            // earlier case's behavior (full background→sleep→foreground
+            // cycle) is what AUDIO_EXPORT_LOCK_TEST has been getting at
+            // runtime all along.
 
             case "SIMULATE_FOREGROUND":
                 await MainActor.run {
@@ -3180,7 +3172,7 @@ extension LibraryViewModel {
         let failedIdentifier = "audioExport.failed.\(documentID.uuidString)"
 
         // ===== Phase 1: baseline (no simulated background) =====
-        await UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [completeIdentifier, failedIdentifier])
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [completeIdentifier, failedIdentifier])
         let phase1Start = Date()
         await MainActor.run {
             NotificationCenter.default.post(
@@ -3202,7 +3194,7 @@ extension LibraryViewModel {
         }
 
         // ===== Phase 2: simulated background (informational only) =====
-        await UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [completeIdentifier, failedIdentifier])
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [completeIdentifier, failedIdentifier])
         let phase2Start = Date()
         await MainActor.run {
             NotificationCenter.default.post(

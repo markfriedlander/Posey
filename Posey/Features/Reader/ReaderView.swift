@@ -2780,7 +2780,13 @@ final class ReaderViewModel: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak exporter] _ in
-                exporter?.cancelDueToBackgroundExpiration()
+                // queue: .main guarantees this fires on the main thread,
+                // so assumeIsolated is safe here and lets us call the
+                // main-actor-isolated `cancelDueToBackgroundExpiration()`
+                // without bouncing through a Task.
+                MainActor.assumeIsolated {
+                    exporter?.cancelDueToBackgroundExpiration()
+                }
             }
             #endif
 

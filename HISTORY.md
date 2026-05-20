@@ -1,5 +1,41 @@
 # Posey History
 
+## 2026-05-19 (late evening) — 63 warnings → 0. Clean Release build before submission.
+
+The submission paperwork was staged. Screenshots were captured. Docs were synced. Mark was about to press Archive in Xcode. Then he opened the project and Xcode's Issues navigator showed **63 issues**. The submission stopped cold.
+
+**Root causes (three forces combined):**
+
+1. **Xcode 26.5 (installed May 12) significantly tightened Swift 6 transition warnings.** Code that compiled clean under the previous Xcode now emitted dozens of "this is an error in the Swift 6 language mode" pre-warnings about main-actor isolation. The project was still on `SWIFT_VERSION = 5.0` so nothing broke — but Xcode 26 was much louder about how Swift 6 *will* see the code.
+
+2. **`SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` (Xcode 26's default for new iOS 26 projects).** Posey was written with **explicit** `@MainActor` on UI types and **explicit** background work elsewhere. The default-MainActor setting forced the compiler to treat every unannotated method as main-actor-isolated, amplifying ~5–10 latent warnings into ~50.
+
+3. **No one ran a clean Release build between the Xcode upgrade and submission day.** Including me. Sessions worked on device with incremental builds; warnings only fully re-emit on a clean build. The pile was invisible because nobody rebuilt from zero. **I had been about to ask Mark to submit defective code to the App Store.**
+
+**Fixes applied (autonomous overnight pass):**
+
+- **`SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated`** in every build configuration. Matches the codebase's actual design (explicit `@MainActor` on UI, nonisolated services). Single highest-leverage change: 63 → 13 warnings.
+- **`LibraryView.swift:2584`** — duplicate `case "SIMULATE_BACKGROUND":` clause removed. Was dead code (the earlier case at line 1855 always matched first); kept as an inline comment explaining what AUDIO_EXPORT_LOCK_TEST has actually been getting at runtime all along.
+- **`LibraryView.swift:3183, 3205`** — useless `await` removed from synchronous `removeDeliveredNotifications` calls.
+- **`ReaderView.swift:2783`** — `MainActor.assumeIsolated { ... }` wrap added around `cancelDueToBackgroundExpiration()` call inside an `addObserver(queue: .main)` closure. The queue guarantees main-thread execution; `assumeIsolated` lets the compiler see that.
+- **`BackgroundEnhancementScheduler.swift:130, 134`** — real concurrency hazard. `[weak self] _ in Task { ... self?.pause() }` was capturing the optional weak `self` into the Task closure (Swift 6 "captured var" error). Fixed to bind `guard let self else { return }` first, then pass `[self]` explicitly into the Task.
+- **`DocumentEmbeddingIndex.swift:2120-2121`** — `try model.requestAssets { _, _ in }` had no throwing call; method reports failures via its completion handler. Removed the do/try/catch around it.
+- **`DocumentEmbeddingIndex.swift:335-369`** — non-Sendable captures into `@Sendable` closure. `DispatchQueue.main.async` requires `@Sendable` and was capturing `database` + `self` (non-Sendable) + `stored` / `entityRows` (concurrently-mutating vars). Replaced with `Task { @MainActor [self, database, storedSnapshot, entityRowsSnapshot] in ... }` after marking `DatabaseManager` and `DocumentEmbeddingIndex` `@unchecked Sendable` (their threading invariant — all DB work routes through main — is enforced by code).
+- **`DatabaseManager.swift:367, 930`** — `try data.withUnsafeBytes { ... }` calling only `sqlite3_bind_blob` (non-throwing). Removed `try`.
+- **AppIntents metadata-processor NSLog noise** — `"warning: Metadata extraction skipped. No AppIntents.framework dependency found."` is emitted by Apple's build tool to stderr; does NOT appear in Xcode's Issues navigator. Documented in DECISIONS.md per Rule 4. Not user-visible. Not counted against the 0/0 goal.
+
+**Verification:**
+
+- Clean Release build (`xcodebuild ... -configuration Release clean build`): **0 Swift warnings, 0 errors. BUILD SUCCEEDED.** Exact same result for both `generic/platform=iOS` and the simulator build.
+- App installed and launched on iPhone 17 Pro Max simulator (iOS 26.5). Library renders correctly. Relaunch persists state correctly (init paths through `DocumentEmbeddingIndex` and `DatabaseManager` — the files where Sendable annotations were added — all execute without crash).
+- Device verification deferred to morning (phone passcode-locked during overnight work). Mark to do final device launch before Archive.
+
+**The standing-rule fallout — CLAUDE.md Rule 4:**
+
+Added during the same session, before the cleanup pass: a fourth standing rule alongside the three from the 2026-05-05 painful session. The text is in CLAUDE.md, commit `e6ac05d`. Summary: zero warnings, zero errors, clean Release build before any submission claim. After any Xcode/toolchain upgrade, audit with a clean Release build first. Warnings you introduce are warnings you fix in your session. Build-system noise counts. The specific failure that produced the rule is documented inline in CLAUDE.md.
+
+---
+
 ## 2026-05-19 — 1.0 submission prep: Ask Posey hidden, Mac config flip, screenshots, GitHub Pages refresh
 
 Mark's strategic decision: Posey 1.0 ships as a pure reading app — TTS, reader, search, notes, bookmarks — with Ask Posey hidden from the UI but kept in the codebase for v1.1 when Hal Universal's upgraded RAG infrastructure (embedder switcher + LLM switcher) ports in. Hal Universal 2.0 was submitted ~20 minutes before this session began; its proven embedder/LLM switching architecture is the v1.1 reference.

@@ -127,11 +127,13 @@ final class BackgroundEnhancementScheduler {
         // posts these notifications around classifyIntent / streamProseResponse.
         nc.addObserver(forName: .askPoseyAFMDidBegin,
                        object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.pause() }
+            guard let self else { return }
+            Task { @MainActor [self] in self.pause() }
         }
         nc.addObserver(forName: .askPoseyAFMDidEnd,
                        object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.resume() }
+            guard let self else { return }
+            Task { @MainActor [self] in self.resume() }
         }
     }
 

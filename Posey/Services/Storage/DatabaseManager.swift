@@ -3,7 +3,12 @@ import SQLite3
 
 // ========== BLOCK 01: DATABASE ERRORS AND LIFECYCLE - START ==========
 
-final class DatabaseManager {
+/// Threading invariant: every `DatabaseManager` call routes through the
+/// canonical main thread. The underlying SQLite handle is single-threaded
+/// and serialized by the call sites; this type is marked `@unchecked Sendable`
+/// so it can be captured into `@Sendable` closures that hop *to* main
+/// (the indexing pipeline hands off accumulated chunks to main for persistence).
+final class DatabaseManager: @unchecked Sendable {
     enum DatabaseError: LocalizedError {
         case openFailed
         case prepareFailed(String)
@@ -364,7 +369,7 @@ extension DatabaseManager {
                     .storeBytes(of: value, as: Double.self)
             }
         }
-        try embeddingData.withUnsafeBytes { rawBuffer -> Void in
+        embeddingData.withUnsafeBytes { rawBuffer -> Void in
             sqlite3_bind_blob(
                 insertStmt, 6, rawBuffer.baseAddress,
                 Int32(rawBuffer.count), SQLITE_TRANSIENT)
@@ -927,7 +932,7 @@ extension DatabaseManager {
                     .storeBytes(of: value, as: Double.self)
             }
         }
-        try data.withUnsafeBytes { rawBuffer -> Void in
+        data.withUnsafeBytes { rawBuffer -> Void in
             sqlite3_bind_blob(
                 statement, 2, rawBuffer.baseAddress,
                 Int32(rawBuffer.count), SQLITE_TRANSIENT)

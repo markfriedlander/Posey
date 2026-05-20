@@ -1,10 +1,16 @@
 # Next
 
-## 2026-05-19 — Ready to submit 1.0
+## 2026-05-19 (late evening) — Submission resumes after warning cleanup
 
-Strategic pivot: Posey 1.0 ships as a pure reading app. Ask Posey is gated behind `POSEY_ENABLE_ASK_POSEY` (Debug-only) — present in the codebase, hidden from Release UI. v1.1 will re-enable Ask Posey with Hal Universal's proven embedder switcher + LLM switcher ported in.
+**Status when Mark wakes:** Clean Release build, 0 Swift warnings, 0 errors. Simulator launch verified. Device launch pending Mark (phone was locked overnight).
 
-### Submission queue (Mark + CC next session)
+### Morning sequence
+
+1. **Mark — quick device sanity check.** Build to phone, launch, confirm library renders + can open one document and play a sentence. ~5 min. Just verify the cleanup didn't break runtime behavior on real hardware. The simulator path is clean but Rule 2 wants both.
+2. **If device is clean — proceed with original submission queue below.**
+3. **If device shows anything weird — pause, share the symptom, we diagnose before Archive.**
+
+### Submission queue (resume)
 
 1. Mark archives Release from Xcode + uploads via Organizer
 2. Mark opens App Store Connect in Chrome; CC drives via Claude-in-Chrome MCP
@@ -13,6 +19,10 @@ Strategic pivot: Posey 1.0 ships as a pure reading app. Ask Posey is gated behin
 5. Verify GitHub Pages URLs render (privacy.html + support.html — already pushed to `origin/main`)
 6. Answer privacy questionnaire: Data Not Collected (per §14 of `posey_ASC_metadata.md`)
 7. Mark hits Submit for Review
+
+### Overnight cleanup pass — what changed
+
+See HISTORY.md for the full account. Headline: 63 warnings → 0 in seven Swift files + one project setting flip. Root cause was `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` (Xcode 26's default for new iOS 26 projects) combined with Xcode 26.5's tightened Swift 6 transition warnings and no one running a clean Release build since the upgrade. CLAUDE.md Rule 4 added so this cannot happen again at the moment of submission.
 
 ### Today's pre-submission work — all committed and pushed to `origin/main`
 

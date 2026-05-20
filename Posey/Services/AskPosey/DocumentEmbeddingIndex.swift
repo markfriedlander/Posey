@@ -129,7 +129,14 @@ nonisolated struct DocumentEmbeddingIndexConfiguration: Sendable {
 /// runner threads, eventually a background `Task` for retro-indexing).
 /// MainActor-isolated deinit hopping triggers a Swift Concurrency
 /// runtime crash on dealloc; nonisolated avoids the hop entirely.
-nonisolated final class DocumentEmbeddingIndex {
+/// Threading invariant: indexing work runs on a background queue (via
+/// `enqueueIndexing`), but every database write hops to main before
+/// touching `database`. The instance carries the metadata-extractor
+/// closure and a `database` reference; both are only read on main once
+/// the background work hands off. `@unchecked Sendable` lets the
+/// background→main hop closures capture `self` and `database` without
+/// false-positive warnings while the real invariant is enforced by code.
+nonisolated final class DocumentEmbeddingIndex: @unchecked Sendable {
 
     // MARK: Wiring
 
@@ -330,9 +337,16 @@ nonisolated final class DocumentEmbeddingIndex {
 
             // Persist + notify on main. SQLite handle is single-threaded
             // so all writes route through the canonical main thread.
-            DispatchQueue.main.async {
+            // Task { @MainActor } gives us a properly main-actor-isolated
+            // context. The `let` snapshots below freeze the accumulated
+            // `stored` and `entityRows` vars so the Task closure captures
+            // them by value (not by reference into a concurrently-mutating
+            // var — Swift 6 strict-concurrency requirement).
+            let storedSnapshot = stored
+            let entityRowsSnapshot = entityRows
+            Task { @MainActor [self, database, storedSnapshot, entityRowsSnapshot] in
                 do {
-                    try database.replaceChunks(stored, for: documentID)
+                    try database.replaceChunks(storedSnapshot, for: documentID)
                     // Task 4 #6 (B) — replace any prior entities
                     // (from an older index) and bulk-insert the new
                     // ones in a single transaction. Failure here is
@@ -341,8 +355,8 @@ nonisolated final class DocumentEmbeddingIndex {
                     // this document.
                     do {
                         try database.deleteEntities(for: documentID)
-                        if !entityRows.isEmpty {
-                            try database.insertEntities(documentID: documentID, entries: entityRows)
+                        if !entityRowsSnapshot.isEmpty {
+                            try database.insertEntities(documentID: documentID, entries: entityRowsSnapshot)
                         }
                     } catch {
                         dbgLog(
@@ -356,7 +370,7 @@ nonisolated final class DocumentEmbeddingIndex {
                         object: nil,
                         userInfo: [
                             DocumentEmbeddingIndex.notificationDocumentIDKey: documentID,
-                            DocumentEmbeddingIndex.notificationChunkCountKey: stored.count
+                            DocumentEmbeddingIndex.notificationChunkCountKey: storedSnapshot.count
                         ]
                     )
                     // 2026-05-05 — Chain to metadata enhancement
@@ -2116,12 +2130,10 @@ nonisolated extension DocumentEmbeddingIndex {
             return nil
         }
         if !model.hasAvailableAssets {
-            do {
-                try model.requestAssets { _, _ in }
-            } catch {
-                dbgLog("[POSEY_ASK_POSEY] NLContextualEmbedding requestAssets failed: %@", "\(error)")
-                return nil
-            }
+            // requestAssets reports failures via its completion handler
+            // (the closure args are result + error); the method itself
+            // does not throw on iOS 26, so no try/catch is needed.
+            model.requestAssets { _, _ in }
         }
         if !model.hasAvailableAssets {
             // Assets requested but not yet downloaded.

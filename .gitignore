@@ -33,9 +33,14 @@ tools/.posey_api_config.*.json
 # sessions. Belongs on local disk only.
 Art/
 
-# App Store submission materials — screenshots, checklists, metadata
-# drafts, accessibility prep notes, test result reports, captured RAG
-# conversations from real documents. None of this is public-facing.
+# App Store submission materials — entirely private. The whole
+# directory stays out of the public repo:
+#   - checklists, metadata drafts, accessibility prep notes
+#   - test result reports, captured RAG conversations
+#   - screenshots (uploaded to ASC directly from the local disk,
+#     not via GitHub)
+# Files stay on the local machine in the repo for working with ASC;
+# they never get pushed.
 submission/
 
 # Internal development tools — local-API test runner, RAG debug harnesses,

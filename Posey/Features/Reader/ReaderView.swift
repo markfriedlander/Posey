@@ -1273,6 +1273,10 @@ struct ReaderView: View {
     private func revealChrome() {
         chromeFadeTask?.cancel()
         isChromeVisible = true
+        // Test-mode skips the 3-second auto-fade so automated
+        // screenshot capture can reliably show the chrome controls.
+        // Doesn't affect end-user behavior.
+        guard !isTestMode else { return }
         chromeFadeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             guard Task.isCancelled == false else { return }

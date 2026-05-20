@@ -29,6 +29,20 @@ __pycache__/
 tools/.posey_api_config.*.json
 
 # ---------------------------------------------------------------------------
+# Internal QA evidence, icon drafts, screenshots from autonomous test
+# sessions. Belongs on local disk only.
+Art/
+
+# App Store submission materials — screenshots, checklists, metadata
+# drafts, accessibility prep notes, test result reports, captured RAG
+# conversations from real documents. None of this is public-facing.
+submission/
+
+# Internal development tools — local-API test runner, RAG debug harnesses,
+# antenna config, synthetic-corpus generators, image-regression scripts.
+# Documents internal QA infrastructure and the dev-only antenna protocol.
+tools/
+
 # GitHub Pages working drafts — never commit. The published pages live
 # at docs/{index,privacy,support}.html. The "maybe new/old versions"
 # directories are scratch drafts and would otherwise be served publicly.

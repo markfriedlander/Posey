@@ -42,6 +42,15 @@ struct TXTLibraryImporter {
             plainText: plainText
         )
 
+        // 2026-05-21 — Layered content-start detection (same shape as
+        // HTML and EPUB importers):
+        //   1. Gutenberg `*** START` marker → skip license preamble
+        //   2. In-prose TOC region → skip the Contents listing too
+        let boundaries = GutenbergBoundaryDetector.detect(in: plainText)
+        let gutenbergStart = boundaries.contentStartOffset ?? 0
+        let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: gutenbergStart) ?? gutenbergStart
+        let skip = max(gutenbergStart, postTOC)
+
         let document = Document(
             id: existingDocument?.id ?? UUID(),
             title: title,
@@ -51,7 +60,9 @@ struct TXTLibraryImporter {
             modifiedAt: now,
             displayText: plainText,
             plainText: plainText,
-            characterCount: plainText.count
+            characterCount: plainText.count,
+            playbackSkipUntilOffset: skip,
+            contentEndOffset: boundaries.contentEndOffset ?? 0
         )
 
         try databaseManager.upsertDocument(document)

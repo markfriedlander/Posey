@@ -1691,7 +1691,10 @@ extension LibraryViewModel {
                 }
                 return json([
                     "documentID": idStr,
-                    "playbackSkipUntilOffset": doc.playbackSkipUntilOffset
+                    "playbackSkipUntilOffset": doc.playbackSkipUntilOffset,
+                    // 2026-05-21 — also surface contentEndOffset for
+                    // verification of the Gutenberg tail detector.
+                    "contentEndOffset": doc.contentEndOffset
                 ])
 
             case "LIST_SEGMENTS_MATCHING":

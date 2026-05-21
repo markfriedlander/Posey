@@ -70,6 +70,16 @@ struct HTMLLibraryImporter {
             plainText: plainText
         )
 
+        // 2026-05-21 — Layered content-start detection (same shape as
+        // EPUBLibraryImporter):
+        //   1. Gutenberg `*** START` marker → skip license preamble
+        //   2. In-prose TOC region → skip the Contents listing too
+        // The detectors are pure functions on plainText, format-agnostic.
+        let gutenbergStart = GutenbergBoundaryDetector.detect(in: plainText).contentStartOffset ?? 0
+        let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: gutenbergStart) ?? gutenbergStart
+        let skip = max(gutenbergStart, postTOC)
+        let contentEnd = GutenbergBoundaryDetector.detect(in: plainText).contentEndOffset ?? 0
+
         let document = Document(
             id: existingDocument?.id ?? UUID(),
             title: title,
@@ -79,7 +89,9 @@ struct HTMLLibraryImporter {
             modifiedAt: now,
             displayText: displayText,
             plainText: plainText,
-            characterCount: plainText.count
+            characterCount: plainText.count,
+            playbackSkipUntilOffset: skip,
+            contentEndOffset: contentEnd
         )
 
         try databaseManager.upsertDocument(document)

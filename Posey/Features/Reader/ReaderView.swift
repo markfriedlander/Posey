@@ -212,6 +212,37 @@ struct ReaderView: View {
                             #endif
                         }
                     }
+
+                    // 2026-05-21 — End-of-book indicator. Appears at
+                    // the very bottom of the scroll content when the
+                    // document has a known content-end boundary
+                    // (Gutenberg `*** END *** ` marker detected at
+                    // import time → contentEndOffset > 0 → reader
+                    // truncates segments/blocks past that offset).
+                    // Without this the doc just stops mid-scroll and
+                    // the user can wonder if something broke. The
+                    // treatment is intentionally understated: a thin
+                    // centered separator + the book's title in small
+                    // italic. No "THE END" copy — the typographic
+                    // colophon carries the meaning. Monochrome,
+                    // consistent with Posey's standing style.
+                    if viewModel.shouldShowEndOfBookIndicator {
+                        VStack(spacing: 14) {
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.25))
+                                .frame(width: 60, height: 0.5)
+                            Text(viewModel.document.title)
+                                .italic()
+                                .font(.system(size: viewModel.fontSize * 0.85, weight: .regular))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 32)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 56)
+                        .padding(.bottom, 24)
+                        .accessibilityIdentifier("reader.endOfBook")
+                    }
                 }
                 .padding(.vertical)
             }
@@ -2660,6 +2691,17 @@ final class ReaderViewModel: ObservableObject {
         didSet { PlaybackPreferences.shared.fontSize = fontSize }
     }
 
+    /// 2026-05-21 — True when the document carries a known content-end
+    /// boundary (set by the Gutenberg `*** END ***` detector or a
+    /// future format-specific detector). When true, ReaderView renders
+    /// a small colophon block at the very bottom of the scroll content
+    /// so the user knows the book has ended rather than wondering if
+    /// something broke. False means the document runs to plainText
+    /// end with no explicit boundary — show nothing.
+    var shouldShowEndOfBookIndicator: Bool {
+        document.contentEndOffset > 0
+    }
+
     /// 2026-05-16 — Reading Style picker removed (Mark spec). The
     /// underlying `PlaybackPreferences.readingStyle` getter always
     /// returns `.standard` and the setter no-ops. This stored
@@ -3159,10 +3201,20 @@ final class ReaderViewModel: ObservableObject {
         for document: Document
     ) -> LoadedContent {
         let skipUntil = max(0, document.playbackSkipUntilOffset)
+        // 2026-05-21 — `contentEndOffset` is the symmetric counterpart of
+        // `playbackSkipUntilOffset`: segments and display blocks whose
+        // startOffset is at or past this offset are filtered out of the
+        // reader entirely. Set by the Gutenberg boundary detector when
+        // it locates a `*** END OF THE PROJECT GUTENBERG EBOOK ***`
+        // marker. Zero = no end boundary, behaves as today.
+        let contentEnd = max(0, document.contentEndOffset)
         let allSegments = SentenceSegmenter().segments(for: document.plainText)
-        let bodySegments = (skipUntil > 0)
+        let preTailSegments = (skipUntil > 0)
             ? allSegments.filter { $0.startOffset >= skipUntil }
             : allSegments
+        let bodySegments = (contentEnd > 0)
+            ? preTailSegments.filter { $0.startOffset < contentEnd }
+            : preTailSegments
         // Re-number IDs to be 0-based contiguous (the rest of the view
         // model treats segment.id as an array index — see currentSegment,
         // playPauseImageName, marker navigation, etc.).
@@ -3183,9 +3235,12 @@ final class ReaderViewModel: ObservableObject {
         } else {
             rawBlocks = []
         }
-        let bodyBlocks: [DisplayBlock] = (skipUntil > 0)
+        let preTailBlocks: [DisplayBlock] = (skipUntil > 0)
             ? rawBlocks.filter { $0.startOffset >= skipUntil }
             : rawBlocks
+        let bodyBlocks: [DisplayBlock] = (contentEnd > 0)
+            ? preTailBlocks.filter { $0.startOffset < contentEnd }
+            : preTailBlocks
         let displayBlocks = ReaderViewModel.splitParagraphBlocks(bodyBlocks, segments: segments)
         let visualPauseMap = ReaderViewModel.buildVisualPauseIndexMap(
             displayBlocks: displayBlocks,

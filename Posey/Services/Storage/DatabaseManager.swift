@@ -67,7 +67,7 @@ final class DatabaseManager: @unchecked Sendable {
 extension DatabaseManager {
     func documents() throws -> [Document] {
         let sql = """
-        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset
+        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset, content_end_offset
         FROM documents
         ORDER BY imported_at DESC;
         """
@@ -95,7 +95,8 @@ extension DatabaseManager {
                 displayText: sqliteString(statement, index: 6) ?? plainText,
                 plainText: plainText,
                 characterCount: Int(sqlite3_column_int64(statement, 8)),
-                playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 9))
+                playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 9)),
+                contentEndOffset: Int(sqlite3_column_int64(statement, 10))
             ))
         }
         return documents
@@ -103,8 +104,8 @@ extension DatabaseManager {
 
     func upsertDocument(_ document: Document) throws {
         let sql = """
-        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset, content_end_offset)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             file_name = excluded.file_name,
@@ -114,7 +115,8 @@ extension DatabaseManager {
             display_text = excluded.display_text,
             plain_text = excluded.plain_text,
             character_count = excluded.character_count,
-            playback_skip_until_offset = excluded.playback_skip_until_offset;
+            playback_skip_until_offset = excluded.playback_skip_until_offset,
+            content_end_offset = excluded.content_end_offset;
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -129,6 +131,7 @@ extension DatabaseManager {
         try bind(document.plainText, at: 8, for: statement)
         sqlite3_bind_int64(statement, 9, sqlite3_int64(document.characterCount))
         sqlite3_bind_int64(statement, 10, sqlite3_int64(document.playbackSkipUntilOffset))
+        sqlite3_bind_int64(statement, 11, sqlite3_int64(document.contentEndOffset))
 
         try step(statement)
     }
@@ -143,7 +146,7 @@ extension DatabaseManager {
 
     func existingDocument(matchingFileName fileName: String, fileType: String, plainText: String, displayText: String? = nil) throws -> Document? {
         let sql = """
-        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset
+        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset, content_end_offset
         FROM documents
         WHERE file_name = ? AND file_type = ? AND plain_text = ? AND display_text = ?
         LIMIT 1;
@@ -177,7 +180,8 @@ extension DatabaseManager {
             displayText: sqliteString(statement, index: 6) ?? storedText,
             plainText: storedText,
             characterCount: Int(sqlite3_column_int64(statement, 8)),
-            playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 9))
+            playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 9)),
+            contentEndOffset: Int(sqlite3_column_int64(statement, 10))
         )
     }
 }
@@ -1510,8 +1514,15 @@ extension DatabaseManager {
         try addColumnIfNeeded(table: "documents", column: "display_text", definition: "TEXT NOT NULL DEFAULT ''")
         // playback_skip_until_offset = character offset in plainText past which
         // the reader should auto-jump on first open. Used by the PDF TOC
-        // detector to suppress reading the TOC aloud. 0 = no skip.
+        // detector, the EPUB front-matter detector, and (2026-05-21) the
+        // Gutenberg boundary detector. 0 = no skip.
         try addColumnIfNeeded(table: "documents", column: "playback_skip_until_offset", definition: "INTEGER NOT NULL DEFAULT 0")
+        // content_end_offset = character offset in plainText at which the
+        // reader should treat the document as ended (e.g. before the
+        // Gutenberg license trailer). 0 = no end boundary recorded;
+        // playback runs to the end of plainText. Added 2026-05-21 with
+        // the front-matter/content-boundary work.
+        try addColumnIfNeeded(table: "documents", column: "content_end_offset", definition: "INTEGER NOT NULL DEFAULT 0")
 
         // 2026-05-05 — Document metadata (title/authors/year/type/summary)
         // extracted via AFM @Generable call at index time. Stored as

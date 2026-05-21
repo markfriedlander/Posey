@@ -45,24 +45,62 @@ enum VisualPlaceholderSplitter {
         var plainOffset = 0
         var cursor = 0
 
+        // 2026-05-21 — corrected. The previous implementation advanced
+        // `plainOffset` by `para.count + 2` per emitted paragraph. That
+        // works when chunks are exactly `para1\n\npara2\n\npara3` —
+        // but EPUB title pages and front-matter typically contain
+        // whitespace-only runs like `\n\n  \n\n` between image markers
+        // and prose. Those runs split into ["", "  ", ""] and trim to
+        // all-empty, so no block is emitted — and `plainOffset` does
+        // not advance even though the whitespace IS in plainText. Drift
+        // accumulates, downstream block offsets land low, and the
+        // reader's `startOffset >= skipUntil` filter silently drops
+        // paragraphs whose true plainText offset is past the threshold
+        // but whose splitter-computed offset is below.
+        //
+        // The corrected algorithm walks the chunk, finds each `\n\n`
+        // separator, and positions each non-empty paragraph block at
+        // its actual character offset inside the chunk (accounting for
+        // leading-whitespace trim). `plainOffset` always advances by
+        // the chunk's full character count, matching how plainText
+        // is built from displayText (markers excluded, all other
+        // chars included).
         @inline(__always) func emitParagraphs(in textChunk: String) {
-            let paragraphs = textChunk
-                .components(separatedBy: "\n\n")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            for para in paragraphs {
-                let start = plainOffset
-                let end = start + para.count
-                blocks.append(DisplayBlock(
-                    id: blocks.count,
-                    kind: .paragraph,
-                    text: para,
-                    displayPrefix: nil,
-                    startOffset: start,
-                    endOffset: end
-                ))
-                plainOffset = end + 2
+            let chunkStartOffset = plainOffset
+            var partStart = textChunk.startIndex
+            while partStart < textChunk.endIndex {
+                let separatorRange = textChunk.range(
+                    of: "\n\n",
+                    range: partStart..<textChunk.endIndex
+                )
+                let partEnd = separatorRange?.lowerBound ?? textChunk.endIndex
+                let part = textChunk[partStart..<partEnd]
+                let leadingWS = part.prefix(while: { $0.isWhitespace || $0.isNewline })
+                let trailingWS = part.reversed().prefix(while: { $0.isWhitespace || $0.isNewline })
+                if part.count > leadingWS.count + trailingWS.count {
+                    let trimStart = textChunk.index(partStart, offsetBy: leadingWS.count)
+                    let trimEnd = textChunk.index(partEnd, offsetBy: -trailingWS.count)
+                    let trimmed = String(textChunk[trimStart..<trimEnd])
+                    let paraOffsetInChunk = textChunk.distance(
+                        from: textChunk.startIndex,
+                        to: trimStart
+                    )
+                    let start = chunkStartOffset + paraOffsetInChunk
+                    let end = start + trimmed.count
+                    blocks.append(DisplayBlock(
+                        id: blocks.count,
+                        kind: .paragraph,
+                        text: trimmed,
+                        displayPrefix: nil,
+                        startOffset: start,
+                        endOffset: end
+                    ))
+                }
+                partStart = separatorRange?.upperBound ?? textChunk.endIndex
             }
+            // Always advance by the full chunk length — the chars are
+            // in plainText regardless of whether they produced a block.
+            plainOffset += textChunk.count
         }
 
         for match in matches {

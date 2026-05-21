@@ -154,6 +154,7 @@ extension EPUBDocumentImporter {
             let html: String
             let chapterText: String
             let plainText: String
+            let anchors: [EPUBAnchorExtractor.ExtractionResult.Anchor]
             let images: [PageImageRecord]
         }
         var allChapters: [ChapterRecord] = []
@@ -201,23 +202,43 @@ extension EPUBDocumentImporter {
             // by TTS as "star star star…") and into displayText
             // (rendered as a stack of asterisk rows in the reader).
             let asterismStripped = Self.stripAsterismBlocks(from: tocStripped)
+            // 2026-05-21 — strip dropcap span wrappers BEFORE
+            // NSAttributedString conversion. Gutenberg's illustrated-
+            // edition ebookmaker and many publisher EPUBs wrap the
+            // chapter's opening letter in a floated/styled `<span>`
+            // to render an illuminated initial. NSAttributedString
+            // treats `float:left` (and class-tagged dropcaps) as a
+            // block-level break, so plainText ends up with the dropcap
+            // letter on its own line: e.g. "A\nlice was beginning…"
+            // for Sam'l Gabriel Sons' 1916 Alice (Gutenberg #19033).
+            // TTS reads that as "A" pause "lice." Fix is generic:
+            // unwrap the span and keep the inner letter inline with
+            // the following text. See `stripDropcapSpans` for the
+            // class/style patterns matched.
+            let dropcapStripped = Self.stripDropcapSpans(from: asterismStripped)
+            let anchorMarked = EPUBAnchorExtractor.insertAnchorSentinels(from: dropcapStripped)
 
             let (processedData, chapterImages) = extractInlineImages(
-                from: asterismStripped,
+                from: anchorMarked,
                 chapterBasePath: chapterDir,
                 entryLoader: entryLoader
             )
 
             guard let chapterText = try? htmlImporter.loadText(fromData: processedData)
             else { continue }
-            let plainChapter = buildPlainText(from: chapterText)
+            // `chapterText` still carries the anchor sentinels. Strip
+            // them and record per-anchor offsets relative to the
+            // chapter's final plainText.
+            let plainWithAnchors = buildPlainText(from: chapterText)
+            let extraction = EPUBAnchorExtractor.extractAnchors(from: plainWithAnchors)
             allChapters.append(ChapterRecord(
                 path: path,
                 href: href,
                 bareHref: bareHref,
                 html: String(data: chapterData, encoding: .utf8) ?? "",
                 chapterText: chapterText,
-                plainText: plainChapter,
+                plainText: extraction.plainText,
+                anchors: extraction.anchors,
                 images: chapterImages
             ))
         }
@@ -250,6 +271,22 @@ extension EPUBDocumentImporter {
                 + max(0, chapterPlainLengths.count - 1) * 2
             if !record.bareHref.isEmpty && pathToPlainOffset[record.bareHref] == nil {
                 pathToPlainOffset[record.bareHref] = cumulativeOffset
+            }
+            // 2026-05-21 — record per-fragment offsets so TOC entries
+            // pointing at `file.xhtml#fragment` can resolve to a
+            // position INSIDE the spine file, not just its start.
+            // Each anchor's chapter-local offset is promoted to a
+            // global offset by adding the chapter's cumulative start.
+            // Conflicts ("first wins") preserve the earliest anchor
+            // when a fragment id happens to appear in more than one
+            // spine item (rare; defensive).
+            if !record.bareHref.isEmpty {
+                for anchor in record.anchors {
+                    let key = "\(record.bareHref)#\(anchor.fragmentID)"
+                    if pathToPlainOffset[key] == nil {
+                        pathToPlainOffset[key] = cumulativeOffset + anchor.offset
+                    }
+                }
             }
             chapterTexts.append(record.chapterText)
             chapterPlainLengths.append(record.plainText.count)
@@ -408,7 +445,13 @@ extension EPUBDocumentImporter {
     /// Must run AFTER newline normalization so the line-anchored regex
     /// in `stripAsterismLines` matches consistently.
     private func normalizeDisplay(_ text: String) -> String {
-        let normalized = TextNormalizer.stripMojibakeAndControlCharacters(text)
+        // 2026-05-21 — chapter texts are concatenated INTO displayText
+        // with TOC anchor sentinels still in them. Strip those here so
+        // the markers never reach the renderer or the user. plainText
+        // is computed from displayText via buildPlainText, so doing the
+        // strip here also keeps plainText clean.
+        let sentinelStripped = EPUBAnchorExtractor.stripSentinels(from: text)
+        let normalized = TextNormalizer.stripMojibakeAndControlCharacters(sentinelStripped)
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r",   with: "\n")
         let asterismStripped = TextNormalizer.stripAsterismLines(normalized)
@@ -472,13 +515,27 @@ extension EPUBDocumentImporter {
         guard !rawEntries.isEmpty else { return [] }
 
         return rawEntries.map { raw in
-            // Strip fragment and normalize href to match pathToPlainOffset keys.
-            let bareHref = raw.href
-                .components(separatedBy: "#").first
-                .map { ($0 as NSString).lastPathComponent } ?? ""
-            let offset = pathToPlainOffset[bareHref] ?? -1
+            // 2026-05-21 — honor the fragment when present. The offset
+            // map is now keyed both by file ("alice.xhtml") and by
+            // file#fragment ("1342-h-0.htm.xhtml#pgepubid00022"). Try
+            // the more specific key first, fall back to the file key
+            // if the anchor isn't recorded (rare — happens when the
+            // nav references an id that wasn't in the spine's HTML,
+            // or when the spine item failed to extract).
+            let parts = raw.href.components(separatedBy: "#")
+            let filePart = parts.first ?? ""
+            let bareHref = (filePart as NSString).lastPathComponent
+            let fragment = parts.count > 1 ? parts[1] : ""
+            let fragmentKey = fragment.isEmpty ? nil : "\(bareHref)#\(fragment)"
+            let offset = (fragmentKey.flatMap { pathToPlainOffset[$0] })
+                ?? pathToPlainOffset[bareHref]
+                ?? -1
+            // Strip Gutenberg's illustrated-edition caption prefix
+            // ("Figure caption. CHAPTER N." → "CHAPTER N."). Conservative
+            // regex; pass-through when no caption pattern is detected.
+            let cleanedTitle = EPUBAnchorExtractor.cleanGutenbergCaptionPrefix(raw.title)
             return EPUBTOCEntry(
-                title: raw.title,
+                title: cleanedTitle,
                 plainTextOffset: offset,
                 playOrder: raw.playOrder,
                 level: raw.level
@@ -632,6 +689,65 @@ extension EPUBDocumentImporter {
                 in: html,
                 range: NSRange(html.startIndex..., in: html),
                 withTemplate: " "
+            )
+        }
+        return html.data(using: .utf8) ?? data
+    }
+
+    /// 2026-05-21 — Strip typographic drop-cap span wrappers around
+    /// chapter-opening letters. Many illustrated EPUBs (Project
+    /// Gutenberg's ebookmaker for Sam'l Gabriel Sons / Heritage Press
+    /// reprints, Calibre output from publisher tools, modern InDesign
+    /// exports) wrap the opening letter of each chapter in a styled
+    /// `<span>`:
+    ///
+    ///   `<span style="float:left;font-size:50px;…">A</span>lice was beginning…`
+    ///   `<span class="dropcap">A</span>lice was beginning…`
+    ///
+    /// NSAttributedString.html parsing treats `float:left` and many
+    /// dropcap class conventions as block-level breaks. The chapter's
+    /// opening letter ends up on its own line in plainText, broken
+    /// from the rest of the first word: `A\nlice was beginning…`.
+    /// AVSpeechSynthesizer reads it as "A" pause "lice", and the
+    /// reader visually shows the same break. The fix unwraps the
+    /// span — drops the opening `<span …>` and closing `</span>` —
+    /// while preserving the single letter inside. After unwrap,
+    /// NSAttributedString sees a normal paragraph: `Alice was
+    /// beginning…`. No newline injection, no synthesis voice
+    /// stuttering, no visual break.
+    ///
+    /// Detected dropcap signatures (case-insensitive):
+    ///
+    /// - `<span style="…float:…">X</span>` — inline-CSS float (the
+    ///   Sam'l Gabriel / Heritage / Folio style; verified against
+    ///   Gutenberg #19033)
+    /// - `<span class="…dropcap…">X</span>` — explicit semantic class
+    /// - `<span class="…initial…">X</span>` — alternate convention
+    /// - `<span class="…firstcharacter…">X</span>` / `first-letter`
+    ///   — TPG ebookmaker variant
+    ///
+    /// Inner content limited to 1–3 characters so the strip can't
+    /// accidentally swallow non-dropcap spans that wrap larger
+    /// inline fragments (e.g. footnote refs, citation chips).
+    static func stripDropcapSpans(from data: Data) -> Data {
+        guard var html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) else {
+            return data
+        }
+        let patterns: [String] = [
+            // Inline-CSS float — `style="…float:…"`. Either quote style.
+            #"(?si)<span\s+[^>]*\bstyle\s*=\s*"[^"]*\bfloat\s*:[^"]*"[^>]*>([^<]{1,3})</span\s*>"#,
+            #"(?si)<span\s+[^>]*\bstyle\s*=\s*'[^']*\bfloat\s*:[^']*'[^>]*>([^<]{1,3})</span\s*>"#,
+            // Semantic class — dropcap / initial / first-character / first-letter.
+            #"(?si)<span\s+[^>]*\bclass\s*=\s*"[^"]*\b(?:dropcap|initial|first[\s-]?character|first[\s-]?letter)\b[^"]*"[^>]*>([^<]{1,3})</span\s*>"#,
+            #"(?si)<span\s+[^>]*\bclass\s*=\s*'[^']*\b(?:dropcap|initial|first[\s-]?character|first[\s-]?letter)\b[^']*'[^>]*>([^<]{1,3})</span\s*>"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            html = regex.stringByReplacingMatches(
+                in: html,
+                range: NSRange(html.startIndex..., in: html),
+                withTemplate: "$1"
             )
         }
         return html.data(using: .utf8) ?? data

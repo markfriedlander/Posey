@@ -138,6 +138,16 @@ struct HTMLDocumentImporter {
         dispatchPrecondition(condition: .onQueue(.main))
         #endif
 
+        // 2026-05-20 — Strip Project Gutenberg's `<p class="asterism">`
+        // scene-break blocks BEFORE list-marker / paragraph-marker /
+        // NSAttributedString passes. Same rationale as the parallel
+        // strip in EPUBDocumentImporter — NSAttributedString.html
+        // discards the class attribute and keeps the literal "*  *
+        // *" text, contaminating plainText and the reader display.
+        // Standalone HTML imports (.html files outside EPUB) also use
+        // this importer, so this fix covers both code paths.
+        let asterismStripped = Self.stripAsterismBlocks(from: data)
+
         // 2026-05-06 (parity #4) — Inject list markers BEFORE the
         // paragraph-marker pass so each <li> shows its bullet/number
         // glyph in the rendered text. NSAttributedString strips the
@@ -146,7 +156,7 @@ struct HTMLDocumentImporter {
         // displayText. Per DECISIONS.md "List markers", these
         // prefixes get stripped at the speech boundary so AVSpeech-
         // Synthesizer never pronounces them.
-        let listMarkedData = injectListMarkers(data)
+        let listMarkedData = injectListMarkers(asterismStripped)
 
         // Pre-inject paragraph markers before closing block-level tags.
         // NSAttributedString collapses <p>…</p> boundaries to a single \n,
@@ -447,6 +457,33 @@ struct HTMLDocumentImporter {
             range: NSRange(text.startIndex..., in: text),
             withTemplate: " "
         )
+    }
+
+    /// 2026-05-20 — Strip Project Gutenberg's `<p class="asterism">`
+    /// scene-break blocks. Mirror of `EPUBDocumentImporter.stripAsterismBlocks`
+    /// — applied to standalone HTML imports so the same fix covers
+    /// .html source files imported directly into Posey.
+    /// See EPUBDocumentImporter for full rationale.
+    static func stripAsterismBlocks(from data: Data) -> Data {
+        guard var html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) else {
+            return data
+        }
+        let patterns: [String] = [
+            #"(?si)<p[^>]*\bclass\s*=\s*"[^"]*\basterism\b[^"]*"[^>]*>.*?</p\s*>"#,
+            #"(?si)<p[^>]*\bclass\s*=\s*'[^']*\basterism\b[^']*'[^>]*>.*?</p\s*>"#,
+            #"(?si)<div[^>]*\bclass\s*=\s*"[^"]*\basterism\b[^"]*"[^>]*>.*?</div\s*>"#,
+            #"(?si)<div[^>]*\bclass\s*=\s*'[^']*\basterism\b[^']*'[^>]*>.*?</div\s*>"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            html = regex.stringByReplacingMatches(
+                in: html,
+                range: NSRange(html.startIndex..., in: html),
+                withTemplate: " "
+            )
+        }
+        return html.data(using: .utf8) ?? data
     }
 }
 // ========== BLOCK 4: INLINE IMAGE EXTRACTION - END ==========

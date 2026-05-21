@@ -1,0 +1,10 @@
+Markdown emphasis uses *italic* and *important* should survive.
+
+Arithmetic like 2 * 3 = 6 should survive — the asterisks share a line
+with real content, so the strip should leave them alone.
+
+Star *symbol* mid-sentence is fine.
+
+A line with one stray asterisk * here in context stays in place.
+
+This last paragraph has no asterisks at all.

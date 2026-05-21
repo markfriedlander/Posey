@@ -1,0 +1,8 @@
+Plain-text content before the scene break.
+The narrator's voice carries through paragraph after paragraph.
+
+*   *   *   *   *
+
+After the asterisk row, the narrative resumes. This second paragraph
+exists to confirm that the strip leaves surrounding prose intact and
+does not eat content adjacent to the asterism line.

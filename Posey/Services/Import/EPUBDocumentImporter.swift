@@ -193,9 +193,17 @@ extension EPUBDocumentImporter {
             // aloud — annoying. Also catches Calibre's `<nav id="toc">`
             // and ARIA `<nav epub:type="toc">` patterns.
             let tocStripped = Self.stripEmbeddedTOC(from: chapterData)
+            // 2026-05-20 — strip Project Gutenberg's scene-break
+            // <p class="asterism">…</p> blocks BEFORE NSAttributedString
+            // parsing. The class attribute is lost during HTML→text
+            // conversion, so without this pre-strip the literal
+            // "*   *   *   *   *" rows leak into plainText (read aloud
+            // by TTS as "star star star…") and into displayText
+            // (rendered as a stack of asterisk rows in the reader).
+            let asterismStripped = Self.stripAsterismBlocks(from: tocStripped)
 
             let (processedData, chapterImages) = extractInlineImages(
-                from: tocStripped,
+                from: asterismStripped,
                 chapterBasePath: chapterDir,
                 entryLoader: entryLoader
             )
@@ -393,10 +401,18 @@ extension EPUBDocumentImporter {
 
     /// Normalizes displayText — preserves \x0c image separators and collapses
     /// excess newlines.
+    /// 2026-05-20 — also strips Project Gutenberg's scene-break asterisk
+    /// rows (the format-agnostic fallback for content that slipped past
+    /// the class-targeted HTML strip in `stripAsterismBlocks`, e.g.
+    /// Moby Dick which uses bare `<p>` with no class attribute).
+    /// Must run AFTER newline normalization so the line-anchored regex
+    /// in `stripAsterismLines` matches consistently.
     private func normalizeDisplay(_ text: String) -> String {
-        TextNormalizer.stripMojibakeAndControlCharacters(text)
+        let normalized = TextNormalizer.stripMojibakeAndControlCharacters(text)
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r",   with: "\n")
+        let asterismStripped = TextNormalizer.stripAsterismLines(normalized)
+        return asterismStripped
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -565,6 +581,51 @@ extension EPUBDocumentImporter {
             #"(?si)<nav[^>]*\bid\s*=\s*"toc"[^>]*>.*?</nav\s*>"#
         ]
 
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            html = regex.stringByReplacingMatches(
+                in: html,
+                range: NSRange(html.startIndex..., in: html),
+                withTemplate: " "
+            )
+        }
+        return html.data(using: .utf8) ?? data
+    }
+
+    /// 2026-05-20 — Strip Project Gutenberg's `<p class="asterism">`
+    /// scene-break blocks. These are typographic devices (rows of
+    /// `*` glyphs separated by `<br/>`) that PG's ebookmaker uses to
+    /// mark scene transitions. NSAttributedString.html parsing
+    /// discards the class attribute and keeps the literal text, so
+    /// without this pre-strip the asterisks leak into plainText
+    /// (where AVSpeechSynthesizer would read them aloud as "star star
+    /// star…") and into displayText (where they render as a stack of
+    /// rows in the reader). Verified against Alice in Wonderland and
+    /// confirmed downstream across plainText, displayText, RAG chunks,
+    /// note anchoring, and audio export.
+    ///
+    /// The fallback for documents WITHOUT this class attribution
+    /// (Moby Dick, A Tale of Two Cities, raw HTML, RTF/PDF imports
+    /// that strip the class) lives in `TextNormalizer.stripAsterismLines`
+    /// — a regex pass on the post-extraction plain text that catches
+    /// any line consisting of whitespace-separated asterisks.
+    ///
+    /// Both layers run for EPUB: the class-targeted pre-strip removes
+    /// the source markup so even the empty `<p>` shell disappears;
+    /// the TextNormalizer pass catches anything that slipped through.
+    static func stripAsterismBlocks(from data: Data) -> Data {
+        guard var html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) else {
+            return data
+        }
+        let patterns: [String] = [
+            // <p class="…asterism…">…</p>
+            #"(?si)<p[^>]*\bclass\s*=\s*"[^"]*\basterism\b[^"]*"[^>]*>.*?</p\s*>"#,
+            #"(?si)<p[^>]*\bclass\s*=\s*'[^']*\basterism\b[^']*'[^>]*>.*?</p\s*>"#,
+            // <div class="…asterism…">…</div> — Calibre variant
+            #"(?si)<div[^>]*\bclass\s*=\s*"[^"]*\basterism\b[^"]*"[^>]*>.*?</div\s*>"#,
+            #"(?si)<div[^>]*\bclass\s*=\s*'[^']*\basterism\b[^']*'[^>]*>.*?</div\s*>"#
+        ]
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             html = regex.stringByReplacingMatches(

@@ -31,6 +31,7 @@ enum TextNormalizer {
         t = stripTrailingWhitespacePerLine(t)
         t = stripLineBreakHyphens(t)        // catches both - and ¬ as line-break markers
         t = stripWaybackPrintHeaders(t)     // PDF-from-Wayback artifacts
+        t = stripAsterismLines(t)           // 2026-05-20 — PG scene-break asterisks
         t = collapseSpacedLetters(t)
         t = collapseSpacedDigits(t)
         t = normalizeTabsAndSpaces(t)
@@ -165,6 +166,56 @@ enum TextNormalizer {
         guard let regex = try? NSRegularExpression(pattern: #"\n{3,}"#) else { return text }
         let range = NSRange(text.startIndex..., in: text)
         return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "\n\n")
+    }
+
+    /// 2026-05-20 — Strip lines that are nothing but whitespace-separated
+    /// asterisks (Project Gutenberg's scene-break "asterism"). The
+    /// EPUB/HTML importers strip `<p class="asterism">` blocks at the
+    /// HTML level; this pass is the format-agnostic safety net for
+    /// PG content that arrives via other paths:
+    ///
+    ///   - PG EPUBs that wrap asterism rows in a different tag (Moby
+    ///     Dick uses `<p>` with no class; survives the class-targeted
+    ///     pre-strip).
+    ///   - PG-derived PDFs imported via the PDF path (no HTML parsing
+    ///     at all, so the HTML-level strip never fires).
+    ///   - RTF / DOCX / MD / TXT sources copied from PG (same story).
+    ///   - Standalone HTML where the asterism row uses a `<div>` /
+    ///     `<pre>` / `<center>` element this importer's regex doesn't
+    ///     cover.
+    ///
+    /// Match criterion: the entire line is whitespace + `*` glyphs,
+    /// with at least 2 asterisks. False positives are essentially
+    /// impossible — natural prose never produces a line consisting
+    /// only of bare asterisks. Markdown emphasis (`*italic*`),
+    /// arithmetic (`2 * 3 = 6`), and inline `*` survive because they
+    /// share a line with other content.
+    ///
+    /// U+2028 (line separator) is normalized to `\n` first because
+    /// some HTML→text paths emit LSEP between row-internal breaks
+    /// (observed in Alice's plainText where asterism rows are joined
+    /// by U+2028 not \n).
+    static func stripAsterismLines(_ text: String) -> String {
+        // Normalize any U+2028 / U+2029 line separators to \n so the
+        // regex line-anchors fire consistently. NSAttributedString
+        // sometimes emits LSEP for `<br/>` inside a single paragraph;
+        // we want each asterisk row treated as its own line.
+        let normalized = text
+            .replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
+        // Match a whole line containing only whitespace and >= 2
+        // asterisks separated by whitespace. Use multiline + ICU
+        // syntax. \h is the ICU horizontal-whitespace class.
+        let pattern = #"(?m)^\h*\*(?:\h+\*){1,}\h*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return normalized }
+        // Replace with empty so collapseExcessiveBlankLines (which
+        // runs AFTER us in the pipeline) folds the resulting blank
+        // line into the surrounding \n\n paragraph break.
+        return regex.stringByReplacingMatches(
+            in: normalized,
+            range: NSRange(normalized.startIndex..., in: normalized),
+            withTemplate: ""
+        )
     }
 
     // ========== BLOCK 03: LINE-ENDING & WHITESPACE PASSES - END ==========

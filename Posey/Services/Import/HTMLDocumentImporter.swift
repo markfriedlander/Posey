@@ -48,16 +48,40 @@ struct HTMLDocumentImporter {
     ///     ingests.
     ///   - `images` — collected `PageImageRecord` values, one per
     ///     successfully-extracted image, ready for `databaseManager.insertImage`.
-    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [HTMLHeadingEntry]) {
+    func loadDocument(from url: URL) async throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [HTMLHeadingEntry]) {
         let data = try Data(contentsOf: url)
         let baseDirectory = url.deletingLastPathComponent()
-        let (markedData, images) = extractInlineImages(from: data, baseDirectory: baseDirectory)
+
+        // 2026-05-22 — Readability pre-pass. Strip site chrome
+        // (nav / sidebar / footer / related-articles) before the
+        // existing NSAttributedString → text pipeline runs. The
+        // cleaned HTML keeps headings + figure-embedded images,
+        // so downstream extractHeadings + extractInlineImages
+        // operate on the article body only. If Readability declines
+        // (page isn't article-shaped), fall back to the raw HTML so
+        // non-article HTML imports (rendered READMEs, EPUB internal
+        // chapters, recipe pages) still work — same code path as
+        // before this commit.
+        let rawHTML = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1)
+            ?? ""
+        let cleanedHTML = await ReadabilityExtractor.extractArticleHTML(
+            rawHTML: rawHTML, baseURL: url
+        )
+        let workingData: Data
+        if let cleanedHTML, let cleanedData = cleanedHTML.data(using: .utf8) {
+            workingData = cleanedData
+        } else {
+            workingData = data
+        }
+
+        let (markedData, images) = extractInlineImages(from: workingData, baseDirectory: baseDirectory)
         let displayText = try loadText(fromData: markedData)
         // 2026-05-06 (parity #2) — displayText KEEPS markers;
         // HTMLDisplayParser converts them to .visualPlaceholder
         // blocks. plainText is the marker-stripped form for TTS.
         let plainText = stripVisualPageMarkers(from: displayText)
-        let headings = extractHeadings(fromRawData: data)
+        let headings = extractHeadings(fromRawData: workingData)
         return (displayText, plainText, images, headings)
     }
 
@@ -128,6 +152,33 @@ struct HTMLDocumentImporter {
     func loadText(from url: URL) throws -> String {
         let data = try Data(contentsOf: url)
         return try loadText(fromData: data)
+    }
+
+    /// 2026-05-22 — Async data-based entry point that runs the
+    /// Readability pre-pass before delegating to `loadText(fromData:)`.
+    /// Mirrors `loadDocument(from:)` for the rawData path that
+    /// `HTMLLibraryImporter.importDocument(rawData:)` uses.
+    ///
+    /// Returns `(plainText, headings)`. No inline-image extraction
+    /// for the data path (per the pre-existing pipeline — data
+    /// imports lack a containing directory for resolving relative
+    /// `<img src=...>` paths).
+    func loadTextAsync(fromData data: Data) async throws -> (text: String, headings: [HTMLHeadingEntry]) {
+        let rawHTML = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1)
+            ?? ""
+        let cleanedHTML = await ReadabilityExtractor.extractArticleHTML(
+            rawHTML: rawHTML, baseURL: nil
+        )
+        let workingData: Data
+        if let cleanedHTML, let cleanedData = cleanedHTML.data(using: .utf8) {
+            workingData = cleanedData
+        } else {
+            workingData = data
+        }
+        let text = try loadText(fromData: workingData)
+        let headings = extractHeadings(fromRawData: workingData)
+        return (text, headings)
     }
 
     /// NSAttributedString HTML parsing uses WebKit internally under UIKit and

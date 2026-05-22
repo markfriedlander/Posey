@@ -11,7 +11,8 @@ struct HTMLLibraryImporter {
         self.embeddingIndex = embeddingIndex
     }
 
-    func importDocument(from url: URL) throws -> Document {
+    @MainActor
+    func importDocument(from url: URL) async throws -> Document {
         // 2026-05-16 (B8) — Reject binary content at the door.
         try FormatPrecheck.checkTextLike(url: url, declaredType: "html")
         // Task 8 #4 (2026-05-03): URL-based import resolves inline
@@ -19,7 +20,10 @@ struct HTMLLibraryImporter {
         // The resulting document carries a separate displayText (with
         // [[POSEY_VISUAL_PAGE:0:uuid]] markers) and plainText (markers
         // stripped, suitable for TTS + embeddings).
-        let parsed = try importer.loadDocument(from: url)
+        //
+        // 2026-05-22 — Now async: Readability pre-pass runs inside
+        // loadDocument and strips site chrome on real-world web HTML.
+        let parsed = try await importer.loadDocument(from: url)
         return try importNormalizedDocument(
             title: url.deletingPathExtension().lastPathComponent,
             fileName: url.lastPathComponent,
@@ -31,26 +35,28 @@ struct HTMLLibraryImporter {
         )
     }
 
-    func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "html") throws -> Document {
+    @MainActor
+    func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "html") async throws -> Document {
         // Data-based import (e.g. via local API upload): no
         // surrounding directory means we can't resolve relative
         // <img> paths. Falls back to plain-text-only extraction;
         // inline images carried as data: URIs would still need
         // additional code to surface — punted as a Mark-review
         // item if it ever matters. Documented in NEXT.md.
-        let plainText = try importer.loadText(fromData: rawData)
+        //
+        // 2026-05-22 — loadTextAsync runs the Readability pre-pass.
         // 2026-05-06 (parity #3): heading extraction works on raw HTML
         // and is independent of the inline-image extraction path, so
         // it works on data-based import too.
-        let headings = importer.extractHeadings(fromRawData: rawData)
+        let parsed = try await importer.loadTextAsync(fromData: rawData)
         return try importNormalizedDocument(
             title: title,
             fileName: fileName,
             fileType: fileType,
-            displayText: plainText,
-            plainText: plainText,
+            displayText: parsed.text,
+            plainText: parsed.text,
             images: [],
-            headings: headings
+            headings: parsed.headings
         )
     }
 

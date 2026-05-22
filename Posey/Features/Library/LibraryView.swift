@@ -554,6 +554,15 @@ final class LibraryViewModel: ObservableObject {
                 return
             }
 
+            // 2026-05-22 — HTML now also async because of the
+            // Readability pre-pass (WKWebView runs JS to extract
+            // article body). Route into its own task so the security-
+            // scoped URL lifetime is managed in the async context.
+            if fileType == "html" || fileType == "htm" {
+                handleHTMLImport(url: url)
+                return
+            }
+
             let didAccess = url.startAccessingSecurityScopedResource()
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
 
@@ -562,13 +571,28 @@ final class LibraryViewModel: ObservableObject {
             case "md", "markdown":    _ = try markdownLibraryImporter.importDocument(from: url)
             case "rtf":               _ = try rtfLibraryImporter.importDocument(from: url)
             case "docx":              _ = try docxLibraryImporter.importDocument(from: url)
-            case "html", "htm":       _ = try htmlLibraryImporter.importDocument(from: url)
             case "epub":              _ = try epubLibraryImporter.importDocument(from: url)
             default:                  throw LibraryImportError.unsupportedFileType
             }
             loadDocuments()
         } catch {
             present(error)
+        }
+    }
+
+    /// 2026-05-22 — HTML import async path (Readability pre-pass).
+    /// Mirrors `handlePDFImport`'s shape: own Task, security-scoped
+    /// URL access inside the task, error → `present(error)` on main.
+    private func handleHTMLImport(url: URL) {
+        Task { @MainActor in
+            let didAccess = url.startAccessingSecurityScopedResource()
+            defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+            do {
+                _ = try await htmlLibraryImporter.importDocument(from: url)
+                loadDocuments()
+            } catch {
+                present(error)
+            }
         }
     }
 
@@ -2741,7 +2765,7 @@ extension LibraryViewModel {
                 case "md", "markdown":  doc = try markdownLibraryImporter.importDocument(from: tempURL)
                 case "rtf":             doc = try rtfLibraryImporter.importDocument(from: tempURL)
                 case "docx":            doc = try docxLibraryImporter.importDocument(from: tempURL)
-                case "html", "htm":     doc = try htmlLibraryImporter.importDocument(from: tempURL)
+                case "html", "htm":     doc = try await htmlLibraryImporter.importDocument(from: tempURL)
                 case "epub":            doc = try epubLibraryImporter.importDocument(from: tempURL)
                 default:                throw LibraryImportError.unsupportedFileType
                 }

@@ -23,6 +23,10 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXBuildFile section */
+		D1A001000000000000000001 /* Readability in Frameworks */ = {isa = PBXBuildFile; productRef = D1A001000000000000000002 /* Readability */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		85B4AE9D2F70864A001A55D8 /* Posey.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Posey.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0DE00012F70864A001A55D8 /* PoseyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PoseyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -57,6 +61,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D1A001000000000000000001 /* Readability in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,6 +123,7 @@
 			);
 			name = Posey;
 			packageProductDependencies = (
+				D1A001000000000000000002 /* Readability */,
 			);
 			productName = Posey;
 			productReference = 85B4AE9D2F70864A001A55D8 /* Posey.app */;
@@ -203,6 +209,9 @@
 			);
 			mainGroup = 85B4AE942F70864A001A55D8;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D1A001000000000000000003 /* XCRemoteSwiftPackageReference "swift-readability" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 85B4AE9E2F70864A001A55D8 /* Products */;
 			projectDirPath = "";
@@ -602,6 +611,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		D1A001000000000000000003 /* XCRemoteSwiftPackageReference "swift-readability" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Ryu0118/swift-readability";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.3.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D1A001000000000000000002 /* Readability */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D1A001000000000000000003 /* XCRemoteSwiftPackageReference "swift-readability" */;
+			productName = Readability;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 85B4AE952F70864A001A55D8 /* Project object */;
 }

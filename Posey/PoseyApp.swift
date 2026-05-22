@@ -68,7 +68,7 @@ struct PoseyApp: App {
                         manager = try DatabaseManager(resetIfExists: launchConfiguration.shouldResetDatabase)
                     }
                     if let preload = launchConfiguration.preload {
-                        try executePreload(preload, databaseManager: manager)
+                        try await executePreload(preload, databaseManager: manager)
                     }
                     databaseManager = manager
                 } catch {
@@ -114,7 +114,8 @@ struct PoseyApp: App {
 
 // ========== BLOCK 2: PRELOAD EXECUTION - START ==========
 private extension PoseyApp {
-    func executePreload(_ preload: PreloadRequest, databaseManager: DatabaseManager) throws {
+    @MainActor
+    func executePreload(_ preload: PreloadRequest, databaseManager: DatabaseManager) async throws {
         let defaultTitle = "Preloaded"
 
         switch preload.format {
@@ -167,11 +168,11 @@ private extension PoseyApp {
         case .html:
             switch preload.source {
             case .url(let url):
-                _ = try HTMLLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
+                _ = try await HTMLLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
             case .inlineBase64(let b64):
                 guard let data = Data(base64Encoded: b64) else { return }
                 let title = preload.title ?? defaultTitle
-                _ = try HTMLLibraryImporter(databaseManager: databaseManager).importDocument(
+                _ = try await HTMLLibraryImporter(databaseManager: databaseManager).importDocument(
                     title: title, fileName: preload.fileName ?? "\(title).html", rawData: data)
             }
 

@@ -298,6 +298,18 @@ extension PDFDocumentImporter {
             }
         }
 
+        // 2026-05-22 — Generalized text-pattern TOC fallback. Last
+        // resort: runs only when (1) the dot-leader detector found
+        // nothing, (2) no outline walker advance, AND (3) the
+        // generalized detector finds a dense cluster of
+        // chapter/part/section/appendix lines on the first ~8 pages
+        // alongside a "Contents" anchor. Safety net for PDFs that
+        // ship neither structural outline nor dot-leader TOC.
+        if tocSkipUntilOffset == 0,
+           let generalized = PDFGeneralizedTOCDetector.detect(pageTexts: readableTextPages) {
+            tocSkipUntilOffset = generalized.regionEndOffset
+        }
+
         return ParsedPDFDocument(
             title: title,
             displayText: displayText,

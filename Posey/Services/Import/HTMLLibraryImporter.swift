@@ -79,6 +79,17 @@ struct HTMLLibraryImporter {
         let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: gutenbergStart) ?? gutenbergStart
         let skip = max(gutenbergStart, postTOC)
         let contentEnd = GutenbergBoundaryDetector.detect(in: plainText).contentEndOffset ?? 0
+        // 2026-05-21 skip-source classification (locked rule):
+        // Gutenberg marker wins for the whole skip; otherwise any
+        // forward motion is "heuristic".
+        let skipSource: String
+        if gutenbergStart > 0 {
+            skipSource = "gutenberg"
+        } else if skip > 0 {
+            skipSource = "heuristic"
+        } else {
+            skipSource = ""
+        }
 
         let document = Document(
             id: existingDocument?.id ?? UUID(),
@@ -91,7 +102,8 @@ struct HTMLLibraryImporter {
             plainText: plainText,
             characterCount: plainText.count,
             playbackSkipUntilOffset: skip,
-            contentEndOffset: contentEnd
+            contentEndOffset: contentEnd,
+            skipSource: skipSource
         )
 
         try databaseManager.upsertDocument(document)

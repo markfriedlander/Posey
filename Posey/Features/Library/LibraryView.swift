@@ -1694,7 +1694,13 @@ extension LibraryViewModel {
                     "playbackSkipUntilOffset": doc.playbackSkipUntilOffset,
                     // 2026-05-21 — also surface contentEndOffset for
                     // verification of the Gutenberg tail detector.
-                    "contentEndOffset": doc.contentEndOffset
+                    "contentEndOffset": doc.contentEndOffset,
+                    // 2026-05-21 (later) — surface skipSource so the
+                    // test harness can verify the smart-skip
+                    // classification: "" / "gutenberg" / "heuristic" /
+                    // "user_keep" / "user_dismiss". See Document.swift
+                    // for the enum.
+                    "skipSource": doc.skipSource
                 ])
 
             case "LIST_SEGMENTS_MATCHING":

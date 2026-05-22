@@ -510,6 +510,12 @@ struct ReaderView: View {
             } message: {
                 Text(viewModel.errorMessage)
             }
+            // 2026-05-21 — Smart skip prompt. Posey-voiced confirmation
+            // dialog, fires once per heuristic-detected skip on a
+            // non-Gutenberg document. Wrapped in a separate modifier
+            // to keep the top-level body modifier chain short enough
+            // for the Swift type-checker.
+            .modifier(SmartSkipPromptModifier(viewModel: viewModel))
             .sheet(isPresented: $isShowingNotesSheet) {
                 NotesSheet(viewModel: viewModel)
             }
@@ -1958,6 +1964,31 @@ private struct ReaderRemoteControlSearchObservers: ViewModifier {
     }
 }
 
+/// 2026-05-21 — Smart skip prompt. Extracted into a ViewModifier so
+/// the ReaderView's body modifier chain stays under the Swift
+/// type-checker's complexity budget. Posey's voice: declarative,
+/// warm, a little personality. Gutenberg-detected skips never reach
+/// this modifier (shouldPromptForSkip returns false) — silent by
+/// design.
+private struct SmartSkipPromptModifier: ViewModifier {
+    @ObservedObject var viewModel: ReaderViewModel
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            "This one starts with some housekeeping before the good stuff. Jump to the first chapter?",
+            isPresented: $viewModel.isPresentingSkipPrompt,
+            titleVisibility: .visible
+        ) {
+            Button("Jump to Chapter") {
+                viewModel.confirmSkipKeep()
+            }
+            Button("Start from Beginning") {
+                viewModel.revealFromBeginning()
+            }
+        }
+    }
+}
+
+@MainActor
 private func matches(_ note: Notification, viewModel: ReaderViewModel) -> Bool {
     guard let docID = note.userInfo?["documentID"] as? UUID else { return false }
     return docID == viewModel.document.id
@@ -2702,6 +2733,97 @@ final class ReaderViewModel: ObservableObject {
         document.contentEndOffset > 0
     }
 
+    /// 2026-05-21 — Smart skip prompt. True when the importer skipped
+    /// past some front-matter via a heuristic detector (in-prose TOC,
+    /// TOC-walker, PDF/DOCX/RTF TOCSkipDetector, EPUBFrontMatterDetector)
+    /// on a non-Gutenberg document. The reader presents a one-time
+    /// confirmation dialog after content has loaded: "Jump to Chapter"
+    /// (keep skip) or "Start from Beginning" (skip = 0, read everything).
+    ///
+    /// Gutenberg-detected skips return false here — Mark's locked
+    /// design: Gutenberg marker presence means the whole skip is
+    /// authoritative and silent. The user is never asked.
+    ///
+    /// After the user makes a choice, `skipSource` transitions to
+    /// `"user_keep"` or `"user_dismiss"`, this property returns false,
+    /// and the prompt never reappears (even on relaunch — the state
+    /// is persisted).
+    var shouldPromptForSkip: Bool {
+        document.skipSource == "heuristic" && document.playbackSkipUntilOffset > 0
+    }
+
+    /// Drives the `.confirmationDialog` presentation. Flipped true by
+    /// `loadContent()` once `isLoading` goes false (so the user sees
+    /// the reader chrome and a bit of content behind the dialog —
+    /// gives the choice context). The user's action handlers flip
+    /// it false again.
+    @Published var isPresentingSkipPrompt: Bool = false
+
+    /// User chose "Jump to Chapter" on the smart-skip prompt. Persist
+    /// `skipSource = "user_keep"` so the prompt never reappears, and
+    /// dismiss the dialog. No reposition needed — the reader already
+    /// opened at the skip offset, which is exactly what the user just
+    /// confirmed.
+    func confirmSkipKeep() {
+        isPresentingSkipPrompt = false
+        guard document.skipSource == "heuristic" else { return }
+        var updated = document
+        updated.skipSource = "user_keep"
+        do {
+            try databaseManager.upsertDocument(updated)
+            self.document = updated
+        } catch {
+            present(error)
+        }
+    }
+
+    /// User chose "Start from Beginning" on the smart-skip prompt.
+    /// Persist `playbackSkipUntilOffset = 0` and `skipSource = "user_dismiss"`,
+    /// then re-run content loading so the previously-filtered segments
+    /// and display blocks re-enter the reader. Finally seek to offset 0
+    /// so playback starts at the very first sentence.
+    func revealFromBeginning() {
+        isPresentingSkipPrompt = false
+        guard document.skipSource == "heuristic" else { return }
+        var updated = document
+        updated.playbackSkipUntilOffset = 0
+        updated.skipSource = "user_dismiss"
+        do {
+            try databaseManager.upsertDocument(updated)
+            self.document = updated
+        } catch {
+            present(error)
+            return
+        }
+        // Rebuild segments + display blocks without the skip filter,
+        // then jump to offset 0. Done on a detached task so the heavy
+        // segmenter pass doesn't block the dialog's dismiss animation.
+        Task { [weak self] in
+            guard let self else { return }
+            await self.reloadContentAfterSkipChange()
+        }
+    }
+
+    /// Re-run the heavy content compute after `document.playbackSkipUntilOffset`
+    /// has changed, then seek to the start. Mirrors `loadContent()` but
+    /// skips the position-restore step (we want offset 0, not whatever
+    /// position was last persisted) and skips the now-playing reinstall
+    /// (the controller is already wired).
+    private func reloadContentAfterSkipChange() async {
+        let snapshot = self.document
+        let computed = await Task.detached(priority: .userInitiated) {
+            ReaderViewModel.computeContent(for: snapshot)
+        }.value
+        self.segments = computed.segments
+        self.displayBlocks = ReaderViewModel.applyHeadingStyling(
+            to: computed.displayBlocks,
+            tocEntries: self.tocEntries
+        )
+        self.visualPauseMapAll = computed.visualPauseMap
+        self.applyVisualBlockMotionPolicy()
+        self.jumpToOffset(0)
+    }
+
     /// 2026-05-16 — Reading Style picker removed (Mark spec). The
     /// underlying `PlaybackPreferences.readingStyle` getter always
     /// returns `.standard` and the setter no-ops. This stored
@@ -3028,7 +3150,14 @@ final class ReaderViewModel: ObservableObject {
     var searchMatchCount: Int { searchMatchIndices.count }
     // ========== BLOCK VM-SEARCH: SEARCH STATE - END ==========
 
-    let document: Document
+    /// 2026-05-21 — Was `let document: Document` until the smart-skip
+    /// prompt landed. Now `@Published private(set) var` so the user's
+    /// "Start from Beginning" / "Jump to Chapter" choice can be
+    /// persisted and the in-memory document updated in lockstep. Most
+    /// fields on `Document` are stable across the reader's lifetime;
+    /// only `playbackSkipUntilOffset` and `skipSource` change in
+    /// response to the smart-skip prompt.
+    @Published private(set) var document: Document
     /// True between `init` returning and the background content load
     /// completing. The reader view shows an "Opening this document…"
     /// overlay during this window so big documents (Illuminatus's
@@ -3316,6 +3445,17 @@ final class ReaderViewModel: ObservableObject {
 
         // 5. Surface the reader.
         self.isLoading = false
+
+        // 5a. 2026-05-21 — Smart skip prompt. Fire AFTER the reader is
+        // visible so the user can see what they're being asked about
+        // (content sitting at the heuristic skip position). Gutenberg
+        // skips return false from shouldPromptForSkip and never trigger
+        // this dialog. The flag stays true until the user picks Jump
+        // to Chapter or Start from Beginning; both handlers persist
+        // skipSource so this won't fire again on relaunch.
+        if self.shouldPromptForSkip {
+            self.isPresentingSkipPrompt = true
+        }
 
         // 6. Test-mode automation hooks (depend on segments).
         self.runAutomationIfNeeded()

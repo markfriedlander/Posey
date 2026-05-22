@@ -77,7 +77,10 @@ struct DOCXLibraryImporter {
             displayText: displayText,
             plainText: plainText,
             characterCount: plainText.count,
-            playbackSkipUntilOffset: tocSkipUntilOffset
+            playbackSkipUntilOffset: tocSkipUntilOffset,
+            // 2026-05-21 — DOCX uses the heading-based TOCSkipDetector,
+            // not Gutenberg. Any forward skip is heuristic.
+            skipSource: tocSkipUntilOffset > 0 ? "heuristic" : ""
         )
 
         try databaseManager.upsertDocument(document)

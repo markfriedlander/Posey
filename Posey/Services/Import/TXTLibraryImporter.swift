@@ -50,6 +50,15 @@ struct TXTLibraryImporter {
         let gutenbergStart = boundaries.contentStartOffset ?? 0
         let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: gutenbergStart) ?? gutenbergStart
         let skip = max(gutenbergStart, postTOC)
+        // 2026-05-21 skip-source classification (locked rule).
+        let skipSource: String
+        if gutenbergStart > 0 {
+            skipSource = "gutenberg"
+        } else if skip > 0 {
+            skipSource = "heuristic"
+        } else {
+            skipSource = ""
+        }
 
         let document = Document(
             id: existingDocument?.id ?? UUID(),
@@ -62,7 +71,8 @@ struct TXTLibraryImporter {
             plainText: plainText,
             characterCount: plainText.count,
             playbackSkipUntilOffset: skip,
-            contentEndOffset: boundaries.contentEndOffset ?? 0
+            contentEndOffset: boundaries.contentEndOffset ?? 0,
+            skipSource: skipSource
         )
 
         try databaseManager.upsertDocument(document)

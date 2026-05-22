@@ -93,7 +93,13 @@ extension PDFLibraryImporter {
             displayText: displayText,
             plainText: plainText,
             characterCount: plainText.count,
-            playbackSkipUntilOffset: playbackSkipUntilOffset
+            playbackSkipUntilOffset: playbackSkipUntilOffset,
+            // 2026-05-21 — PDF's `tocSkipUntilOffset` comes from the
+            // PDFTOCDetector heuristic (dot-leader Contents page).
+            // Gutenberg-PDF distributions aren't wired in yet, so
+            // any skip here is by definition heuristic; user will
+            // see the smart-skip prompt on first open.
+            skipSource: playbackSkipUntilOffset > 0 ? "heuristic" : ""
         )
 
         try databaseManager.upsertDocument(document)

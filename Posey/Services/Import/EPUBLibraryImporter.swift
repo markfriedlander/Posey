@@ -17,7 +17,7 @@ struct EPUBLibraryImporter {
         // 2026-05-16 (B8) — Reject anything that isn't ZIP-shaped.
         try FormatPrecheck.checkEPUB(url: url)
         let parsed = try importer.loadDocument(from: url)
-        let skip = Self.computeContentStart(
+        let computed = Self.computeContentStartAndSource(
             existingSkip: parsed.playbackSkipUntilOffset,
             plainText: parsed.plainText,
             tocEntries: parsed.tocEntries
@@ -29,8 +29,9 @@ struct EPUBLibraryImporter {
             fileType: url.pathExtension.lowercased(),
             displayText: parsed.displayText,
             plainText: parsed.plainText,
-            playbackSkipUntilOffset: skip,
-            contentEndOffset: boundaries.contentEndOffset ?? 0
+            playbackSkipUntilOffset: computed.skipOffset,
+            contentEndOffset: boundaries.contentEndOffset ?? 0,
+            skipSource: computed.skipSource
         )
         try saveImages(parsed.images, for: doc.id)
         try saveTOC(parsed.tocEntries, for: doc.id)
@@ -39,7 +40,7 @@ struct EPUBLibraryImporter {
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "epub") throws -> Document {
         let parsed = try importer.loadDocument(fromData: rawData)
-        let skip = Self.computeContentStart(
+        let computed = Self.computeContentStartAndSource(
             existingSkip: parsed.playbackSkipUntilOffset,
             plainText: parsed.plainText,
             tocEntries: parsed.tocEntries
@@ -51,8 +52,9 @@ struct EPUBLibraryImporter {
             fileType: fileType,
             displayText: parsed.displayText,
             plainText: parsed.plainText,
-            playbackSkipUntilOffset: skip,
-            contentEndOffset: boundaries.contentEndOffset ?? 0
+            playbackSkipUntilOffset: computed.skipOffset,
+            contentEndOffset: boundaries.contentEndOffset ?? 0,
+            skipSource: computed.skipSource
         )
         try saveImages(parsed.images, for: doc.id)
         try saveTOC(parsed.tocEntries, for: doc.id)
@@ -73,11 +75,25 @@ struct EPUBLibraryImporter {
     ///      PUBLISHING_INFO entries were walked past (catches Pride's
     ///      Saintsbury Preface, which isn't in Pride's nav.xhtml).
     /// Each layer can only ADVANCE the skip; we never go backward.
-    fileprivate static func computeContentStart(
+    /// Result of `computeContentStartAndSource` — pair of the final
+    /// skip offset and the classification of how it was reached.
+    /// `skipSource` follows the locked 2026-05-21 rule:
+    ///   • Gutenberg marker present → "gutenberg" (silent skip, no
+    ///     prompt) even if downstream detectors advanced further within
+    ///     Gutenberg territory.
+    ///   • No Gutenberg marker but any heuristic detector advanced
+    ///     the skip → "heuristic" (one-time prompt).
+    ///   • No skip at all → "" (empty).
+    struct ContentStartResult {
+        let skipOffset: Int
+        let skipSource: String
+    }
+
+    fileprivate static func computeContentStartAndSource(
         existingSkip: Int,
         plainText: String,
         tocEntries: [EPUBTOCEntry]
-    ) -> Int {
+    ) -> ContentStartResult {
         let gutenbergStart = GutenbergBoundaryDetector.detect(in: plainText).contentStartOffset ?? 0
         let postGutenberg = max(existingSkip, gutenbergStart)
         let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: postGutenberg) ?? postGutenberg
@@ -95,7 +111,20 @@ struct EPUBLibraryImporter {
             plainText: plainText,
             currentSkip: afterInProse
         )
-        return max(afterInProse, walkResult.newSkipOffset ?? afterInProse)
+        let finalSkip = max(afterInProse, walkResult.newSkipOffset ?? afterInProse)
+
+        // 2026-05-21 classification — Gutenberg marker presence wins
+        // for the whole skip (silent). Otherwise any forward motion
+        // from a heuristic detector counts as "heuristic" (prompt).
+        let source: String
+        if gutenbergStart > 0 {
+            source = "gutenberg"
+        } else if finalSkip > 0 {
+            source = "heuristic"
+        } else {
+            source = ""
+        }
+        return ContentStartResult(skipOffset: finalSkip, skipSource: source)
     }
 }
 
@@ -112,7 +141,8 @@ extension EPUBLibraryImporter {
         displayText: String,
         plainText: String,
         playbackSkipUntilOffset: Int = 0,
-        contentEndOffset: Int = 0
+        contentEndOffset: Int = 0,
+        skipSource: String = ""
     ) throws -> Document {
         let now = Date()
         let existing = try databaseManager.existingDocument(
@@ -133,7 +163,8 @@ extension EPUBLibraryImporter {
             plainText: plainText,
             characterCount: plainText.count,
             playbackSkipUntilOffset: playbackSkipUntilOffset,
-            contentEndOffset: contentEndOffset
+            contentEndOffset: contentEndOffset,
+            skipSource: skipSource
         )
 
         try databaseManager.upsertDocument(document)

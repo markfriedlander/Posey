@@ -131,10 +131,30 @@ extension PDFDocumentImporter {
         readableTextPages.reserveCapacity(pageCount)
         var imageRecords: [PageImageRecord] = []
 
+        // 2026-05-22 — Detect running headers/footers across the
+        // whole document before per-page extraction. Returns a
+        // per-page-index dictionary of character ranges in the
+        // page's raw `string` to strip out. Pages without repeating
+        // margin-zone text get nothing (no-op for those pages).
+        // See PDFRunningHeaderDetector for the algorithm + the
+        // visual-audit-driven rationale behind the tunables.
+        let headerStripRanges = PDFRunningHeaderDetector.detect(in: document)
+
         for index in 0..<pageCount {
             guard let page = document.page(at: index) else { continue }
 
-            let pdfText = normalize(page.string ?? "")
+            // Strip running header/footer ranges (if any detected
+            // for this page) from the raw PDFKit page text BEFORE
+            // normalization. The detector returns ranges in
+            // `page.string`'s utf16 index space.
+            let rawPageString = page.string ?? ""
+            let stripped: String = {
+                if let ranges = headerStripRanges[index], !ranges.isEmpty {
+                    return PDFRunningHeaderDetector.applyStrips(ranges, to: rawPageString)
+                }
+                return rawPageString
+            }()
+            let pdfText = normalize(stripped)
             if !pdfText.isEmpty {
                 pageContents.append(.text(pdfText))
                 readableTextPages.append(pdfText)

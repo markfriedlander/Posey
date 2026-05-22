@@ -4014,6 +4014,17 @@ final class ReaderViewModel: ObservableObject {
         return segments[index].text
     }
 
+    /// 2026-05-22 — One-shot anchor override consumed by the next
+    /// `scrollToCurrentSentence` call. Defaults to `.center` (matches
+    /// active-sentence centering during playback). TOC chapter taps
+    /// set this to `.top` so the chapter heading pins to the top of
+    /// the visible area on navigation — "Jump to chapter II" should
+    /// land you AT chapter II, not in the middle of the screen with
+    /// chapter I's last few lines visible above. Reset to `.center`
+    /// after each scroll so the next sentence advance during playback
+    /// re-centers normally.
+    private var nextScrollAnchor: UnitPoint = .center
+
     func scrollToCurrentSentence(with proxy: ScrollViewProxy, animated: Bool) {
         let scrollTargetID: Int
 
@@ -4025,8 +4036,11 @@ final class ReaderViewModel: ObservableObject {
             return
         }
 
+        let anchor = nextScrollAnchor
+        nextScrollAnchor = .center
+
         let action = {
-            proxy.scrollTo(scrollTargetID, anchor: .center)
+            proxy.scrollTo(scrollTargetID, anchor: anchor)
         }
 
         if animated && !Self.reduceMotionEnabled {
@@ -4489,10 +4503,30 @@ final class ReaderViewModel: ObservableObject {
 
     // ========== BLOCK VM-TOC: TABLE OF CONTENTS NAVIGATION - START ==========
 
-    /// Jumps playback and scroll position to the sentence nearest to a TOC entry's
-    /// plainTextOffset. Stops any active playback before jumping.
+    /// Jumps playback and scroll position to the chapter heading at a
+    /// TOC entry's plainTextOffset. Stops any active playback before
+    /// jumping.
+    ///
+    /// 2026-05-22 — Two changes over the previous behavior:
+    /// 1. Pick the first segment at-or-AFTER the TOC offset (not
+    ///    at-or-before). The TOC offset points to the chapter heading;
+    ///    `at-or-before` lands the user on the last sentence of the
+    ///    PREVIOUS chapter, which is the opposite of what "jump to
+    ///    Chapter II" should do. Page-jumps and TOC-walker offsets
+    ///    use the same convention: the offset is the START of the
+    ///    target region, so the first segment whose startOffset >= it
+    ///    is what the user wants.
+    /// 2. Request `.top` scroll anchor so the chapter heading pins to
+    ///    the top of the visible area rather than centering.
+    ///    Navigation should feel like navigation.
     func jumpToTOCEntry(_ entry: StoredTOCEntry) {
-        jumpToOffset(entry.plainTextOffset)
+        stopPlayback()
+        nextScrollAnchor = .top
+        let target = entry.plainTextOffset
+        let targetIndex = segments.firstIndex(where: { $0.startOffset >= target })
+            ?? max(0, segments.count - 1)
+        currentSentenceIndex = targetIndex
+        persistPosition()
     }
 
     /// Jump the reader to the sentence at-or-before `plainTextOffset`.
@@ -4521,7 +4555,14 @@ final class ReaderViewModel: ObservableObject {
         guard pageMap.hasPages,
               let offset = pageMap.offset(forPage: page) else { return false }
         stopPlayback()
-        let targetIndex = segments.lastIndex(where: { $0.startOffset <= offset }) ?? 0
+        // 2026-05-22 — Same navigation intent as TOC tap: pin the
+        // destination at the top of the visible area, not the center,
+        // AND pick the first segment at-or-AFTER the page-start offset
+        // (not at-or-before, which would land on the previous page's
+        // last sentence).
+        nextScrollAnchor = .top
+        let targetIndex = segments.firstIndex(where: { $0.startOffset >= offset })
+            ?? max(0, segments.count - 1)
         currentSentenceIndex = targetIndex
         persistPosition()
         return true

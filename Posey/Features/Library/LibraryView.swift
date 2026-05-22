@@ -784,6 +784,8 @@ extension LibraryViewModel {
                 // race fix). Mirrors LibraryViewModel.deleteDocument.
                 embeddingIndex.cancelIndexing(for: doc.id)
                 try databaseManager.deleteDocument(doc)
+                // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecar.
+                PageFlagsStore.delete(documentID: doc.id)
                 loadDocuments()
                 // 2026-05-13 — A4: invalidate cached audio export.
                 NotificationCenter.default.post(
@@ -799,6 +801,8 @@ extension LibraryViewModel {
                 // the wipe (FK race fix).
                 for doc in docs { embeddingIndex.cancelIndexing(for: doc.id) }
                 for doc in docs { try databaseManager.deleteDocument(doc) }
+                // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecars.
+                for doc in docs { PageFlagsStore.delete(documentID: doc.id) }
                 loadDocuments()
                 // 2026-05-13 — A4: nuke the entire audio-export cache
                 // when every document is wiped.
@@ -1293,6 +1297,70 @@ extension LibraryViewModel {
                     "documentID": id.uuidString,
                     "returned": items.count,
                     "chunks": items
+                ])
+
+            case "LIST_PAGE_FLAGS":
+                // 2026-05-22 — Tier 1/2 Phase 1 calibration verb.
+                // Returns the per-page confidence-detector output for
+                // a PDF document. Empty / "not assessed" when called
+                // on a non-PDF, on a PDF imported before this build,
+                // or when the sidecar was deleted.
+                //
+                // Usage:
+                //   LIST_PAGE_FLAGS:<doc-id>           — flagged pages only (default)
+                //   LIST_PAGE_FLAGS:<doc-id>:all       — every page including unflagged
+                //
+                // The default surface is flagged-only because that's
+                // what calibration cares about. The full per-page
+                // payload (signals + reasons) is included for each
+                // returned page so we can recompute thresholds offline
+                // without re-importing.
+                let raw = arg ?? ""
+                let parts = raw.split(separator: ":", maxSplits: 1,
+                                      omittingEmptySubsequences: false)
+                guard parts.count >= 1,
+                      let id = UUID(uuidString: String(parts[0])) else {
+                    return #"{"error":"Usage: LIST_PAGE_FLAGS:<doc-id>[:all]"}"#
+                }
+                let includeAll = parts.count >= 2 && String(parts[1]).lowercased() == "all"
+                guard let record = PageFlagsStore.read(documentID: id) else {
+                    return json([
+                        "documentID": id.uuidString,
+                        "assessed": false,
+                        "reason": "no calibration record on disk (re-import to populate)"
+                    ])
+                }
+                let included = includeAll
+                    ? record.flags
+                    : record.flags.filter { $0.needsTier2 }
+                let pages: [[String: Any]] = included.map { f in
+                    [
+                        "pageIndex": f.pageIndex,
+                        "needsTier2": f.needsTier2,
+                        "tier2Mode": f.tier2Mode.rawValue,
+                        "reasons": f.reasons,
+                        "signals": [
+                            "charCount": f.signals.charCount,
+                            "pageAreaPt2": f.signals.pageAreaPt2,
+                            "charDensity": f.signals.charDensity,
+                            "longCapsTokenCount": f.signals.longCapsTokenCount,
+                            "avgWordLength": f.signals.avgWordLength
+                        ]
+                    ]
+                }
+                let summary = record.summary
+                return json([
+                    "documentID": record.documentID,
+                    "fileName": record.fileName ?? "",
+                    "assessed": true,
+                    "detectorVersion": record.detectorVersion,
+                    "assessedAt": ISO8601DateFormatter().string(from: record.assessedAt),
+                    "pageCount": summary.pageCount,
+                    "flaggedCount": summary.flaggedCount,
+                    "modeCounts": summary.modeCounts,
+                    "returned": pages.count,
+                    "includeAll": includeAll,
+                    "pages": pages
                 ])
 
             case "GET_DOCUMENT_METADATA":

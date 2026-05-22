@@ -34,6 +34,13 @@ struct PDFLibraryImporter {
         )
         try saveImages(parsed.images, for: doc.id)
         try saveTOCEntries(parsed.tocEntries, for: doc.id)
+        // 2026-05-22 — see persistParsedDocument(_:from:) for context.
+        PageFlagsStore.write(
+            flags: parsed.pageFlags,
+            for: doc.id,
+            fileName: fileName,
+            pageCount: parsed.pageFlags.count
+        )
         return doc
     }
 
@@ -58,6 +65,19 @@ struct PDFLibraryImporter {
         )
         try saveImages(parsed.images, for: doc.id)
         try saveTOCEntries(parsed.tocEntries, for: doc.id)
+
+        // 2026-05-22 — Phase 1 of the Tier 1/2 PDF extraction
+        // architecture. Persist per-page confidence-detector output
+        // as a JSON sidecar keyed by document UUID. Calibration data
+        // only at this phase — nothing in the import path branches
+        // on these flags. Inspect via `LIST_PAGE_FLAGS:<doc-id>`.
+        PageFlagsStore.write(
+            flags: parsed.pageFlags,
+            for: doc.id,
+            fileName: fileName,
+            pageCount: parsed.pageFlags.count
+        )
+
         return doc
     }
 }

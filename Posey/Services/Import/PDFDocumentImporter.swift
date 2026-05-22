@@ -29,6 +29,13 @@ struct ParsedPDFDocument: Sendable {
     /// Detected TOC entries (best-effort). Persisted via the existing
     /// `document_toc` table so the existing TOC sheet shows them.
     let tocEntries: [PDFTOCEntry]
+    /// 2026-05-22 — Phase 1 of the Tier 1/2 PDF extraction architecture.
+    /// One `PDFPageFlags` per page in page-index order, written by the
+    /// importer for later persistence in a JSON sidecar and inspection
+    /// via `LIST_PAGE_FLAGS:<doc-id>`. **Logging + persistence only at
+    /// this phase — nothing branches on `needsTier2` yet.** See
+    /// `PDFPageConfidenceDetector` + DECISIONS.md (2026-05-22 late).
+    let pageFlags: [PDFPageFlags]
 }
 
 /// Carries a parsed TOC entry from importer to library to DB.
@@ -139,6 +146,29 @@ extension PDFDocumentImporter {
         // See PDFRunningHeaderDetector for the algorithm + the
         // visual-audit-driven rationale behind the tunables.
         let headerStripRanges = PDFRunningHeaderDetector.detect(in: document)
+
+        // 2026-05-22 — Phase 1 of the Tier 1/2 PDF extraction
+        // architecture. Walk every page with the confidence detector
+        // and capture per-page flags + signals. **Logging-only at
+        // this phase.** No page extraction path branches on the
+        // result. The flags ride out on `ParsedPDFDocument.pageFlags`
+        // so `PDFLibraryImporter` can persist them via
+        // `PageFlagsStore` for later inspection through the
+        // `LIST_PAGE_FLAGS:<doc-id>` antenna verb.
+        //
+        // See `PDFPageConfidenceDetector` for the heuristics and the
+        // generous-side starting thresholds. Calibration on the audit
+        // corpus tightens these before Phase 2 wires Tier 2 (Vision
+        // OCR) in to the importer's per-page branch.
+        let pageFlags = PDFPageConfidenceDetector.assess(document)
+        let flagSummary = pageFlags.filter { $0.needsTier2 }
+        dbgLog(
+            "PDF page flags: %d/%d pages flagged for Tier 2 (full=%d fusionRepair=%d figureRegion=%d)",
+            flagSummary.count, pageFlags.count,
+            flagSummary.filter { $0.tier2Mode == .full }.count,
+            flagSummary.filter { $0.tier2Mode == .fusionRepair }.count,
+            flagSummary.filter { $0.tier2Mode == .figureRegion }.count
+        )
 
         for index in 0..<pageCount {
             guard let page = document.page(at: index) else { continue }
@@ -336,7 +366,8 @@ extension PDFDocumentImporter {
             plainText: plainText,
             images: imageRecords,
             tocSkipUntilOffset: tocSkipUntilOffset,
-            tocEntries: tocEntries
+            tocEntries: tocEntries,
+            pageFlags: pageFlags
         )
     }
 

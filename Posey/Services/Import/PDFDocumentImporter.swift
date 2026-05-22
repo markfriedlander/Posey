@@ -247,7 +247,7 @@ extension PDFDocumentImporter {
         // listening experience). Entries (best-effort) are persisted so the
         // existing TOC sheet can navigate the document.
         let tocResult = PDFTOCDetector.detect(pageTexts: readableTextPages)
-        let tocSkipUntilOffset = tocResult?.regionEndOffset ?? 0
+        var tocSkipUntilOffset = tocResult?.regionEndOffset ?? 0
         var tocEntries: [PDFTOCEntry] = tocResult.map { result in
             buildEntries(for: result.entries,
                          in: plainText,
@@ -263,6 +263,39 @@ extension PDFDocumentImporter {
             tocEntries = extractOutlineEntries(from: outline,
                                                in: document,
                                                readableTextPages: readableTextPages)
+        }
+
+        // 2026-05-22 — Outline-based skip detection. When the
+        // text-pattern TOC detector found nothing but the PDF carries
+        // a structural outline (Cryptography for Dummies is the
+        // canonical case — outline lists "Table of Contents",
+        // "BackCover", "Cryptography for Dummies", "Introduction",
+        // …), feed the outline entries through `TOCWalkContentStartDetector`
+        // to skip past TOC / publishing-info entries and land at the
+        // first body section.
+        //
+        // Three guard conditions to avoid false positives:
+        //   1. text-pattern detector didn't fire (`tocSkipUntilOffset == 0`)
+        //   2. at least 3 outline entries (single-section outlines
+        //      lack the structural cues the walker relies on)
+        //   3. the walker actually advanced past offset 0
+        //
+        // skipSource classification carries through as "heuristic"
+        // in PDFLibraryImporter (any positive skip on PDF is
+        // heuristic — there's no Gutenberg-PDF wiring yet).
+        if tocSkipUntilOffset == 0, tocEntries.count >= 3 {
+            let walkerEntries = tocEntries
+                .map { TOCWalkContentStartDetector.TOCEntry(
+                    title: $0.title, plainTextOffset: $0.plainTextOffset) }
+                .sorted { $0.plainTextOffset < $1.plainTextOffset }
+            let walkResult = TOCWalkContentStartDetector.detect(
+                tocEntries: walkerEntries,
+                plainText: plainText,
+                currentSkip: 0
+            )
+            if let advanced = walkResult.newSkipOffset, advanced > 0 {
+                tocSkipUntilOffset = advanced
+            }
         }
 
         return ParsedPDFDocument(

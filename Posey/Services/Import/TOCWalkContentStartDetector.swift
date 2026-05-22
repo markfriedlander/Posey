@@ -199,6 +199,14 @@ enum TOCWalkContentStartDetector {
 
         // PUBLISHING_INFO — narrow, distinctive phrases the importer
         // can be sure are editorial/publishing metadata.
+        // 2026-05-22 — additions for PDF outline entries: PDFs ship
+        // structural outlines that label cover / TOC / back-matter
+        // sections explicitly. Without recognizing these, the walker
+        // sees a large gap to "Introduction" and triggers prose
+        // fallback that can land inside the back-cover blurb. The
+        // patterns are deliberately narrow — `\bcover\b` alone would
+        // overmatch (e.g., a chapter titled "Under Cover"), so we
+        // require "back cover" / "front cover" / "the cover".
         let publishingInfoPatterns: [String] = [
             #"\btranscriber'?s?\s+note"#,
             #"\beditor'?s?\s+note"#,
@@ -208,6 +216,12 @@ enum TOCWalkContentStartDetector {
             #"\bimprint\b"#,
             #"\bpublisher'?s?\s+note"#,
             #"\bproject\s+gutenberg\s+(license|trademark)"#,
+            #"^(back\s*cover|front\s*cover|the\s+cover)$"#,
+            #"^(about\s+the\s+author|about\s+the\s+publisher)$"#,
+            #"^(acknowledg(e)?ments?|dedication|copyright|colophon)$"#,
+            #"^(index|glossary|bibliography|works\s+cited|references)$"#,
+            #"^table\s+of\s+contents$"#,
+            #"^list\s+of\s+(figures|tables|illustrations|sidebars|abbreviations)$"#,
         ]
         for pattern in publishingInfoPatterns {
             if lower.range(of: pattern, options: .regularExpression) != nil {

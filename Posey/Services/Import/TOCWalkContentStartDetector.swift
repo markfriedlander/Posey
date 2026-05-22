@@ -148,14 +148,33 @@ enum TOCWalkContentStartDetector {
                 // the body section. The body section is the safe
                 // floor; the prose start is the preserve-content
                 // optimization.
-                return Result(
-                    newSkipOffset: min(proseOffset, bodyOffset),
-                    usedProseFallback: true
-                )
+                //
+                // 2026-05-22 — Only treat the prose fallback as a
+                // refinement when it strictly advances past currentSkip.
+                // Otherwise the "found prose at offset N" result is just
+                // "the document contains some prose somewhere starting
+                // at N" — which for PDFs with minimal-newline preambles
+                // (IRS Pub 17 is the canonical case) collapses to the
+                // very first character of the document, and
+                // `min(0, 19697) = 0` short-circuits the entire walker
+                // result, leaving the user at the cover/title page.
+                //
+                // Strict > currentSkip preserves the Pride Saintsbury
+                // case (prose@28K > currentSkip@1207, valid refinement)
+                // but rejects the IRS case (prose@0 ≤ currentSkip@0,
+                // not a refinement — fall through to Case 4).
+                if proseOffset > currentSkip {
+                    return Result(
+                        newSkipOffset: min(proseOffset, bodyOffset),
+                        usedProseFallback: true
+                    )
+                }
             }
         }
 
-        // Case 4: gap is reasonable; trust the TOC.
+        // Case 4: gap is reasonable, OR the prose fallback couldn't
+        // find a meaningful refinement — trust the body-section
+        // entry from the TOC.
         return Result(newSkipOffset: bodyOffset, usedProseFallback: false)
     }
 

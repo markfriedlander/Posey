@@ -182,7 +182,13 @@ extension RTFDocumentImporter {
         from cursor: String.Index,
         in normalized: String
     ) -> String.Index {
-        guard let dotLeader = try? NSRegularExpression(pattern: #"^.+?(?:\t+|[ .]{3,})\d+\s*$"#) else {
+        // 2026-05-22 — Tightened from `[ .]{3,}` to `\.{4,}` for the
+        // same false-positive class TOCSkipDetector hit (see that file
+        // for the worked example with GEB's dialogue typography).
+        // Dialogue ellipses like " . . . " no longer get treated as
+        // dot leaders; real Word/Pages dot leaders have 4+ consecutive
+        // period chars.
+        guard let dotLeader = try? NSRegularExpression(pattern: #"^.+?(?:\t+|\.{4,})\s*\d+\s*$"#) else {
             return cursor
         }
         var idx = cursor
@@ -362,6 +368,37 @@ fileprivate enum RTFRawTokenizer {
                     switch word {
                     case "par", "sect":
                         flushParagraph()
+                    case "pard":
+                        // 2026-05-22 — `\pard` resets paragraph
+                        // properties (per RTF spec). Well-formed
+                        // RTFs (Word, pandoc) always emit `\par`
+                        // immediately before `\pard` so the previous
+                        // paragraph is already flushed by the time
+                        // `\pard` arrives — in that case currentText
+                        // is empty and this branch is a no-op.
+                        //
+                        // BUT some hand-written or generated RTFs
+                        // emit `\pard\s<n>\fs<n>` directly after
+                        // body text without an intervening `\par`,
+                        // which would otherwise concatenate the
+                        // following styled run onto the previous
+                        // paragraph (e.g. a heading absorbed into
+                        // its preceding body text, losing its
+                        // distinct font-size and never being
+                        // detected as a heading).
+                        //
+                        // Treat `\pard` as an implicit flush when
+                        // there's accumulated text. Safe for
+                        // well-formed RTFs (currentText empty, no-op).
+                        // The character-properties reset (font size,
+                        // bold, etc.) is NOT applied here — `\pard`
+                        // is paragraph-properties-only per spec;
+                        // character resets are `\plain`'s job, not
+                        // ours. Subsequent `\fs<n>` / `\b` control
+                        // words set the new paragraph's style.
+                        if !currentText.isEmpty {
+                            flushParagraph()
+                        }
                     case "line":
                         appendChar("\n")
                     case "tab":

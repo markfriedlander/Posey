@@ -60,7 +60,7 @@ enum TOCSkipDetector {
     /// false matches (a single "Chapter 5" line).
     private static func findOrphanDotLeaderRegionEnd(in plainText: String) -> Int {
         guard !plainText.isEmpty,
-              let dotLeader = try? NSRegularExpression(pattern: #"^.+?(?:\t+|[ .]{3,})\d+\s*$"#)
+              let dotLeader = try? NSRegularExpression(pattern: #"^.+?(?:\t+|\.{4,})\s*\d+\s*$"#)
         else { return 0 }
 
         var cursor = plainText.startIndex
@@ -125,12 +125,32 @@ enum TOCSkipDetector {
               offset >= 0, offset < plainText.count else { return offset }
         // Match a TOC line: title text, followed by either a tab
         // (Word's most common rendering of "leader" between title
-        // and page number) OR 3+ leader chars (period/space), then
-        // digits at end of line.
-        // Examples: "Chapter 1 ........ 5", "Introduction\t5",
-        // "Embracing Collaboration\t6".
+        // and page number) OR 4+ CONSECUTIVE dots, then optional
+        // whitespace, then digits at end of line.
+        //
+        // 2026-05-22 — Tightened from `[ .]{3,}` (3+ dots-or-spaces
+        // mixed) to `\.{4,}` (4+ consecutive dots) after GEB.docx
+        // surfaced false positives on dialogue typography like
+        // "Birthday Cantatatata . . 456" and "Achilles: . . . 142"
+        // where 2-3 dots interspersed with spaces satisfied the old
+        // pattern. Real Word/Pages-rendered dot leaders are
+        // unbroken runs of period chars (".........."), 5+ typical,
+        // never 2-3. The `\t+` branch is unchanged (Word's default
+        // is a tab between title and page number — no dots involved).
+        //
+        // Examples that MATCH (genuine TOC dot-leader rows):
+        //   "Chapter 1 ............ 5"
+        //   "Introduction ..... 5"
+        //   "Introduction\t5"
+        //   "Embracing Collaboration\t6"
+        //
+        // Examples that no longer match (real-world false positives):
+        //   "Birthday Cantatatata . . 456"     (2 dots, not consecutive)
+        //   "Achilles: . . . 142"              (3 dots, space-separated)
+        //   "Whitman, 1855. 23"                (1 dot)
+        //   "Note . . . 17"                    (3 dots, space-separated)
         guard let dotLeader = try? NSRegularExpression(
-            pattern: #"^.+?(?:\t+|[ .]{3,})\d+\s*$"#
+            pattern: #"^.+?(?:\t+|\.{4,})\s*\d+\s*$"#
         ) else { return offset }
 
         var cursor = offset

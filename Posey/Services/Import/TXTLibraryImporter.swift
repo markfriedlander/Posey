@@ -48,8 +48,11 @@ struct TXTLibraryImporter {
         //   2. In-prose TOC region → skip the Contents listing too
         let boundaries = GutenbergBoundaryDetector.detect(in: plainText)
         let gutenbergStart = boundaries.contentStartOffset ?? 0
-        let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: gutenbergStart) ?? gutenbergStart
-        let skip = max(gutenbergStart, postTOC)
+        // 2026-05-22 — Multi-edition Gutenberg catalog page (illustrated
+        // Alice shape). Skip past it before the in-prose TOC detector.
+        let postCatalog = GutenbergCatalogDetector.endOfCatalogRegion(in: plainText, after: gutenbergStart) ?? gutenbergStart
+        let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: postCatalog) ?? postCatalog
+        let skip = max(postCatalog, postTOC)
         // 2026-05-21 skip-source classification (locked rule).
         let skipSource: String
         if gutenbergStart > 0 {

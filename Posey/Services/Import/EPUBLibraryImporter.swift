@@ -96,8 +96,14 @@ struct EPUBLibraryImporter {
     ) -> ContentStartResult {
         let gutenbergStart = GutenbergBoundaryDetector.detect(in: plainText).contentStartOffset ?? 0
         let postGutenberg = max(existingSkip, gutenbergStart)
-        let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: postGutenberg) ?? postGutenberg
-        let afterInProse = max(postGutenberg, postTOC)
+        // 2026-05-22 — Multi-edition Gutenberg distributions (e.g.,
+        // illustrated Alice #19033) place a catalog page after the
+        // `*** START ***` marker. Skip past it before the in-prose TOC
+        // detector runs so the catalog text doesn't get treated as
+        // book content.
+        let postCatalog = GutenbergCatalogDetector.endOfCatalogRegion(in: plainText, after: postGutenberg) ?? postGutenberg
+        let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: postCatalog) ?? postCatalog
+        let afterInProse = max(postCatalog, postTOC)
 
         // Build TOC-walker input from the stored TOC. Sort by offset so
         // the walker sees entries in document order. (Persistence

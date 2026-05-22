@@ -184,10 +184,15 @@ enum TOCWalkContentStartDetector {
             #"^canto\s+[ivxlcdm0-9]+"#,
             #"^act\s+[ivxlcdm0-9]+"#,
             #"^scene\s+[ivxlcdm0-9]+"#,
-            // Standalone roman/arabic numerals optionally with period
-            // and trailing title — e.g. "I.", "I. A SCANDAL IN BOHEMIA".
-            #"^[ivxlcdm]+\.?(\s|$)"#,
-            #"^\d+\.?(\s|$)"#,
+            // Standalone roman/arabic numerals + optional separator +
+            // optional title — e.g. "I.", "I. A SCANDAL IN BOHEMIA",
+            // "I—DOWN THE RABBIT-HOLE" (illustrated Alice em-dash
+            // shape), "I-Down the Rabbit-Hole" (hyphen variant),
+            // "I: A Scandal in Bohemia" (colon variant).
+            // 2026-05-22 — broadened from `\.?(\s|$)` after illustrated
+            // Alice #19033 surfaced the em-dash separator.
+            #"^[ivxlcdm]+(?:\.|\u{2014}|\u{2013}|-|:|\s|$)"#,
+            #"^\d+(?:\.|\u{2014}|\u{2013}|-|:|\s|$)"#,
             // Section-name words (case-insensitive).
             #"^(preface|foreword|introduction|prologue|epilogue|etymology|extracts|afterword|interlude|postscript)\b"#,
         ]
@@ -218,7 +223,11 @@ enum TOCWalkContentStartDetector {
             #"\bproject\s+gutenberg\s+(license|trademark)"#,
             #"^(back\s*cover|front\s*cover|the\s+cover)$"#,
             #"^(about\s+the\s+author|about\s+the\s+publisher)$"#,
-            #"^(acknowledg(e)?ments?|dedication|copyright|colophon)$"#,
+            // 2026-05-22 — broadened from `^…$` to `^…\b` so titles
+            // like "Copyright, 1916, by SAM'L GABRIEL SONS" (illustrated
+            // Alice) classify as publishing info rather than fall
+            // through to titleBlock.
+            #"^(acknowledg(e)?ments?|dedication|copyright|colophon)\b"#,
             #"^(index|glossary|bibliography|works\s+cited|references)$"#,
             #"^table\s+of\s+contents$"#,
             #"^list\s+of\s+(figures|tables|illustrations|sidebars|abbreviations)$"#,

@@ -76,8 +76,12 @@ struct HTMLLibraryImporter {
         //   2. In-prose TOC region → skip the Contents listing too
         // The detectors are pure functions on plainText, format-agnostic.
         let gutenbergStart = GutenbergBoundaryDetector.detect(in: plainText).contentStartOffset ?? 0
-        let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: gutenbergStart) ?? gutenbergStart
-        let skip = max(gutenbergStart, postTOC)
+        // 2026-05-22 — Multi-edition Gutenberg catalog page (illustrated
+        // Alice shape). Skip past it before the in-prose TOC detector
+        // runs.
+        let postCatalog = GutenbergCatalogDetector.endOfCatalogRegion(in: plainText, after: gutenbergStart) ?? gutenbergStart
+        let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: postCatalog) ?? postCatalog
+        let skip = max(postCatalog, postTOC)
         let contentEnd = GutenbergBoundaryDetector.detect(in: plainText).contentEndOffset ?? 0
         // 2026-05-21 skip-source classification (locked rule):
         // Gutenberg marker wins for the whole skip; otherwise any

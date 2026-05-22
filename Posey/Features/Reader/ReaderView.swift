@@ -882,7 +882,7 @@ struct ReaderView: View {
             }
             .accessibilityLabel("Search in document")
 
-            if !viewModel.tocEntries.isEmpty {
+            if !viewModel.visibleTOCEntries.isEmpty {
                 Button {
                     revealChrome()
                     isShowingTOCSheet = true
@@ -3195,6 +3195,29 @@ final class ReaderViewModel: ObservableObject {
     @Published private(set) var displayBlocks: [DisplayBlock] = []
     /// Table of contents entries for this document. Empty if not available.
     @Published private(set) var tocEntries: [StoredTOCEntry] = []
+
+    /// 2026-05-22 — Filtered TOC view: entries strictly inside the
+    /// document's body content range. The full `tocEntries` array
+    /// preserves every NCX/nav entry the importer saw — including
+    /// front-matter sections (title page, Millennium Fulcrum edition
+    /// statement, in-prose Contents listing) and trailing sections
+    /// (Project Gutenberg license, transcriber's notes). Those are
+    /// not navigation targets a reader should see: tapping them
+    /// would either land at offset 0 (when the offset is before the
+    /// filtered segments range) or read aloud the license boilerplate
+    /// the content-end detector already trimmed away.
+    ///
+    /// Filter: `offset >= playbackSkipUntilOffset` AND
+    /// `offset < contentEndOffset` (when set; 0 means no trailer cap).
+    var visibleTOCEntries: [StoredTOCEntry] {
+        let skip = document.playbackSkipUntilOffset
+        let end = document.contentEndOffset
+        return tocEntries.filter { entry in
+            guard entry.plainTextOffset >= skip else { return false }
+            if end > 0 { return entry.plainTextOffset < end }
+            return true
+        }
+    }
     /// Page-number → plainText offset map for the Go-to-page input in
     /// the TOC sheet. Empty for formats with no page concept (TXT, MD,
     /// RTF, DOCX, HTML); populated for PDF (form-feed-counted) and
@@ -4743,7 +4766,7 @@ private struct TOCSheet: View {
                 NotificationCenter.default.publisher(for: .remoteTapTOCEntry)
             ) { note in
                 guard let playOrder = note.userInfo?["playOrder"] as? Int,
-                      let entry = viewModel.tocEntries.first(where: { $0.playOrder == playOrder })
+                      let entry = viewModel.visibleTOCEntries.first(where: { $0.playOrder == playOrder })
                 else { return }
                 viewModel.jumpToTOCEntry(entry)
                 dismiss()
@@ -4808,8 +4831,9 @@ private struct TOCSheet: View {
     }
 
     private var contentsList: some View {
-        List {
-            if viewModel.tocEntries.isEmpty {
+        let entries = viewModel.visibleTOCEntries
+        return List {
+            if entries.isEmpty {
                 // 2026-05-07 (parity #5): real empty state when
                 // no TOC entries are detected. The button that
                 // opens this sheet only appears when there are
@@ -4830,7 +4854,7 @@ private struct TOCSheet: View {
                     // and a notice.html both starting at 0). Combine
                     // playOrder + offset + title so duplicates stay
                     // unique even when one of them is empty.
-                    ForEach(viewModel.tocEntries, id: \.compositeID) { entry in
+                    ForEach(entries, id: \.compositeID) { entry in
                         Button {
                             viewModel.jumpToTOCEntry(entry)
                             dismiss()

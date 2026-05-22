@@ -9,6 +9,13 @@ enum DisplayBlockKind: Equatable, Hashable {
     case numbered
     case quote
     case visualPlaceholder
+    /// 2026-05-22 — Markdown horizontal rule (`---`, `***`, `___`).
+    /// Renderer shows a thin centered separator (same treatment as
+    /// the end-of-book colophon). The block carries no spoken text
+    /// (`text == ""`) and contributes nothing to plainText, so TTS
+    /// passes silently through the rule rather than reading "dash
+    /// dash dash".
+    case horizontalRule
 }
 
 // ========== BLOCK 01: DISPLAY BLOCK KIND - END ==========

@@ -104,6 +104,11 @@ struct ReaderView: View {
                                 if block.kind == .visualPlaceholder {
                                     visualPlaceholder(block: block)
                                         .frame(maxWidth: .infinity, alignment: .leading)
+                                } else if block.kind == .horizontalRule {
+                                    // 2026-05-22 — Markdown `---`/`***`/`___`.
+                                    // Same treatment as the end-of-book colophon
+                                    // separator: thin, centered, understated.
+                                    horizontalRuleView()
                                 } else {
                                     Text(viewModel.displayText(for: block))
                                         .textSelection(.enabled)
@@ -670,6 +675,7 @@ struct ReaderView: View {
             case .numbered: kindLabel = "numbered"
             case .quote: kindLabel = "quote"
             case .visualPlaceholder: kindLabel = "visualPlaceholder"
+            case .horizontalRule: kindLabel = "horizontalRule"
             }
             return (index: i, kind: kindLabel, text: block.text, startOffset: block.startOffset, endOffset: block.endOffset)
         }
@@ -1082,6 +1088,20 @@ struct ReaderView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .padding(.horizontal)
         .padding(.bottom, 6)
+    }
+
+    /// 2026-05-22 — Renders a markdown horizontal rule (`---`/`***`/`___`)
+    /// as a thin centered separator. Same understated treatment as the
+    /// end-of-book colophon's separator: a 60pt-wide 0.5pt line at
+    /// 0.25 opacity, with a comfortable amount of vertical breathing
+    /// room above and below so it reads as a section break.
+    private func horizontalRuleView() -> some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.25))
+            .frame(width: 60, height: 0.5)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, 18)
+            .accessibilityIdentifier("reader.horizontalRule")
     }
 
     private func visualPlaceholder(block: DisplayBlock) -> some View {
@@ -3963,11 +3983,21 @@ final class ReaderViewModel: ObservableObject {
     /// level scale that lived here previously was too subtle to read
     /// as hierarchy at normal reading distance.
     static func headingFontSize(body: CGFloat, level: Int) -> CGFloat {
+        // 2026-05-22 — Pushed multipliers stronger (Mark spec). The
+        // prior 1.50 / 1.30 / 1.15 scale read as "all roughly the
+        // same size" at normal reading distance, particularly on
+        // technical Markdown documents where H1/H2/H3 are the
+        // primary structural cue. The new scale makes the hierarchy
+        // feel real:
+        //   H1 = 1.75× body   (chapter-feeling title)
+        //   H2 = 1.40× body   (section)
+        //   H3 = 1.20× body   (subsection)
+        //   H4-H6 = body (weight-only differentiation as before)
         let multiplier: CGFloat
         switch max(1, min(6, level)) {
-        case 1: multiplier = 1.50
-        case 2: multiplier = 1.30
-        case 3: multiplier = 1.15
+        case 1: multiplier = 1.75
+        case 2: multiplier = 1.40
+        case 3: multiplier = 1.20
         default: multiplier = 1.00 // level 4-6 collapse to body size, weight only
         }
         return body * multiplier

@@ -14,6 +14,11 @@ struct MarkdownParser {
         case quote(text: String)
         case paragraph(text: String)
         case blank
+        /// 2026-05-22 — A markdown horizontal-rule line. Matches a
+        /// standalone line of three-or-more `-`, `*`, or `_` characters
+        /// (commonmark §4.1). Rendered as a thin centered separator and
+        /// excluded from plainText / TTS.
+        case horizontalRule
     }
 
     func parse(markdown source: String) -> ParsedMarkdownDocument {
@@ -41,6 +46,26 @@ struct MarkdownParser {
             let text = quoteBuffer.joined(separator: " ")
             appendBlock(kind: .quote, text: text)
             quoteBuffer.removeAll()
+        }
+
+        /// 2026-05-22 — Append a horizontal-rule block. Holds an empty
+        /// text and contributes nothing to `plainText` / `plainTextParts`
+        /// so TTS passes through silently. Renderer special-cases
+        /// `.horizontalRule` like it does `.visualPlaceholder`. The
+        /// block's startOffset == endOffset == the current cumulative
+        /// plainText length, so positions of subsequent blocks remain
+        /// consistent with the un-ruled flow.
+        func appendHorizontalRuleBlock() {
+            blocks.append(
+                DisplayBlock(
+                    id: blocks.count,
+                    kind: .horizontalRule,
+                    text: "",
+                    displayPrefix: nil,
+                    startOffset: offset,
+                    endOffset: offset
+                )
+            )
         }
 
         func appendBlock(kind: DisplayBlockKind, text: String, displayPrefix: String? = nil) {
@@ -91,6 +116,10 @@ struct MarkdownParser {
             case .paragraph(let text):
                 flushQuoteBuffer()
                 paragraphBuffer.append(text)
+            case .horizontalRule:
+                flushParagraphBuffer()
+                flushQuoteBuffer()
+                appendHorizontalRuleBlock()
             }
         }
 
@@ -112,6 +141,16 @@ struct MarkdownParser {
 
         if let heading = match(in: trimmed, pattern: #"^(#{1,6})\s+(.*)$"#) {
             return .heading(level: heading.0.count, text: heading.1)
+        }
+
+        // 2026-05-22 — Horizontal rule. CommonMark §4.1: a line of
+        // three-or-more matching `-`, `*`, or `_` characters, with
+        // optional spaces between (already trimmed away here). Must
+        // be a homogeneous run — `--*` doesn't qualify.
+        if let regex = try? NSRegularExpression(pattern: #"^(-{3,}|\*{3,}|_{3,})$"#),
+           regex.firstMatch(in: trimmed,
+                            range: NSRange(trimmed.startIndex..., in: trimmed)) != nil {
+            return .horizontalRule
         }
 
         if let bullet = match(in: trimmed, pattern: #"^[-*+]\s+(.*)$"#) {

@@ -521,6 +521,13 @@ final class LibraryViewModel: ObservableObject {
 
     func deleteDocument(_ document: Document) {
         do {
+            // 2026-05-22 — Cancel any in-flight embedding-index job
+            // for this document BEFORE the row is removed. Without
+            // this, the embedding pipeline's main-actor write step
+            // could fire after the delete and hit a FOREIGN KEY
+            // constraint failure when it tries to insert chunks
+            // against a no-longer-existing documents row.
+            embeddingIndex.cancelIndexing(for: document.id)
             try databaseManager.deleteDocument(document)
             loadDocuments()
             // 2026-05-13 — A4: invalidate any cached audio export
@@ -749,6 +756,9 @@ extension LibraryViewModel {
                 guard let doc = docs.first(where: { $0.id == id }) else {
                     return #"{"error":"Document not found"}"#
                 }
+                // 2026-05-22 — Cancel in-flight indexing first (FK
+                // race fix). Mirrors LibraryViewModel.deleteDocument.
+                embeddingIndex.cancelIndexing(for: doc.id)
                 try databaseManager.deleteDocument(doc)
                 loadDocuments()
                 // 2026-05-13 — A4: invalidate cached audio export.
@@ -761,6 +771,9 @@ extension LibraryViewModel {
 
             case "RESET_ALL":
                 let docs = try databaseManager.documents()
+                // 2026-05-22 — Cancel any in-flight indexing across
+                // the wipe (FK race fix).
+                for doc in docs { embeddingIndex.cancelIndexing(for: doc.id) }
                 for doc in docs { try databaseManager.deleteDocument(doc) }
                 loadDocuments()
                 // 2026-05-13 — A4: nuke the entire audio-export cache

@@ -163,6 +163,48 @@ nonisolated final class DocumentEmbeddingIndex: @unchecked Sendable {
         self.metadataExtractor = metadataExtractor
     }
 
+    // MARK: Cancellation
+
+    /// 2026-05-22 — Cancellation set for in-flight indexing jobs. The
+    /// indexing pipeline has two long-running asynchronous stages
+    /// (background CPU work + main-actor DB write). If a document is
+    /// deleted between import time and the main-actor write, the
+    /// subsequent `replaceChunks` insert hits a FOREIGN KEY constraint
+    /// failure because the documents row is gone. Callers about to
+    /// delete a document should call `cancelIndexing(for:)` first;
+    /// the embedding job checks this set at each long-running boundary
+    /// and bails silently rather than failing.
+    private let cancellationLock = NSLock()
+    private var cancelledDocumentIDs: Set<UUID> = []
+
+    /// Mark `documentID` cancelled so any in-flight indexing job for
+    /// that document bails before its next DB write. Safe to call
+    /// when no job is in flight — the entry is cleared the next time
+    /// the job (or a fresh import) reaches a checkpoint.
+    func cancelIndexing(for documentID: UUID) {
+        cancellationLock.lock()
+        cancelledDocumentIDs.insert(documentID)
+        cancellationLock.unlock()
+    }
+
+    /// Check whether an in-flight indexing job for `documentID`
+    /// should bail out. Called from the embedding job at each
+    /// long-running boundary.
+    fileprivate func isIndexingCancelled(_ documentID: UUID) -> Bool {
+        cancellationLock.lock()
+        defer { cancellationLock.unlock() }
+        return cancelledDocumentIDs.contains(documentID)
+    }
+
+    /// Clear a cancellation marker. Called from the embedding job
+    /// after it has bailed, so a fresh import of the same document
+    /// id later can proceed normally.
+    fileprivate func clearCancellation(for documentID: UUID) {
+        cancellationLock.lock()
+        cancelledDocumentIDs.remove(documentID)
+        cancellationLock.unlock()
+    }
+
     // MARK: Public surface
 
     /// Build the chunk index for `document` if it has none. Idempotent:
@@ -259,7 +301,14 @@ nonisolated final class DocumentEmbeddingIndex: @unchecked Sendable {
                 ]
             )
         }
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // 2026-05-22 — Bail early if a delete arrived before the
+            // background dispatch started.
+            guard let self = self else { return }
+            if self.isIndexingCancelled(documentID) {
+                self.clearCancellation(for: documentID)
+                return
+            }
             // Pure-CPU phase: language detection + chunking + NLEmbedding
             // calls. No SQLite touched here — database writes happen on
             // main below.
@@ -345,6 +394,16 @@ nonisolated final class DocumentEmbeddingIndex: @unchecked Sendable {
             let storedSnapshot = stored
             let entityRowsSnapshot = entityRows
             Task { @MainActor [self, database, storedSnapshot, entityRowsSnapshot] in
+                // 2026-05-22 — Last-chance cancellation check before
+                // the FK-vulnerable INSERT. If the document was deleted
+                // while we were chunking/embedding, replaceChunks would
+                // raise FOREIGN KEY constraint failed and surface as a
+                // "Reader Error" alert on the next reader open. Bail
+                // silently instead.
+                if self.isIndexingCancelled(documentID) {
+                    self.clearCancellation(for: documentID)
+                    return
+                }
                 do {
                     try database.replaceChunks(storedSnapshot, for: documentID)
                     // Task 4 #6 (B) — replace any prior entities
@@ -393,7 +452,15 @@ nonisolated final class DocumentEmbeddingIndex: @unchecked Sendable {
                             plainText: plainText,
                             characterCount: plainText.count
                         )
-                        Task { @MainActor in
+                        Task { @MainActor [self] in
+                            // 2026-05-22 — Same cancellation gate as
+                            // above. AFM metadata enhancement issues
+                            // another FK-vulnerable INSERT for the
+                            // synthetic metadata chunk.
+                            if self.isIndexingCancelled(documentID) {
+                                self.clearCancellation(for: documentID)
+                                return
+                            }
                             dbgLog("DocumentEmbeddingIndex: starting metadata enhancement for %@", documentTitle)
                             await self.enhanceMetadata(doc, extractor: extractor)
                             dbgLog("DocumentEmbeddingIndex: metadata enhancement complete for %@", documentTitle)

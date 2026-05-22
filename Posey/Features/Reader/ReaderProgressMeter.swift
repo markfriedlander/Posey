@@ -117,7 +117,12 @@ struct ReaderProgressMeter: View {
                 Spacer()
                 Text(snap.label)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    // 2026-05-22 — Was .secondary (~0.6 opacity) which
+                    // got visually drowned by body text scrolling past
+                    // beneath the safe-area inset. .primary at 0.85
+                    // gives a clearly readable label without changing
+                    // the meter's quiet typography or layout.
+                    .foregroundStyle(.primary.opacity(0.85))
                     .accessibilityIdentifier("reader.progressMeter.label")
             }
         }

@@ -1176,7 +1176,10 @@ struct ReaderView: View {
         if viewModel.isSearchMatch(segment: segment) { return 1.0 }
         switch viewModel.readingStyle {
         case .standard:
-            return 1.0
+            // 2026-05-22 — Apple Music–style lyrics dimming: non-active
+            // rows recede to ~45% opacity so the highlighted sentence
+            // becomes the clear focal point. Was 1.0 (no dimming) before.
+            return viewModel.isActive(segment: segment) ? 1.0 : 0.45
         case .focus:
             return viewModel.isActive(segment: segment) ? 1.0 : 0.45
         case .immersive, .motion:
@@ -1190,7 +1193,9 @@ struct ReaderView: View {
         if viewModel.isSearchMatch(block: block) { return 1.0 }
         switch viewModel.readingStyle {
         case .standard:
-            return 1.0
+            // 2026-05-22 — Apple Music–style lyrics dimming. Non-active
+            // rows recede so the highlighted sentence draws the eye.
+            return viewModel.isActive(block: block) ? 1.0 : 0.45
         case .focus:
             return viewModel.isActive(block: block) ? 1.0 : 0.45
         case .immersive, .motion:

@@ -98,6 +98,30 @@ struct PDFPageFlags: Codable, Sendable, Equatable {
         /// Mean token length across all whitespace-separated
         /// tokens on the page. Body prose: 4–6. Fused covers: 12+.
         let avgWordLength: Double
+        /// 2026-05-22 Phase 2.1 — count of tokens length ≥
+        /// `mixedCaseTokenMinLength` that contain at least one
+        /// `[a-z][A-Z]` boundary (camelCase / PascalCase fusion
+        /// signature). Defaults to 0 in older sidecars decoded
+        /// against this schema.
+        let mixedCaseTokenCount: Int
+
+        /// Custom decoder so older Phase 1 / Phase 2 sidecars without
+        /// `mixedCaseTokenCount` decode cleanly (default 0).
+        init(
+            charCount: Int,
+            pageAreaPt2: Double,
+            charDensity: Double,
+            longCapsTokenCount: Int,
+            avgWordLength: Double,
+            mixedCaseTokenCount: Int = 0
+        ) {
+            self.charCount = charCount
+            self.pageAreaPt2 = pageAreaPt2
+            self.charDensity = charDensity
+            self.longCapsTokenCount = longCapsTokenCount
+            self.avgWordLength = avgWordLength
+            self.mixedCaseTokenCount = mixedCaseTokenCount
+        }
     }
 }
 
@@ -155,14 +179,32 @@ struct PDFPageConfidenceDetector {
     static let minCharDensity: Double = 0.5
 
     /// All-caps token length threshold for the fusion signature.
-    /// 12 chars is longer than every common English word, so an
-    /// all-caps token at this length is almost certainly multiple
-    /// words fused together (cover-page rendering loses spaces).
-    static let longCapsTokenMinLength: Int = 12
+    /// 9 chars catches "ANETERNAL" (the canonical GEB cover fusion
+    /// case). Longer than common English words like "DIFFERENT" (9)
+    /// is borderline — we accept a slightly higher false-positive
+    /// rate per Mark's directive that Vision cycles are cheap and
+    /// the reconciler's per-page char-loss + token-ratio gates
+    /// prevent harmful swaps.
+    /// 2026-05-22 Phase 2.1 — lowered 12 → 9 after GEB cover audit.
+    static let longCapsTokenMinLength: Int = 9
 
-    /// One long all-caps token can happen legitimately ("INTRODUCTION"
-    /// is 12). Two on the same page is the cover-page signature.
+    /// One long all-caps token can happen legitimately ("DIFFERENT",
+    /// "EVERYWHERE", "STATEMENTS"). Two on the same page is the
+    /// cover-page / decorative-title signature.
     static let minLongCapsTokensForFusion: Int = 2
+
+    /// 2026-05-22 Phase 2.1 — camelCase / PascalCase internal-
+    /// boundary heuristic. Catches fusion where lowercase-to-
+    /// uppercase transitions inside a token mark a lost space
+    /// (e.g., "wordWord", "TitleWord", "iPhoneOS"). Tokens shorter
+    /// than this length aren't long enough for the signature to be
+    /// distinctive.
+    static let mixedCaseTokenMinLength: Int = 7
+
+    /// At least this many internal `[a-z][A-Z]` boundaries across
+    /// the page's tokens to fire `.fusionRepair`. Two is the
+    /// minimum "this isn't just one brand name" threshold.
+    static let minMixedCaseTokensForFusion: Int = 2
 
     /// Mean word length threshold for decorative-typography fusion.
     /// Body prose: 4–6. Title pages with letterspacing: 12+.
@@ -204,6 +246,7 @@ struct PDFPageConfidenceDetector {
             .split(whereSeparator: { $0.isWhitespace })
             .map(String.init)
         let longCapsTokens = tokens.filter(isLongCapsToken)
+        let mixedCaseTokens = tokens.filter(isMixedCaseToken)
         let avgWordLen: Double = {
             guard !tokens.isEmpty else { return 0 }
             let totalChars = tokens.reduce(0) { $0 + $1.count }
@@ -244,6 +287,21 @@ struct PDFPageConfidenceDetector {
             if mode == .none { mode = .fusionRepair }
         }
 
+        // 2026-05-22 Phase 2.1 — Heuristic 5: camelCase / PascalCase
+        // internal-boundary fusion. Catches tokens like "wordWord"
+        // / "TitleWord" where PDFKit collapsed a space across a case
+        // boundary. Programming-style identifiers and brand names
+        // ("YouTube", "iPhone") will false-positive here; that's
+        // acceptable per the calibration directive (Vision cycles
+        // are cheap; the reconciler protects against bad swaps).
+        if mixedCaseTokens.count >= minMixedCaseTokensForFusion {
+            let sample = mixedCaseTokens.prefix(3).joined(separator: " ")
+            reasons.append(
+                "\(mixedCaseTokens.count) mixed-case tokens ≥ \(mixedCaseTokenMinLength) chars with [a-z][A-Z] boundary (e.g. \(sample))"
+            )
+            if mode == .none { mode = .fusionRepair }
+        }
+
         return PDFPageFlags(
             pageIndex: pageIndex,
             needsTier2: mode != .none,
@@ -254,7 +312,8 @@ struct PDFPageConfidenceDetector {
                 pageAreaPt2: area,
                 charDensity: density,
                 longCapsTokenCount: longCapsTokens.count,
-                avgWordLength: avgWordLen
+                avgWordLength: avgWordLen,
+                mixedCaseTokenCount: mixedCaseTokens.count
             )
         )
     }
@@ -288,9 +347,29 @@ struct PDFPageConfidenceDetector {
                 pageAreaPt2: 0,
                 charDensity: 0,
                 longCapsTokenCount: 0,
-                avgWordLength: 0
+                avgWordLength: 0,
+                mixedCaseTokenCount: 0
             )
         )
+    }
+
+    /// 2026-05-22 Phase 2.1 — true iff the token is length ≥
+    /// `mixedCaseTokenMinLength` AND contains at least one `[a-z][A-Z]`
+    /// adjacent-character boundary. The pattern catches fusion where
+    /// PDFKit collapsed a space across a case transition. Single-
+    /// character classification via Foundation's `isLowercase` /
+    /// `isUppercase` so the check works across Unicode scripts (Latin
+    /// extended, Greek, Cyrillic — same behavior).
+    fileprivate static func isMixedCaseToken(_ token: String) -> Bool {
+        guard token.count >= mixedCaseTokenMinLength else { return false }
+        var prev: Character? = nil
+        for ch in token {
+            if let p = prev, p.isLetter, ch.isLetter, p.isLowercase, ch.isUppercase {
+                return true
+            }
+            prev = ch
+        }
+        return false
     }
 
     fileprivate static func formatArea(_ a: Double) -> String {

@@ -142,6 +142,20 @@ struct PDFTier12Reconciler {
     /// Tier 1.
     static let fusionRepairTokenRatio: Double = 1.25
 
+    /// 2026-05-22 Phase 2.1 — char-loss safety guard. Reject any
+    /// proposed swap (in any mode) where Tier 2's output has at
+    /// least this fraction fewer characters than Tier 1. Catches
+    /// the NIST p3 TOC regression case: Vision produced a higher
+    /// token count by splitting differently but dropped dot-leader
+    /// + page-number content, ending up at 50% of Tier 1's char
+    /// count. The token gate alone allowed the swap; this guard
+    /// rejects it.
+    ///
+    /// Applied to ALL modes including `.full` — defends against
+    /// pathological Vision outputs where rescue mode runs but the
+    /// output is structurally incomplete.
+    static let maxTier2CharLossRatio: Double = 0.30
+
     // MARK: Result type
 
     enum Decision: String, Sendable {
@@ -169,6 +183,22 @@ struct PDFTier12Reconciler {
 
         if tier2.isEmpty {
             return Result(text: tier1, decision: .tier2Empty, tier2Chars: 0)
+        }
+
+        // 2026-05-22 Phase 2.1 — universal char-loss guard. If a
+        // swap would discard > maxTier2CharLossRatio of Tier 1's
+        // characters, refuse regardless of mode or token ratio.
+        // The `.full` rescue case (Tier 1 < 50 chars) is exempt
+        // because the loss math doesn't mean anything when the
+        // baseline is tiny — we're not "losing" content, we're
+        // adding it.
+        if tier1.count >= PDFTier12Reconciler.fullModeTier1MaxChars {
+            let minAllowedTier2Chars = Int(
+                Double(tier1.count) * (1.0 - maxTier2CharLossRatio)
+            )
+            if tier2.count < minAllowedTier2Chars {
+                return Result(text: tier1, decision: .tier1Kept, tier2Chars: tier2.count)
+            }
         }
 
         switch mode {

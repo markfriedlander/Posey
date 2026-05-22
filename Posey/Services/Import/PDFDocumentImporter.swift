@@ -186,6 +186,21 @@ extension PDFDocumentImporter {
             throw ImportError.scannedDocument
         }
 
+        // 2026-05-22 — Watermark strip. Converter watermarks (ChmMagic,
+        // Aspose, Calibre, generic "Evaluation Only" notices) are
+        // injected by upstream tools and repeat on every page of the
+        // resulting PDF. Without this strip, they read aloud as if
+        // they were prose, embed into the RAG index, and surface as
+        // the document's first sentence. Applied per-page so the
+        // downstream TOC detector also sees clean text.
+        readableTextPages = readableTextPages.map { PDFWatermarkStripper.strip($0) }
+        pageContents = pageContents.map { content in
+            switch content {
+            case .text(let t): return .text(PDFWatermarkStripper.strip(t))
+            case .visualPlaceholder: return content
+            }
+        }
+
         // Join pages, then run a second collapseLineBreakHyphens pass so that
         // hyphens spanning a page boundary (word-\x0cword) are collapsed too.
         // Per-page normalize() can't catch these because it runs before joining.

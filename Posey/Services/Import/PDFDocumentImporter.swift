@@ -160,7 +160,13 @@ extension PDFDocumentImporter {
         // generous-side starting thresholds. Calibration on the audit
         // corpus tightens these before Phase 2 wires Tier 2 (Vision
         // OCR) in to the importer's per-page branch.
-        let pageFlags = PDFPageConfidenceDetector.assess(document)
+        // 2026-05-22 Phase 2 — `pageFlags` is mutable here because
+        // the Tier 2 branch in the per-page loop annotates each
+        // flag with its runtime outcome (`tier2: Tier2Outcome`).
+        // The final array is what gets persisted in the sidecar so
+        // `LIST_PAGE_FLAGS` shows both the static heuristic decision
+        // and what Vision actually did.
+        var pageFlags = PDFPageConfidenceDetector.assess(document)
         let flagSummary = pageFlags.filter { $0.needsTier2 }
         dbgLog(
             "PDF page flags: %d/%d pages flagged for Tier 2 (full=%d fusionRepair=%d figureRegion=%d)",
@@ -184,7 +190,44 @@ extension PDFDocumentImporter {
                 }
                 return rawPageString
             }()
-            let pdfText = normalize(stripped)
+            var pdfText = normalize(stripped)
+
+            // 2026-05-22 Phase 2 — Tier 2 Vision OCR for pages the
+            // confidence detector flagged. Only invoked on flagged
+            // pages where Tier 1 produced SOME text (the empty-text
+            // path below already runs Vision via the existing OCR
+            // fallback). The reconciler decides whether to swap Tier
+            // 2's output in for Tier 1's — token-count comparison for
+            // `.fusionRepair`, wholesale swap on rescued empty pages
+            // for `.full`. See `PDFTier12Reconciler`.
+            if !pdfText.isEmpty,
+               index < pageFlags.count,
+               pageFlags[index].needsTier2 {
+                progress?(.ocr(page: index + 1, of: pageCount))
+                let visionRaw = PDFTier2VisionExtractor.extract(page)
+                let visionNormalized = visionRaw.isEmpty ? "" : normalize(visionRaw)
+                let result = PDFTier12Reconciler.merge(
+                    tier1: pdfText,
+                    tier2: visionNormalized,
+                    mode: pageFlags[index].tier2Mode
+                )
+                pageFlags[index].tier2 = PDFPageFlags.Tier2Outcome(
+                    ran: true,
+                    decision: result.decision.rawValue,
+                    tier2Chars: result.tier2Chars
+                )
+                if result.decision == .visionWon {
+                    dbgLog(
+                        "PDF Tier 2 swap on page %d (mode=%@): tier1=%d → tier2=%d chars",
+                        index + 1,
+                        pageFlags[index].tier2Mode.rawValue,
+                        pdfText.count,
+                        result.tier2Chars
+                    )
+                    pdfText = result.text
+                }
+            }
+
             if !pdfText.isEmpty {
                 pageContents.append(.text(pdfText))
                 readableTextPages.append(pdfText)
@@ -201,6 +244,17 @@ extension PDFDocumentImporter {
                 // PDFKit found no text — report progress then try Vision OCR.
                 progress?(.ocr(page: index + 1, of: pageCount))
                 let ocr = ocrText(from: page)
+                // 2026-05-22 Phase 2 — record fallback Vision outcome
+                // in the page-flags telemetry so calibration sees a
+                // unified view of which pages went through Vision and
+                // what happened.
+                if index < pageFlags.count {
+                    pageFlags[index].tier2 = PDFPageFlags.Tier2Outcome(
+                        ran: true,
+                        decision: ocr.count >= 10 ? "fallback_ocr_used" : "fallback_ocr_empty",
+                        tier2Chars: ocr.count
+                    )
+                }
                 // Require at least 10 chars of OCR text before treating a page as readable.
                 // Fewer than that (page numbers, "iii", lone captions) means the page is
                 // effectively visual — render it as an image stop instead.

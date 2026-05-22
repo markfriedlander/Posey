@@ -1334,7 +1334,7 @@ extension LibraryViewModel {
                     ? record.flags
                     : record.flags.filter { $0.needsTier2 }
                 let pages: [[String: Any]] = included.map { f in
-                    [
+                    var page: [String: Any] = [
                         "pageIndex": f.pageIndex,
                         "needsTier2": f.needsTier2,
                         "tier2Mode": f.tier2Mode.rawValue,
@@ -1347,6 +1347,14 @@ extension LibraryViewModel {
                             "avgWordLength": f.signals.avgWordLength
                         ]
                     ]
+                    if let t2 = f.tier2 {
+                        page["tier2"] = [
+                            "ran": t2.ran,
+                            "decision": t2.decision,
+                            "tier2Chars": t2.tier2Chars
+                        ]
+                    }
+                    return page
                 }
                 let summary = record.summary
                 return json([
@@ -1358,6 +1366,7 @@ extension LibraryViewModel {
                     "pageCount": summary.pageCount,
                     "flaggedCount": summary.flaggedCount,
                     "modeCounts": summary.modeCounts,
+                    "tier2Counts": summary.tier2Counts,
                     "returned": pages.count,
                     "includeAll": includeAll,
                     "pages": pages

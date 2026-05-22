@@ -35,11 +35,51 @@ struct PDFPageFlags: Codable, Sendable, Equatable {
     /// underlying distribution is sound.
     let signals: Signals
 
+    /// Set during parsing when Tier 2 ran on this page (Phase 2).
+    /// Nil before parsing completes and on pages where Tier 2 was
+    /// not invoked. The value records what actually happened — did
+    /// Vision return text, did the reconciler pick Vision or keep
+    /// PDFKit, how many chars Vision produced.
+    var tier2: Tier2Outcome?
+
     enum Tier2Mode: String, Codable, Sendable {
         case none
         case full           // image-only or near-empty pages
         case fusionRepair   // text present but word boundaries fused
         case figureRegion   // mixed text + large image (Phase 2; not emitted yet)
+    }
+
+    /// Records what the Phase 2 Tier 2 path actually did on this page.
+    struct Tier2Outcome: Codable, Sendable, Equatable {
+        let ran: Bool
+        /// Free-form decision label, set by `PDFTier12Reconciler` or
+        /// the importer's empty-text OCR fallback. Known values:
+        ///   - `vision_won`        Reconciler swapped Tier 2 in
+        ///   - `tier1_kept`        Reconciler kept Tier 1 unchanged
+        ///   - `tier2_empty`       Vision returned no text
+        ///   - `fallback_ocr_used` Empty-text fallback path used Vision (Phase 1 behavior)
+        ///   - `fallback_ocr_empty` Empty-text fallback got no OCR text → visual stop
+        let decision: String
+        let tier2Chars: Int
+    }
+
+    /// Custom init so `tier2` defaults to nil and existing call sites
+    /// don't need to thread it through. Tier 2 outcomes are set by the
+    /// importer's Phase 2 branch after parsing decides what happened.
+    init(
+        pageIndex: Int,
+        needsTier2: Bool,
+        tier2Mode: Tier2Mode,
+        reasons: [String],
+        signals: Signals,
+        tier2: Tier2Outcome? = nil
+    ) {
+        self.pageIndex = pageIndex
+        self.needsTier2 = needsTier2
+        self.tier2Mode = tier2Mode
+        self.reasons = reasons
+        self.signals = signals
+        self.tier2 = tier2
     }
 
     struct Signals: Codable, Sendable, Equatable {

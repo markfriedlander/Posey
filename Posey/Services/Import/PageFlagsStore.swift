@@ -39,10 +39,18 @@ struct PageFlagsStore {
             for f in flagged {
                 modeCounts[f.tier2Mode.rawValue, default: 0] += 1
             }
+            // Phase 2: aggregate the Tier 2 runtime outcomes.
+            var tier2Counts: [String: Int] = [:]
+            for f in flags {
+                if let outcome = f.tier2, outcome.ran {
+                    tier2Counts[outcome.decision, default: 0] += 1
+                }
+            }
             return Summary(
                 pageCount: pageCount,
                 flaggedCount: flagged.count,
-                modeCounts: modeCounts
+                modeCounts: modeCounts,
+                tier2Counts: tier2Counts
             )
         }
     }
@@ -51,9 +59,14 @@ struct PageFlagsStore {
         let pageCount: Int
         let flaggedCount: Int
         let modeCounts: [String: Int]
+        /// Phase 2: counts keyed by `Tier2Outcome.decision` for pages
+        /// where Tier 2 ran. Includes empty-text fallback outcomes
+        /// (`fallback_ocr_used`, `fallback_ocr_empty`) so calibration
+        /// has a unified view of every Vision invocation.
+        let tier2Counts: [String: Int]
     }
 
-    static let detectorVersion: String = "v1.0-phase1"
+    static let detectorVersion: String = "v1.1-phase2"
 
     // MARK: Disk layout
 

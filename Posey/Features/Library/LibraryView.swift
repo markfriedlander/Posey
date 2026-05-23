@@ -63,9 +63,16 @@ struct LibraryView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(document.title)
                             .font(.headline)
-                        Text("\(document.characterCount) characters")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        // 2026-05-22 Phase 2.2 Step 8 — reading-time
+                        // label replaces the raw character count. Shows
+                        // total time when unstarted, time-remaining when
+                        // in progress, and a "Completed" indicator when
+                        // the reader has reached the document's end.
+                        // Tracks TTS rate changes via UserDefaults notifications.
+                        LibraryReadingTimeLabel(
+                            document: document,
+                            databaseManager: viewModel.databaseManager
+                        )
                     }
                     .padding(.vertical, 4)
                 }
@@ -160,10 +167,8 @@ struct LibraryView: View {
             ) { _ in
                 // 2026-05-22 Phase 2.2 Step 7 — refresh the library
                 // so the card's characterCount reflects the post-
-                // Tier-2 + Tier-3 corrected text. We reload every
-                // doc rather than patching one row because the
-                // current LibraryViewModel.documents is a cached
-                // array refreshed via loadDocuments.
+                // Tier-2 + Tier-3 corrected text. Step 8 — same
+                // reload also refreshes the reading-time label.
                 viewModel.loadDocuments()
             }
             .onReceive(

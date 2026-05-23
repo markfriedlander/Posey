@@ -2353,4 +2353,236 @@ extension DatabaseManager {
 
 // ========== BLOCK 08: PHASE 2.2 CONTENT BOUNDARIES + PAGE REWRITE - END ==========
 
+// ========== BLOCK 09: PHASE 2.2 TIER 3 FUSION REPAIR HELPERS - START ==========
+
+extension DatabaseManager {
+
+    /// Read every original token already corrected (or attempted-and-
+    /// kept-unchanged) for a document. Tier 3 startup queries this to
+    /// skip tokens it's already processed.
+    func existingAFMCorrections(for documentID: UUID) throws -> Set<String> {
+        let sql = "SELECT original FROM document_afm_corrections WHERE document_id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var out = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let s = sqliteString(statement, index: 0) {
+                out.insert(s)
+            }
+        }
+        return out
+    }
+
+    /// Record an AFM verdict for a token. UNIQUE constraint on
+    /// (document_id, original) — if the token's already recorded
+    /// the insert is a no-op (`ON CONFLICT DO NOTHING`).
+    func recordAFMCorrection(
+        documentID: UUID,
+        original: String,
+        corrected: String
+    ) throws {
+        let sql = """
+        INSERT INTO document_afm_corrections (document_id, original, corrected, applied_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(document_id, original) DO NOTHING;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        try bind(original, at: 2, for: statement)
+        try bind(corrected, at: 3, for: statement)
+        sqlite3_bind_double(statement, 4, Date().timeIntervalSince1970)
+        try step(statement)
+    }
+
+    /// **Atomic per-token document rewrite.** The Tier 3 analogue of
+    /// `rewritePageText` — splices a token-level correction across
+    /// the whole document.
+    ///
+    /// Finds every word-boundary occurrence of `original` in
+    /// `documents.plainText`, replaces with `corrected`, updates every
+    /// chunk whose text contained the token (with re-embedding via
+    /// the supplied closure), and shifts every downstream offset in
+    /// `content_boundaries`, later chunks' `startOffset`/`endOffset`,
+    /// `reading_positions.character_offset`, `notes.start_offset` /
+    /// `end_offset`, and `document_toc.plain_text_offset` by the
+    /// appropriate cumulative delta. Wrapped in a single SQL
+    /// transaction.
+    ///
+    /// Returns nil if no occurrences were found (caller still records
+    /// the verdict in `document_afm_corrections` so the no-op token
+    /// isn't reprocessed on subsequent runs).
+    func replaceTokenInDocument(
+        documentID: UUID,
+        original: String,
+        corrected: String,
+        embedKind: String,
+        embed: (String) -> [Double]
+    ) throws -> ReplaceTokenResult? {
+        let oldPlainText = try plainText(for: documentID) ?? ""
+        let oldChunks = try chunks(for: documentID)
+        let oldBoundaries = try contentBoundaries(for: documentID)
+
+        let escaped = NSRegularExpression.escapedPattern(for: original)
+        guard let regex = try? NSRegularExpression(pattern: "\\b\(escaped)\\b") else {
+            return nil
+        }
+        let nsText = oldPlainText as NSString
+        let matches = regex.matches(
+            in: oldPlainText,
+            range: NSRange(location: 0, length: nsText.length)
+        )
+        if matches.isEmpty { return nil }
+
+        let perDelta = corrected.utf16.count - original.utf16.count
+        let positions = matches.map { $0.range.location }.sorted()
+
+        // Build new plainText via reverse-iteration splicing.
+        var newPlainText = oldPlainText
+        for match in matches.sorted(by: { $0.range.location > $1.range.location }) {
+            guard let r = Range(match.range, in: newPlainText) else { continue }
+            newPlainText.replaceSubrange(r, with: corrected)
+        }
+
+        // Rebuild chunks with cumulative-delta offsets + in-place
+        // text update where occurrences land inside the chunk.
+        var newChunks: [StoredDocumentChunk] = []
+        var affectedChunks = 0
+        for chunk in oldChunks {
+            let preceding = positions.filter { $0 < chunk.startOffset }.count
+            let inside = positions.filter { $0 >= chunk.startOffset && $0 < chunk.endOffset }.count
+            let precedingDelta = preceding * perDelta
+            let newStart = chunk.startOffset + precedingDelta
+            let newEnd = chunk.endOffset + precedingDelta + (inside * perDelta)
+            if inside > 0 {
+                affectedChunks += 1
+                let chunkNS = chunk.text as NSString
+                let newText = regex.stringByReplacingMatches(
+                    in: chunk.text,
+                    range: NSRange(location: 0, length: chunkNS.length),
+                    withTemplate: NSRegularExpression.escapedTemplate(for: corrected)
+                )
+                let newVec = embed(newText)
+                newChunks.append(StoredDocumentChunk(
+                    chunkIndex: chunk.chunkIndex,
+                    startOffset: newStart,
+                    endOffset: newEnd,
+                    text: newText,
+                    embedding: newVec,
+                    embeddingKind: embedKind,
+                    pageStart: chunk.pageStart,
+                    pageEnd: chunk.pageEnd,
+                    revision: chunk.revision + 1,
+                    sourceTier: "tier3_afm_repair"
+                ))
+            } else {
+                newChunks.append(StoredDocumentChunk(
+                    chunkIndex: chunk.chunkIndex,
+                    startOffset: newStart,
+                    endOffset: newEnd,
+                    text: chunk.text,
+                    embedding: chunk.embedding,
+                    embeddingKind: chunk.embeddingKind,
+                    pageStart: chunk.pageStart,
+                    pageEnd: chunk.pageEnd,
+                    revision: chunk.revision,
+                    sourceTier: chunk.sourceTier
+                ))
+            }
+        }
+
+        // Shift content_boundaries by preceding-match count × perDelta.
+        var newBoundaries = oldBoundaries
+        for i in 0..<newBoundaries.count {
+            let preceding = positions.filter { $0 < newBoundaries[i] }.count
+            newBoundaries[i] += preceding * perDelta
+        }
+
+        // ── Atomic transaction ──────────────────────────────────
+        try execute("BEGIN TRANSACTION;")
+        do {
+            try execute("DELETE FROM document_chunks WHERE document_id = '\(documentID.uuidString)';")
+            let insertSQL = """
+            INSERT INTO document_chunks
+                (document_id, chunk_index, start_offset, end_offset, text, embedding, embedding_kind,
+                 page_start, page_end, revision, source_tier)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            for chunk in newChunks {
+                let s = try prepareStatement(sql: insertSQL)
+                defer { sqlite3_finalize(s) }
+                try bind(documentID.uuidString, at: 1, for: s)
+                sqlite3_bind_int(s, 2, Int32(chunk.chunkIndex))
+                sqlite3_bind_int(s, 3, Int32(chunk.startOffset))
+                sqlite3_bind_int(s, 4, Int32(chunk.endOffset))
+                try bind(chunk.text, at: 5, for: s)
+                let blob = chunk.embedding.withUnsafeBufferPointer { Data(buffer: $0) }
+                let bytes = [UInt8](blob)
+                if sqlite3_bind_blob(s, 6, bytes, Int32(bytes.count), SQLITE_TRANSIENT) != SQLITE_OK {
+                    throw DatabaseError.bindFailed(lastErrorMessage())
+                }
+                try bind(chunk.embeddingKind, at: 7, for: s)
+                sqlite3_bind_int(s, 8, Int32(chunk.pageStart))
+                sqlite3_bind_int(s, 9, Int32(chunk.pageEnd))
+                sqlite3_bind_int(s, 10, Int32(chunk.revision))
+                try bind(chunk.sourceTier, at: 11, for: s)
+                try step(s)
+            }
+
+            // Update documents row.
+            let docSQL = "UPDATE documents SET plain_text = ?, character_count = ?, content_boundaries = ? WHERE id = ?;"
+            let ds = try prepareStatement(sql: docSQL)
+            defer { sqlite3_finalize(ds) }
+            try bind(newPlainText, at: 1, for: ds)
+            sqlite3_bind_int(ds, 2, Int32(newPlainText.count))
+            let boundaryJSON = String(
+                data: try JSONEncoder().encode(newBoundaries),
+                encoding: .utf8
+            ) ?? "[]"
+            try bind(boundaryJSON, at: 3, for: ds)
+            try bind(documentID.uuidString, at: 4, for: ds)
+            try step(ds)
+
+            // Shift linked tables. Iterate positions in REVERSE so
+            // each `>` filter uses original positions; cumulative
+            // effect compounds correctly per match.
+            if perDelta != 0 {
+                for pos in positions.reversed() {
+                    let shifts = [
+                        "UPDATE reading_positions SET character_offset = character_offset + \(perDelta) WHERE document_id = ? AND character_offset > \(pos);",
+                        "UPDATE notes SET start_offset = start_offset + \(perDelta) WHERE document_id = ? AND start_offset > \(pos);",
+                        "UPDATE notes SET end_offset = end_offset + \(perDelta) WHERE document_id = ? AND end_offset > \(pos);",
+                        "UPDATE document_toc SET plain_text_offset = plain_text_offset + \(perDelta) WHERE document_id = ? AND plain_text_offset > \(pos);"
+                    ]
+                    for sql in shifts {
+                        let s = try prepareStatement(sql: sql)
+                        defer { sqlite3_finalize(s) }
+                        try bind(documentID.uuidString, at: 1, for: s)
+                        try step(s)
+                    }
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+
+        return ReplaceTokenResult(
+            occurrenceCount: matches.count,
+            totalDelta: matches.count * perDelta,
+            affectedChunks: affectedChunks
+        )
+    }
+
+    struct ReplaceTokenResult: Sendable {
+        let occurrenceCount: Int
+        let totalDelta: Int
+        let affectedChunks: Int
+    }
+}
+
+// ========== BLOCK 09: PHASE 2.2 TIER 3 FUSION REPAIR HELPERS - END ==========
+
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

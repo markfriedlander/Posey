@@ -210,9 +210,24 @@ actor PDFEnhancementService {
             return
         }
 
-        // Step 6 will replace this with the actual Tier 3 run; for
-        // now we transition straight to 'complete' so the
-        // state machine is observable end-to-end.
+        // Tier 3 — AFM fusion repair. Mark status, run, then
+        // transition to complete.
+        do {
+            try await MainActor.run {
+                try db.updateEnhancementState(documentID: documentID, status: "tier3", error: nil)
+            }
+        } catch {
+            dbgLog("PDFEnhancementService: failed to set tier3 status for %@: %@",
+                   documentID.uuidString, String(describing: error))
+        }
+
+        await runTier3(documentID: documentID)
+
+        if cancelled.contains(documentID) {
+            cancelled.remove(documentID)
+            return
+        }
+
         do {
             try await MainActor.run {
                 try db.updateEnhancementState(documentID: documentID, status: "complete", error: nil)
@@ -223,6 +238,160 @@ actor PDFEnhancementService {
             dbgLog("PDFEnhancementService: failed to mark complete for %@: %@",
                    documentID.uuidString, String(describing: error))
         }
+    }
+
+    // MARK: Tier 3 — AFM fusion repair
+
+    /// Run Tier 3 (AFM fusion-token correction) on the document.
+    /// Detects suspect tokens via `SuspectTokenDetector`, skips any
+    /// already-corrected ones (idempotency via
+    /// `document_afm_corrections`), and for each remaining token:
+    /// asks AFM via `FusionCorrectionAFM.correct`, records the
+    /// verdict, and (if AFM proposed a change) applies the swap
+    /// across the whole document via `DatabaseManager.replaceTokenInDocument`.
+    ///
+    /// Sequential per Mark's directive — one token per AFM call (Rule
+    /// 6: local inference is free; batching gives no quality benefit
+    /// for a per-token decision and costs prompt clarity). The actor
+    /// isolation provides natural pacing without an explicit
+    /// cooldown (matches Phase B chunk enhancement).
+    private func runTier3(documentID: UUID) async {
+        guard let db = databaseManager else { return }
+
+        let plainText: String
+        do {
+            plainText = try await MainActor.run {
+                try db.plainText(for: documentID) ?? ""
+            }
+        } catch {
+            dbgLog("PDFEnhancementService: Tier 3 — failed to read plainText for %@: %@",
+                   documentID.uuidString, String(describing: error))
+            return
+        }
+        if plainText.isEmpty {
+            dbgLog("PDFEnhancementService: Tier 3 skipped — empty plainText on %@",
+                   documentID.uuidString)
+            return
+        }
+
+        let allSuspects = SuspectTokenDetector.detect(in: plainText)
+        if allSuspects.isEmpty {
+            dbgLog("PDFEnhancementService: Tier 3 — no suspect tokens on %@",
+                   documentID.uuidString)
+            return
+        }
+
+        let alreadyProcessed: Set<String>
+        do {
+            alreadyProcessed = try await MainActor.run {
+                try db.existingAFMCorrections(for: documentID)
+            }
+        } catch {
+            dbgLog("PDFEnhancementService: Tier 3 — failed to read corrections for %@: %@",
+                   documentID.uuidString, String(describing: error))
+            return
+        }
+
+        let toProcess = allSuspects.filter { !alreadyProcessed.contains($0) }
+        if toProcess.isEmpty {
+            dbgLog("PDFEnhancementService: Tier 3 — every suspect already processed on %@",
+                   documentID.uuidString)
+            return
+        }
+        dbgLog("PDFEnhancementService: Tier 3 starting on %@ — %d suspect tokens (already done %d, total %d)",
+               documentID.uuidString, toProcess.count, alreadyProcessed.count, allSuspects.count)
+
+        // Determine embedding kind for re-embeds on chunks the swap
+        // touches. Same logic as Tier 2.
+        let existingChunks: [StoredDocumentChunk]
+        do {
+            existingChunks = try await MainActor.run { try db.chunks(for: documentID) }
+        } catch {
+            dbgLog("PDFEnhancementService: Tier 3 — failed to read chunks for %@: %@",
+                   documentID.uuidString, String(describing: error))
+            return
+        }
+        let kindCounts = Dictionary(grouping: existingChunks, by: { $0.embeddingKind })
+            .mapValues(\.count)
+        let dominantKind: String = kindCounts.max(by: { $0.value < $1.value })?.key ?? "en-sentence"
+
+        var processedCount = 0
+        var appliedCount = 0
+        for token in toProcess {
+            if cancelled.contains(documentID) {
+                dbgLog("PDFEnhancementService: Tier 3 cancelled mid-run on %@",
+                       documentID.uuidString)
+                return
+            }
+
+            let verdict = await FusionCorrectionAFM.correct(token)
+            guard let corrected = verdict else {
+                // AFM unavailable or refused — skip silently.
+                dbgLog("PDFEnhancementService: Tier 3 — AFM returned nil for token '%@'", token)
+                processedCount += 1
+                continue
+            }
+
+            // Record the verdict regardless of whether it differs —
+            // ensures the same token isn't re-asked next run.
+            do {
+                try await MainActor.run {
+                    try db.recordAFMCorrection(
+                        documentID: documentID,
+                        original: token,
+                        corrected: corrected
+                    )
+                }
+            } catch {
+                dbgLog("PDFEnhancementService: Tier 3 — failed to record correction '%@' → '%@': %@",
+                       token, corrected, String(describing: error))
+            }
+
+            processedCount += 1
+            if corrected == token { continue }
+
+            // Apply the swap atomically across the document.
+            do {
+                let result: DatabaseManager.ReplaceTokenResult? = try await MainActor.run {
+                    try db.replaceTokenInDocument(
+                        documentID: documentID,
+                        original: token,
+                        corrected: corrected,
+                        embedKind: dominantKind,
+                        embed: { text in
+                            DocumentEmbeddingIndex.embedTextWithKind(text: text, kind: dominantKind)
+                        }
+                    )
+                }
+                if let r = result {
+                    appliedCount += 1
+                    dbgLog("PDFEnhancementService: Tier 3 — '%@' → '%@' on %@ (occurrences=%d delta=%d chunks=%d)",
+                           token, corrected, documentID.uuidString,
+                           r.occurrenceCount, r.totalDelta, r.affectedChunks)
+                }
+            } catch {
+                dbgLog("PDFEnhancementService: Tier 3 — swap failed for '%@' → '%@': %@",
+                       token, corrected, String(describing: error))
+            }
+
+            // Persist running count for diagnostics. Snapshot the
+            // value into a let so the MainActor.run closure captures
+            // by value (Swift 6 concurrency requirement).
+            let runningCount = processedCount
+            do {
+                try await MainActor.run {
+                    try db.updateEnhancementState(
+                        documentID: documentID,
+                        status: "tier3",
+                        tier3TokensDone: runningCount,
+                        error: nil
+                    )
+                }
+            } catch { /* best-effort */ }
+        }
+
+        dbgLog("PDFEnhancementService: Tier 3 finished on %@ — processed %d, applied %d swaps",
+               documentID.uuidString, processedCount, appliedCount)
     }
 
     // MARK: Tier 2 — Vision rescue with streaming chunk replacement

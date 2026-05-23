@@ -1,8 +1,10 @@
 # Test materials — large files, not for version control
 Posey Test Materials/
+TestMaterials/
 
 # API config — contains token, machine-local
 tools/.posey_api_config.json
+tools/.posey_api_config.*.json
 
 # Xcode
 *.xcuserstate
@@ -20,53 +22,15 @@ DerivedData/
 .DS_Store
 __pycache__/
 
-# Reference / read-only sibling-project sources dropped here for inspection
-# (e.g. Hal.swift for RAG/context-management patterns).
-/Hal.swift
-
 # Claude Code session state (per-machine, scheduled tasks, local prefs)
 .claude/
-tools/.posey_api_config.*.json
 
-# ---------------------------------------------------------------------------
-# Internal QA evidence, icon drafts, screenshots from autonomous test
-# sessions. Belongs on local disk only.
+# Internal QA evidence, icon drafts.
 Art/
 
-# App Store submission materials — entirely private. The whole
-# directory stays out of the public repo:
-#   - checklists, metadata drafts, accessibility prep notes
-#   - test result reports, captured RAG conversations
-#   - screenshots (uploaded to ASC directly from the local disk,
-#     not via GitHub)
-# Files stay on the local machine in the repo for working with ASC;
-# they never get pushed.
+# App Store submission materials — entirely private.
 submission/
 
-# Internal development tools — local-API test runner, RAG debug harnesses,
-# antenna config, synthetic-corpus generators, image-regression scripts.
-# Documents internal QA infrastructure and the dev-only antenna protocol.
+# Internal development tools — local-API test runner, RAG harnesses,
+# antenna config, corpus generators. Local-only.
 tools/
-
-# GitHub Pages working drafts — never commit. The published pages live
-# at docs/{index,privacy,support}.html. The "maybe new/old versions"
-# directories are scratch drafts and would otherwise be served publicly.
-docs/maybe new versions/
-docs/maybe old versions/
-
-# Internal working documents — NEVER commit to the public repo.
-# These expose product roadmap, internal process, architectural decisions,
-# and working methodology. They live locally only.
-# ---------------------------------------------------------------------------
-CLAUDE.md
-CONSTITUTION.md
-ARCHITECTURE.md
-TESTING.md
-REQUIREMENTS.md
-NEXT.md
-HISTORY.md
-DECISIONS.md
-ask_posey_spec.md
-ask_posey_implementation_plan.md
-posey_task_sequence.md
-front_matter_proposal.md

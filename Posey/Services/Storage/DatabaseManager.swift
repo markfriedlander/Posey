@@ -699,6 +699,53 @@ nonisolated struct StoredDocumentChunk: Equatable, Sendable {
     /// `"hash-fallback"`. Stored so future model upgrades can re-index
     /// only the rows that need it.
     let embeddingKind: String
+    /// 2026-05-22 Phase 2.2 Step 2 — PDF page provenance. First and
+    /// last PDF page indices (0-based) that contributed this chunk's
+    /// text. Default 0 / 0 for non-PDF chunks and for any chunk where
+    /// the importer didn't supply page boundaries. The Phase 2.2
+    /// Tier 2 runner uses this to find which chunks belong to a
+    /// Vision-rescued page.
+    let pageStart: Int
+    let pageEnd: Int
+    /// 2026-05-22 Phase 2.2 Step 2 — bumps on every enhancement-tier
+    /// text update. 0 = original Tier 1 chunk. Read by the embedding
+    /// indexer (when Phase 2.2 Step 7 lands) to know when re-embedding
+    /// is required.
+    let revision: Int
+    /// 2026-05-22 Phase 2.2 Step 2 — which extractor produced the
+    /// current text. `"tier1"` for PDFKit / non-PDF importers,
+    /// `"tier2_vision"` after Vision rescue, `"tier3_afm_repair"`
+    /// after AFM fusion correction. Diagnostic; surfaced via LIST_CHUNKS.
+    let sourceTier: String
+
+    /// Default-arg init so the wide set of existing call sites can
+    /// continue to construct chunks without page provenance — the
+    /// defaults are correct for non-PDF formats and for the Tier 1
+    /// first-pass case. Phase 2.2 Step 4 wires PDF page boundaries
+    /// through this init.
+    init(
+        chunkIndex: Int,
+        startOffset: Int,
+        endOffset: Int,
+        text: String,
+        embedding: [Double],
+        embeddingKind: String,
+        pageStart: Int = 0,
+        pageEnd: Int = 0,
+        revision: Int = 0,
+        sourceTier: String = "tier1"
+    ) {
+        self.chunkIndex = chunkIndex
+        self.startOffset = startOffset
+        self.endOffset = endOffset
+        self.text = text
+        self.embedding = embedding
+        self.embeddingKind = embeddingKind
+        self.pageStart = pageStart
+        self.pageEnd = pageEnd
+        self.revision = revision
+        self.sourceTier = sourceTier
+    }
 }
 
 extension DatabaseManager {
@@ -709,10 +756,16 @@ extension DatabaseManager {
         try execute("BEGIN TRANSACTION;")
         do {
             try execute("DELETE FROM document_chunks WHERE document_id = '\(documentID.uuidString)';")
+            // 2026-05-22 Phase 2.2 Step 2 — bind page provenance +
+            // revision + source_tier alongside the existing columns.
+            // Defaults on the StoredDocumentChunk init make this
+            // safe for non-PDF importers that don't supply page
+            // boundaries.
             let insertSQL = """
             INSERT INTO document_chunks
-                (document_id, chunk_index, start_offset, end_offset, text, embedding, embedding_kind)
-            VALUES (?, ?, ?, ?, ?, ?, ?);
+                (document_id, chunk_index, start_offset, end_offset, text, embedding, embedding_kind,
+                 page_start, page_end, revision, source_tier)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
             for chunk in chunks {
                 let statement = try prepareStatement(sql: insertSQL)
@@ -736,6 +789,10 @@ extension DatabaseManager {
                     throw DatabaseError.bindFailed(lastErrorMessage())
                 }
                 try bind(chunk.embeddingKind, at: 7, for: statement)
+                sqlite3_bind_int(statement, 8, Int32(chunk.pageStart))
+                sqlite3_bind_int(statement, 9, Int32(chunk.pageEnd))
+                sqlite3_bind_int(statement, 10, Int32(chunk.revision))
+                try bind(chunk.sourceTier, at: 11, for: statement)
                 try step(statement)
             }
             try execute("COMMIT;")
@@ -745,6 +802,13 @@ extension DatabaseManager {
         }
     }
 
+    // NOTE: `frontMatterChunks(for:limit:)` below still projects only
+    // the legacy columns because it deliberately discards the embedding
+    // blob and reconstructs chunks for text use only. Phase 2.2 Step 2
+    // didn't widen this path because its consumer (Ask Posey front-
+    // matter injection) never reads page_start / page_end / revision /
+    // source_tier. The chunk objects it returns carry the StoredDocumentChunk
+    // defaults for those fields, which is correct for read-only text use.
     /// Return the document's first `limit` chunks (oldest by
     /// chunk_index). Used by the Ask Posey front-matter injection
     /// path: document-scoped invocations always include the title
@@ -1059,8 +1123,14 @@ extension DatabaseManager {
 
     /// Return all chunks for a document, in chunk-index order.
     func chunks(for documentID: UUID) throws -> [StoredDocumentChunk] {
+        // 2026-05-22 Phase 2.2 Step 2 — also project page_start /
+        // page_end / revision / source_tier so the Tier 2 / Tier 3
+        // runners can locate chunks by page and skip already-updated
+        // ones. Old rows missing the columns get the table's
+        // declared defaults (0 / 0 / 0 / 'tier1').
         let sql = """
-        SELECT chunk_index, start_offset, end_offset, text, embedding, embedding_kind
+        SELECT chunk_index, start_offset, end_offset, text, embedding, embedding_kind,
+               page_start, page_end, revision, source_tier
         FROM document_chunks
         WHERE document_id = ?
         ORDER BY chunk_index;
@@ -1081,13 +1151,21 @@ extension DatabaseManager {
                     Array(ptr.bindMemory(to: Double.self))
                 }
             let kind = sqliteString(statement, index: 5) ?? "unknown"
+            let pageStart  = Int(sqlite3_column_int(statement, 6))
+            let pageEnd    = Int(sqlite3_column_int(statement, 7))
+            let revision   = Int(sqlite3_column_int(statement, 8))
+            let sourceTier = sqliteString(statement, index: 9) ?? "tier1"
             results.append(StoredDocumentChunk(
                 chunkIndex: index,
                 startOffset: start,
                 endOffset: end,
                 text: text,
                 embedding: embedding,
-                embeddingKind: kind
+                embeddingKind: kind,
+                pageStart: pageStart,
+                pageEnd: pageEnd,
+                revision: revision,
+                sourceTier: sourceTier
             ))
         }
         return results

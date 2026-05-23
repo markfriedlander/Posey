@@ -41,7 +41,42 @@ struct PDFLibraryImporter {
             fileName: fileName,
             pageCount: parsed.pageFlags.count
         )
+        // 2026-05-22 Phase 2.2 Step 4 — enqueue background enhancement.
+        enqueueEnhancement(documentID: doc.id, pageFlags: parsed.pageFlags)
         return doc
+    }
+
+    /// 2026-05-22 Phase 2.2 Step 4 — bridge the synchronous import
+    /// path to the background `PDFEnhancementService`.
+    ///
+    /// Behavior:
+    /// - If any page is flagged for Tier 2, set
+    ///   `enhancement_status = 'pending'` synchronously and dispatch
+    ///   an actor-isolated `enqueue` via a fire-and-forget Task. The
+    ///   service will pick the document up and walk it through Tier 2
+    ///   → Tier 3 → embedding (Steps 5-7).
+    /// - If no pages are flagged, we STILL enqueue — Tier 3 (AFM
+    ///   fusion repair) runs on any PDF with ≥ 1 suspect token,
+    ///   regardless of Tier 2 outcome. The runner will skip Tier 2
+    ///   internally when there's nothing flagged, then check suspect
+    ///   tokens; if zero, it'll mark status = 'complete' and exit.
+    ///
+    /// Status update is best-effort — failures log but don't throw,
+    /// matching the existing pageFlags-sidecar pattern.
+    private func enqueueEnhancement(documentID: UUID, pageFlags: [PDFPageFlags]) {
+        do {
+            try databaseManager.updateEnhancementState(
+                documentID: documentID,
+                status: "pending",
+                error: nil
+            )
+        } catch {
+            dbgLog("PDFLibraryImporter: failed to mark enhancement pending for %@: %@",
+                   documentID.uuidString, String(describing: error))
+        }
+        Task {
+            await PDFEnhancementService.shared.enqueue(documentID)
+        }
     }
 
     /// Persist an already-parsed document. Called on the main thread after
@@ -77,6 +112,13 @@ struct PDFLibraryImporter {
             fileName: fileName,
             pageCount: parsed.pageFlags.count
         )
+
+        // 2026-05-22 Phase 2.2 Step 4 — kick off background
+        // enhancement for PDFs. The runner (Steps 5-7) decides
+        // whether Tier 2 / Tier 3 work is needed and transitions
+        // the document through tier2 → tier3 → complete (or 'na'
+        // if neither tier has work).
+        enqueueEnhancement(documentID: doc.id, pageFlags: parsed.pageFlags)
 
         return doc
     }

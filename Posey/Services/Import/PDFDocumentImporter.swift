@@ -190,43 +190,15 @@ extension PDFDocumentImporter {
                 }
                 return rawPageString
             }()
-            var pdfText = normalize(stripped)
+            let pdfText = normalize(stripped)
 
-            // 2026-05-22 Phase 2 — Tier 2 Vision OCR for pages the
-            // confidence detector flagged. Only invoked on flagged
-            // pages where Tier 1 produced SOME text (the empty-text
-            // path below already runs Vision via the existing OCR
-            // fallback). The reconciler decides whether to swap Tier
-            // 2's output in for Tier 1's — token-count comparison for
-            // `.fusionRepair`, wholesale swap on rescued empty pages
-            // for `.full`. See `PDFTier12Reconciler`.
-            if !pdfText.isEmpty,
-               index < pageFlags.count,
-               pageFlags[index].needsTier2 {
-                progress?(.ocr(page: index + 1, of: pageCount))
-                let visionRaw = PDFTier2VisionExtractor.extract(page)
-                let visionNormalized = visionRaw.isEmpty ? "" : normalize(visionRaw)
-                let result = PDFTier12Reconciler.merge(
-                    tier1: pdfText,
-                    tier2: visionNormalized,
-                    mode: pageFlags[index].tier2Mode
-                )
-                pageFlags[index].tier2 = PDFPageFlags.Tier2Outcome(
-                    ran: true,
-                    decision: result.decision.rawValue,
-                    tier2Chars: result.tier2Chars
-                )
-                if result.decision == .visionWon {
-                    dbgLog(
-                        "PDF Tier 2 swap on page %d (mode=%@): tier1=%d → tier2=%d chars",
-                        index + 1,
-                        pageFlags[index].tier2Mode.rawValue,
-                        pdfText.count,
-                        result.tier2Chars
-                    )
-                    pdfText = result.text
-                }
-            }
+            // 2026-05-22 Phase 2.2 Step 4 — Tier 2 Vision OCR no
+            // longer runs synchronously during import. Flagged pages
+            // are persisted via the page-flags sidecar; the
+            // PDFEnhancementService background runner picks them up
+            // after persistence (Step 5). Synchronous import path
+            // is Tier 1 only — fast, deterministic, no jetsam risk
+            // on large documents.
 
             if !pdfText.isEmpty {
                 pageContents.append(.text(pdfText))

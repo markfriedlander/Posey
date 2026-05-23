@@ -528,6 +528,11 @@ final class LibraryViewModel: ObservableObject {
             // constraint failure when it tries to insert chunks
             // against a no-longer-existing documents row.
             embeddingIndex.cancelIndexing(for: document.id)
+            // 2026-05-22 Phase 2.2 Step 4 — cancel background
+            // enhancement for the same reason: a Tier 2 / Tier 3
+            // update mid-flight against a deleted document would
+            // hit FK failures.
+            Task { await PDFEnhancementService.shared.cancel(document.id) }
             try databaseManager.deleteDocument(document)
             loadDocuments()
             // 2026-05-13 — A4: invalidate any cached audio export
@@ -783,6 +788,9 @@ extension LibraryViewModel {
                 // 2026-05-22 — Cancel in-flight indexing first (FK
                 // race fix). Mirrors LibraryViewModel.deleteDocument.
                 embeddingIndex.cancelIndexing(for: doc.id)
+                // 2026-05-22 Phase 2.2 Step 4 — cancel any in-flight
+                // background enhancement for this document.
+                Task { await PDFEnhancementService.shared.cancel(doc.id) }
                 try databaseManager.deleteDocument(doc)
                 // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecar.
                 PageFlagsStore.delete(documentID: doc.id)
@@ -800,6 +808,11 @@ extension LibraryViewModel {
                 // 2026-05-22 — Cancel any in-flight indexing across
                 // the wipe (FK race fix).
                 for doc in docs { embeddingIndex.cancelIndexing(for: doc.id) }
+                // 2026-05-22 Phase 2.2 Step 4 — cancel background
+                // enhancements before deleting.
+                Task {
+                    for doc in docs { await PDFEnhancementService.shared.cancel(doc.id) }
+                }
                 for doc in docs { try databaseManager.deleteDocument(doc) }
                 // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecars.
                 for doc in docs { PageFlagsStore.delete(documentID: doc.id) }

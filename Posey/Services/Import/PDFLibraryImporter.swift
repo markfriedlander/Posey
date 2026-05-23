@@ -197,12 +197,20 @@ extension PDFLibraryImporter {
             try databaseManager.upsertReadingPosition(.initial(for: document.id))
         }
 
-        // Ask Posey embedding index — best-effort (logs on failure).
-        // PDFs can be very long and the embedding step is synchronous;
-        // if it ever becomes a perceptible UI freeze on the largest
-        // documents we'll move it to a background Task. Tracked in
-        // NEXT.md.
-        embeddingIndex?.enqueueIndexing(document)
+        // 2026-05-22 Phase 2.2 Step 7 — for PDFs the embedding
+        // index runs AFTER Tier 2 + Tier 3 finish (kicked off by
+        // PDFEnhancementService at end of enhancement) so embeddings
+        // are built on the corrected text. For non-PDF formats and
+        // for PDFs that hit this path without enhancement (e.g.
+        // legacy re-imports on databases that predate Phase 2.2)
+        // enqueue immediately as before.
+        if fileType.lowercased() == "pdf" {
+            // PDF: defer to PDFEnhancementService end-of-Tier-3 hook.
+            // This avoids embedding Tier 1 text that's about to be
+            // corrected, which would force a full re-index.
+        } else {
+            embeddingIndex?.enqueueIndexing(document)
+        }
 
         return document
     }

@@ -53,6 +53,11 @@ actor PDFEnhancementService {
     // MARK: State
 
     private var databaseManager: DatabaseManager?
+    /// 2026-05-22 Phase 2.2 Step 7 — the embedding index is held here
+    /// so the enhancement runner can trigger indexing at end-of-Tier-3
+    /// on the corrected text rather than at persistence-time on the
+    /// Tier 1 first pass.
+    private var embeddingIndex: DocumentEmbeddingIndex?
 
     /// FIFO of document IDs waiting to be processed. We don't dedupe
     /// on enqueue — `processNext` is the gate that decides what to
@@ -82,10 +87,16 @@ actor PDFEnhancementService {
     /// Wire the live DatabaseManager. Must be called once at app
     /// launch before any enhancement work can run. Subsequent calls
     /// replace the manager (used by some test harnesses that swap
-    /// in a fresh DB mid-session).
-    func configure(databaseManager: DatabaseManager) {
+    /// in a fresh DB mid-session). The `embeddingIndex` is optional
+    /// — when present the runner triggers indexing on the final
+    /// corrected text at end-of-Tier-3 instead of at persistence
+    /// time (Phase 2.2 Step 7).
+    func configure(databaseManager: DatabaseManager,
+                   embeddingIndex: DocumentEmbeddingIndex? = nil) {
         self.databaseManager = databaseManager
-        dbgLog("PDFEnhancementService: configured")
+        self.embeddingIndex = embeddingIndex
+        dbgLog("PDFEnhancementService: configured (embeddingIndex=%@)",
+               embeddingIndex == nil ? "nil" : "set")
     }
 
     // MARK: Public API
@@ -234,11 +245,64 @@ actor PDFEnhancementService {
             }
             // Source PDF no longer needed once enhancement is done.
             PDFSourceStore.delete(documentID)
+
+            // Step 7 — trigger embedding indexing on the corrected
+            // text. PDFLibraryImporter.persistDocument no longer
+            // enqueues this for PDFs precisely so we can defer to
+            // here. If `embeddingIndex` wasn't wired we fall back
+            // to no-op + log (the doc will still be readable, just
+            // without Ask Posey RAG until a re-import).
+            if let index = embeddingIndex {
+                let doc: Document?
+                do {
+                    doc = try await MainActor.run { () throws -> Document? in
+                        try db.documents().first(where: { $0.id == documentID })
+                    }
+                } catch {
+                    dbgLog("PDFEnhancementService: failed to load doc for embedding handoff: %@",
+                           String(describing: error))
+                    doc = nil
+                }
+                if let doc {
+                    await MainActor.run {
+                        index.enqueueIndexing(doc)
+                    }
+                    dbgLog("PDFEnhancementService: embedding indexing enqueued for %@",
+                           documentID.uuidString)
+                }
+            } else {
+                dbgLog("PDFEnhancementService: no embeddingIndex wired; skipped indexing handoff for %@",
+                       documentID.uuidString)
+            }
+
+            // Step 7 — post completion notification so the library
+            // view can refresh the stale character count + any
+            // future "enhancement complete" indicator.
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: PDFEnhancementService.enhancementDidComplete,
+                    object: nil,
+                    userInfo: [
+                        PDFEnhancementService.notificationDocumentIDKey: documentID
+                    ]
+                )
+            }
         } catch {
             dbgLog("PDFEnhancementService: failed to mark complete for %@: %@",
                    documentID.uuidString, String(describing: error))
         }
     }
+
+    // MARK: Notifications
+
+    /// Posted on the main thread when a document transitions to
+    /// `enhancement_status = 'complete'`. `userInfo` includes the
+    /// document UUID under `notificationDocumentIDKey`. Library /
+    /// Reader views subscribe to refresh stale state.
+    static let enhancementDidComplete = Notification.Name(
+        "Posey.PDFEnhancementService.didComplete"
+    )
+    static let notificationDocumentIDKey = "documentID"
 
     // MARK: Tier 3 — AFM fusion repair
 

@@ -156,6 +156,17 @@ struct LibraryView: View {
                 if viewModel.localAPIEnabled { viewModel.toggleLocalAPI() }
             }
             .onReceive(
+                NotificationCenter.default.publisher(for: PDFEnhancementService.enhancementDidComplete)
+            ) { _ in
+                // 2026-05-22 Phase 2.2 Step 7 — refresh the library
+                // so the card's characterCount reflects the post-
+                // Tier-2 + Tier-3 corrected text. We reload every
+                // doc rather than patching one row because the
+                // current LibraryViewModel.documents is a cached
+                // array refreshed via loadDocuments.
+                viewModel.loadDocuments()
+            }
+            .onReceive(
                 NotificationCenter.default
                     .publisher(for: .openAskPoseyForDocument)
             ) { notification in
@@ -421,10 +432,18 @@ final class LibraryViewModel: ObservableObject {
             }
         }
         #endif
-        return DocumentEmbeddingIndex(
+        let index = DocumentEmbeddingIndex(
             database: databaseManager,
             metadataExtractor: extractor
         )
+        // 2026-05-22 Phase 2.2 Step 7 — hand the live embedding
+        // index to PDFEnhancementService so it can trigger indexing
+        // on the corrected text at end-of-Tier-3 instead of at
+        // persistence time. Re-configures the service (replaces the
+        // databaseManager-only configuration from PoseyApp.onAppear).
+        let mgr = databaseManager
+        Task { await PDFEnhancementService.shared.configure(databaseManager: mgr, embeddingIndex: index) }
+        return index
     }()
 
     /// Phase B background-enhancement scheduler. Held lazily so it
@@ -1317,6 +1336,36 @@ extension LibraryViewModel {
                     "documentID": id.uuidString,
                     "returned": items.count,
                     "chunks": items
+                ])
+
+            case "GET_ENHANCEMENT_STATUS":
+                // 2026-05-22 Phase 2.2 Step 7 — diagnostic verb.
+                // Returns the document's enhancement_status state +
+                // tier2_pages_done summary + tier3_tokens_done + last
+                // error, plus the live in-memory queue snapshot from
+                // PDFEnhancementService for visibility into whether
+                // the doc is queued / processing / idle.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: GET_ENHANCEMENT_STATUS:<doc-id>"}"#
+                }
+                let row = try databaseManager.enhancementStatus(for: id)
+                let snapshot = await PDFEnhancementService.shared.snapshot()
+                let pagesDoneCount: Int = {
+                    guard let row,
+                          let data = row.tier2PagesDoneJSON.data(using: .utf8),
+                          let arr = try? JSONDecoder().decode([Int].self, from: data) else { return 0 }
+                    return arr.count
+                }()
+                return json([
+                    "documentID": id.uuidString,
+                    "status": row?.status ?? "na",
+                    "tier2PagesDoneCount": pagesDoneCount,
+                    "tier3TokensDone": row?.tier3TokensDone ?? 0,
+                    "error": row?.error ?? "",
+                    "queue": snapshot.queue.map(\.uuidString),
+                    "currentlyProcessing": snapshot.current?.uuidString ?? "",
+                    "cancelledInMemory": snapshot.cancelled.map(\.uuidString),
+                    "queuePosition": snapshot.queue.firstIndex(of: id) ?? -1
                 ])
 
             case "LIST_PAGE_FLAGS":

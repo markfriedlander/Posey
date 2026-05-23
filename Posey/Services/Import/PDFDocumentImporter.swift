@@ -521,28 +521,36 @@ extension PDFDocumentImporter {
     /// or if the average recognition confidence is below `ocrConfidenceThreshold`.
     /// Runs synchronously — `VNImageRequestHandler.perform` blocks until complete.
     private func ocrText(from page: PDFPage) -> String {
-        guard let image = renderPageToCGImage(page, colorSpace: CGColorSpaceCreateDeviceGray()) else { return "" }
+        // 2026-05-22 Phase 2.2 quick-win — autoreleasepool wrap so
+        // Vision's autoreleased observations + the rendered CGImage
+        // drain after each per-page call. Mirrors the same wrap in
+        // PDFTier2VisionExtractor.extract; without these, sequential
+        // per-page Vision invocations on iPhone exhausted memory
+        // and triggered a jetsam kill mid-import.
+        autoreleasepool {
+            guard let image = renderPageToCGImage(page, colorSpace: CGColorSpaceCreateDeviceGray()) else { return "" }
 
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
 
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        guard (try? handler.perform([request])) != nil else { return "" }
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            guard (try? handler.perform([request])) != nil else { return "" }
 
-        let observations = request.results ?? []
-        let candidates = observations.compactMap { $0.topCandidates(1).first }
-        guard !candidates.isEmpty else { return "" }
+            let observations = request.results ?? []
+            let candidates = observations.compactMap { $0.topCandidates(1).first }
+            guard !candidates.isEmpty else { return "" }
 
-        // Gate on average confidence. Low confidence = garbled scan or form
-        // page — surface as a visual block instead of reading garbage aloud.
-        let avgConfidence = candidates.map(\.confidence).reduce(0, +) / Float(candidates.count)
-        guard avgConfidence >= Self.ocrConfidenceThreshold else { return "" }
+            // Gate on average confidence. Low confidence = garbled scan or form
+            // page — surface as a visual block instead of reading garbage aloud.
+            let avgConfidence = candidates.map(\.confidence).reduce(0, +) / Float(candidates.count)
+            guard avgConfidence >= Self.ocrConfidenceThreshold else { return "" }
 
-        let lines = candidates.map(\.string)
-        guard !lines.isEmpty else { return "" }
+            let lines = candidates.map(\.string)
+            guard !lines.isEmpty else { return "" }
 
-        return normalize(lines.joined(separator: " "))
+            return normalize(lines.joined(separator: " "))
+        }
     }
 
     /// Task 8 #5 (2026-05-03): is the page effectively blank?

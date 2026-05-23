@@ -34,24 +34,35 @@ struct PDFTier2VisionExtractor {
     /// without any normalization (the importer normalizes on the
     /// way out, same as Tier 1). Empty string on render failure,
     /// Vision failure, no observations, or sub-confidence output.
+    ///
+    /// 2026-05-22 Phase 2.2 quick-win — wrapped in `autoreleasepool`
+    /// so Cocoa autoreleased objects (Vision observations + the
+    /// rendered CGImage retained by the request) drain after each
+    /// per-page call. Without this wrap, 78 sequential Vision calls
+    /// during a Cryptography for Dummies import on iPhone 16 Plus
+    /// blew past the jetsam memory ceiling and the app was killed
+    /// mid-import. This is interim — Phase 2.2 moves Tier 2 to a
+    /// background enhancement pass after persistence.
     static func extract(_ page: PDFPage) -> String {
-        guard let image = render(page) else { return "" }
+        autoreleasepool {
+            guard let image = render(page) else { return "" }
 
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
 
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        guard (try? handler.perform([request])) != nil else { return "" }
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            guard (try? handler.perform([request])) != nil else { return "" }
 
-        let observations = request.results ?? []
-        let candidates = observations.compactMap { $0.topCandidates(1).first }
-        guard !candidates.isEmpty else { return "" }
+            let observations = request.results ?? []
+            let candidates = observations.compactMap { $0.topCandidates(1).first }
+            guard !candidates.isEmpty else { return "" }
 
-        let avg = candidates.map(\.confidence).reduce(0, +) / Float(candidates.count)
-        guard avg >= minAvgConfidence else { return "" }
+            let avg = candidates.map(\.confidence).reduce(0, +) / Float(candidates.count)
+            guard avg >= minAvgConfidence else { return "" }
 
-        return candidates.map(\.string).joined(separator: " ")
+            return candidates.map(\.string).joined(separator: " ")
+        }
     }
 
     private static func render(_ page: PDFPage) -> CGImage? {

@@ -71,6 +71,14 @@ struct PoseyApp: App {
                         try await executePreload(preload, databaseManager: manager)
                     }
                     databaseManager = manager
+                    // 2026-05-22 Phase 2.2 Step 3 — configure the
+                    // background enhancement service with the live
+                    // DatabaseManager and sweep for orphaned jobs
+                    // (documents whose enhancement was mid-flight
+                    // when the app last terminated). No-op when
+                    // there's nothing to resume.
+                    await PDFEnhancementService.shared.configure(databaseManager: manager)
+                    await PDFEnhancementService.shared.bootstrap()
                 } catch {
                     databaseErrorMessage = error.localizedDescription
                 }

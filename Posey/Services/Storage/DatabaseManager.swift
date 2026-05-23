@@ -1937,4 +1937,123 @@ extension DatabaseManager {
 
 // ========== BLOCK 06: SCHEMA AND HELPERS - END ==========
 
+// ========== BLOCK 07: PHASE 2.2 ENHANCEMENT STATE HELPERS - START ==========
+
+/// Helpers for reading + writing the Phase 2.2 enhancement state
+/// columns added to `documents` in Step 1. All run on the main-actor-
+/// isolated DatabaseManager; the background `PDFEnhancementService`
+/// actor hops to MainActor to call these.
+extension DatabaseManager {
+
+    /// One status row per pending / in-flight document. Used by
+    /// `PDFEnhancementService.bootstrap()` on app launch to resume
+    /// orphaned enhancement jobs.
+    struct EnhancementStatusRow: Sendable {
+        let documentID: UUID
+        let status: String
+        let tier2PagesDoneJSON: String
+        let tier3TokensDone: Int
+        let error: String?
+    }
+
+    /// Read the enhancement_status state for a single document.
+    /// Returns nil when the document doesn't exist (caller should
+    /// treat as 'na' and skip).
+    func enhancementStatus(for documentID: UUID) throws -> EnhancementStatusRow? {
+        let sql = """
+        SELECT enhancement_status, tier2_pages_done, tier3_tokens_done, enhancement_error
+        FROM documents
+        WHERE id = ?;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let status = sqliteString(statement, index: 0) ?? "na"
+        let pagesDone = sqliteString(statement, index: 1) ?? "[]"
+        let tokensDone = Int(sqlite3_column_int(statement, 2))
+        let error = sqliteString(statement, index: 3)
+        return EnhancementStatusRow(
+            documentID: documentID,
+            status: status,
+            tier2PagesDoneJSON: pagesDone,
+            tier3TokensDone: tokensDone,
+            error: error
+        )
+    }
+
+    /// Documents currently in any enhancement state matching one of
+    /// `statuses`. Used by bootstrap to find orphaned jobs.
+    func documentsByEnhancementStatus(_ statuses: [String]) throws -> [EnhancementStatusRow] {
+        guard !statuses.isEmpty else { return [] }
+        let placeholders = Array(repeating: "?", count: statuses.count).joined(separator: ", ")
+        let sql = """
+        SELECT id, enhancement_status, tier2_pages_done, tier3_tokens_done, enhancement_error
+        FROM documents
+        WHERE enhancement_status IN (\(placeholders));
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        for (i, s) in statuses.enumerated() {
+            try bind(s, at: Int32(i + 1), for: statement)
+        }
+        var rows: [EnhancementStatusRow] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let idStr = sqliteString(statement, index: 0),
+                  let id = UUID(uuidString: idStr) else { continue }
+            let status = sqliteString(statement, index: 1) ?? "na"
+            let pagesDone = sqliteString(statement, index: 2) ?? "[]"
+            let tokensDone = Int(sqlite3_column_int(statement, 3))
+            let error = sqliteString(statement, index: 4)
+            rows.append(EnhancementStatusRow(
+                documentID: id,
+                status: status,
+                tier2PagesDoneJSON: pagesDone,
+                tier3TokensDone: tokensDone,
+                error: error
+            ))
+        }
+        return rows
+    }
+
+    /// Update enhancement_status (and optionally tier2_pages_done /
+    /// tier3_tokens_done / enhancement_error) for a document.
+    func updateEnhancementState(
+        documentID: UUID,
+        status: String,
+        tier2PagesDoneJSON: String? = nil,
+        tier3TokensDone: Int? = nil,
+        error: String? = nil
+    ) throws {
+        var sets: [String] = ["enhancement_status = ?"]
+        if tier2PagesDoneJSON != nil { sets.append("tier2_pages_done = ?") }
+        if tier3TokensDone != nil { sets.append("tier3_tokens_done = ?") }
+        // enhancement_error is always written (including to NULL) when
+        // status is updated, so a failure → recovery cycle clears the
+        // prior error message.
+        sets.append("enhancement_error = ?")
+        let sql = "UPDATE documents SET \(sets.joined(separator: ", ")) WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        var idx: Int32 = 1
+        try bind(status, at: idx, for: statement); idx += 1
+        if let json = tier2PagesDoneJSON {
+            try bind(json, at: idx, for: statement); idx += 1
+        }
+        if let tokens = tier3TokensDone {
+            sqlite3_bind_int(statement, idx, Int32(tokens)); idx += 1
+        }
+        if let e = error {
+            try bind(e, at: idx, for: statement)
+        } else {
+            sqlite3_bind_null(statement, idx)
+        }
+        idx += 1
+        try bind(documentID.uuidString, at: idx, for: statement)
+        try step(statement)
+    }
+}
+
+// ========== BLOCK 07: PHASE 2.2 ENHANCEMENT STATE HELPERS - END ==========
+
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

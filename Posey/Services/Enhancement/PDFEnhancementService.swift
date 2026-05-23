@@ -1,4 +1,5 @@
 import Foundation
+import PDFKit
 
 // ========== BLOCK 01: PDF ENHANCEMENT SERVICE - START ==========
 
@@ -175,14 +176,349 @@ actor PDFEnhancementService {
     }
 
     /// Process a single document through Tier 2 → Tier 3 → embedding.
-    /// **Step 3 stub:** logs and writes a `complete` status. The real
-    /// tier work lands in Steps 5 + 6 + 7.
+    /// **Step 5 (this commit):** runs Tier 2 (Vision OCR + reconciler
+    /// + streaming chunk replacement with reader-aware priority + TTS
+    /// + viewport locks). Tier 3 stub remains — Step 6 fills it in.
     private func processDocument(_ documentID: UUID) async {
-        dbgLog("PDFEnhancementService: would process %@ (Step 3 stub — no tier work yet)",
-               documentID.uuidString)
-        // Don't transition status yet — Step 4 introduces the
-        // 'pending' state at persistence; Steps 5/6/7 advance it.
-        // Step 3 ships the actor skeleton only.
+        guard let db = databaseManager else {
+            dbgLog("PDFEnhancementService: processDocument(%@) skipped — no databaseManager",
+                   documentID.uuidString)
+            return
+        }
+
+        // Cancellation gate before any work.
+        if cancelled.contains(documentID) {
+            cancelled.remove(documentID)
+            return
+        }
+
+        // Mark tier2 status. Best-effort; failures log but the work
+        // still runs.
+        do {
+            try await MainActor.run {
+                try db.updateEnhancementState(documentID: documentID, status: "tier2", error: nil)
+            }
+        } catch {
+            dbgLog("PDFEnhancementService: failed to set tier2 status for %@: %@",
+                   documentID.uuidString, String(describing: error))
+        }
+
+        await runTier2(documentID: documentID)
+
+        if cancelled.contains(documentID) {
+            cancelled.remove(documentID)
+            return
+        }
+
+        // Step 6 will replace this with the actual Tier 3 run; for
+        // now we transition straight to 'complete' so the
+        // state machine is observable end-to-end.
+        do {
+            try await MainActor.run {
+                try db.updateEnhancementState(documentID: documentID, status: "complete", error: nil)
+            }
+            // Source PDF no longer needed once enhancement is done.
+            PDFSourceStore.delete(documentID)
+        } catch {
+            dbgLog("PDFEnhancementService: failed to mark complete for %@: %@",
+                   documentID.uuidString, String(describing: error))
+        }
+    }
+
+    // MARK: Tier 2 — Vision rescue with streaming chunk replacement
+
+    /// Maximum times a single page can be deferred due to TTS/viewport
+    /// locks before we give up and apply the update anyway. Defensive
+    /// cap on an edge case (a chunk persistently visible / always
+    /// being spoken).
+    private static let maxLockDeferralsPerPage = 8
+
+    /// Run Tier 2 (Vision OCR + reconciler) on every flagged page in
+    /// the document that hasn't already been processed. Reader-aware
+    /// priority ordering: pages whose chunks contain or sit near the
+    /// reader's current position go first; pages far from the reader
+    /// update in the background.
+    private func runTier2(documentID: UUID) async {
+        guard let db = databaseManager else { return }
+
+        // ── Load source PDF ──────────────────────────────────────
+        guard let pdfData = PDFSourceStore.read(documentID),
+              let document = PDFDocument(data: pdfData) else {
+            dbgLog("PDFEnhancementService: Tier 2 skipped for %@ — source PDF unavailable",
+                   documentID.uuidString)
+            return
+        }
+
+        // ── Load page flags + already-done set ──────────────────
+        guard let flagsRecord = PageFlagsStore.read(documentID: documentID) else {
+            dbgLog("PDFEnhancementService: Tier 2 skipped for %@ — no page flags",
+                   documentID.uuidString)
+            return
+        }
+        let allFlagged: [PDFPageFlags] = flagsRecord.flags.filter { $0.needsTier2 }
+        if allFlagged.isEmpty {
+            dbgLog("PDFEnhancementService: Tier 2 — no flagged pages on %@",
+                   documentID.uuidString)
+            return
+        }
+        let statusRow: DatabaseManager.EnhancementStatusRow?
+        do {
+            statusRow = try await MainActor.run {
+                try db.enhancementStatus(for: documentID)
+            }
+        } catch {
+            dbgLog("PDFEnhancementService: failed to read status for %@: %@",
+                   documentID.uuidString, String(describing: error))
+            return
+        }
+        var pagesDone: Set<Int> = {
+            guard let row = statusRow,
+                  let data = row.tier2PagesDoneJSON.data(using: .utf8),
+                  let arr = try? JSONDecoder().decode([Int].self, from: data) else {
+                return []
+            }
+            return Set(arr)
+        }()
+        let toProcess: [PDFPageFlags] = allFlagged.filter { !pagesDone.contains($0.pageIndex) }
+        if toProcess.isEmpty {
+            dbgLog("PDFEnhancementService: Tier 2 — every flagged page already done on %@",
+                   documentID.uuidString)
+            return
+        }
+        dbgLog("PDFEnhancementService: Tier 2 starting on %@ — %d pages (already-done %d, total flagged %d)",
+               documentID.uuidString, toProcess.count, pagesDone.count, allFlagged.count)
+
+        // ── Determine embedding kind from existing chunks ───────
+        let existingChunks: [StoredDocumentChunk]
+        do {
+            existingChunks = try await MainActor.run {
+                try db.chunks(for: documentID)
+            }
+        } catch {
+            dbgLog("PDFEnhancementService: failed to read existing chunks for %@: %@",
+                   documentID.uuidString, String(describing: error))
+            return
+        }
+        let kindCounts = Dictionary(grouping: existingChunks, by: { $0.embeddingKind })
+            .mapValues(\.count)
+        let dominantKind: String = kindCounts.max(by: { $0.value < $1.value })?.key ?? "en-sentence"
+
+        // ── Work loop with priority + locks + cancellation ──────
+        var deferralCounts: [Int: Int] = [:]  // pageIndex → defer count
+        var workQueue: [PDFPageFlags] = toProcess
+
+        while !workQueue.isEmpty {
+            if cancelled.contains(documentID) {
+                dbgLog("PDFEnhancementService: Tier 2 cancelled mid-run on %@",
+                       documentID.uuidString)
+                return
+            }
+
+            // Snapshot reader state for priority + locks.
+            let snapshot: ReaderObservation.Snapshot = await ReaderObservation.shared.snapshot()
+            let boundaries: [Int]
+            do {
+                boundaries = try await MainActor.run { try db.contentBoundaries(for: documentID) }
+            } catch {
+                dbgLog("PDFEnhancementService: failed to read boundaries: %@", String(describing: error))
+                return
+            }
+
+            // Compute reader's page (if doc is open + offset known).
+            let readerPage: Int? = {
+                guard snapshot.openDocumentID == documentID,
+                      let offset = snapshot.currentOffset,
+                      !boundaries.isEmpty else { return nil }
+                var i = 0
+                for (idx, b) in boundaries.enumerated() {
+                    if offset >= b { i = idx } else { break }
+                }
+                return i
+            }()
+
+            // Sort the queue by priority. If we have a reader page,
+            // smaller |pageIndex - readerPage| wins. Otherwise
+            // sequential by pageIndex.
+            workQueue.sort { a, b in
+                if let rp = readerPage {
+                    let da = abs(a.pageIndex - rp)
+                    let db_ = abs(b.pageIndex - rp)
+                    if da != db_ { return da < db_ }
+                }
+                return a.pageIndex < b.pageIndex
+            }
+
+            // Try the highest-priority page; if locked, defer to back
+            // of queue and try the next one.
+            var pickedIndex: Int? = nil
+            for (qi, page) in workQueue.enumerated() {
+                if !pageIsLockedForUpdate(page.pageIndex,
+                                          boundaries: boundaries,
+                                          chunks: existingChunks,
+                                          documentID: documentID,
+                                          snapshot: snapshot) {
+                    pickedIndex = qi
+                    break
+                }
+                // Otherwise increment defer count; if maxed out,
+                // accept the page anyway (defensive).
+                let cnt = (deferralCounts[page.pageIndex] ?? 0) + 1
+                deferralCounts[page.pageIndex] = cnt
+                if cnt >= Self.maxLockDeferralsPerPage {
+                    dbgLog("PDFEnhancementService: page %d hit defer cap on %@ — applying anyway",
+                           page.pageIndex, documentID.uuidString)
+                    pickedIndex = qi
+                    break
+                }
+            }
+            guard let qIndex = pickedIndex else {
+                // Every page locked — wait briefly, retry.
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                continue
+            }
+            let page = workQueue.remove(at: qIndex)
+
+            // ── Run Vision on the chosen page ──────────────────
+            guard let pdfPage = document.page(at: page.pageIndex) else {
+                dbgLog("PDFEnhancementService: page(at: %d) is nil on %@",
+                       page.pageIndex, documentID.uuidString)
+                pagesDone.insert(page.pageIndex)
+                await persistPagesDone(pagesDone, for: documentID, db: db)
+                continue
+            }
+
+            let visionText = PDFTier2VisionExtractor.extract(pdfPage)
+
+            // Read current page text from plainText slice for the
+            // reconciler comparison.
+            let pageOldText: String
+            do {
+                pageOldText = try await MainActor.run { () throws -> String in
+                    let pt = try db.plainText(for: documentID) ?? ""
+                    let bs = try db.contentBoundaries(for: documentID)
+                    guard page.pageIndex < bs.count else { return "" }
+                    let lo = bs[page.pageIndex]
+                    let hi = (page.pageIndex + 1 < bs.count) ? bs[page.pageIndex + 1] : pt.count
+                    guard lo <= hi, hi <= pt.count else { return "" }
+                    let s = pt.index(pt.startIndex, offsetBy: lo)
+                    let e = pt.index(pt.startIndex, offsetBy: hi)
+                    return String(pt[s..<e])
+                }
+            } catch {
+                dbgLog("PDFEnhancementService: failed to read page %d text for %@: %@",
+                       page.pageIndex, documentID.uuidString, String(describing: error))
+                continue
+            }
+
+            let mergeResult = PDFTier12Reconciler.merge(
+                tier1: pageOldText,
+                tier2: visionText,
+                mode: page.tier2Mode
+            )
+
+            if mergeResult.decision == .visionWon {
+                dbgLog("PDFEnhancementService: page %d on %@ → vision_won (%d → %d chars)",
+                       page.pageIndex, documentID.uuidString,
+                       pageOldText.count, mergeResult.text.count)
+                // Apply the page rewrite atomically.
+                do {
+                    let result = try await MainActor.run { () throws -> DatabaseManager.RewritePageResult in
+                        try db.rewritePageText(
+                            documentID: documentID,
+                            pageIndex: page.pageIndex,
+                            newPageText: mergeResult.text,
+                            sourceTier: "tier2_vision",
+                            segmentAndEmbed: { newText in
+                                Self.segmentAndEmbed(text: newText, kind: dominantKind)
+                            }
+                        )
+                    }
+                    dbgLog("PDFEnhancementService: page %d rewrite delta=%d replaced=%d inserted=%d",
+                           page.pageIndex, result.delta,
+                           result.replacedChunkCount, result.insertedChunkCount)
+                } catch {
+                    dbgLog("PDFEnhancementService: page %d rewrite failed for %@: %@",
+                           page.pageIndex, documentID.uuidString, String(describing: error))
+                }
+            } else {
+                dbgLog("PDFEnhancementService: page %d on %@ → %@ (kept tier 1)",
+                       page.pageIndex, documentID.uuidString, mergeResult.decision.rawValue)
+            }
+
+            pagesDone.insert(page.pageIndex)
+            await persistPagesDone(pagesDone, for: documentID, db: db)
+        }
+
+        dbgLog("PDFEnhancementService: Tier 2 finished on %@", documentID.uuidString)
+    }
+
+    /// True iff updating page `pageIndex` would touch a chunk the
+    /// reader is currently rendering or TTS is currently speaking.
+    private func pageIsLockedForUpdate(
+        _ pageIndex: Int,
+        boundaries: [Int],
+        chunks: [StoredDocumentChunk],
+        documentID: UUID,
+        snapshot: ReaderObservation.Snapshot
+    ) -> Bool {
+        // Compute the plainText range for this page.
+        guard pageIndex < boundaries.count else { return false }
+        let lo = boundaries[pageIndex]
+        let hi = (pageIndex + 1 < boundaries.count) ? boundaries[pageIndex + 1] : Int.max
+        let overlapping = chunks.filter { $0.startOffset < hi && $0.endOffset > lo }
+        // Only check locks if this is the document the reader has open.
+        guard snapshot.openDocumentID == documentID else { return false }
+        for chunk in overlapping {
+            let chunkID = ReaderObservation.ChunkID(
+                documentID: documentID, chunkIndex: chunk.chunkIndex
+            )
+            if snapshot.ttsInUseChunk == chunkID { return true }
+            if snapshot.visibleChunks.contains(chunkID) { return true }
+        }
+        return false
+    }
+
+    /// Persist the tier2_pages_done set as JSON, best-effort.
+    private func persistPagesDone(_ pages: Set<Int>, for documentID: UUID, db: DatabaseManager) async {
+        let sorted = pages.sorted()
+        let json = (try? JSONEncoder().encode(sorted))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        do {
+            try await MainActor.run {
+                try db.updateEnhancementState(
+                    documentID: documentID,
+                    status: "tier2",
+                    tier2PagesDoneJSON: json,
+                    error: nil
+                )
+            }
+        } catch {
+            dbgLog("PDFEnhancementService: persistPagesDone failed for %@: %@",
+                   documentID.uuidString, String(describing: error))
+        }
+    }
+
+    // MARK: Segmenter + embedder hookup
+
+    /// Re-segment `text` into chunks via the same sentence-aware
+    /// chunker `DocumentEmbeddingIndex` uses, then embed each chunk
+    /// against the document's existing embedding kind so retrieval
+    /// stays consistent. Static helper — no actor isolation needed.
+    nonisolated static func segmentAndEmbed(text: String, kind: String) -> [StoredDocumentChunk] {
+        let cfg = DocumentEmbeddingIndexConfiguration.default
+        let chunks = DocumentEmbeddingIndex.chunk(text, configuration: cfg)
+        return chunks.map { c in
+            let vector = DocumentEmbeddingIndex.embedTextWithKind(text: c.text, kind: kind)
+            return StoredDocumentChunk(
+                chunkIndex: c.chunkIndex,
+                startOffset: c.startOffset,
+                endOffset: c.endOffset,
+                text: c.text,
+                embedding: vector,
+                embeddingKind: kind,
+                pageStart: 0, pageEnd: 0, revision: 0, sourceTier: "tier2_vision"
+            )
+        }
     }
 }
 

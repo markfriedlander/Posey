@@ -534,6 +534,9 @@ final class LibraryViewModel: ObservableObject {
             // hit FK failures.
             Task { await PDFEnhancementService.shared.cancel(document.id) }
             try databaseManager.deleteDocument(document)
+            // 2026-05-22 Phase 2.2 Step 5 — drop the source PDF
+            // sidecar (no longer needed once the doc is gone).
+            PDFSourceStore.delete(document.id)
             loadDocuments()
             // 2026-05-13 — A4: invalidate any cached audio export
             // tied to this document. AudioExportCache.shared
@@ -794,6 +797,8 @@ extension LibraryViewModel {
                 try databaseManager.deleteDocument(doc)
                 // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecar.
                 PageFlagsStore.delete(documentID: doc.id)
+                // 2026-05-22 Phase 2.2 Step 5 — source PDF sidecar.
+                PDFSourceStore.delete(doc.id)
                 loadDocuments()
                 // 2026-05-13 — A4: invalidate cached audio export.
                 NotificationCenter.default.post(
@@ -816,6 +821,8 @@ extension LibraryViewModel {
                 for doc in docs { try databaseManager.deleteDocument(doc) }
                 // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecars.
                 for doc in docs { PageFlagsStore.delete(documentID: doc.id) }
+                // 2026-05-22 Phase 2.2 Step 5 — source PDF sidecars.
+                for doc in docs { PDFSourceStore.delete(doc.id) }
                 loadDocuments()
                 // 2026-05-13 — A4: nuke the entire audio-export cache
                 // when every document is wiped.

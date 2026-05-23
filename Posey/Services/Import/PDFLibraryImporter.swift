@@ -19,7 +19,11 @@ struct PDFLibraryImporter {
         // 2026-05-16 (B8) — Reject anything that isn't a PDF at the door.
         try FormatPrecheck.checkPDF(url: url)
         let parsed = try importer.loadDocument(from: url)
-        return try persistParsedDocument(parsed, from: url)
+        // 2026-05-22 Phase 2.2 Step 5 — read source bytes from the
+        // import URL so the background enhancement runner has them
+        // after the temp URL is unlinked.
+        let sourceData = (try? Data(contentsOf: url)) ?? nil
+        return try persistParsedDocument(parsed, from: url, sourceData: sourceData)
     }
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "pdf") throws -> Document {
@@ -41,6 +45,10 @@ struct PDFLibraryImporter {
             fileName: fileName,
             pageCount: parsed.pageFlags.count
         )
+        // 2026-05-22 Phase 2.2 Step 5 — persist content_boundaries +
+        // source PDF for the background enhancement window.
+        try? databaseManager.setContentBoundaries(parsed.contentBoundaries, for: doc.id)
+        _ = PDFSourceStore.save(rawData, for: doc.id)
         // 2026-05-22 Phase 2.2 Step 4 — enqueue background enhancement.
         enqueueEnhancement(documentID: doc.id, pageFlags: parsed.pageFlags)
         return doc
@@ -82,6 +90,14 @@ struct PDFLibraryImporter {
     /// Persist an already-parsed document. Called on the main thread after
     /// async PDF parsing completes. DatabaseManager must stay on main thread.
     func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL) throws -> Document {
+        try persistParsedDocument(parsed, from: url, sourceData: try? Data(contentsOf: url))
+    }
+
+    /// Variant that accepts the source PDF bytes for Phase 2.2 source
+    /// persistence. The sync path reads them from the temp URL before
+    /// the defer-cleanup runs; the async path can also supply them
+    /// from a Data buffer it already has.
+    func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL, sourceData: Data?) throws -> Document {
         // Strip duplicate file extensions (e.g. "report.pdf.pdf" → "report.pdf")
         // so the title fallback and stored fileName are clean.
         let rawFilename = url.lastPathComponent
@@ -112,6 +128,17 @@ struct PDFLibraryImporter {
             fileName: fileName,
             pageCount: parsed.pageFlags.count
         )
+
+        // 2026-05-22 Phase 2.2 Step 5 — persist content_boundaries
+        // (universal — for PDF these are page offsets; for other
+        // formats the corresponding importer fills in chapter /
+        // section / heading offsets per Mark's architectural
+        // direction) and save the source PDF bytes for the
+        // background enhancement window.
+        try? databaseManager.setContentBoundaries(parsed.contentBoundaries, for: doc.id)
+        if let sourceData {
+            _ = PDFSourceStore.save(sourceData, for: doc.id)
+        }
 
         // 2026-05-22 Phase 2.2 Step 4 — kick off background
         // enhancement for PDFs. The runner (Steps 5-7) decides

@@ -1831,6 +1831,20 @@ extension DatabaseManager {
         //   'complete' — both tiers finished
         //   'failed'   — enhancement aborted; see enhancement_error
         try addColumnIfNeeded(table: "documents", column: "enhancement_status", definition: "TEXT NOT NULL DEFAULT 'na'")
+        // 2026-05-22 Phase 2.2 Step 5 — universal content boundaries.
+        // JSON array of plainText character offsets where each
+        // meaningful division begins. Format-specific:
+        //   - PDF:   page boundaries (every page start)
+        //   - EPUB:  chapter boundaries
+        //   - DOCX:  section boundaries
+        //   - HTML:  heading boundaries (if any) or empty
+        //   - MD:    heading boundaries (if any) or empty
+        //   - RTF:   heading boundaries (if any) or empty
+        //   - TXT:   heading boundaries (if any) or empty
+        // The enhancement service uses these at runtime to compute
+        // which chunks overlap a given page/section being processed
+        // by Tier 2 / Tier 3 — one mechanism, all seven formats.
+        try addColumnIfNeeded(table: "documents", column: "content_boundaries", definition: "TEXT NOT NULL DEFAULT '[]'")
         // tier2_pages_done — JSON array of page indices Vision has
         // already processed for this document. Lets us resume a
         // partial run after relaunch without re-doing completed
@@ -2055,5 +2069,288 @@ extension DatabaseManager {
 }
 
 // ========== BLOCK 07: PHASE 2.2 ENHANCEMENT STATE HELPERS - END ==========
+
+// ========== BLOCK 08: PHASE 2.2 CONTENT BOUNDARIES + PAGE REWRITE - START ==========
+
+/// Step 5 — content_boundaries read/write + the atomic per-page
+/// text-rewrite transaction used by the Tier 2 Vision background
+/// runner to splice new page text into a document and shift
+/// downstream offsets across every linked table.
+extension DatabaseManager {
+
+    /// Read the content_boundaries array as `[Int]`. Returns empty
+    /// array on missing column or malformed JSON.
+    func contentBoundaries(for documentID: UUID) throws -> [Int] {
+        let sql = "SELECT content_boundaries FROM documents WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let json = sqliteString(statement, index: 0),
+              let data = json.data(using: .utf8) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([Int].self, from: data)) ?? []
+    }
+
+    /// Write the content_boundaries array. Called once at import
+    /// time and updated incrementally by `rewritePageText` as Tier 2
+    /// swaps shift downstream offsets.
+    func setContentBoundaries(_ boundaries: [Int], for documentID: UUID) throws {
+        let data = try JSONEncoder().encode(boundaries)
+        let json = String(data: data, encoding: .utf8) ?? "[]"
+        let sql = "UPDATE documents SET content_boundaries = ? WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(json, at: 1, for: statement)
+        try bind(documentID.uuidString, at: 2, for: statement)
+        try step(statement)
+    }
+
+    /// Read plainText for a document. Used by the enhancement service
+    /// to compute the current page range before rewriting it.
+    func plainText(for documentID: UUID) throws -> String? {
+        let sql = "SELECT plain_text FROM documents WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return sqliteString(statement, index: 0)
+    }
+
+    /// **Atomic per-page text rewrite.** The load-bearing operation for
+    /// streaming chunk replacement.
+    ///
+    /// Given a `documentID`, a `pageIndex`, and `newPageText` produced
+    /// by Tier 2 (Vision) — splice the new text into `documents.plainText`
+    /// in place of the old page region, replace the affected chunks
+    /// with freshly-segmented ones tagged `(pageStart: N, pageEnd: N,
+    /// revision: $0.revision + 1, sourceTier: "tier2_vision")`, and
+    /// shift the offsets of every downstream reference (later chunks,
+    /// notes, bookmarks, reading positions, TOC entries) by the length
+    /// delta. Wrapped in a single SQL transaction so a partial failure
+    /// can never leave the index in a half-rewritten state.
+    ///
+    /// Re-segmentation is delegated via the `segmentAndEmbed` closure
+    /// because chunk creation requires the embedder (owned by
+    /// `DocumentEmbeddingIndex`). The closure receives the new page
+    /// text and the chunk-index range it should fill, and returns
+    /// fresh `StoredDocumentChunk`s with `chunkIndex` set to whatever
+    /// scheme makes sense — this helper renumbers them globally before
+    /// inserting.
+    ///
+    /// **NOTE on displayText:** Step 5 deliberately does NOT splice
+    /// displayText. plainText is updated incrementally so RAG sees
+    /// the corrected text; displayText is rebuilt by the enhancement
+    /// service at end-of-Tier-2 from the corrected per-page text via
+    /// a separate write. The reader observes plainText for TTS-pace
+    /// material and displayText for visible rendering, so the gap
+    /// during enhancement is bounded.
+    func rewritePageText(
+        documentID: UUID,
+        pageIndex: Int,
+        newPageText: String,
+        sourceTier: String,
+        segmentAndEmbed: (String) throws -> [StoredDocumentChunk]
+    ) throws -> RewritePageResult {
+        // ── Read current state ───────────────────────────────────
+        let boundaries = try contentBoundaries(for: documentID)
+        guard pageIndex >= 0, pageIndex < boundaries.count else {
+            throw DatabaseError.prepareFailed("rewritePageText: pageIndex \(pageIndex) out of range")
+        }
+        guard let plainText = try plainText(for: documentID) else {
+            throw DatabaseError.prepareFailed("rewritePageText: document \(documentID) has no plainText")
+        }
+        let pageStart = boundaries[pageIndex]
+        let pageEnd: Int = (pageIndex + 1 < boundaries.count)
+            ? boundaries[pageIndex + 1]
+            : plainText.count
+        guard pageStart <= plainText.count, pageEnd <= plainText.count, pageStart <= pageEnd else {
+            throw DatabaseError.prepareFailed("rewritePageText: bad page bounds [\(pageStart),\(pageEnd)] for plainText length \(plainText.count)")
+        }
+        let lowerIdx = plainText.index(plainText.startIndex, offsetBy: pageStart)
+        let upperIdx = plainText.index(plainText.startIndex, offsetBy: pageEnd)
+        let oldPageText = String(plainText[lowerIdx..<upperIdx])
+        let delta = newPageText.count - oldPageText.count
+
+        // Existing chunks (full set) so we can determine which ones
+        // overlap the page region by offset comparison.
+        let allChunks = try chunks(for: documentID)
+        let overlapping = allChunks.filter {
+            $0.startOffset < pageEnd && $0.endOffset > pageStart
+        }
+        let downstream = allChunks.filter { $0.startOffset >= pageEnd }
+        let upstream = allChunks.filter { $0.endOffset <= pageStart }
+
+        // ── Generate the replacement chunks BEFORE we open the txn ─
+        // Re-segmenting is potentially heavy (re-embedding). Do it
+        // outside the transaction so the DB lock is held briefly.
+        let baseRevision = (overlapping.map(\.revision).max() ?? 0) + 1
+        let freshChunks = try segmentAndEmbed(newPageText)
+
+        // Renumber + offset-correct the fresh chunks: they should
+        // start at the page's startOffset and be sequentially indexed
+        // beginning at the first overlapping chunk's index.
+        let firstReplacedIndex = overlapping.first?.chunkIndex ?? upstream.count
+        var newChunkRows: [StoredDocumentChunk] = []
+        newChunkRows.reserveCapacity(freshChunks.count)
+        var cursor = pageStart
+        for (i, fc) in freshChunks.enumerated() {
+            let chunkStart = cursor
+            let chunkEnd = chunkStart + fc.text.count
+            cursor = chunkEnd
+            newChunkRows.append(StoredDocumentChunk(
+                chunkIndex: firstReplacedIndex + i,
+                startOffset: chunkStart,
+                endOffset: chunkEnd,
+                text: fc.text,
+                embedding: fc.embedding,
+                embeddingKind: fc.embeddingKind,
+                pageStart: pageIndex,
+                pageEnd: pageIndex,
+                revision: baseRevision,
+                sourceTier: sourceTier
+            ))
+        }
+
+        // Downstream chunks get their indices renumbered + offsets
+        // shifted by delta.
+        let downstreamShifted: [StoredDocumentChunk] = downstream.enumerated().map { (offsetFromStart, c) in
+            StoredDocumentChunk(
+                chunkIndex: firstReplacedIndex + newChunkRows.count + offsetFromStart,
+                startOffset: c.startOffset + delta,
+                endOffset: c.endOffset + delta,
+                text: c.text,
+                embedding: c.embedding,
+                embeddingKind: c.embeddingKind,
+                pageStart: c.pageStart,
+                pageEnd: c.pageEnd,
+                revision: c.revision,
+                sourceTier: c.sourceTier
+            )
+        }
+
+        let assembledChunks = upstream + newChunkRows + downstreamShifted
+
+        // ── Splice plainText ─────────────────────────────────────
+        var newPlainText = plainText
+        newPlainText.replaceSubrange(lowerIdx..<upperIdx, with: newPageText)
+
+        // ── Adjust content_boundaries for subsequent pages ───────
+        var newBoundaries = boundaries
+        if delta != 0 && pageIndex + 1 < newBoundaries.count {
+            for j in (pageIndex + 1)..<newBoundaries.count {
+                newBoundaries[j] += delta
+            }
+        }
+
+        // ── Atomic transaction: write everything together ────────
+        try execute("BEGIN TRANSACTION;")
+        do {
+            // Replace all chunks for this document. `replaceChunks`
+            // wraps DELETE + INSERTs in its own transaction
+            // semantically; we're inside an outer BEGIN so the rows
+            // either all land or all roll back together with the
+            // documents + linked-table updates.
+            try execute("DELETE FROM document_chunks WHERE document_id = '\(documentID.uuidString)';")
+            let insertSQL = """
+            INSERT INTO document_chunks
+                (document_id, chunk_index, start_offset, end_offset, text, embedding, embedding_kind,
+                 page_start, page_end, revision, source_tier)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            for chunk in assembledChunks {
+                let statement = try prepareStatement(sql: insertSQL)
+                defer { sqlite3_finalize(statement) }
+                try bind(documentID.uuidString, at: 1, for: statement)
+                sqlite3_bind_int(statement, 2, Int32(chunk.chunkIndex))
+                sqlite3_bind_int(statement, 3, Int32(chunk.startOffset))
+                sqlite3_bind_int(statement, 4, Int32(chunk.endOffset))
+                try bind(chunk.text, at: 5, for: statement)
+                let blob = chunk.embedding.withUnsafeBufferPointer { Data(buffer: $0) }
+                let bytes = [UInt8](blob)
+                if sqlite3_bind_blob(statement, 6, bytes, Int32(bytes.count), SQLITE_TRANSIENT) != SQLITE_OK {
+                    throw DatabaseError.bindFailed(lastErrorMessage())
+                }
+                try bind(chunk.embeddingKind, at: 7, for: statement)
+                sqlite3_bind_int(statement, 8, Int32(chunk.pageStart))
+                sqlite3_bind_int(statement, 9, Int32(chunk.pageEnd))
+                sqlite3_bind_int(statement, 10, Int32(chunk.revision))
+                try bind(chunk.sourceTier, at: 11, for: statement)
+                try step(statement)
+            }
+
+            // Write the new plainText + character_count + content_boundaries.
+            let docSQL = """
+            UPDATE documents SET
+              plain_text = ?,
+              character_count = ?,
+              content_boundaries = ?
+            WHERE id = ?;
+            """
+            let docStmt = try prepareStatement(sql: docSQL)
+            defer { sqlite3_finalize(docStmt) }
+            try bind(newPlainText, at: 1, for: docStmt)
+            sqlite3_bind_int(docStmt, 2, Int32(newPlainText.count))
+            let boundaryJSON = String(
+                data: try JSONEncoder().encode(newBoundaries),
+                encoding: .utf8
+            ) ?? "[]"
+            try bind(boundaryJSON, at: 3, for: docStmt)
+            try bind(documentID.uuidString, at: 4, for: docStmt)
+            try step(docStmt)
+
+            // Shift linked-table offsets that fall AT OR AFTER pageEnd
+            // (the splice point). Anything in the rewritten page
+            // region is left alone — the user's notes/reading_position
+            // inside that page may map to slightly different text now,
+            // but the chunk-level mapping makes that survivable.
+            // (Notes mid-page falling exactly on a fused token now
+            // anchor to the corrected token; an acceptable improvement.)
+            if delta != 0 {
+                // reading_positions uses character_offset; notes
+                // anchors a (start_offset, end_offset) range; toc uses
+                // plain_text_offset. Shift any reference that lands at
+                // or after the splice point.
+                let shiftSQLs: [String] = [
+                    "UPDATE reading_positions SET character_offset = character_offset + \(delta) WHERE document_id = ? AND character_offset >= \(pageEnd);",
+                    "UPDATE notes SET start_offset = start_offset + \(delta), end_offset = end_offset + \(delta) WHERE document_id = ? AND start_offset >= \(pageEnd);",
+                    "UPDATE document_toc SET plain_text_offset = plain_text_offset + \(delta) WHERE document_id = ? AND plain_text_offset >= \(pageEnd);"
+                ]
+                for sql in shiftSQLs {
+                    let s = try prepareStatement(sql: sql)
+                    defer { sqlite3_finalize(s) }
+                    try bind(documentID.uuidString, at: 1, for: s)
+                    try step(s)
+                }
+            }
+
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+
+        return RewritePageResult(
+            oldPageText: oldPageText,
+            newPageTextLength: newPageText.count,
+            delta: delta,
+            replacedChunkCount: overlapping.count,
+            insertedChunkCount: newChunkRows.count
+        )
+    }
+
+    /// Telemetry returned by `rewritePageText` for logging + caller
+    /// state updates.
+    struct RewritePageResult: Sendable {
+        let oldPageText: String
+        let newPageTextLength: Int
+        let delta: Int
+        let replacedChunkCount: Int
+        let insertedChunkCount: Int
+    }
+}
+
+// ========== BLOCK 08: PHASE 2.2 CONTENT BOUNDARIES + PAGE REWRITE - END ==========
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

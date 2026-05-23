@@ -1733,6 +1733,82 @@ extension DatabaseManager {
             """)
         // ========== End Task 4 #6 (B) ==========
         // ========== End Ask Posey Milestone 1 schema additions ==========
+
+        // ========== 2026-05-22 Phase 2.2 — Background enhancement schema ==========
+        // Streaming chunk replacement architecture for PDF Tier 2
+        // (Vision) and Tier 3 (AFM fusion repair) post-extraction
+        // enhancement. See DECISIONS.md 2026-05-22 late-evening
+        // entry. All columns additive + nullable / defaulted so
+        // pre-Phase-2.2 databases migrate cleanly.
+
+        // documents — enhancement state machine + resume markers.
+        //
+        // enhancement_status state machine:
+        //   'na'       — no enhancement applicable (non-PDF, or PDF
+        //                with zero flagged pages and zero suspect
+        //                tokens)
+        //   'pending'  — enqueued but not yet started
+        //   'tier2'    — Tier 2 (Vision) currently running
+        //   'tier3'    — Tier 3 (AFM fusion repair) currently running
+        //   'complete' — both tiers finished
+        //   'failed'   — enhancement aborted; see enhancement_error
+        try addColumnIfNeeded(table: "documents", column: "enhancement_status", definition: "TEXT NOT NULL DEFAULT 'na'")
+        // tier2_pages_done — JSON array of page indices Vision has
+        // already processed for this document. Lets us resume a
+        // partial run after relaunch without re-doing completed
+        // pages. Empty array = nothing done yet.
+        try addColumnIfNeeded(table: "documents", column: "tier2_pages_done", definition: "TEXT NOT NULL DEFAULT '[]'")
+        // tier3_tokens_done — count of suspect tokens AFM has
+        // already corrected (or attempted). Diagnostic / telemetry;
+        // the authoritative idempotency record is the
+        // `document_afm_corrections` table below.
+        try addColumnIfNeeded(table: "documents", column: "tier3_tokens_done", definition: "INTEGER NOT NULL DEFAULT 0")
+        // enhancement_error — last failure reason when
+        // enhancement_status = 'failed'. NULL otherwise.
+        try addColumnIfNeeded(table: "documents", column: "enhancement_error", definition: "TEXT")
+
+        // document_chunks — page provenance + revision tracking.
+        // page_start / page_end mark which PDF pages contributed
+        // this chunk's text. 0 = unknown / non-PDF (existing chunks
+        // backfill to 0). Used by Tier 2 to locate the chunks that
+        // belong to a rescued page.
+        try addColumnIfNeeded(table: "document_chunks", column: "page_start", definition: "INTEGER NOT NULL DEFAULT 0")
+        try addColumnIfNeeded(table: "document_chunks", column: "page_end", definition: "INTEGER NOT NULL DEFAULT 0")
+        // revision bumps every time a chunk's text is updated by
+        // an enhancement tier. 0 = original Tier 1. Read by the
+        // embedding indexer to know when to re-embed.
+        try addColumnIfNeeded(table: "document_chunks", column: "revision", definition: "INTEGER NOT NULL DEFAULT 0")
+        // source_tier records which extractor produced the current
+        // text: 'tier1' (PDFKit / non-PDF importer), 'tier2_vision'
+        // (Vision rescued the page), 'tier3_afm_repair' (AFM
+        // corrected a fusion token). Diagnostic; surfaced via
+        // LIST_CHUNKS for debugging.
+        try addColumnIfNeeded(table: "document_chunks", column: "source_tier", definition: "TEXT NOT NULL DEFAULT 'tier1'")
+
+        // document_afm_corrections — Tier 3 idempotency table.
+        // One row per (document, original-token, corrected-token)
+        // triple. Tier 3 startup queries this table to skip tokens
+        // already corrected for the document. Survives mid-pass
+        // app kills + relaunches without reprocessing.
+        try execute("""
+            CREATE TABLE IF NOT EXISTS document_afm_corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                original TEXT NOT NULL,
+                corrected TEXT NOT NULL,
+                applied_at REAL NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_document_afm_corrections_doc
+            ON document_afm_corrections(document_id);
+            """)
+        try execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_document_afm_corrections_orig
+            ON document_afm_corrections(document_id, original);
+            """)
+        // ========== End Phase 2.2 schema additions ==========
     }
 
     private func execute(_ sql: String) throws {

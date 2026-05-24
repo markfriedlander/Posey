@@ -1901,6 +1901,101 @@ extension DatabaseManager {
             ON document_afm_corrections(document_id, original);
             """)
         // ========== End Phase 2.2 schema additions ==========
+
+        // ========== 2026-05-23 Architecture rebuild — units schema ==========
+        // The new single-source-of-truth content model. See
+        // `docs-internal/architecture-rebuild-proposal.md`.
+        //
+        // Old `documents.plain_text` / `display_text` columns + the
+        // `document_chunks` table remain in the schema during the
+        // per-format rollout so the project compiles while one
+        // format at a time switches over. The cleanup pass at the
+        // end of the rebuild drops the old columns and the chunks
+        // table.
+
+        // document_units — the new authoritative content store. Every
+        // importer emits an ordered list of these; the reader, TTS,
+        // search, and Ask Posey RAG all derive their views from this
+        // table. See `ContentUnit.swift` for the type and the field
+        // conventions.
+        try execute("""
+            CREATE TABLE IF NOT EXISTS document_units (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                revision INTEGER NOT NULL DEFAULT 1,
+                source_tier TEXT NOT NULL DEFAULT 'importer',
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_document_units_doc_seq
+            ON document_units(document_id, sequence);
+            """)
+
+        // document_sentences — pre-computed sentence segmentation per
+        // unit, produced by `SentenceIndexer` at import time. The
+        // playback service reads these directly with no NLTokenizer
+        // pass on the open path. `(unit_sequence, sentence_index)`
+        // gives the global playback order.
+        try execute("""
+            CREATE TABLE IF NOT EXISTS document_sentences (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                unit_id TEXT NOT NULL,
+                unit_sequence INTEGER NOT NULL,
+                sentence_index INTEGER NOT NULL,
+                intra_start INTEGER NOT NULL,
+                intra_end INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
+                FOREIGN KEY(unit_id) REFERENCES document_units(id) ON DELETE CASCADE
+            );
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_document_sentences_playback
+            ON document_sentences(document_id, unit_sequence, sentence_index);
+            """)
+
+        // unit_embedding_chunks — derived cache for RAG retrieval.
+        // The unit-aware chunker reads units in order and emits
+        // overlap-windowed retrieval slices. Rebuilt when units
+        // change (Tier 2 page swap, Tier 3 token correction).
+        // Distinct from the legacy `document_chunks` table (which is
+        // still wired to the old plainText flow during the rollout).
+        try execute("""
+            CREATE TABLE IF NOT EXISTS unit_embedding_chunks (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                start_unit_id TEXT NOT NULL,
+                start_intra_offset INTEGER NOT NULL,
+                end_unit_id TEXT NOT NULL,
+                end_intra_offset INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_kind TEXT NOT NULL DEFAULT 'unknown',
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
+                FOREIGN KEY(start_unit_id) REFERENCES document_units(id) ON DELETE CASCADE,
+                FOREIGN KEY(end_unit_id) REFERENCES document_units(id) ON DELETE CASCADE
+            );
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_unit_embedding_chunks_doc
+            ON unit_embedding_chunks(document_id, chunk_index);
+            """)
+
+        // smart-skip + content-end references move from plainText
+        // offsets to unit ids. Old offset columns (playback_skip_until_offset,
+        // content_end_offset) stay during the rollout; new code reads
+        // these unit-id columns when available, falls back to the
+        // offset columns when not.
+        try addColumnIfNeeded(table: "documents", column: "skip_unit_id", definition: "TEXT")
+        try addColumnIfNeeded(table: "documents", column: "content_end_unit_id", definition: "TEXT")
+        // ========== End architecture rebuild — units schema ==========
     }
 
     private func execute(_ sql: String) throws {
@@ -2584,5 +2679,519 @@ extension DatabaseManager {
 }
 
 // ========== BLOCK 09: PHASE 2.2 TIER 3 FUSION REPAIR HELPERS - END ==========
+
+// ========== BLOCK 10: CONTENT UNITS + SENTENCES (REBUILD) - START ==========
+//
+// Persistence layer for the rebuild's content-units source of truth.
+// See `docs-internal/architecture-rebuild-proposal.md` and
+// `Posey/Domain/Models/ContentUnit.swift` for the data model.
+//
+// These helpers live alongside the legacy plainText / displayText /
+// document_chunks paths during the per-format rollout. As each format
+// flips to units, its old paths get retired.
+
+extension DatabaseManager {
+
+    // MARK: Units — read
+
+    /// Fetch every content unit for a document, ordered by sequence.
+    /// One indexed SELECT; sub-second even on Moby-sized documents
+    /// because there's no per-row computation.
+    func units(for documentID: UUID) throws -> [ContentUnit] {
+        let sql = """
+        SELECT id, sequence, kind, text, metadata_json, revision, source_tier
+        FROM document_units
+        WHERE document_id = ?
+        ORDER BY sequence ASC;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var out: [ContentUnit] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let idStr = sqliteString(statement, index: 0),
+                  let id = UUID(uuidString: idStr),
+                  let kindRaw = sqliteString(statement, index: 2),
+                  let kind = ContentUnitKind(rawValue: kindRaw),
+                  let text = sqliteString(statement, index: 3),
+                  let metaJSON = sqliteString(statement, index: 4),
+                  let sourceTier = sqliteString(statement, index: 6) else {
+                continue
+            }
+            let metadata: ContentUnitMetadata = {
+                guard let data = metaJSON.data(using: .utf8),
+                      let m = try? JSONDecoder().decode(ContentUnitMetadata.self, from: data) else {
+                    return .empty
+                }
+                return m
+            }()
+            out.append(ContentUnit(
+                id: id,
+                documentID: documentID,
+                sequence: Int(sqlite3_column_int64(statement, 1)),
+                kind: kind,
+                text: text,
+                metadata: metadata,
+                revision: Int(sqlite3_column_int64(statement, 5)),
+                sourceTier: sourceTier
+            ))
+        }
+        return out
+    }
+
+    /// Fetch a single unit by id. Returns nil if not found (or
+    /// document was deleted out from under it).
+    func unit(withID id: UUID) throws -> ContentUnit? {
+        let sql = """
+        SELECT id, document_id, sequence, kind, text, metadata_json, revision, source_tier
+        FROM document_units
+        WHERE id = ?;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(id.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard let docIDStr = sqliteString(statement, index: 1),
+              let docID = UUID(uuidString: docIDStr),
+              let kindRaw = sqliteString(statement, index: 3),
+              let kind = ContentUnitKind(rawValue: kindRaw),
+              let text = sqliteString(statement, index: 4),
+              let metaJSON = sqliteString(statement, index: 5),
+              let sourceTier = sqliteString(statement, index: 7) else {
+            return nil
+        }
+        let metadata: ContentUnitMetadata = {
+            guard let data = metaJSON.data(using: .utf8),
+                  let m = try? JSONDecoder().decode(ContentUnitMetadata.self, from: data) else {
+                return .empty
+            }
+            return m
+        }()
+        return ContentUnit(
+            id: id,
+            documentID: docID,
+            sequence: Int(sqlite3_column_int64(statement, 2)),
+            kind: kind,
+            text: text,
+            metadata: metadata,
+            revision: Int(sqlite3_column_int64(statement, 6)),
+            sourceTier: sourceTier
+        )
+    }
+
+    // MARK: Units — write
+
+    /// Replace the entire unit list for a document. Atomic — the
+    /// transaction either succeeds wholesale or rolls back. Used by
+    /// importers at import time. For incremental edits (Tier 2 page
+    /// swap, Tier 3 token correction) see `replaceUnits(in:with:for:)`
+    /// and `updateUnitText(...)` below.
+    func replaceAllUnits(_ units: [ContentUnit], for documentID: UUID) throws {
+        try execute("BEGIN TRANSACTION;")
+        do {
+            try execute("DELETE FROM document_units WHERE document_id = '\(documentID.uuidString)';")
+            for unit in units {
+                try insertUnit(unit)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Insert one unit. Assumes the caller is inside a transaction.
+    private func insertUnit(_ unit: ContentUnit) throws {
+        let metaJSON: String = {
+            guard let data = try? JSONEncoder().encode(unit.metadata),
+                  let s = String(data: data, encoding: .utf8) else {
+                return "{}"
+            }
+            return s
+        }()
+        let sql = """
+        INSERT INTO document_units
+            (id, document_id, sequence, kind, text, metadata_json, revision, source_tier)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(unit.id.uuidString, at: 1, for: statement)
+        try bind(unit.documentID.uuidString, at: 2, for: statement)
+        sqlite3_bind_int64(statement, 3, sqlite3_int64(unit.sequence))
+        try bind(unit.kind.rawValue, at: 4, for: statement)
+        try bind(unit.text, at: 5, for: statement)
+        try bind(metaJSON, at: 6, for: statement)
+        sqlite3_bind_int64(statement, 7, sqlite3_int64(unit.revision))
+        try bind(unit.sourceTier, at: 8, for: statement)
+        try step(statement)
+    }
+
+    /// Replace a contiguous run of units (identified by sequence
+    /// range) with a new list. Used by Tier 2 Vision OCR when it
+    /// re-extracts a page: delete the page's units, insert the new
+    /// ones. The new units may have a different count than what they
+    /// replaced; sequence numbers come from the caller.
+    ///
+    /// Atomic. The caller is responsible for re-segmenting the new
+    /// units' sentences afterward (see `SentenceIndexer`).
+    func replaceUnits(
+        inSequenceRange range: ClosedRange<Int>,
+        with newUnits: [ContentUnit],
+        for documentID: UUID
+    ) throws {
+        try execute("BEGIN TRANSACTION;")
+        do {
+            let deleteSQL = """
+            DELETE FROM document_units
+            WHERE document_id = ? AND sequence >= ? AND sequence <= ?;
+            """
+            let deleteStmt = try prepareStatement(sql: deleteSQL)
+            try bind(documentID.uuidString, at: 1, for: deleteStmt)
+            sqlite3_bind_int64(deleteStmt, 2, sqlite3_int64(range.lowerBound))
+            sqlite3_bind_int64(deleteStmt, 3, sqlite3_int64(range.upperBound))
+            try step(deleteStmt)
+            sqlite3_finalize(deleteStmt)
+            for unit in newUnits {
+                try insertUnit(unit)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Mutate one unit's text in place, bumping revision and updating
+    /// source_tier. Used by Tier 3 AFM fusion repair on individual
+    /// units containing a corrected token. The caller is responsible
+    /// for regenerating that unit's sentences afterward.
+    func updateUnitText(
+        _ unitID: UUID,
+        newText: String,
+        sourceTier: String
+    ) throws {
+        let sql = """
+        UPDATE document_units
+        SET text = ?, revision = revision + 1, source_tier = ?
+        WHERE id = ?;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(newText, at: 1, for: statement)
+        try bind(sourceTier, at: 2, for: statement)
+        try bind(unitID.uuidString, at: 3, for: statement)
+        try step(statement)
+    }
+
+    /// Count of units for a document. Cheap; uses the
+    /// `(document_id, sequence)` index.
+    func unitCount(for documentID: UUID) throws -> Int {
+        let sql = "SELECT COUNT(*) FROM document_units WHERE document_id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    // MARK: Sentences — read
+
+    /// Fetch every sentence for a document, ordered by
+    /// `(unit_sequence, sentence_index)` — the natural playback order.
+    /// This is what `SpeechPlaybackService` consumes at open time.
+    /// One indexed SELECT; no NLTokenizer pass.
+    func sentences(for documentID: UUID) throws -> [Sentence] {
+        let sql = """
+        SELECT id, unit_id, unit_sequence, sentence_index, intra_start, intra_end, text
+        FROM document_sentences
+        WHERE document_id = ?
+        ORDER BY unit_sequence ASC, sentence_index ASC;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var out: [Sentence] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let idStr = sqliteString(statement, index: 0),
+                  let id = UUID(uuidString: idStr),
+                  let unitIDStr = sqliteString(statement, index: 1),
+                  let unitID = UUID(uuidString: unitIDStr),
+                  let text = sqliteString(statement, index: 6) else {
+                continue
+            }
+            out.append(Sentence(
+                id: id,
+                documentID: documentID,
+                unitID: unitID,
+                unitSequence: Int(sqlite3_column_int64(statement, 2)),
+                sentenceIndex: Int(sqlite3_column_int64(statement, 3)),
+                intraStart: Int(sqlite3_column_int64(statement, 4)),
+                intraEnd: Int(sqlite3_column_int64(statement, 5)),
+                text: text
+            ))
+        }
+        return out
+    }
+
+    /// Fetch sentences for one unit, ordered by sentence_index.
+    /// Used by the reader when only one unit's sentences are needed
+    /// (e.g., on a single-unit replacement during Tier 3).
+    func sentences(forUnitID unitID: UUID) throws -> [Sentence] {
+        let sql = """
+        SELECT id, document_id, unit_sequence, sentence_index, intra_start, intra_end, text
+        FROM document_sentences
+        WHERE unit_id = ?
+        ORDER BY sentence_index ASC;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(unitID.uuidString, at: 1, for: statement)
+        var out: [Sentence] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let idStr = sqliteString(statement, index: 0),
+                  let id = UUID(uuidString: idStr),
+                  let docIDStr = sqliteString(statement, index: 1),
+                  let documentID = UUID(uuidString: docIDStr),
+                  let text = sqliteString(statement, index: 6) else {
+                continue
+            }
+            out.append(Sentence(
+                id: id,
+                documentID: documentID,
+                unitID: unitID,
+                unitSequence: Int(sqlite3_column_int64(statement, 2)),
+                sentenceIndex: Int(sqlite3_column_int64(statement, 3)),
+                intraStart: Int(sqlite3_column_int64(statement, 4)),
+                intraEnd: Int(sqlite3_column_int64(statement, 5)),
+                text: text
+            ))
+        }
+        return out
+    }
+
+    // MARK: Sentences — write
+
+    /// Replace the sentence list for a single unit. Atomic per-unit
+    /// transaction. Used by `SentenceIndexer` at import time (initial
+    /// indexing) and after every Tier 2 / Tier 3 unit edit.
+    func replaceSentences(_ sentences: [Sentence], forUnitID unitID: UUID) throws {
+        try execute("BEGIN TRANSACTION;")
+        do {
+            try execute("DELETE FROM document_sentences WHERE unit_id = '\(unitID.uuidString)';")
+            for sentence in sentences {
+                try insertSentence(sentence)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Bulk-replace every sentence for an entire document. Used by
+    /// the initial indexing pass after `replaceAllUnits` at import.
+    func replaceAllSentences(_ sentences: [Sentence], for documentID: UUID) throws {
+        try execute("BEGIN TRANSACTION;")
+        do {
+            try execute("DELETE FROM document_sentences WHERE document_id = '\(documentID.uuidString)';")
+            for sentence in sentences {
+                try insertSentence(sentence)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    private func insertSentence(_ sentence: Sentence) throws {
+        let sql = """
+        INSERT INTO document_sentences
+            (id, document_id, unit_id, unit_sequence, sentence_index, intra_start, intra_end, text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(sentence.id.uuidString, at: 1, for: statement)
+        try bind(sentence.documentID.uuidString, at: 2, for: statement)
+        try bind(sentence.unitID.uuidString, at: 3, for: statement)
+        sqlite3_bind_int64(statement, 4, sqlite3_int64(sentence.unitSequence))
+        sqlite3_bind_int64(statement, 5, sqlite3_int64(sentence.sentenceIndex))
+        sqlite3_bind_int64(statement, 6, sqlite3_int64(sentence.intraStart))
+        sqlite3_bind_int64(statement, 7, sqlite3_int64(sentence.intraEnd))
+        try bind(sentence.text, at: 8, for: statement)
+        try step(statement)
+    }
+
+    /// Sentence count for a document — diagnostic / library badge.
+    func sentenceCount(for documentID: UUID) throws -> Int {
+        let sql = "SELECT COUNT(*) FROM document_sentences WHERE document_id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    // MARK: One-shot persistence of an importer result
+
+    /// Persist everything from a `ParsedDocument` in a single
+    /// transaction: the document header, every unit, every sentence,
+    /// TOC entries, and the skip references. Used by the unit-aware
+    /// importers as the one call after they finish parsing.
+    ///
+    /// During the per-format rollout, this also populates the legacy
+    /// `plain_text` / `display_text` / `character_count` columns by
+    /// joining unit text — so any consumer that hasn't switched to
+    /// units yet still sees a coherent document.
+    func persistParsedDocument(_ parsed: ParsedDocument) throws {
+        try execute("BEGIN TRANSACTION;")
+        do {
+            // Derive legacy text fields by joining prose-bearing
+            // units. Newline separator between units. This keeps the
+            // pre-rebuild reader path functional for any format that
+            // hasn't switched to units yet (and during the rollout
+            // window for the format that's mid-flip).
+            let proseUnits = parsed.units.filter { $0.kind.carriesProseText }
+            let joinedText = proseUnits.map(\.text).joined(separator: "\n\n")
+            let now = Date()
+
+            // Insert / update document header.
+            let docSQL = """
+            INSERT INTO documents (
+                id, title, file_name, file_type, imported_at, modified_at,
+                display_text, plain_text, character_count,
+                playback_skip_until_offset, content_end_offset, skip_source,
+                skip_unit_id, content_end_unit_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                file_name = excluded.file_name,
+                file_type = excluded.file_type,
+                modified_at = excluded.modified_at,
+                display_text = excluded.display_text,
+                plain_text = excluded.plain_text,
+                character_count = excluded.character_count,
+                skip_source = excluded.skip_source,
+                skip_unit_id = excluded.skip_unit_id,
+                content_end_unit_id = excluded.content_end_unit_id;
+            """
+            let docStmt = try prepareStatement(sql: docSQL)
+            defer { sqlite3_finalize(docStmt) }
+            try bind(parsed.id.uuidString, at: 1, for: docStmt)
+            try bind(parsed.title, at: 2, for: docStmt)
+            try bind(parsed.fileName, at: 3, for: docStmt)
+            try bind(parsed.fileType, at: 4, for: docStmt)
+            sqlite3_bind_double(docStmt, 5, now.timeIntervalSince1970)
+            sqlite3_bind_double(docStmt, 6, now.timeIntervalSince1970)
+            try bind(joinedText, at: 7, for: docStmt)
+            try bind(joinedText, at: 8, for: docStmt)
+            sqlite3_bind_int64(docStmt, 9, sqlite3_int64(joinedText.count))
+            try bind(parsed.skipSource, at: 10, for: docStmt)
+            if let s = parsed.skipUnitID {
+                try bind(s.uuidString, at: 11, for: docStmt)
+            } else {
+                sqlite3_bind_null(docStmt, 11)
+            }
+            if let e = parsed.contentEndUnitID {
+                try bind(e.uuidString, at: 12, for: docStmt)
+            } else {
+                sqlite3_bind_null(docStmt, 12)
+            }
+            try step(docStmt)
+
+            // Replace units + sentences for this document.
+            try execute("DELETE FROM document_units WHERE document_id = '\(parsed.id.uuidString)';")
+            for unit in parsed.units {
+                try insertUnit(unit)
+            }
+            try execute("DELETE FROM document_sentences WHERE document_id = '\(parsed.id.uuidString)';")
+            for sentence in parsed.sentences {
+                try insertSentence(sentence)
+            }
+
+            // TOC.
+            try execute("DELETE FROM document_toc WHERE document_id = '\(parsed.id.uuidString)';")
+            for entry in parsed.toc {
+                try insertTOCEntry(entry, for: parsed.id)
+            }
+
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Helper for `persistParsedDocument`'s TOC insert. The existing
+    /// `insertTOCEntries` does a DELETE + bulk INSERT outside a
+    /// transaction; we want each insert inline within our wrapping
+    /// transaction.
+    private func insertTOCEntry(_ entry: StoredTOCEntry, for documentID: UUID) throws {
+        let sql = """
+        INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level)
+        VALUES (?, ?, ?, ?, ?);
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        sqlite3_bind_int64(statement, 2, sqlite3_int64(entry.playOrder))
+        try bind(entry.title, at: 3, for: statement)
+        sqlite3_bind_int64(statement, 4, sqlite3_int64(entry.plainTextOffset))
+        sqlite3_bind_int64(statement, 5, sqlite3_int64(entry.level))
+        try step(statement)
+    }
+
+    // MARK: Skip + content-end unit references
+
+    /// Read the skip / content-end unit references for a document.
+    /// During the per-format rollout, these may be nil for documents
+    /// imported through the legacy plainText path.
+    func unitSkipReferences(for documentID: UUID) throws -> (skipUnitID: UUID?, contentEndUnitID: UUID?) {
+        let sql = "SELECT skip_unit_id, content_end_unit_id FROM documents WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return (nil, nil) }
+        let skipStr = sqliteString(statement, index: 0)
+        let endStr = sqliteString(statement, index: 1)
+        return (
+            skipStr.flatMap(UUID.init(uuidString:)),
+            endStr.flatMap(UUID.init(uuidString:))
+        )
+    }
+
+    /// Write the skip / content-end unit references. Set to nil to
+    /// clear (e.g., user picked "Start from Beginning").
+    func setUnitSkipReferences(
+        skipUnitID: UUID?,
+        contentEndUnitID: UUID?,
+        for documentID: UUID
+    ) throws {
+        let sql = """
+        UPDATE documents
+        SET skip_unit_id = ?, content_end_unit_id = ?
+        WHERE id = ?;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        if let skipUnitID {
+            try bind(skipUnitID.uuidString, at: 1, for: statement)
+        } else {
+            sqlite3_bind_null(statement, 1)
+        }
+        if let contentEndUnitID {
+            try bind(contentEndUnitID.uuidString, at: 2, for: statement)
+        } else {
+            sqlite3_bind_null(statement, 2)
+        }
+        try bind(documentID.uuidString, at: 3, for: statement)
+        try step(statement)
+    }
+}
+
+// ========== BLOCK 10: CONTENT UNITS + SENTENCES (REBUILD) - END ==========
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

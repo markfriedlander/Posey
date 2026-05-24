@@ -3374,6 +3374,88 @@ final class ReaderViewModel: ObservableObject {
     /// NLTokenizer over the entire plainText — for Illuminatus's
     /// 1.6M chars this takes ~5–10s and is the reason this pass
     /// can't run on init's main-thread call.
+    /// 2026-05-23 Architecture rebuild — units fast path.
+    ///
+    /// Build the reader's `LoadedContent` from pre-fetched units +
+    /// sentences instead of running `NLTokenizer` over a plainText
+    /// string. The result is wire-compatible with the legacy
+    /// `computeContent`: same `segments` shape, same `displayBlocks`
+    /// shape, same `visualPauseMap`. Downstream reader machinery
+    /// doesn't care which path produced its inputs.
+    ///
+    /// Offset coherence: segments carry global offsets into the
+    /// joined plainText the persister wrote at import. The join
+    /// rule is `units.map(\.text).joined(separator: "\n\n")`, so a
+    /// unit's "global offset" is the running sum of preceding
+    /// prose-unit lengths plus 2 per separator.
+    nonisolated fileprivate static func computeContentFromUnits(
+        document: Document,
+        units: [ContentUnit],
+        sentences: [Sentence],
+        skipUnitSequence: Int?,
+        contentEndUnitSequence: Int?
+    ) -> LoadedContent {
+        // Compute the cumulative plainText offset of each unit so
+        // sentence intra-offsets can be lifted into the global
+        // offset space the rest of the reader anchors to. Sequence
+        // is monotonically increasing but possibly non-contiguous;
+        // we walk units in their stored order.
+        var cumulativeOffsetByUnitID: [UUID: Int] = [:]
+        var cumulative = 0
+        var skipGlobalOffset = 0
+        var endGlobalOffset = 0
+        for unit in units {
+            cumulativeOffsetByUnitID[unit.id] = cumulative
+            if let s = skipUnitSequence, unit.sequence == s {
+                skipGlobalOffset = cumulative
+            }
+            if let e = contentEndUnitSequence, unit.sequence == e {
+                endGlobalOffset = cumulative
+            }
+            // Only prose-bearing units contribute to the joined
+            // plainText (matches persistParsedDocument's filter).
+            if unit.kind.carriesProseText {
+                cumulative += unit.text.count + 2 // "\n\n" separator
+            }
+        }
+
+        // Build segments. Filter by skip / content-end ranges in
+        // sequence space (cleaner than offset comparison; same
+        // semantics).
+        var segments: [TextSegment] = []
+        for sentence in sentences {
+            if let s = skipUnitSequence, sentence.unitSequence < s { continue }
+            if let e = contentEndUnitSequence, sentence.unitSequence >= e { continue }
+            let unitOffset = cumulativeOffsetByUnitID[sentence.unitID] ?? 0
+            segments.append(TextSegment(
+                id: segments.count,
+                text: sentence.text,
+                startOffset: unitOffset + sentence.intraStart,
+                endOffset: unitOffset + sentence.intraEnd
+            ))
+        }
+
+        // Units-based docs render through the unified UnitRowView
+        // (added separately). The legacy displayBlocks path is left
+        // empty so the reader falls into its sentence-row code path
+        // for now; switching the renderer is the next step in the
+        // rebuild.
+        let displayBlocks: [DisplayBlock] = []
+        let visualPauseMap: [Int: Int] = [:]
+
+        // Suppress unused-parameter warnings on the bridge fields
+        // until the per-format flips wire them up.
+        _ = skipGlobalOffset
+        _ = endGlobalOffset
+        _ = document
+
+        return LoadedContent(
+            segments: segments,
+            displayBlocks: displayBlocks,
+            visualPauseMap: visualPauseMap
+        )
+    }
+
     nonisolated fileprivate static func computeContent(
         for document: Document
     ) -> LoadedContent {
@@ -3446,9 +3528,60 @@ final class ReaderViewModel: ObservableObject {
     /// this order risks the user seeing a half-prepared reader.
     private func loadContent() async {
         let document = self.document
-        let computed = await Task.detached(priority: .userInitiated) {
-            ReaderViewModel.computeContent(for: document)
-        }.value
+
+        // 2026-05-23 Architecture rebuild — units fast path.
+        // If this document was imported via the new unit-based
+        // importer, units + sentences are pre-computed and live in
+        // the DB. Reader-open becomes a sub-second indexed SELECT
+        // instead of a multi-second NLTokenizer pass. Otherwise we
+        // fall back to the legacy compute path so formats that
+        // haven't been flipped to units yet still work.
+        let preloadedSentences: [Sentence]
+        let preloadedUnits: [ContentUnit]
+        do {
+            let units = try databaseManager.units(for: document.id)
+            if units.isEmpty {
+                preloadedUnits = []
+                preloadedSentences = []
+            } else {
+                preloadedUnits = units
+                preloadedSentences = (try? databaseManager.sentences(for: document.id)) ?? []
+            }
+        } catch {
+            preloadedUnits = []
+            preloadedSentences = []
+        }
+
+        let computed: LoadedContent
+        if preloadedUnits.isEmpty == false {
+            // Units fast path — build segments directly from
+            // pre-computed sentences. No NLTokenizer at open time.
+            let document = self.document
+            let units = preloadedUnits
+            let sentences = preloadedSentences
+            let skipSeq: Int? = {
+                guard let skipID = (try? databaseManager.unitSkipReferences(for: document.id).skipUnitID) ?? nil else { return nil }
+                return units.first(where: { $0.id == skipID })?.sequence
+            }()
+            let endSeq: Int? = {
+                guard let endID = (try? databaseManager.unitSkipReferences(for: document.id).contentEndUnitID) ?? nil else { return nil }
+                return units.first(where: { $0.id == endID })?.sequence
+            }()
+            computed = await Task.detached(priority: .userInitiated) {
+                ReaderViewModel.computeContentFromUnits(
+                    document: document,
+                    units: units,
+                    sentences: sentences,
+                    skipUnitSequence: skipSeq,
+                    contentEndUnitSequence: endSeq
+                )
+            }.value
+        } else {
+            // Legacy path — NLTokenizer over plainText.
+            computed = await Task.detached(priority: .userInitiated) {
+                ReaderViewModel.computeContent(for: document)
+            }.value
+        }
 
         // 1. Heavy results.
         self.segments = computed.segments

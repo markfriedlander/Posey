@@ -1962,12 +1962,26 @@ extension DatabaseManager {
 
         // unit_embedding_chunks — derived cache for RAG retrieval.
         // The unit-aware chunker reads units in order and emits
-        // overlap-windowed retrieval slices. Rebuilt when units
-        // change (Tier 2 page swap, Tier 3 token correction).
-        // Distinct from the legacy `document_chunks` table (which is
-        // still wired to the old plainText flow during the rollout).
+        // overlap-windowed retrieval slices anchored to
+        // (start_unit_id, start_intra_offset, end_unit_id,
+        // end_intra_offset). Rebuilt when units change (Tier 2
+        // page swap, Tier 3 token correction).
+        //
+        // 2026-05-23 — Step 8a (Hal-based Ask Posey rebuild).
+        // The earlier interim schema had `embedding BLOB NOT NULL`
+        // and an `embedding_kind` column. The new architecture's
+        // invariant is "one active embedding backend at a time,
+        // every row is either in that backend's space or NULL
+        // pending a migration re-embed." Per-row kind has no
+        // meaning under this invariant, and NULL is required so
+        // `EmbedderMigrationCoordinator` can wipe-and-refill.
+        // The table is empty in every existing install (the
+        // chunker that would populate it ships in Step 8b), so
+        // we DROP and recreate rather than performing a more
+        // elaborate column-level migration.
+        try execute("DROP TABLE IF EXISTS unit_embedding_chunks;")
         try execute("""
-            CREATE TABLE IF NOT EXISTS unit_embedding_chunks (
+            CREATE TABLE unit_embedding_chunks (
                 id TEXT PRIMARY KEY,
                 document_id TEXT NOT NULL,
                 chunk_index INTEGER NOT NULL,
@@ -1976,8 +1990,7 @@ extension DatabaseManager {
                 end_unit_id TEXT NOT NULL,
                 end_intra_offset INTEGER NOT NULL,
                 text TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                embedding_kind TEXT NOT NULL DEFAULT 'unknown',
+                embedding BLOB,
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
                 FOREIGN KEY(start_unit_id) REFERENCES document_units(id) ON DELETE CASCADE,
                 FOREIGN KEY(end_unit_id) REFERENCES document_units(id) ON DELETE CASCADE
@@ -1986,6 +1999,10 @@ extension DatabaseManager {
         try execute("""
             CREATE INDEX IF NOT EXISTS idx_unit_embedding_chunks_doc
             ON unit_embedding_chunks(document_id, chunk_index);
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_unit_embedding_chunks_null
+            ON unit_embedding_chunks(document_id) WHERE embedding IS NULL;
             """)
 
         // smart-skip + content-end references move from plainText
@@ -2987,5 +3004,210 @@ extension DatabaseManager {
 }
 
 // ========== BLOCK 10: CONTENT UNITS + SENTENCES (REBUILD) - END ==========
+
+
+// ========== BLOCK 11: UNIT EMBEDDING CHUNKS (REBUILD STEP 8) - START ==========
+
+/// One row of `unit_embedding_chunks`: a retrieval slice anchored to
+/// content-unit coordinates. The `embedding` may be NULL while a
+/// backend migration is in flight (rows get NULL'd at swap time and
+/// re-embedded incrementally by `EmbedderMigrationCoordinator`).
+struct StoredUnitEmbeddingChunk: Sendable, Equatable {
+    let id: UUID
+    let documentID: UUID
+    let chunkIndex: Int
+    let startUnitID: UUID
+    let startIntraOffset: Int
+    let endUnitID: UUID
+    let endIntraOffset: Int
+    let text: String
+    /// Non-nil iff a vector currently exists for this row under the
+    /// active embedding backend's space. Nil during migration.
+    let embedding: [Double]?
+}
+
+extension DatabaseManager {
+
+    /// Insert or replace a batch of chunks atomically. Used by the
+    /// unit-aware chunker on import and on Tier 2/3 invalidation.
+    /// Replaces every chunk for `documentID` whose `chunk_index`
+    /// is not in the new set is NOT a concern of this method —
+    /// callers should explicitly delete first or use
+    /// `replaceAllUnitEmbeddingChunks`.
+    func upsertUnitEmbeddingChunks(_ chunks: [StoredUnitEmbeddingChunk]) throws {
+        guard !chunks.isEmpty else { return }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let sql = """
+                INSERT OR REPLACE INTO unit_embedding_chunks
+                    (id, document_id, chunk_index,
+                     start_unit_id, start_intra_offset,
+                     end_unit_id, end_intra_offset,
+                     text, embedding)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """
+            let stmt = try prepareStatement(sql: sql)
+            defer { sqlite3_finalize(stmt) }
+            for chunk in chunks {
+                sqlite3_reset(stmt)
+                sqlite3_clear_bindings(stmt)
+                sqlite3_bind_text(stmt, 1, chunk.id.uuidString, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, chunk.documentID.uuidString, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(stmt, 3, Int32(chunk.chunkIndex))
+                sqlite3_bind_text(stmt, 4, chunk.startUnitID.uuidString, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(stmt, 5, Int32(chunk.startIntraOffset))
+                sqlite3_bind_text(stmt, 6, chunk.endUnitID.uuidString, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int(stmt, 7, Int32(chunk.endIntraOffset))
+                sqlite3_bind_text(stmt, 8, chunk.text, -1, SQLITE_TRANSIENT)
+                if let emb = chunk.embedding {
+                    var bytes = emb
+                    let byteCount = bytes.count * MemoryLayout<Double>.size
+                    sqlite3_bind_blob(stmt, 9, &bytes, Int32(byteCount), SQLITE_TRANSIENT)
+                } else {
+                    sqlite3_bind_null(stmt, 9)
+                }
+                try step(stmt)
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Replace every chunk for `documentID` with the supplied set.
+    /// Atomic: deletes old then inserts new in a single transaction.
+    func replaceAllUnitEmbeddingChunks(_ chunks: [StoredUnitEmbeddingChunk],
+                                       for documentID: UUID) throws {
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let deleteStmt = try prepareStatement(
+                sql: "DELETE FROM unit_embedding_chunks WHERE document_id = ?;"
+            )
+            defer { sqlite3_finalize(deleteStmt) }
+            sqlite3_bind_text(deleteStmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+            try step(deleteStmt)
+
+            if !chunks.isEmpty {
+                let insertSQL = """
+                    INSERT INTO unit_embedding_chunks
+                        (id, document_id, chunk_index,
+                         start_unit_id, start_intra_offset,
+                         end_unit_id, end_intra_offset,
+                         text, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """
+                let insertStmt = try prepareStatement(sql: insertSQL)
+                defer { sqlite3_finalize(insertStmt) }
+                for chunk in chunks {
+                    sqlite3_reset(insertStmt)
+                    sqlite3_clear_bindings(insertStmt)
+                    sqlite3_bind_text(insertStmt, 1, chunk.id.uuidString, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(insertStmt, 2, chunk.documentID.uuidString, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_int(insertStmt, 3, Int32(chunk.chunkIndex))
+                    sqlite3_bind_text(insertStmt, 4, chunk.startUnitID.uuidString, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_int(insertStmt, 5, Int32(chunk.startIntraOffset))
+                    sqlite3_bind_text(insertStmt, 6, chunk.endUnitID.uuidString, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_int(insertStmt, 7, Int32(chunk.endIntraOffset))
+                    sqlite3_bind_text(insertStmt, 8, chunk.text, -1, SQLITE_TRANSIENT)
+                    if let emb = chunk.embedding {
+                        var bytes = emb
+                        let byteCount = bytes.count * MemoryLayout<Double>.size
+                        sqlite3_bind_blob(insertStmt, 9, &bytes, Int32(byteCount), SQLITE_TRANSIENT)
+                    } else {
+                        sqlite3_bind_null(insertStmt, 9)
+                    }
+                    try step(insertStmt)
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Update just the embedding for a single chunk. Used by the
+    /// migration coordinator's re-embed loop. Passing nil for
+    /// `embedding` clears the vector (e.g. on switch + wipe).
+    func updateUnitEmbeddingChunkEmbedding(id: UUID, embedding: [Double]?) throws {
+        let sql = "UPDATE unit_embedding_chunks SET embedding = ? WHERE id = ?;"
+        let stmt = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(stmt) }
+        if let emb = embedding {
+            var bytes = emb
+            let byteCount = bytes.count * MemoryLayout<Double>.size
+            sqlite3_bind_blob(stmt, 1, &bytes, Int32(byteCount), SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 1)
+        }
+        sqlite3_bind_text(stmt, 2, id.uuidString, -1, SQLITE_TRANSIENT)
+        try step(stmt)
+    }
+
+    /// Set `embedding = NULL` for every chunk in the table. Used by
+    /// `EmbedderMigrationCoordinator` at swap time; the re-embed
+    /// loop walks NULL rows back to filled-in.
+    func nullAllUnitEmbeddingChunkEmbeddings() throws {
+        try execute("UPDATE unit_embedding_chunks SET embedding = NULL;")
+    }
+
+    /// Fetch IDs (and text) of every chunk currently lacking an
+    /// embedding, optionally scoped to a single document. Ordered
+    /// by `(document_id, chunk_index)` so the migration UI can
+    /// report meaningful progress.
+    struct UnitEmbeddingChunkNeedingEmbedding: Sendable {
+        let id: UUID
+        let text: String
+    }
+    func unitEmbeddingChunksNeedingEmbedding(
+        for documentID: UUID? = nil,
+        limit: Int? = nil
+    ) throws -> [UnitEmbeddingChunkNeedingEmbedding] {
+        var sql = "SELECT id, text FROM unit_embedding_chunks WHERE embedding IS NULL"
+        if documentID != nil { sql += " AND document_id = ?" }
+        sql += " ORDER BY document_id, chunk_index"
+        if let limit = limit { sql += " LIMIT \(limit)" }
+        sql += ";"
+        let stmt = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(stmt) }
+        if let documentID = documentID {
+            sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        }
+        var rows: [UnitEmbeddingChunkNeedingEmbedding] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard
+                let idCStr = sqlite3_column_text(stmt, 0),
+                let id = UUID(uuidString: String(cString: idCStr)),
+                let textCStr = sqlite3_column_text(stmt, 1)
+            else { continue }
+            rows.append(.init(id: id, text: String(cString: textCStr)))
+        }
+        return rows
+    }
+
+    /// Total count of unit_embedding_chunks rows (both NULL and
+    /// filled). Used by the migration UI to report progress.
+    func unitEmbeddingChunkTotalCount() throws -> Int {
+        let stmt = try prepareStatement(sql: "SELECT COUNT(*) FROM unit_embedding_chunks;")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// Count of unit_embedding_chunks rows currently lacking an
+    /// embedding. Used by the migration UI to report progress as
+    /// `(total - needing) / total`.
+    func unitEmbeddingChunkNullCount() throws -> Int {
+        let stmt = try prepareStatement(
+            sql: "SELECT COUNT(*) FROM unit_embedding_chunks WHERE embedding IS NULL;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+}
+
+// ========== BLOCK 11: UNIT EMBEDDING CHUNKS (REBUILD STEP 8) - END ==========
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

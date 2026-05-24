@@ -25,6 +25,17 @@ struct PoseyApp: App {
     @State private var databaseManager: DatabaseManager?
     @State private var databaseErrorMessage: String?
 
+    // 2026-05-23 — Step 8a: apply the embedding-backend crash
+    // guard once per process before anything else can touch
+    // EmbeddingProvider. If the previous launch was mid-load
+    // on a heavyweight backend (e.g. Nomic) when the process
+    // died, this reverts to NLContextual so we don't immediately
+    // re-crash. Stored in a `let` so it runs at struct
+    // initialization time, which is before `body` evaluates.
+    private let _embeddingBackendResolved: EmbeddingBackend = {
+        return EmbeddingBackend.applyCrashGuardAtLaunch()
+    }()
+
     var body: some Scene {
         WindowGroup {
             // Task 10 (2026-05-03 — Mac Catalyst): on macOS, the

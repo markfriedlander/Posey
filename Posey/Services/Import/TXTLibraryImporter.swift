@@ -136,6 +136,15 @@ struct TXTLibraryImporter {
             skipSource: skipSource
         )
         embeddingIndex?.enqueueIndexing(document)
+        // 2026-05-23 — Step 8b: new unit-anchored chunker runs in
+        // parallel with the legacy one during the cutover.
+        let docID = document.id
+        let dbRef = databaseManager
+        Task.detached {
+            await UnitEmbeddingService.shared.enqueueIndexing(
+                documentID: docID, databaseManager: dbRef
+            )
+        }
         return document
     }
 

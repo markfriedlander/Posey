@@ -140,6 +140,13 @@ struct DOCXLibraryImporter {
             skipSource: skipSource
         )
         embeddingIndex?.enqueueIndexing(document)
+        let docID = document.id
+        let dbRef = databaseManager
+        Task.detached {
+            await UnitEmbeddingService.shared.enqueueIndexing(
+                documentID: docID, databaseManager: dbRef
+            )
+        }
         return document
     }
 }

@@ -27,9 +27,21 @@ import Foundation
 /// 2026-05-23 — introduced as part of the Hal-based Ask Posey
 /// rebuild (Step 8a).
 nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
+    /// `NLEmbedding.sentenceEmbedding(for:)` — the pre-iOS-17
+    /// Natural Language framework sentence embedder. Bundled with
+    /// iOS, no download, language-specific dimensions (English is
+    /// 50–300 depending on platform release). Lower retrieval
+    /// quality than transformer-based backends but **available
+    /// instantly on first launch**, which is why it's the default.
+    /// Posey's legacy `DocumentEmbeddingIndex` defaults to this
+    /// same backend, so behavior parity is preserved.
+    case nlSentence = "nlsentence"
+
     /// Apple's transformer-based on-device sentence embedder
-    /// (iOS 17+). Built into the OS, no download, 512-dim.
-    /// Default for v1 of the new architecture.
+    /// (iOS 17+, mBERT). Higher retrieval quality, 512-dim, runs
+    /// on the Neural Engine. Requires a one-time asset download
+    /// on first selection (~50 MB). Opt-in via the embedder
+    /// picker; matches Hal's NLContextual path.
     case nlContextual = "nlcontextual"
 
     /// Nomic Embed Text v1.5 via the `swift-embeddings` package
@@ -57,10 +69,15 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
     /// `applyCrashGuardAtLaunch()` once at startup before any
     /// other access so the guard's side effect happens in a
     /// predictable place.
+    ///
+    /// Default is `nlSentence` — Apple's older NLEmbedding API
+    /// that's built into iOS and works instantly. Users upgrade
+    /// to NLContextual (one-time mBERT download) or Nomic
+    /// (one-time 522 MB download) via the picker.
     nonisolated static func current() -> EmbeddingBackend {
         let raw = UserDefaults.standard.string(forKey: defaultsKey)
-            ?? Self.nlContextual.rawValue
-        return EmbeddingBackend(rawValue: raw) ?? .nlContextual
+            ?? Self.nlSentence.rawValue
+        return EmbeddingBackend(rawValue: raw) ?? .nlSentence
     }
 
     /// Called once at app launch (before any embed call). If the
@@ -71,15 +88,18 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
     @discardableResult
     nonisolated static func applyCrashGuardAtLaunch() -> EmbeddingBackend {
         let selected = current()
-        guard selected != .nlContextual else { return selected }
+        // The crash guard only protects against heavyweight loads
+        // (Nomic in particular). nlSentence and nlContextual are
+        // OS-bundled and don't crash on load — no need to revert.
+        guard selected == .nomic else { return selected }
         let crashed = UserDefaults.standard.bool(forKey: crashGuardKey)
         if crashed {
             UserDefaults.standard.set(
-                EmbeddingBackend.nlContextual.rawValue,
+                EmbeddingBackend.nlSentence.rawValue,
                 forKey: defaultsKey
             )
             UserDefaults.standard.removeObject(forKey: crashGuardKey)
-            return .nlContextual
+            return .nlSentence
         }
         return selected
     }
@@ -100,28 +120,34 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
     /// Sentence-vector dimension for this backend. The migration
     /// coordinator does NOT consult this — its invariant is row-
     /// level (NULL or active), not dimension-tracked. This is
-    /// here purely for diagnostics and sanity checks.
+    /// here purely for diagnostics and sanity checks. NLEmbedding's
+    /// English sentence dim varies by iOS release (was 300 for
+    /// a long time, currently 50 on iOS 26 — Apple reduced it);
+    /// callers shouldn't hard-code on this.
     nonisolated var dimension: Int {
         switch self {
+        case .nlSentence:   return 50    // English; nominal, varies
         case .nlContextual: return 512
         case .nomic:        return 768
         }
     }
 
     /// HuggingFace model id for backends that load a downloadable
-    /// model. nil for the OS-built-in backend.
+    /// model. nil for OS-built-in backends.
     nonisolated var modelID: String? {
         switch self {
+        case .nlSentence:   return nil
         case .nlContextual: return nil
         case .nomic:        return "nomic-ai/nomic-embed-text-v1.5"
         }
     }
 
     /// On-disk size note for the model picker UI. nil for backends
-    /// that don't ship a model file.
+    /// that don't ship a model file the user is on the hook for.
     var sizeBlurb: String? {
         switch self {
-        case .nlContextual: return nil
+        case .nlSentence:   return nil
+        case .nlContextual: return "~50 MB asset"
         case .nomic:        return "~522 MB"
         }
     }
@@ -129,7 +155,8 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
     /// Display name shown in the embedder picker.
     var displayName: String {
         switch self {
-        case .nlContextual: return "Apple NLContextual"
+        case .nlSentence:   return "Apple NLEmbedding (sentence)"
+        case .nlContextual: return "Apple NLContextual (mBERT)"
         case .nomic:        return "Nomic Embed Text v1.5"
         }
     }
@@ -137,8 +164,10 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
     /// One-line description for the picker card.
     var blurb: String {
         switch self {
+        case .nlSentence:
+            return "Built into iOS. Bundled with the OS, no download. Fast and small; the default."
         case .nlContextual:
-            return "Built into iOS. Runs on the Neural Engine. 512-dim sentence vectors. No download, always available."
+            return "Apple's transformer-based mBERT embedder. Runs on the Neural Engine. Higher retrieval quality. Downloads a ~50 MB asset on first use."
         case .nomic:
             return "Nomic AI's open embedding model. 137M params, 768-dim, purpose-built for asymmetric retrieval (query vs document). ~522 MB on disk."
         }

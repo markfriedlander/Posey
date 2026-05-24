@@ -2005,6 +2005,50 @@ extension DatabaseManager {
             ON unit_embedding_chunks(document_id) WHERE embedding IS NULL;
             """)
 
+        // FTS5 mirror over unit_embedding_chunks.text — gives BM25
+        // and lexical search "for free" on the same rows that hold
+        // semantic embeddings. Contentless external-content shape:
+        // the FTS table doesn't store the text itself, it indexes
+        // the base table's `text` column by rowid. Three triggers
+        // (AFTER INSERT/DELETE/UPDATE) keep the mirror in sync;
+        // they're the standard external-content FTS5 pattern from
+        // the SQLite docs.
+        //
+        // 2026-05-23 — Step 8b (Hal-based Ask Posey rebuild).
+        // BM25 retrieval rides on this; the RRF hybrid retriever
+        // in 8c reads here.
+        try execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS unit_embedding_chunks_fts USING fts5(
+                text,
+                document_id UNINDEXED,
+                content='unit_embedding_chunks',
+                content_rowid='rowid'
+            );
+            """)
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS unit_embedding_chunks_ai
+            AFTER INSERT ON unit_embedding_chunks BEGIN
+                INSERT INTO unit_embedding_chunks_fts(rowid, text, document_id)
+                VALUES (new.rowid, new.text, new.document_id);
+            END;
+            """)
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS unit_embedding_chunks_ad
+            AFTER DELETE ON unit_embedding_chunks BEGIN
+                INSERT INTO unit_embedding_chunks_fts(unit_embedding_chunks_fts, rowid, text, document_id)
+                VALUES ('delete', old.rowid, old.text, old.document_id);
+            END;
+            """)
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS unit_embedding_chunks_au
+            AFTER UPDATE ON unit_embedding_chunks BEGIN
+                INSERT INTO unit_embedding_chunks_fts(unit_embedding_chunks_fts, rowid, text, document_id)
+                VALUES ('delete', old.rowid, old.text, old.document_id);
+                INSERT INTO unit_embedding_chunks_fts(rowid, text, document_id)
+                VALUES (new.rowid, new.text, new.document_id);
+            END;
+            """)
+
         // smart-skip + content-end references move from plainText
         // offsets to unit ids. Old offset columns (playback_skip_until_offset,
         // content_end_offset) stay during the rollout; new code reads
@@ -3205,6 +3249,109 @@ extension DatabaseManager {
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// Fetch every chunk row for `documentID` (including embedding,
+    /// possibly nil). Used by the semantic-pass side of the RRF
+    /// hybrid retriever — Swift-side cosine over every row's vector.
+    func unitEmbeddingChunks(for documentID: UUID) throws -> [StoredUnitEmbeddingChunk] {
+        let sql = """
+            SELECT id, chunk_index,
+                   start_unit_id, start_intra_offset,
+                   end_unit_id, end_intra_offset,
+                   text, embedding
+            FROM unit_embedding_chunks
+            WHERE document_id = ?
+            ORDER BY chunk_index;
+            """
+        let stmt = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        var rows: [StoredUnitEmbeddingChunk] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard
+                let idCStr = sqlite3_column_text(stmt, 0),
+                let id = UUID(uuidString: String(cString: idCStr)),
+                let startUCStr = sqlite3_column_text(stmt, 2),
+                let startU = UUID(uuidString: String(cString: startUCStr)),
+                let endUCStr = sqlite3_column_text(stmt, 4),
+                let endU = UUID(uuidString: String(cString: endUCStr)),
+                let textCStr = sqlite3_column_text(stmt, 6)
+            else { continue }
+            var embedding: [Double]? = nil
+            if sqlite3_column_type(stmt, 7) != SQLITE_NULL,
+               let blob = sqlite3_column_blob(stmt, 7) {
+                let byteCount = Int(sqlite3_column_bytes(stmt, 7))
+                let doubleCount = byteCount / MemoryLayout<Double>.size
+                let buffer = blob.assumingMemoryBound(to: Double.self)
+                embedding = Array(UnsafeBufferPointer(start: buffer, count: doubleCount))
+            }
+            rows.append(StoredUnitEmbeddingChunk(
+                id: id,
+                documentID: documentID,
+                chunkIndex: Int(sqlite3_column_int(stmt, 1)),
+                startUnitID: startU,
+                startIntraOffset: Int(sqlite3_column_int(stmt, 3)),
+                endUnitID: endU,
+                endIntraOffset: Int(sqlite3_column_int(stmt, 5)),
+                text: String(cString: textCStr),
+                embedding: embedding
+            ))
+        }
+        return rows
+    }
+
+    /// One BM25 search result: the chunk's rowid (which the caller
+    /// joins back to `id` via `unitEmbeddingChunkByRowID`) and the
+    /// raw BM25 score from FTS5 (lower is better; we negate at
+    /// query time for SQL ordering convenience).
+    struct UnitEmbeddingChunkBM25Hit: Sendable, Equatable {
+        let chunkID: UUID
+        let chunkIndex: Int
+        /// FTS5 `bm25()` value, untouched. SQLite returns this as
+        /// "lower is better" (typical BM25 form negated by FTS5).
+        /// Most code wants the SQL `-bm25()` ordering — we expose
+        /// the raw value so callers can pick a sign convention.
+        let rawBM25: Double
+    }
+
+    /// BM25 search over `unit_embedding_chunks_fts` scoped to one
+    /// document. `matchExpression` is passed directly to FTS5's
+    /// `MATCH` operator — callers are responsible for sanitizing
+    /// user input (FTS5 query syntax has its own operators that
+    /// can throw if a stray quote appears in a question).
+    func bm25Search(
+        documentID: UUID,
+        matchExpression: String,
+        limit: Int
+    ) throws -> [UnitEmbeddingChunkBM25Hit] {
+        let sql = """
+            SELECT c.id, c.chunk_index, bm25(unit_embedding_chunks_fts) AS score
+            FROM unit_embedding_chunks_fts
+            JOIN unit_embedding_chunks c ON c.rowid = unit_embedding_chunks_fts.rowid
+            WHERE unit_embedding_chunks_fts MATCH ?
+              AND c.document_id = ?
+            ORDER BY score
+            LIMIT ?;
+            """
+        let stmt = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, matchExpression, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 3, Int32(limit))
+        var hits: [UnitEmbeddingChunkBM25Hit] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard
+                let idCStr = sqlite3_column_text(stmt, 0),
+                let id = UUID(uuidString: String(cString: idCStr))
+            else { continue }
+            hits.append(UnitEmbeddingChunkBM25Hit(
+                chunkID: id,
+                chunkIndex: Int(sqlite3_column_int(stmt, 1)),
+                rawBM25: sqlite3_column_double(stmt, 2)
+            ))
+        }
+        return hits
     }
 }
 

@@ -275,6 +275,17 @@ actor PDFEnhancementService {
                        documentID.uuidString)
             }
 
+            // 2026-05-23 — Step 8b: the new unit-anchored chunker runs in
+            // parallel with the legacy one during the cutover. End-of-
+            // enhancement is the right hook — the corrected units are
+            // the source of truth and the chunk set should reflect them.
+            // Fire-and-forget; the service is actor-serialized internally.
+            Task.detached {
+                await UnitEmbeddingService.shared.enqueueIndexing(
+                    documentID: documentID, databaseManager: db
+                )
+            }
+
             // Step 7 — post completion notification so the library
             // view can refresh the stale character count + any
             // future "enhancement complete" indicator.

@@ -104,6 +104,16 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
     /// is skipped. Default `nil` keeps the verbatim mode unchanged.
     let pairwiseSummaries: [String]?
 
+    /// 2026-05-23 — Step 8d (anti-confabulation guard). True when
+    /// the RRF retriever returned no chunk whose relevance crossed
+    /// `HybridRetriever.confidenceFloor` for the distinctive terms
+    /// in the user's question. When set, the builder appends an
+    /// explicit system note ("no high-relevance content was
+    /// retrieved — if you don't have grounded knowledge, say so").
+    /// Combats Hal's Bug 2b: silent retrieval miss + confident
+    /// fabrication is the canonical RAG failure mode.
+    let lowConfidenceRetrieval: Bool
+
     init(
         intent: AskPoseyIntent,
         anchor: AskPoseyAnchor?,
@@ -112,7 +122,8 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         conversationSummary: String?,
         documentChunks: [RetrievedChunk],
         currentQuestion: String,
-        pairwiseSummaries: [String]? = nil
+        pairwiseSummaries: [String]? = nil,
+        lowConfidenceRetrieval: Bool = false
     ) {
         self.intent = intent
         self.anchor = anchor
@@ -122,6 +133,7 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         self.documentChunks = documentChunks
         self.currentQuestion = currentQuestion
         self.pairwiseSummaries = pairwiseSummaries
+        self.lowConfidenceRetrieval = lowConfidenceRetrieval
     }
 }
 
@@ -487,7 +499,18 @@ nonisolated enum AskPoseyPromptBuilder {
         // runs once per process; in DEBUG it asserts the prose hasn't
         // bloated past `AskPoseyTokenBudget.proseInstructionsBudgetTokens`.
         _ = proseInstructionsBudgetCheck
-        let instructions = proseInstructions
+        // 2026-05-23 — Step 8d: prepend the active model's Layer-1
+        // framing (per-model behavioral correction) ahead of the
+        // universal Layer-2 hard rules. Models without a Layer-1
+        // (e.g. Llama 3.2 — well-behaved in this role) skip the
+        // prepend cleanly.
+        let activeModel = ModelCatalog.current()
+        let instructions: String = {
+            if let layer1 = activeModel.layerOnePrompt, !layer1.isEmpty {
+                return layer1 + "\n\n" + proseInstructions
+            }
+            return proseInstructions
+        }()
         breakdown.system = AskPoseyTokenEstimator.tokens(in: instructions)
 
         // -------- ANCHOR (non-droppable when present) --------
@@ -627,6 +650,23 @@ nonisolated enum AskPoseyPromptBuilder {
         if !stmRendered.isEmpty { sections.append(stmRendered) }
         if !ragRendered.isEmpty { sections.append(ragRendered) }
         if let surroundingBlock { sections.append(surroundingBlock) }
+        // 2026-05-23 — Step 8d (anti-confabulation guard). When the
+        // retriever found nothing strong, inject an explicit note
+        // BEFORE the user question so the model sees "retrieval was
+        // weak — say so" rather than silently filling the gap with
+        // plausible-sounding fabrication. Combats Hal's Bug 2b
+        // verbatim. The note is short on purpose — the universal
+        // Layer-2 rules already cover the "don't fabricate" contract;
+        // this is just the per-turn signal that the contract is
+        // about to be tested.
+        if inputs.lowConfidenceRetrieval {
+            let guardBlock = """
+            #=== BEGIN RETRIEVAL_NOTE ===#
+            The document search returned no high-relevance match for the distinctive terms in the user's question. If the excerpts above don't actually answer it, say so directly ("The document doesn't appear to discuss that") rather than reaching for plausible content. Do not fabricate.
+            #=== END RETRIEVAL_NOTE ===#
+            """
+            sections.append(guardBlock)
+        }
         sections.append(userBlock)
 
         // -------- ASSEMBLE --------

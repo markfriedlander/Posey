@@ -1969,6 +1969,19 @@ extension AskPoseyChatViewModel {
                 self.lastPairwiseStats = pairwiseStatsThisTurn
 
                 // Call 2: prompt build + stream.
+                // 2026-05-23 — Step 8d: anti-confabulation guard.
+                // Retrieval landed `lastRetrievalTopRelevance` during
+                // `retrieveRAGChunks`. When the top RRF score is below
+                // `HybridRetriever.confidenceFloor`, the builder
+                // appends an explicit "no high-relevance match" note
+                // before the user question so the model is told the
+                // retrieval was weak rather than silently filling the
+                // gap. We only fire the guard when chunks WERE
+                // attempted (`chunks` non-empty would still be low-
+                // confidence; chunks empty + zero relevance means
+                // RAG wasn't even attempted, so no signal to give).
+                let lowConfidence = !chunks.isEmpty
+                    && self.lastRetrievalTopRelevance < HybridRetriever.confidenceFloor
                 let inputs = AskPoseyPromptInputs(
                     intent: intent,
                     anchor: self.anchor,
@@ -1977,7 +1990,8 @@ extension AskPoseyChatViewModel {
                     conversationSummary: self.cachedConversationSummary,
                     documentChunks: chunks,
                     currentQuestion: trimmedInput,
-                    pairwiseSummaries: pairwiseSummaries
+                    pairwiseSummaries: pairwiseSummaries,
+                    lowConfidenceRetrieval: lowConfidence
                 )
 
                 do {

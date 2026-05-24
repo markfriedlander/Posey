@@ -1498,6 +1498,38 @@ extension LibraryViewModel {
                     "chunks": items
                 ])
 
+            case "LIST_UNIT_CHUNKS":
+                // 2026-05-23 — Step 8b: inspect the NEW unit-anchored
+                // chunk table (`unit_embedding_chunks`). Args: <doc-id>.
+                // Returns counts (total, with embedding, without) plus
+                // FTS5 mirror rowcount + a few text/length samples.
+                // Cheap; used by the verification harness during the
+                // 8a-8f rebuild rollout.
+                guard let raw = arg, let id = UUID(uuidString: raw) else {
+                    return #"{"error":"Usage: LIST_UNIT_CHUNKS:<doc-id>"}"#
+                }
+                let rows = try databaseManager.unitEmbeddingChunks(for: id)
+                let filled = rows.filter { $0.embedding != nil }.count
+                let samples: [[String: Any]] = rows.prefix(5).map { c in
+                    [
+                        "chunkIndex": c.chunkIndex,
+                        "length": c.text.count,
+                        "startUnitID": c.startUnitID.uuidString,
+                        "startIntra": c.startIntraOffset,
+                        "endUnitID": c.endUnitID.uuidString,
+                        "endIntra": c.endIntraOffset,
+                        "embeddingDims": c.embedding?.count ?? 0,
+                        "preview": String(c.text.prefix(60))
+                    ]
+                }
+                return json([
+                    "documentID": id.uuidString,
+                    "totalChunks": rows.count,
+                    "embeddingsFilled": filled,
+                    "embeddingsNull": rows.count - filled,
+                    "samples": samples
+                ])
+
             case "LIST_CHUNKS":
                 // 2026-05-04 — RAG audit verb. Args:
                 //   <doc-id>[:offset[:limit]]

@@ -90,6 +90,15 @@ struct PoseyApp: App {
                     // there's nothing to resume.
                     await PDFEnhancementService.shared.configure(databaseManager: manager)
                     await PDFEnhancementService.shared.bootstrap()
+
+                    // 2026-05-23 — Step 8a: warm up the active embedding
+                    // backend so any required asset download (e.g.
+                    // NLContextual's mBERT on first launch) starts in
+                    // the background immediately rather than blocking
+                    // the first chunker call. Hal does the same; the
+                    // pattern keeps the asset download invisible to
+                    // the user.
+                    EmbeddingProvider.shared.warmUp()
                 } catch {
                     databaseErrorMessage = error.localizedDescription
                 }

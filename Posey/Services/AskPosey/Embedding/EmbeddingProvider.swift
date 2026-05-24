@@ -38,13 +38,10 @@ final class EmbeddingProvider: @unchecked Sendable {
 
     private let lock = NSLock()
 
-    // NLEmbedding.sentenceEmbedding (the default backend). Bundled
-    // with iOS, no download, always works.
-    nonisolated(unsafe) private var nlSentenceModel: NLEmbedding?
-    nonisolated(unsafe) private var nlSentenceLoadAttempted: Bool = false
-
-    // NLContextualEmbedding (mBERT). Requires a one-time asset
-    // download. Opt-in via the embedder picker.
+    // NLContextualEmbedding (mBERT) — the default backend. Asset
+    // is downloaded transparently by the system on first launch;
+    // until ready, `embed()` returns nil and the retrieval
+    // pipeline falls back to BM25-only.
     nonisolated(unsafe) private var nlContextualModel: NLContextualEmbedding?
     nonisolated(unsafe) private var nlContextualLoadAttempted: Bool = false
 
@@ -70,8 +67,6 @@ final class EmbeddingProvider: @unchecked Sendable {
         guard !cleaned.isEmpty else { return nil }
 
         switch EmbeddingBackend.current() {
-        case .nlSentence:
-            return embedNLSentence(cleaned)
         case .nlContextual:
             return embedNLContextual(cleaned)
         case .nomic:
@@ -90,7 +85,6 @@ final class EmbeddingProvider: @unchecked Sendable {
     nonisolated var isLoaded: Bool {
         lock.lock(); defer { lock.unlock() }
         switch EmbeddingBackend.current() {
-        case .nlSentence:   return nlSentenceModel != nil
         case .nlContextual: return nlContextualModel != nil
         case .nomic:        return false // wired live in 8h
         }
@@ -108,45 +102,13 @@ final class EmbeddingProvider: @unchecked Sendable {
         Task.detached { [weak self] in
             guard let self = self else { return }
             switch EmbeddingBackend.current() {
-            case .nlSentence:   self.ensureNLSentenceLoadedBlocking()
             case .nlContextual: self.ensureNLContextualLoadedBlocking()
             case .nomic:        ()  // 8h wires this
             }
         }
     }
 
-    // MARK: - NLEmbedding.sentenceEmbedding path (default)
-
-    private nonisolated func embedNLSentence(_ text: String) -> [Double]? {
-        ensureNLSentenceLoadedBlocking()
-
-        lock.lock()
-        let loaded = nlSentenceModel
-        lock.unlock()
-
-        guard let model = loaded else { return nil }
-        guard let vec = model.vector(for: text) else { return nil }
-        return vec
-    }
-
-    private nonisolated func ensureNLSentenceLoadedBlocking() {
-        lock.lock()
-        if nlSentenceModel != nil { lock.unlock(); return }
-        if nlSentenceLoadAttempted { lock.unlock(); return }
-        nlSentenceLoadAttempted = true
-        lock.unlock()
-
-        guard let model = NLEmbedding.sentenceEmbedding(for: .english) else {
-            // Allow retry on the next call.
-            lock.lock(); nlSentenceLoadAttempted = false; lock.unlock()
-            return
-        }
-        lock.lock()
-        self.nlSentenceModel = model
-        lock.unlock()
-    }
-
-    // MARK: - NLContextualEmbedding path (opt-in)
+    // MARK: - NLContextualEmbedding path (default)
 
     private nonisolated func embedNLContextual(_ text: String) -> [Double]? {
         ensureNLContextualLoadedBlocking()

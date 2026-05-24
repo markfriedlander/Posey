@@ -792,7 +792,15 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             ) { tag, range in
                 if let t = tag,
                    t == .personalName || t == .placeName || t == .organizationName {
+                    // Lowercase to match `haystackLower.contains(entity)`
+                    // below (haystack is lowercased once at the top).
+                    // The pre-8f DocumentEmbeddingIndex.extractEntities
+                    // helper lowercased — my inline replacement initially
+                    // didn't, which made every NLTagger-flagged name
+                    // (e.g. "Posey") fail the grounding check even when
+                    // the document literally contained the word.
                     let token = String(answer[range])
+                        .lowercased()
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     if !token.isEmpty { candidates.insert(token) }
                 }

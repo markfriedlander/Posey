@@ -635,21 +635,14 @@ struct ReaderView: View {
         }
     }
 
-    /// Push the live reader snapshot into the API-visible state cache.
-    /// 2026-05-05 — Phase B: tell the background-enhancement scheduler
-    /// where the user is reading so it prioritizes chunks around the
-    /// current position. Cheap: scheduler re-reads its queue lazily.
+    /// 2026-05-23 — Step 8f: this used to post .readerPositionDidUpdate
+    /// for the Phase B BackgroundEnhancementScheduler's reader-aware
+    /// priority. Scheduler + notification both torn out in 8f. Kept as
+    /// a no-op shell so existing call sites stay intact — if a future
+    /// polish pass wires reader position into something else, this is
+    /// the hook to repopulate.
     private func publishReadingPositionForEnhancement() {
-        let idx = viewModel.currentSentenceIndex
-        let segs = viewModel.segments
-        let offset: Int = (idx >= 0 && idx < segs.count) ? segs[idx].startOffset : 0
-        // 2026-05-23 — Step 8f: this notification used to drive the
-        // Phase B BackgroundEnhancementScheduler's reader-aware
-        // chunk-enhancement priority. With the scheduler torn out
-        // (along with its .readerPositionDidUpdate notification
-        // declaration), the post is gone too. A future polish pass
-        // can resurrect it on top of UnitEmbeddingService progress
-        // signals if that priority shaping proves valuable again.
+        // intentionally empty
     }
 
     private func publishRemoteState() {

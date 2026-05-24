@@ -129,12 +129,15 @@ enum ModelCatalog {
     }
 
     /// True when the model's source is available in this build /
-    /// at runtime. 8d: only AFM is `true`. 8g flips the MLX entries
-    /// once the adapter ships.
+    /// at runtime. 8g flips MLX from false → true: the adapter is
+    /// wired (LLMService → MLXService → MLX-LM), but actually using
+    /// a model still requires the first call to download the
+    /// HuggingFace asset (handled automatically; multi-second to
+    /// multi-minute depending on size and bandwidth).
     static func isAvailable(_ model: ModelConfiguration) -> Bool {
         switch model.source {
         case .appleFoundation: return true
-        case .mlx:             return false  // wired live in 8g
+        case .mlx:             return true
         }
     }
 }

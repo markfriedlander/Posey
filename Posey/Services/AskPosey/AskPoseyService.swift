@@ -356,6 +356,22 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         onSnapshot: @MainActor @Sendable (String) -> Void
     ) async throws -> AskPoseyResponseMetadata {
 
+        // 2026-05-23 — Step 8g: if the user has selected an MLX
+        // model, route through the LLMService facade instead of
+        // AFM's LanguageModelSession. The MLX path is single-pass
+        // (no grounded+polish two-call structure); the chunker /
+        // retriever / Layer-1 framing all already work through
+        // the shared prompt builder.
+        let activeModel = ModelCatalog.current()
+        if activeModel.source == .mlx {
+            return try await streamProseResponseMLX(
+                inputs: inputs,
+                budget: budget,
+                model: activeModel,
+                onSnapshot: onSnapshot
+            )
+        }
+
         guard model.availability == .available else {
             throw AskPoseyServiceError.afmUnavailable
         }
@@ -887,6 +903,65 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         }
         return accumulated
     }
+
+    // ========== BLOCK MLX: MLX PROSE STREAMING - START ==========
+
+    /// MLX path for `streamProseResponse`. Runs a single-pass
+    /// generation through `LLMService.streamChat` rather than
+    /// AFM's grounded+polish two-call structure (which is
+    /// AFM-shaped — refusal-retry pattern doesn't apply to MLX
+    /// models that don't have a refusal mode in the same form).
+    ///
+    /// 2026-05-23 — Step 8g.
+    private func streamProseResponseMLX(
+        inputs: AskPoseyPromptInputs,
+        budget: AskPoseyTokenBudget,
+        model: ModelConfiguration,
+        onSnapshot: @MainActor @Sendable (String) -> Void
+    ) async throws -> AskPoseyResponseMetadata {
+
+        NotificationCenter.default.post(name: .askPoseyAFMDidBegin, object: nil)
+        defer {
+            NotificationCenter.default.post(name: .askPoseyAFMDidEnd, object: nil)
+        }
+
+        let output = AskPoseyPromptBuilder.build(inputs, budget: budget)
+        let started = Date()
+
+        let messages: [ChatMessage] = [
+            ChatMessage(role: .system, content: output.instructions),
+            ChatMessage(role: .user, content: output.renderedBody)
+        ]
+
+        var fullText = ""
+        let stream = LLMService.shared.streamChat(
+            messages: messages,
+            model: model,
+            options: LLMGenerationOptions(temperature: 0.2)
+        )
+
+        do {
+            for try await snapshot in stream {
+                fullText = snapshot
+                onSnapshot(snapshot)
+            }
+        } catch {
+            throw error
+        }
+
+        let elapsed = Date().timeIntervalSince(started)
+        return AskPoseyResponseMetadata(
+            finalText: fullText,
+            promptTokenTotal: output.tokenBreakdown.totalIncludingScaffolding,
+            breakdown: output.tokenBreakdown,
+            droppedSections: output.droppedSections,
+            chunksInjected: output.chunksInjected,
+            fullPromptForLogging: output.combinedForLogging,
+            inferenceDuration: elapsed
+        )
+    }
+
+    // ========== BLOCK MLX: MLX PROSE STREAMING - END ==========
 
     /// Summarize a span of older conversation turns into a short
     /// prose summary. M6 hard-blocker per Mark's M5 architectural

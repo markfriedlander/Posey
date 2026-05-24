@@ -36,15 +36,15 @@ final class LLMService: @unchecked Sendable {
 
     enum LLMError: LocalizedError {
         case modelUnavailable(modelID: String)
-        case mlxNotYetWired(modelID: String)
+        case insufficientMemoryForTurn(modelID: String, promptTokens: Int, neededMB: Int, availableMB: Int)
         case generationFailed(underlying: Error)
 
         var errorDescription: String? {
             switch self {
             case .modelUnavailable(let id):
                 return "Model '\(id)' is not available on this device."
-            case .mlxNotYetWired(let id):
-                return "Model '\(id)' is an MLX model; the MLX adapter isn't wired yet (Step 8g)."
+            case .insufficientMemoryForTurn(let id, let prompt, let needed, let avail):
+                return "Not enough memory for this turn on \(id): prompt \(prompt) tokens would need ~\(needed)MB; only \(avail)MB available. Try a shorter conversation or a smaller model."
             case .generationFailed(let err):
                 return "LLM generation failed: \(err.localizedDescription)"
             }
@@ -80,10 +80,15 @@ final class LLMService: @unchecked Sendable {
                             continuation: continuation
                         )
                     case .mlx:
-                        // 8g wires this. Until then surface the
-                        // explicit error so callers can fall back
-                        // rather than silently dropping the call.
-                        continuation.finish(throwing: LLMError.mlxNotYetWired(modelID: model.id))
+                        try await MLXService.shared.streamChat(
+                            messages: messages,
+                            model: model,
+                            options: options,
+                            continuation: continuation
+                        )
+                        // MLXService.streamChat finishes the
+                        // continuation itself on success; no
+                        // additional finish() needed here.
                     }
                 } catch {
                     continuation.finish(throwing: error)

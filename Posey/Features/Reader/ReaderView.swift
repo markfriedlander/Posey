@@ -2219,6 +2219,15 @@ private struct ReaderPreferencesSheet: View {
                 // own Delete; the section footer shows total used
                 // and offers Delete All when non-empty.
                 CachedAudioFilesSection(databaseManager: viewModel.databaseManager)
+
+                // 2026-05-23 — Step 8e: Ask Posey settings sections
+                // (embedding backend picker + LLM picker). Driven off
+                // the shared EmbedderMigrationCoordinator so the
+                // migration phase enum animates inline progress.
+                AskPoseyPreferencesSection(
+                    migrationCoordinator: EmbedderMigrationCoordinator.shared,
+                    databaseManager: viewModel.databaseManager
+                )
             }
             .navigationTitle("Reader Preferences")
             .navigationBarTitleDisplayMode(.inline)

@@ -1,11 +1,31 @@
 import Foundation
 
-// ========== BLOCK 01: EPUB LIBRARY IMPORTER - START ==========
+// ========== BLOCK 01: EPUB LIBRARY IMPORTER (UNITS) - START ==========
 
+/// Imports EPUB files into the unit-based content model.
+///
+/// **What changed in the rebuild:** the importer now runs
+/// `EPUBDisplayParser` at import time and converts the resulting
+/// `DisplayBlock`s into `ContentUnit`s via the shared
+/// `ContentUnitBuilder`. When the EPUB has no inline images the
+/// display parser returns nothing — the prose fallback splits
+/// plainText on blank lines to build prose units, same shape as
+/// the TXT importer.
+///
+/// The four-layer smart-skip composition is unchanged: importer's
+/// initial skip → Gutenberg marker → Gutenberg catalog → in-prose
+/// TOC → TOC walker. The composed character offset is mapped onto a
+/// unit reference via `ContentUnitBuilder.firstUnit(...)`.
+///
+/// `SentenceIndexer` pre-segments per unit. `persistParsedDocument`
+/// writes everything in one transaction.
+///
+/// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct EPUBLibraryImporter {
     let databaseManager: DatabaseManager
     let embeddingIndex: DocumentEmbeddingIndex?
     private let importer = EPUBDocumentImporter()
+    private let displayParser = EPUBDisplayParser()
 
     init(databaseManager: DatabaseManager,
          embeddingIndex: DocumentEmbeddingIndex? = nil) {
@@ -14,76 +34,122 @@ struct EPUBLibraryImporter {
     }
 
     func importDocument(from url: URL) throws -> Document {
-        // 2026-05-16 (B8) — Reject anything that isn't ZIP-shaped.
         try FormatPrecheck.checkEPUB(url: url)
         let parsed = try importer.loadDocument(from: url)
-        let computed = Self.computeContentStartAndSource(
-            existingSkip: parsed.playbackSkipUntilOffset,
-            plainText: parsed.plainText,
-            tocEntries: parsed.tocEntries
-        )
-        let boundaries = GutenbergBoundaryDetector.detect(in: parsed.plainText)
-        let doc = try persistParsedDocument(
+        return try importParsedDocument(
             title: parsed.title ?? url.deletingPathExtension().lastPathComponent,
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
-            displayText: parsed.displayText,
-            plainText: parsed.plainText,
-            playbackSkipUntilOffset: computed.skipOffset,
-            contentEndOffset: boundaries.contentEndOffset ?? 0,
-            skipSource: computed.skipSource
+            parsed: parsed
         )
-        try saveImages(parsed.images, for: doc.id)
-        try saveTOC(parsed.tocEntries, for: doc.id)
-        return doc
     }
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "epub") throws -> Document {
         let parsed = try importer.loadDocument(fromData: rawData)
+        return try importParsedDocument(
+            title: parsed.title ?? title,
+            fileName: fileName,
+            fileType: fileType,
+            parsed: parsed
+        )
+    }
+
+    private func importParsedDocument(
+        title: String,
+        fileName: String,
+        fileType: String,
+        parsed: ParsedEPUBDocument
+    ) throws -> Document {
+        let existingDocument = try databaseManager.existingDocument(
+            matchingFileName: fileName,
+            fileType: fileType,
+            plainText: parsed.plainText,
+            displayText: parsed.displayText
+        )
+        let documentID = existingDocument?.id ?? UUID()
+
+        // ── Smart-skip composition (unchanged logic, four layers).
         let computed = Self.computeContentStartAndSource(
             existingSkip: parsed.playbackSkipUntilOffset,
             plainText: parsed.plainText,
             tocEntries: parsed.tocEntries
         )
         let boundaries = GutenbergBoundaryDetector.detect(in: parsed.plainText)
-        let doc = try persistParsedDocument(
-            title: parsed.title ?? title,
+        let contentEndOffset = boundaries.contentEndOffset ?? 0
+
+        // ── Run display parser at import time, build units.
+        let blocks = displayParser.parse(displayText: parsed.displayText)
+        let units = ContentUnitBuilder.unitsPreferringBlocks(
+            blocks: blocks,
+            plainText: parsed.plainText,
+            documentID: documentID
+        )
+
+        // ── Map smart-skip offset to a unit reference.
+        let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: computed.skipOffset)?.id
+        let contentEndUnitID: UUID? = {
+            guard contentEndOffset > 0 else { return nil }
+            return ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: contentEndOffset)?.id
+        }()
+
+        // ── Sentences.
+        let sentences = SentenceIndexer.sentences(for: units)
+
+        // ── TOC entries (pass-through; offsets already in plainText space).
+        let tocEntries: [StoredTOCEntry] = parsed.tocEntries.map {
+            StoredTOCEntry(
+                title: $0.title,
+                plainTextOffset: $0.plainTextOffset,
+                playOrder: $0.playOrder,
+                level: $0.level
+            )
+        }
+
+        let parsedDoc = ParsedDocument(
+            id: documentID,
+            title: title,
             fileName: fileName,
             fileType: fileType,
+            units: units,
+            sentences: sentences,
+            toc: tocEntries,
+            skipUnitID: skipUnitID,
+            skipSource: computed.skipSource,
+            contentEndUnitID: contentEndUnitID
+        )
+        try databaseManager.persistParsedDocument(parsedDoc)
+
+        // Persist inline images.
+        try databaseManager.deleteImages(for: documentID)
+        for image in parsed.images {
+            try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
+        }
+
+        if existingDocument == nil {
+            try databaseManager.upsertReadingPosition(.initial(for: documentID))
+        }
+
+        let now = Date()
+        let document = Document(
+            id: documentID,
+            title: title,
+            fileName: fileName,
+            fileType: fileType,
+            importedAt: existingDocument?.importedAt ?? now,
+            modifiedAt: now,
             displayText: parsed.displayText,
             plainText: parsed.plainText,
+            characterCount: parsed.plainText.count,
             playbackSkipUntilOffset: computed.skipOffset,
-            contentEndOffset: boundaries.contentEndOffset ?? 0,
+            contentEndOffset: contentEndOffset,
             skipSource: computed.skipSource
         )
-        try saveImages(parsed.images, for: doc.id)
-        try saveTOC(parsed.tocEntries, for: doc.id)
-        return doc
+        embeddingIndex?.enqueueIndexing(document)
+        return document
     }
 
-    /// Compose the four sources of skip-offset signal into a single
-    /// content-start value:
-    ///   1. Whatever the document-level importer already detected
-    ///      (e.g. EPUBFrontMatterDetector for IA-style EPUBs).
-    ///   2. The Gutenberg `*** START` marker, if present.
-    ///   3. The in-prose "Contents" listing's body anchor, if present.
-    ///   4. (2026-05-21 second pass) TOC-walk: classify each stored
-    ///      TOC entry's title and skip past TITLE_BLOCK / PUBLISHING_INFO
-    ///      entries to land at the first BODY_SECTION (Preface, Letter,
-    ///      Chapter, Etymology, etc.). With prose-paragraph fallback
-    ///      when the gap to the next body section is large and no
-    ///      PUBLISHING_INFO entries were walked past (catches Pride's
-    ///      Saintsbury Preface, which isn't in Pride's nav.xhtml).
-    /// Each layer can only ADVANCE the skip; we never go backward.
-    /// Result of `computeContentStartAndSource` — pair of the final
-    /// skip offset and the classification of how it was reached.
-    /// `skipSource` follows the locked 2026-05-21 rule:
-    ///   • Gutenberg marker present → "gutenberg" (silent skip, no
-    ///     prompt) even if downstream detectors advanced further within
-    ///     Gutenberg territory.
-    ///   • No Gutenberg marker but any heuristic detector advanced
-    ///     the skip → "heuristic" (one-time prompt).
-    ///   • No skip at all → "" (empty).
+    // MARK: - Smart-skip composition (unchanged from legacy)
+
     struct ContentStartResult {
         let skipOffset: Int
         let skipSource: String
@@ -96,19 +162,10 @@ struct EPUBLibraryImporter {
     ) -> ContentStartResult {
         let gutenbergStart = GutenbergBoundaryDetector.detect(in: plainText).contentStartOffset ?? 0
         let postGutenberg = max(existingSkip, gutenbergStart)
-        // 2026-05-22 — Multi-edition Gutenberg distributions (e.g.,
-        // illustrated Alice #19033) place a catalog page after the
-        // `*** START ***` marker. Skip past it before the in-prose TOC
-        // detector runs so the catalog text doesn't get treated as
-        // book content.
         let postCatalog = GutenbergCatalogDetector.endOfCatalogRegion(in: plainText, after: postGutenberg) ?? postGutenberg
         let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: postCatalog) ?? postCatalog
         let afterInProse = max(postCatalog, postTOC)
 
-        // Build TOC-walker input from the stored TOC. Sort by offset so
-        // the walker sees entries in document order. (Persistence
-        // order is play_order which generally matches offset order,
-        // but defensively sort here.)
         let walkerEntries = tocEntries
             .map { TOCWalkContentStartDetector.TOCEntry(title: $0.title, plainTextOffset: $0.plainTextOffset) }
             .sorted { $0.plainTextOffset < $1.plainTextOffset }
@@ -119,9 +176,6 @@ struct EPUBLibraryImporter {
         )
         let finalSkip = max(afterInProse, walkResult.newSkipOffset ?? afterInProse)
 
-        // 2026-05-21 classification — Gutenberg marker presence wins
-        // for the whole skip (silent). Otherwise any forward motion
-        // from a heuristic detector counts as "heuristic" (prompt).
         let source: String
         if gutenbergStart > 0 {
             source = "gutenberg"
@@ -134,79 +188,4 @@ struct EPUBLibraryImporter {
     }
 }
 
-// ========== BLOCK 01: EPUB LIBRARY IMPORTER - END ==========
-
-// ========== BLOCK 02: EPUB LIBRARY IMPORTER - PERSISTENCE - START ==========
-
-extension EPUBLibraryImporter {
-
-    private func persistParsedDocument(
-        title: String,
-        fileName: String,
-        fileType: String,
-        displayText: String,
-        plainText: String,
-        playbackSkipUntilOffset: Int = 0,
-        contentEndOffset: Int = 0,
-        skipSource: String = ""
-    ) throws -> Document {
-        let now = Date()
-        let existing = try databaseManager.existingDocument(
-            matchingFileName: fileName,
-            fileType: fileType,
-            plainText: plainText,
-            displayText: displayText
-        )
-
-        let document = Document(
-            id: existing?.id ?? UUID(),
-            title: title,
-            fileName: fileName,
-            fileType: fileType,
-            importedAt: existing?.importedAt ?? now,
-            modifiedAt: now,
-            displayText: displayText,
-            plainText: plainText,
-            characterCount: plainText.count,
-            playbackSkipUntilOffset: playbackSkipUntilOffset,
-            contentEndOffset: contentEndOffset,
-            skipSource: skipSource
-        )
-
-        try databaseManager.upsertDocument(document)
-
-        if existing == nil {
-            try databaseManager.upsertReadingPosition(.initial(for: document.id))
-        }
-
-        // Ask Posey embedding index — best-effort (logs on failure).
-        embeddingIndex?.enqueueIndexing(document)
-
-        return document
-    }
-
-    /// Delete stale image records then insert the new set. Called after every
-    /// import so reimports don't leave orphaned blobs under old image IDs.
-    private func saveImages(_ images: [PageImageRecord], for documentID: UUID) throws {
-        try databaseManager.deleteImages(for: documentID)
-        for image in images {
-            try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
-        }
-    }
-
-    /// Persist TOC entries from a freshly parsed EPUB. Replaces any existing
-    /// entries so reimports stay current.
-    private func saveTOC(_ entries: [EPUBTOCEntry], for documentID: UUID) throws {
-        let stored = entries.map {
-            StoredTOCEntry(
-                title: $0.title,
-                plainTextOffset: $0.plainTextOffset,
-                playOrder: $0.playOrder,
-                level: $0.level
-            )
-        }
-        try databaseManager.insertTOCEntries(stored, for: documentID)
-    }
-}
-
-// ========== BLOCK 02: EPUB LIBRARY IMPORTER - PERSISTENCE - END ==========
+// ========== BLOCK 01: EPUB LIBRARY IMPORTER (UNITS) - END ==========

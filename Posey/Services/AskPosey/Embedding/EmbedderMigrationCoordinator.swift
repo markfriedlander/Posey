@@ -99,16 +99,19 @@ final class EmbedderMigrationCoordinator: ObservableObject {
     // MARK: - Worker
 
     private func runSwitch(to target: EmbeddingBackend, database: DatabaseManager) async {
-        // Phase 1 — Download (Nomic only; NLContextual is OS-built-in
-        // and assets are requested transparently by NLContextualEmbedding
-        // itself on first use, so no orchestration here).
-        if let _ = target.modelID, target == .nomic {
-            // Live download wiring lands in Step 8h. Until then we
-            // surface a clean error rather than attempting a backend
-            // we can't actually load.
-            currentPhase = .error("Nomic embedder is not yet available in this build.")
-            return
-        }
+        // Phase 1 — Download.
+        //
+        // NLContextual: OS-built-in; the embedder framework
+        // requests assets transparently on first use. No
+        // orchestration needed here.
+        //
+        // Nomic (Step 8h, live): `EmbeddingProvider.shared.warmUp()`
+        // below triggers `NomicBert.loadModelBundle(from: repoID)`
+        // on a background task, which does the HuggingFace fetch
+        // itself. We don't drive progress here — the picker UI
+        // reports `.switching` until `isLoaded` flips. A polish
+        // pass can wire HuggingFace's progress reporter into a
+        // `.downloading` phase later.
 
         if cancelRequested { currentPhase = .cancelled; return }
 

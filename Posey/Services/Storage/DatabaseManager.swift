@@ -1975,13 +1975,33 @@ extension DatabaseManager {
         // pending a migration re-embed." Per-row kind has no
         // meaning under this invariant, and NULL is required so
         // `EmbedderMigrationCoordinator` can wipe-and-refill.
-        // The table is empty in every existing install (the
-        // chunker that would populate it ships in Step 8b), so
-        // we DROP and recreate rather than performing a more
-        // elaborate column-level migration.
-        try execute("DROP TABLE IF EXISTS unit_embedding_chunks;")
+        //
+        // **Idempotent migration.** First version of this migration
+        // unconditionally DROPped the table on every launch — that
+        // wiped chunk data on every app update / install. The fix:
+        // detect the legacy shape (presence of the `embedding_kind`
+        // column) and migrate only when needed. If the table
+        // already exists in the new shape, leave it alone. If it
+        // doesn't exist yet (fresh install), CREATE IF NOT EXISTS
+        // handles that path.
+        let chunksTableHasLegacyKind: Bool = {
+            do {
+                let stmt = try prepareStatement(sql: "PRAGMA table_info(unit_embedding_chunks);")
+                defer { sqlite3_finalize(stmt) }
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    if let cName = sqlite3_column_text(stmt, 1) {
+                        let name = String(cString: cName)
+                        if name == "embedding_kind" { return true }
+                    }
+                }
+            } catch { return false }
+            return false
+        }()
+        if chunksTableHasLegacyKind {
+            try execute("DROP TABLE unit_embedding_chunks;")
+        }
         try execute("""
-            CREATE TABLE unit_embedding_chunks (
+            CREATE TABLE IF NOT EXISTS unit_embedding_chunks (
                 id TEXT PRIMARY KEY,
                 document_id TEXT NOT NULL,
                 chunk_index INTEGER NOT NULL,

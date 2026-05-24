@@ -1,5 +1,7 @@
 import Foundation
 import NaturalLanguage
+import CoreML
+@preconcurrency import Embeddings
 
 // ========== BLOCK 01: EMBEDDING PROVIDER - START ==========
 
@@ -45,10 +47,11 @@ final class EmbeddingProvider: @unchecked Sendable {
     nonisolated(unsafe) private var nlContextualModel: NLContextualEmbedding?
     nonisolated(unsafe) private var nlContextualLoadAttempted: Bool = false
 
-    // Nomic state is declared so the surface area is stable even
-    // before 8h. The 8h step bumps these up to real types from
-    // the `Embeddings` package and adds the load path; until
-    // then `embedNomic` returns nil.
+    // Nomic Embed Text v1.5 — wired live in Step 8h via the
+    // swift-embeddings package. NomicBert.loadModelBundle does
+    // the HuggingFace download + load in one call; subsequent
+    // embeds are tokenize → forward → mean-pool → L2-normalize.
+    nonisolated(unsafe) private var nomicBundle: NomicBert.ModelBundle?
     nonisolated(unsafe) private var nomicLoadAttempted: Bool = false
 
     private init() {}
@@ -86,7 +89,7 @@ final class EmbeddingProvider: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         switch EmbeddingBackend.current() {
         case .nlContextual: return nlContextualModel != nil
-        case .nomic:        return false // wired live in 8h
+        case .nomic:        return nomicBundle != nil
         }
     }
 
@@ -103,7 +106,7 @@ final class EmbeddingProvider: @unchecked Sendable {
             guard let self = self else { return }
             switch EmbeddingBackend.current() {
             case .nlContextual: self.ensureNLContextualLoadedBlocking()
-            case .nomic:        ()  // 8h wires this
+            case .nomic:        self.ensureNomicLoadedBlocking()
             }
         }
     }
@@ -190,12 +193,105 @@ final class EmbeddingProvider: @unchecked Sendable {
     }
 
     private nonisolated func embedNomic(_ text: String, purpose: EmbeddingPurpose) -> [Double]? {
-        _ = nomicPrefixed(text, purpose: purpose)
-        // 8h wires the live swift-embeddings call here. Until
-        // then the surface returns nil; the migration coordinator
-        // refuses the switch so callers shouldn't reach this.
-        _ = nomicLoadAttempted
-        return nil
+        ensureNomicLoadedBlocking()
+
+        lock.lock()
+        let loaded = nomicBundle
+        lock.unlock()
+
+        guard let bundle = loaded else { return nil }
+
+        let prefixed = nomicPrefixed(text, purpose: purpose)
+
+        // Bridge async MLTensor inference into the sync embed
+        // surface via a semaphore. Same pattern Hal uses; bundle.
+        // encode is throws and the shapedArray fetch is async.
+        let sem = DispatchSemaphore(value: 0)
+        var resultVec: [Double]?
+        Task.detached {
+            do {
+                let encoded = try bundle.encode(prefixed, maxLength: 512)
+                let asFloat = await encoded.cast(to: Float.self).shapedArray(of: Float.self)
+                let shape = asFloat.shape
+                let scalars = asFloat.scalars
+                // Pool over the sequence dimension to get a single
+                // sentence vector. NomicBert can emit either
+                // [1, hidden] (already pooled), [1, seqLen, hidden],
+                // or [seqLen, hidden] depending on the model wrapper.
+                // Mean-pool whichever shape we see; the L2-normalize
+                // at the end makes cosine == dot product.
+                let pooled: [Double]
+                if shape.count == 2 && shape[0] == 1 {
+                    pooled = (0..<shape[1]).map { Double(scalars[$0]) }
+                } else if shape.count == 3 && shape[0] == 1 {
+                    let seqLen = shape[1], hidden = shape[2]
+                    var acc = [Double](repeating: 0, count: hidden)
+                    for t in 0..<seqLen {
+                        let base = t * hidden
+                        for h in 0..<hidden { acc[h] += Double(scalars[base + h]) }
+                    }
+                    pooled = acc.map { $0 / Double(seqLen) }
+                } else if shape.count == 2 {
+                    let seqLen = shape[0], hidden = shape[1]
+                    var acc = [Double](repeating: 0, count: hidden)
+                    for t in 0..<seqLen {
+                        let base = t * hidden
+                        for h in 0..<hidden { acc[h] += Double(scalars[base + h]) }
+                    }
+                    pooled = acc.map { $0 / Double(seqLen) }
+                } else {
+                    sem.signal()
+                    return
+                }
+                let norm = sqrt(pooled.reduce(0) { $0 + $1 * $1 })
+                resultVec = norm > 0 ? pooled.map { $0 / norm } : pooled
+            } catch {
+                // Leave resultVec nil; caller treats as "no semantic"
+                // and falls through to BM25-only retrieval.
+            }
+            sem.signal()
+        }
+        sem.wait()
+        return resultVec
+    }
+
+    private nonisolated func ensureNomicLoadedBlocking() {
+        lock.lock()
+        if nomicBundle != nil { lock.unlock(); return }
+        if nomicLoadAttempted { lock.unlock(); return }
+        nomicLoadAttempted = true
+        lock.unlock()
+
+        guard let repoID = EmbeddingBackend.nomic.modelID else { return }
+
+        // The Nomic load triggers a ~522 MB HuggingFace fetch on
+        // first use. Set the crash guard before attempting, clear
+        // on success — if the load crashes the process, the next
+        // launch reverts to NLContextual rather than re-crashing.
+        EmbeddingBackend.recordLoadAttempt()
+
+        let sem = DispatchSemaphore(value: 0)
+        var loaded: NomicBert.ModelBundle?
+        Task.detached {
+            do {
+                loaded = try await NomicBert.loadModelBundle(from: repoID)
+            } catch {
+                // Leave loaded nil; allow retry next call.
+            }
+            sem.signal()
+        }
+        sem.wait()
+
+        if let loaded = loaded {
+            lock.lock()
+            self.nomicBundle = loaded
+            lock.unlock()
+            EmbeddingBackend.recordLoadSuccess()
+        } else {
+            lock.lock()
+            self.nomicLoadAttempted = false
+            lock.unlock()
+        }
     }
 
     // MARK: - Cosine similarity (used everywhere downstream)

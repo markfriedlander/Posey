@@ -7,12 +7,23 @@ import Foundation
 /// it unchanged) so the call sites in `AskPoseyChatViewModel`
 /// don't need to learn a new type during the cutover.
 ///
-/// For unit-anchored chunks `startOffset` is the sentinel `-1`
-/// (the consumer already has a `chunk.startOffset < 0` check
-/// from earlier work). Jump-back wiring switches to unit_id +
-/// intra_offset in Step 9; for now the prompt builder just
-/// renders the value in its diagnostic header and AFM ignores it.
+/// For unit-anchored chunks `startOffset` is the sentinel `-2`.
+/// Distinct from the legacy synthetic-metadata sentinel `-1`,
+/// which means "phone verification can disambiguate which
+/// retriever actually served the turn" — caught the hard way
+/// in the 8h verification pass when -1 turned out to overlap.
+/// Both negative values pass the `chunk.startOffset < 0` exempt-
+/// from-filter test downstream, so behavior is preserved.
+/// Jump-back wiring switches to unit_id + intra_offset in Step 9;
+/// the prompt builder just renders the value in its diagnostic
+/// header and AFM ignores it.
 typealias HybridRetrievalResult = RetrievedChunk
+
+/// Sentinel value for the `startOffset` field on chunks the new
+/// RRF retriever returns. Distinct from the legacy synthetic-
+/// metadata chunks' `-1` sentinel so verification can tell which
+/// retriever served a given turn.
+let kUnitAnchoredStartOffsetSentinel: Int = -2
 
 // ========== BLOCK 01: HYBRID RETRIEVER TYPES - END ==========
 
@@ -215,7 +226,7 @@ struct HybridRetriever {
                 guard let chunk = chunksByID[id] else { return nil }
                 return HybridRetrievalResult(
                     chunkID: chunk.chunkIndex,
-                    startOffset: -1,  // sentinel for unit-anchored
+                    startOffset: kUnitAnchoredStartOffsetSentinel,
                     text: chunk.text,
                     relevance: score
                 )

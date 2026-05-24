@@ -816,50 +816,73 @@ private extension AskPoseyChatViewModel {
     /// top-of-list, and meta-questions get reliable grounding
     /// regardless of scope. Cost is small (~1800 chars).
     func retrieveRAGChunks(for question: String) -> [RetrievedChunk] {
-        // 2026-05-23 — Step 8c: try the new RRF-based HybridRetriever
-        // (semantic via NLContextual + BM25 via FTS5 mirror, fused
-        // via Reciprocal Rank Fusion with Hal's quality gate). If
-        // the new path returns results, use them — they're built
-        // on the canonical unit-anchored chunk store and will
-        // outlive the legacy path after 8f's tear-down. If the new
-        // path returns empty (no chunks yet for this doc, embeddings
-        // still loading, or the chunker hasn't run), fall through
-        // to the legacy searchHybrid as a defensive bridge during
-        // the 8b-8f cutover.
+        // 2026-05-23 — Step 8c (fixed 8h pass): try the new RRF-based
+        // HybridRetriever first. If it returns results, those become
+        // the organic chunk set for this turn and we SKIP the legacy
+        // index.searchHybrid call (avoids injecting near-duplicate
+        // content from both stores). If it returns empty (chunks
+        // haven't been built for this doc yet, embeddings still
+        // loading, or the chunker hasn't run), fall through to legacy
+        // searchHybrid so this turn still has retrieval.
+        //
+        // Critical: do NOT early-return here. The downstream pipeline
+        // (front-matter prepend, Wayback stripping, dedup, relevance
+        // filter, sort) still has to run for both paths. The bug
+        // shipped in 8c's commit short-circuited that work; this
+        // version pre-populates `translated` from the new path and
+        // lets the existing pipeline finish.
+        var preTranslatedFromNewPath: [RetrievedChunk] = []
         if let db = databaseManager {
             let retriever = HybridRetriever(database: db)
             let outcome = retriever.retrieve(
                 documentID: documentID, query: question, limit: ragTopK
             )
             if !outcome.results.isEmpty {
-                // The new path serves this query.
+                preTranslatedFromNewPath = outcome.results.map { rc in
+                    RetrievedChunk(
+                        chunkID: rc.chunkID,
+                        startOffset: rc.startOffset,
+                        text: TextNormalizer.stripWaybackPrintHeaders(rc.text),
+                        relevance: rc.relevance
+                    )
+                }
                 self.lastRetrievalTopRelevance = outcome.topRelevance
                 self.lastRetrievalBM25Excluded = outcome.bm25Excluded
-                return outcome.results
             }
         }
 
         guard let index = embeddingIndex else {
+            // Even with no legacy index we can still ship the new
+            // path's chunks (if any). The downstream pipeline handles
+            // an empty `results` array.
+            if !preTranslatedFromNewPath.isEmpty {
+                // Inline minimal merge: no front-matter source available
+                // without the index, so just sort + filter and return.
+                return preTranslatedFromNewPath
+                    .filter { $0.startOffset < 0 || $0.relevance >= 0.40 }
+                    .sorted { $0.relevance > $1.relevance }
+            }
             self.lastRetrievalTopRelevance = 0
             self.lastRetrievalBM25Excluded = false
             return []
         }
 
-        let results: [DocumentEmbeddingSearchResult]
-        do {
-            // Legacy path. Retained as a fallback until step 8f.
-            results = try index.searchHybrid(documentID: documentID, query: question, limit: ragTopK)
-        } catch {
-            // Index unavailable / query failed → fall back to no RAG.
-            // Better to ship a less-grounded answer than to error out
-            // the whole send.
-            dbgLog("AskPosey RAG search failed: \(error)")
-            self.lastRetrievalTopRelevance = 0
+        // Legacy `results` is only populated when the new path
+        // returned nothing — otherwise we let the new chunks be the
+        // organic retrieval and skip the legacy call.
+        var results: [DocumentEmbeddingSearchResult] = []
+        if preTranslatedFromNewPath.isEmpty {
+            do {
+                results = try index.searchHybrid(documentID: documentID, query: question, limit: ragTopK)
+            } catch {
+                dbgLog("AskPosey RAG search failed: \(error)")
+                self.lastRetrievalTopRelevance = 0
+                self.lastRetrievalBM25Excluded = false
+                return []
+            }
+            self.lastRetrievalTopRelevance = results.first?.similarity ?? 0
             self.lastRetrievalBM25Excluded = false
-            return []
         }
-        self.lastRetrievalTopRelevance = results.first?.similarity ?? 0
-        self.lastRetrievalBM25Excluded = false
 
         // 2026-05-04 — Skip front-matter prepend when there's an
         // anchor. Real-conversation testing showed front-matter
@@ -943,8 +966,14 @@ private extension AskPoseyChatViewModel {
             ? [Double]()
             : index.embed(referenceText, forDocument: documentID)
 
-        // Translate to RetrievedChunk and dedup.
-        var translated: [RetrievedChunk] = []
+        // Translate to RetrievedChunk and dedup. When the new path
+        // served this turn (`preTranslatedFromNewPath` non-empty),
+        // seed `translated` with those chunks — they've already
+        // been through Wayback stripping, just need to flow through
+        // dedup + sort + filter alongside any legacy results
+        // (legacy `results` will be empty in that case, so we just
+        // run dedup on the pre-translated set).
+        var translated: [RetrievedChunk] = preTranslatedFromNewPath
         for result in results {
             if !referenceVector.isEmpty {
                 let chunkVector = result.chunk.embedding

@@ -24,18 +24,42 @@ import Foundation
 /// work is bounded by `EmbeddingProvider`'s own thread-safety
 /// (NSLock-serialized) and SQLite's single-threaded handle.
 ///
-/// **No notifications yet.** The legacy `DocumentEmbeddingIndex`
-/// posts `.documentIndexingDidStart/Progress/Complete`
-/// notifications that the IndexingTracker / UI consume. During the
-/// 8b-8e rollout the legacy path keeps posting those, and the new
-/// service runs silently. 8e wires the new service to the UI;
-/// 8f tears the legacy notifications down.
+/// **Progress notifications.** Posts `Notification.Name.unit*`
+/// notifications at start / progress / complete so
+/// `IndexingTracker` (and the reader's "Still learning this
+/// document — N%" banner) can reflect the embed fill state.
+/// Posted on the main thread; cumulative `processed` + `total`
+/// in userInfo. Total = chunks.count at start (every chunk row
+/// is NULL at insert time and the fill loop processes all of
+/// them).
 ///
-/// 2026-05-23 — introduced as part of the Hal-based Ask Posey
-/// rebuild (Step 8b).
+/// 2026-05-23 — introduced in Step 8b. 2026-05-24 — Step 8f
+/// follow-up: progress notifications wired (was previously
+/// silent — the legacy `DocumentEmbeddingIndex` notifications
+/// were torn out in 8f without a replacement).
 actor UnitEmbeddingService {
 
     static let shared = UnitEmbeddingService()
+
+    // MARK: - Notification API
+
+    /// Posted on the main thread when a document's chunk fill
+    /// begins. userInfo: `documentID` (UUID), `totalChunks` (Int).
+    static let didStartNotification = Notification.Name("posey.unitEmbedding.didStart")
+    /// Posted on the main thread after each batch of fills.
+    /// userInfo: `documentID` (UUID), `processedChunks` (Int),
+    /// `totalChunks` (Int).
+    static let didProgressNotification = Notification.Name("posey.unitEmbedding.didProgress")
+    /// Posted on the main thread when the fill loop exits, regardless
+    /// of whether it succeeded fully or bailed on the empty-batch
+    /// guard. userInfo: `documentID` (UUID), `processedChunks`
+    /// (Int), `totalChunks` (Int).
+    static let didCompleteNotification = Notification.Name("posey.unitEmbedding.didComplete")
+
+    /// userInfo keys (shared across the three notifications).
+    static let documentIDKey = "posey.unitEmbedding.documentID"
+    static let totalChunksKey = "posey.unitEmbedding.totalChunks"
+    static let processedChunksKey = "posey.unitEmbedding.processedChunks"
 
     /// Per-document in-flight marker. A second `enqueueIndexing`
     /// for the same documentID while the first is running short-
@@ -84,12 +108,27 @@ actor UnitEmbeddingService {
             return
         }
 
+        // Post .didStart so the indexing banner can show. Total =
+        // chunks.count; fillEmbeddings reports `processed` against
+        // this denominator.
+        let totalChunks = chunks.count
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: Self.didStartNotification,
+                object: nil,
+                userInfo: [
+                    Self.documentIDKey: documentID,
+                    Self.totalChunksKey: totalChunks
+                ]
+            )
+        }
+
         // Drop the in-flight marker if any, then start the embed
         // fill. The fill is its own actor-isolated method so a
         // second enqueue won't double-start it.
         if inFlight.contains(documentID) { return }
         inFlight.insert(documentID)
-        Task { await self.fillEmbeddings(for: documentID, databaseManager: databaseManager) }
+        Task { await self.fillEmbeddings(for: documentID, totalChunks: totalChunks, databaseManager: databaseManager) }
     }
 
     // MARK: - Embedding fill loop
@@ -106,12 +145,37 @@ actor UnitEmbeddingService {
     /// where we stopped. Without this guard a perma-nil backend
     /// would spin the loop forever pulling the same NULL rows.
     private func fillEmbeddings(for documentID: UUID,
+                                totalChunks: Int,
                                 databaseManager: DatabaseManager) async {
-        defer { inFlight.remove(documentID) }
+        defer {
+            inFlight.remove(documentID)
+            // Always post a terminal .didComplete so any UI banner
+            // subscribed via IndexingTracker can clear, even when
+            // the empty-batch guard bailed early. Snapshot the
+            // running `processed` count for the userInfo so the
+            // last reported value matches the terminal one.
+            let processed = processedSoFar
+            Task { @MainActor in
+                NotificationCenter.default.post(
+                    name: Self.didCompleteNotification,
+                    object: nil,
+                    userInfo: [
+                        Self.documentIDKey: documentID,
+                        Self.processedChunksKey: processed,
+                        Self.totalChunksKey: totalChunks
+                    ]
+                )
+            }
+        }
 
         let batchSize = 32
         let maxNullBatches = 2
         var consecutiveEmptyBatches = 0
+        // Running tally for progress posts. We can't trust
+        // `total - nullCount` mid-loop because the same set of
+        // NULL rows can include leftovers from a prior failed
+        // pass; instead we count successful writes this run.
+        processedSoFar = 0
 
         while true {
             let batch: [DatabaseManager.UnitEmbeddingChunkNeedingEmbedding]
@@ -141,10 +205,26 @@ actor UnitEmbeddingService {
                             )
                         }
                         successesThisBatch += 1
+                        processedSoFar += 1
                     } catch {
                         // Row stays NULL; continue.
                     }
                 }
+            }
+
+            // Post .didProgress per batch (not per row — would
+            // flood the main queue on long docs).
+            let snapshotProcessed = processedSoFar
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: Self.didProgressNotification,
+                    object: nil,
+                    userInfo: [
+                        Self.documentIDKey: documentID,
+                        Self.processedChunksKey: snapshotProcessed,
+                        Self.totalChunksKey: totalChunks
+                    ]
+                )
             }
 
             if successesThisBatch == 0 {
@@ -155,6 +235,13 @@ actor UnitEmbeddingService {
             }
         }
     }
+
+    /// Per-document running tally of successful embedding writes
+    /// in the current fill loop. Read by the terminal .didComplete
+    /// post (defer block) so the final progress value reflects
+    /// reality even when the loop bails on the empty-batch guard.
+    /// Reset to 0 at the start of each fillEmbeddings call.
+    private var processedSoFar: Int = 0
 }
 
 // ========== BLOCK 01: UNIT EMBEDDING SERVICE - END ==========

@@ -1,38 +1,34 @@
 import Foundation
 import Combine
 
-// ========== BLOCK 01: INDEXING TRACKER (NEUTERED) - START ==========
+// ========== BLOCK 01: INDEXING TRACKER - START ==========
 
-/// **Step 8f neutering.** The legacy `DocumentEmbeddingIndex` posted
-/// `documentIndexingDidStart/Progress/Complete` notifications that
-/// drove the "Still learning this document — N%" UI affordance in
-/// the reader's Ask Posey menu. With 8f's tear-down of
-/// DocumentEmbeddingIndex, the new `UnitEmbeddingService` actor
-/// runs silently (no notifications) — embedding fill is fast
-/// enough at typical document sizes that the progress UI proved
-/// unnecessary in practice.
+/// Observable view-friendly mirror of `UnitEmbeddingService`'s
+/// progress notifications. Drives the reader's "Still learning
+/// this document — N%" affordance in the Ask Posey menu.
 ///
-/// This file is kept as a neutered stub preserving the public
-/// surface (`isEnhancing`, `indexingProgress`, `IndexingProgress`,
-/// `sharedForChat`) so view code that wires `@StateObject private
-/// var indexingTracker = IndexingTracker()` doesn't have to change.
-/// All progress queries return nil / false; the UI degrades to "no
-/// banner visible" which is the right behavior for the new
-/// fast-fill path.
-///
-/// 2026-05-23 — neutered in Step 8f. A future polish pass could
-/// re-wire this to UnitEmbeddingService progress signals; deferred.
+/// **History:** the legacy `DocumentEmbeddingIndex` posted
+/// `documentIndexingDidStart/Progress/Complete` that this tracker
+/// listened to. 8f tore out that index; this file was neutered
+/// (all queries returned nil/false) so the banner never showed.
+/// 2026-05-24 follow-up: re-wired to `UnitEmbeddingService`'s
+/// new `unitEmbeddingDidStart/Progress/Complete` notifications.
+/// SwiftUI view code (`@StateObject private var indexingTracker =
+/// IndexingTracker()` in `ReaderView` and `AskPoseyView`) is
+/// unchanged; the same public surface works.
+@MainActor
 final class IndexingTracker: ObservableObject {
 
     static let sharedForChat = IndexingTracker()
 
+    /// Per-document progress snapshot. Empty after .didComplete fires.
     @Published private(set) var indexingProgress: [UUID: IndexingProgress] = [:]
-    /// Always empty — see file-level comment. Kept on the public
-    /// surface so SwiftUI `.animation(value:)` modifiers that
-    /// observed the legacy set still compile.
+    /// Convenience set used by SwiftUI `.animation(value:)` modifiers
+    /// that watch "is any indexing happening?" rather than a specific
+    /// document's progress.
     @Published private(set) var indexingDocumentIDs: Set<UUID> = []
 
-    /// Same shape as the legacy struct so view code that destructures
+    /// Same shape as the pre-8f struct so view code that destructures
     /// the optional doesn't break.
     struct IndexingProgress: Equatable, Sendable {
         let processed: Int
@@ -42,27 +38,71 @@ final class IndexingTracker: ObservableObject {
         }
     }
 
-    init() {}
+    private var cancellables: Set<AnyCancellable> = []
 
-    /// Always returns false — see file-level comment.
+    init(notificationCenter: NotificationCenter = .default) {
+        notificationCenter.publisher(for: UnitEmbeddingService.didStartNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleStart(note) }
+            .store(in: &cancellables)
+        notificationCenter.publisher(for: UnitEmbeddingService.didProgressNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleProgress(note) }
+            .store(in: &cancellables)
+        notificationCenter.publisher(for: UnitEmbeddingService.didCompleteNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleComplete(note) }
+            .store(in: &cancellables)
+    }
+
+    // MARK: - Public surface (matches pre-8f shape)
+
+    /// True iff the named document currently has a fill in flight.
+    /// Used by the reader's Ask Posey menu to show the banner.
+    /// Identical semantics to `isIndexing` — the pre-8f tracker
+    /// distinguished "indexing chunks" from "AFM metadata
+    /// enhancement"; with metadata enhancement torn out, both
+    /// collapse to one signal.
     func isEnhancing(_ documentID: UUID) -> Bool {
-        return false
+        return indexingProgress[documentID] != nil
     }
 
-    /// Always returns false — see file-level comment. Distinct from
-    /// `isEnhancing`: legacy distinguished "currently indexing" from
-    /// "currently in metadata enhancement"; the neutered version
-    /// collapses both.
     func isIndexing(_ documentID: UUID) -> Bool {
-        return false
+        return indexingProgress[documentID] != nil
     }
 
-    /// Always returns nil — see file-level comment. Legacy signature
-    /// returned a `Double?` fraction (0…1); preserved here so view
-    /// callers (`.unifiedProgress(for:)`) keep compiling.
+    /// Pre-8f returned a fraction (0…1) for the unified
+    /// chunks+metadata signal. Today same fraction, computed off
+    /// the single-stage chunk fill.
     func unifiedProgress(for documentID: UUID) -> Double? {
-        return nil
+        return indexingProgress[documentID]?.fraction
+    }
+
+    // MARK: - Notification handlers
+
+    private func handleStart(_ note: Notification) {
+        guard let id = note.userInfo?[UnitEmbeddingService.documentIDKey] as? UUID,
+              let total = note.userInfo?[UnitEmbeddingService.totalChunksKey] as? Int else {
+            return
+        }
+        indexingProgress[id] = IndexingProgress(processed: 0, total: total)
+        indexingDocumentIDs.insert(id)
+    }
+
+    private func handleProgress(_ note: Notification) {
+        guard let id = note.userInfo?[UnitEmbeddingService.documentIDKey] as? UUID,
+              let processed = note.userInfo?[UnitEmbeddingService.processedChunksKey] as? Int,
+              let total = note.userInfo?[UnitEmbeddingService.totalChunksKey] as? Int else {
+            return
+        }
+        indexingProgress[id] = IndexingProgress(processed: processed, total: total)
+    }
+
+    private func handleComplete(_ note: Notification) {
+        guard let id = note.userInfo?[UnitEmbeddingService.documentIDKey] as? UUID else { return }
+        indexingProgress.removeValue(forKey: id)
+        indexingDocumentIDs.remove(id)
     }
 }
 
-// ========== BLOCK 01: INDEXING TRACKER (NEUTERED) - END ==========
+// ========== BLOCK 01: INDEXING TRACKER - END ==========

@@ -941,9 +941,42 @@ extension LibraryViewModel {
                 return #"{"error":"Verb removed in Step 8f (synthetic-metadata + Phase B chunk enhancement torn out)."}"#
 
             case "INDEXING_STATE":
-                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
-                _ = arg
-                return #"{\"error\":\"INDEXING_STATE removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
+                // 2026-05-24 — re-wired to IndexingTracker.sharedForChat
+                // (post-8f tracker re-build). Args: optional <doc-id>
+                // to scope to one document. With no arg, dumps state
+                // for every in-flight document.
+                let tracker = IndexingTracker.sharedForChat
+                let progress = tracker.indexingProgress
+                if let raw = arg, !raw.isEmpty {
+                    guard let id = UUID(uuidString: raw) else {
+                        return #"{"error":"Invalid document ID"}"#
+                    }
+                    if let p = progress[id] {
+                        return json([
+                            "documentID": id.uuidString,
+                            "processed": p.processed,
+                            "total": p.total,
+                            "fraction": p.fraction,
+                            "isIndexing": true
+                        ])
+                    }
+                    return json([
+                        "documentID": id.uuidString,
+                        "isIndexing": false
+                    ])
+                }
+                let items: [[String: Any]] = progress.map { (id, p) in
+                    [
+                        "documentID": id.uuidString,
+                        "processed": p.processed,
+                        "total": p.total,
+                        "fraction": p.fraction
+                    ]
+                }
+                return json([
+                    "inFlightCount": items.count,
+                    "documents": items
+                ])
 
             case "ENHANCE_CHUNK_NOW":
                 // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).

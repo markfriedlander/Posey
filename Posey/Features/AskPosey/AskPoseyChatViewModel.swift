@@ -202,6 +202,20 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// budget constants.
     private let ragDedupThreshold: Double = 0.85
 
+    /// 2026-05-23 — Step 8c: latched after each `retrieveRAGChunks`
+    /// call so 8d's prompt-builder can read the RRF top score and
+    /// inject the anti-confabulation guard when no high-relevance
+    /// match was found. Reset to defaults at each call entry.
+    /// Natural RRF top-1 from one retriever sits around
+    /// `1/(60+1) ≈ 0.0164`; from both retrievers ranking the same
+    /// chunk #1 it doubles. The 8d guard threshold reads
+    /// `HybridRetriever.confidenceFloor`.
+    var lastRetrievalTopRelevance: Double = 0
+    /// Diagnostic: BM25 was excluded from RRF by the quality gate
+    /// on the most recent retrieval. Surfaced through the local
+    /// API for tuning visibility.
+    var lastRetrievalBM25Excluded: Bool = false
+
     /// In-flight conversation-summarization task. Set when a turn
     /// finalizes with enough older messages to need summarizing; the
     /// next send awaits this before building its prompt so the
@@ -802,26 +816,50 @@ private extension AskPoseyChatViewModel {
     /// top-of-list, and meta-questions get reliable grounding
     /// regardless of scope. Cost is small (~1800 chars).
     func retrieveRAGChunks(for question: String) -> [RetrievedChunk] {
-        guard let index = embeddingIndex else { return [] }
+        // 2026-05-23 — Step 8c: try the new RRF-based HybridRetriever
+        // (semantic via NLContextual + BM25 via FTS5 mirror, fused
+        // via Reciprocal Rank Fusion with Hal's quality gate). If
+        // the new path returns results, use them — they're built
+        // on the canonical unit-anchored chunk store and will
+        // outlive the legacy path after 8f's tear-down. If the new
+        // path returns empty (no chunks yet for this doc, embeddings
+        // still loading, or the chunker hasn't run), fall through
+        // to the legacy searchHybrid as a defensive bridge during
+        // the 8b-8f cutover.
+        if let db = databaseManager {
+            let retriever = HybridRetriever(database: db)
+            let outcome = retriever.retrieve(
+                documentID: documentID, query: question, limit: ragTopK
+            )
+            if !outcome.results.isEmpty {
+                // The new path serves this query.
+                self.lastRetrievalTopRelevance = outcome.topRelevance
+                self.lastRetrievalBM25Excluded = outcome.bm25Excluded
+                return outcome.results
+            }
+        }
+
+        guard let index = embeddingIndex else {
+            self.lastRetrievalTopRelevance = 0
+            self.lastRetrievalBM25Excluded = false
+            return []
+        }
 
         let results: [DocumentEmbeddingSearchResult]
         do {
-            // 2026-05-04 — Hybrid retrieval (cosine + lexical as
-            // peers). Replaces the entity-boost-only ranking. NLEmbedding
-            // can't reliably surface IR queries on its own; lexical
-            // scoring catches verbatim-phrase matches (and most "find
-            // information about X" queries) that cosine misses. Entity-
-            // index hits still get folded in. See DocumentEmbeddingIndex
-            // .searchHybrid for the algorithm and the RAG audit findings
-            // in DECISIONS.md (2026-05-04).
+            // Legacy path. Retained as a fallback until step 8f.
             results = try index.searchHybrid(documentID: documentID, query: question, limit: ragTopK)
         } catch {
             // Index unavailable / query failed → fall back to no RAG.
             // Better to ship a less-grounded answer than to error out
             // the whole send.
             dbgLog("AskPosey RAG search failed: \(error)")
+            self.lastRetrievalTopRelevance = 0
+            self.lastRetrievalBM25Excluded = false
             return []
         }
+        self.lastRetrievalTopRelevance = results.first?.similarity ?? 0
+        self.lastRetrievalBM25Excluded = false
 
         // 2026-05-04 — Skip front-matter prepend when there's an
         // anchor. Real-conversation testing showed front-matter

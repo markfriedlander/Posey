@@ -63,10 +63,7 @@ struct MarkdownLibraryImporter {
         let documentID = existingDocument?.id ?? UUID()
 
         // ── Build units from MarkdownParser's display blocks.
-        let units = Self.buildUnits(
-            from: parsed.blocks,
-            documentID: documentID
-        )
+        let units = ContentUnitBuilder.units(from: parsed.blocks, documentID: documentID)
 
         // ── Pre-compute sentences per unit.
         let sentences = SentenceIndexer.sentences(for: units)

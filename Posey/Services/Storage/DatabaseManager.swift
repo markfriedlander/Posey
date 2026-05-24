@@ -3190,6 +3190,216 @@ extension DatabaseManager {
         try bind(documentID.uuidString, at: 3, for: statement)
         try step(statement)
     }
+
+    // MARK: Enhancement — unit-based replacements
+
+    /// Replace the content units of one page (identified by
+    /// `metadata.pageNumber` on a `pageBreak` unit) with new prose
+    /// units derived from Vision OCR output. Atomic. The new
+    /// sentences for the inserted units are regenerated and
+    /// inserted in the same transaction.
+    ///
+    /// Used by `PDFEnhancementService.runTier2` after the reconciler
+    /// returns `.visionWon` for a flagged page.
+    func replaceUnitsForPage(
+        documentID: UUID,
+        pageNumber: Int,
+        newPageText: String,
+        sourceTier: String
+    ) throws -> ReplacePageUnitsResult {
+        try execute("BEGIN TRANSACTION;")
+        do {
+            // Find the page_break unit for this page, and the
+            // page_break for the next page (or end of doc).
+            let existingUnits = try units(for: documentID)
+            guard let breakIdx = existingUnits.firstIndex(where: {
+                $0.kind == .pageBreak && $0.metadata.pageNumber == pageNumber
+            }) else {
+                try execute("ROLLBACK;")
+                throw DatabaseError.prepareFailed(
+                    "replaceUnitsForPage: no pageBreak found for page \(pageNumber)"
+                )
+            }
+            // The page's content is everything from breakIdx+1 up to
+            // (but not including) the next pageBreak.
+            var endIdx = existingUnits.count
+            for i in (breakIdx + 1)..<existingUnits.count {
+                if existingUnits[i].kind == .pageBreak {
+                    endIdx = i
+                    break
+                }
+            }
+            let breakUnit = existingUnits[breakIdx]
+            let pageContentUnits = Array(existingUnits[(breakIdx + 1)..<endIdx])
+
+            // Sequence numbers for the new content. We insert after
+            // the page break unit's sequence, before the next
+            // existing unit (or open-ended at the end). Use sequence
+            // strides of 1 starting at breakUnit.sequence + 1; this
+            // preserves "page N's content" semantics regardless of
+            // how many new units we produce.
+            let baseSeq = breakUnit.sequence + 1
+            let paragraphs = newPageText
+                .components(separatedBy: "\n\n")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let newUnits: [ContentUnit] = paragraphs.enumerated().map { (i, text) in
+                ContentUnit(
+                    documentID: documentID,
+                    sequence: baseSeq + i,
+                    kind: .prose,
+                    text: text,
+                    sourceTier: sourceTier
+                )
+            }
+
+            // Delete old content units + their sentences.
+            for unit in pageContentUnits {
+                try execute("DELETE FROM document_sentences WHERE unit_id = '\(unit.id.uuidString)';")
+                try execute("DELETE FROM document_units WHERE id = '\(unit.id.uuidString)';")
+            }
+            // Insert new content units.
+            for unit in newUnits {
+                try insertUnit(unit)
+            }
+            // Insert sentences for the new units.
+            for unit in newUnits {
+                let sentences = SentenceIndexer.sentences(for: unit)
+                for s in sentences { try insertSentence(s) }
+            }
+
+            // Refresh derived plain_text on the documents row by
+            // joining all prose-bearing units. Cheap; one read +
+            // one write per page-rewrite.
+            let refreshedUnits = try units(for: documentID)
+            let joined = refreshedUnits
+                .filter { $0.kind.carriesProseText }
+                .map(\.text)
+                .joined(separator: "\n\n")
+            let updateSQL = """
+            UPDATE documents
+            SET plain_text = ?, display_text = ?, character_count = ?
+            WHERE id = ?;
+            """
+            let updateStmt = try prepareStatement(sql: updateSQL)
+            defer { sqlite3_finalize(updateStmt) }
+            try bind(joined, at: 1, for: updateStmt)
+            try bind(joined, at: 2, for: updateStmt)
+            sqlite3_bind_int64(updateStmt, 3, sqlite3_int64(joined.count))
+            try bind(documentID.uuidString, at: 4, for: updateStmt)
+            try step(updateStmt)
+
+            try execute("COMMIT;")
+            return ReplacePageUnitsResult(
+                removedUnitCount: pageContentUnits.count,
+                insertedUnitCount: newUnits.count
+            )
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    struct ReplacePageUnitsResult: Sendable {
+        let removedUnitCount: Int
+        let insertedUnitCount: Int
+    }
+
+    /// Replace every occurrence of `original` with `corrected` in
+    /// every prose-bearing unit's text. Atomic. Each modified unit
+    /// gets its `revision` bumped, `source_tier` updated, and its
+    /// sentences regenerated. Used by `PDFEnhancementService.runTier3`
+    /// for AFM fusion-token swaps.
+    ///
+    /// Word-boundary regex; case-sensitive (matching the legacy
+    /// `replaceTokenInDocument` behavior).
+    func replaceTokenInUnits(
+        documentID: UUID,
+        original: String,
+        corrected: String,
+        sourceTier: String
+    ) throws -> ReplaceTokenInUnitsResult {
+        let escapedOriginal = NSRegularExpression.escapedPattern(for: original)
+        let pattern = "\\b" + escapedOriginal + "\\b"
+        let regex = try NSRegularExpression(pattern: pattern)
+
+        try execute("BEGIN TRANSACTION;")
+        do {
+            let existing = try units(for: documentID)
+            var unitsTouched = 0
+            var totalOccurrences = 0
+            for unit in existing where unit.kind.carriesProseText {
+                let text = unit.text
+                let range = NSRange(text.startIndex..., in: text)
+                let matches = regex.matches(in: text, range: range)
+                if matches.isEmpty { continue }
+                let newText = regex.stringByReplacingMatches(
+                    in: text, range: range, withTemplate: NSRegularExpression.escapedTemplate(for: corrected)
+                )
+                // Update unit text + bump revision + tier.
+                let updateSQL = """
+                UPDATE document_units
+                SET text = ?, revision = revision + 1, source_tier = ?
+                WHERE id = ?;
+                """
+                let updateStmt = try prepareStatement(sql: updateSQL)
+                defer { sqlite3_finalize(updateStmt) }
+                try bind(newText, at: 1, for: updateStmt)
+                try bind(sourceTier, at: 2, for: updateStmt)
+                try bind(unit.id.uuidString, at: 3, for: updateStmt)
+                try step(updateStmt)
+
+                // Replace sentences for this unit.
+                try execute("DELETE FROM document_sentences WHERE unit_id = '\(unit.id.uuidString)';")
+                let mutatedUnit = ContentUnit(
+                    id: unit.id, documentID: unit.documentID, sequence: unit.sequence,
+                    kind: unit.kind, text: newText, metadata: unit.metadata,
+                    revision: unit.revision + 1, sourceTier: sourceTier
+                )
+                let newSentences = SentenceIndexer.sentences(for: mutatedUnit)
+                for s in newSentences { try insertSentence(s) }
+
+                unitsTouched += 1
+                totalOccurrences += matches.count
+            }
+
+            // Refresh derived plain_text / display_text once at end
+            // (cheap full-doc join).
+            if unitsTouched > 0 {
+                let refreshedUnits = try units(for: documentID)
+                let joined = refreshedUnits
+                    .filter { $0.kind.carriesProseText }
+                    .map(\.text)
+                    .joined(separator: "\n\n")
+                let updateSQL = """
+                UPDATE documents
+                SET plain_text = ?, display_text = ?, character_count = ?
+                WHERE id = ?;
+                """
+                let updateStmt = try prepareStatement(sql: updateSQL)
+                defer { sqlite3_finalize(updateStmt) }
+                try bind(joined, at: 1, for: updateStmt)
+                try bind(joined, at: 2, for: updateStmt)
+                sqlite3_bind_int64(updateStmt, 3, sqlite3_int64(joined.count))
+                try bind(documentID.uuidString, at: 4, for: updateStmt)
+                try step(updateStmt)
+            }
+
+            try execute("COMMIT;")
+            return ReplaceTokenInUnitsResult(
+                unitsTouched: unitsTouched,
+                totalOccurrences: totalOccurrences
+            )
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    struct ReplaceTokenInUnitsResult: Sendable {
+        let unitsTouched: Int
+        let totalOccurrences: Int
+    }
 }
 
 // ========== BLOCK 10: CONTENT UNITS + SENTENCES (REBUILD) - END ==========

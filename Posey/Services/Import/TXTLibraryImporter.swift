@@ -80,16 +80,16 @@ struct TXTLibraryImporter {
         }()
 
         // ── Paragraph split → prose units.
-        let units = Self.buildProseUnits(
-            from: plainText,
+        let units = ContentUnitBuilder.proseUnits(
+            fromPlainText: plainText,
             documentID: documentID
         )
 
         // ── Map smart-skip plainText offsets to unit ids.
-        let skipUnitID = Self.firstUnit(in: units, atOrAfterPlainTextOffset: skipOffset)?.id
+        let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: skipOffset)?.id
         let contentEndUnitID: UUID? = {
             guard contentEndOffset > 0 else { return nil }
-            return Self.firstUnit(in: units, atOrAfterPlainTextOffset: contentEndOffset)?.id
+            return ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: contentEndOffset)?.id
         }()
 
         // ── Pre-compute sentences per unit.
@@ -139,64 +139,9 @@ struct TXTLibraryImporter {
         return document
     }
 
-    // MARK: - Paragraph splitter
-
-    /// Split normalized plainText into prose units along blank-line
-    /// boundaries. Each non-empty paragraph becomes one `.prose`
-    /// unit. Sequence numbers count by 10 (10, 20, 30, …) so future
-    /// in-place edits can insert between units without renumbering.
-    static func buildProseUnits(from plainText: String, documentID: UUID) -> [ContentUnit] {
-        var units: [ContentUnit] = []
-        var sequence = 10
-        // Split on runs of two or more newlines. Single newlines
-        // within a paragraph are common in source TXT (manual
-        // line-wrap from old-school text files); the normalizer
-        // already collapses excessive whitespace, but we leave
-        // within-paragraph newlines intact for fidelity.
-        let paragraphs = plainText.components(separatedBy: "\n\n")
-        for rawParagraph in paragraphs {
-            let trimmed = rawParagraph.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            units.append(ContentUnit(
-                documentID: documentID,
-                sequence: sequence,
-                kind: .prose,
-                text: trimmed
-            ))
-            sequence += 10
-        }
-        return units
-    }
-
-    /// Find the first unit whose original position in plainText is
-    /// at or after `offset`. Used to map smart-skip detector output
-    /// (a plainText character offset) onto a unit reference.
-    ///
-    /// Implementation: walks units in order, accumulating their
-    /// original positions from the join the persister derives.
-    /// (For TXT, the join character is `\n\n`, so cumulative
-    /// position is `previousEnd + 2`.) This is approximate enough
-    /// for smart-skip purposes (off by a few chars at most, always
-    /// erring on the "after" side, which is what we want).
-    static func firstUnit(in units: [ContentUnit], atOrAfterPlainTextOffset offset: Int) -> ContentUnit? {
-        guard offset > 0 else { return units.first }
-        var cumulative = 0
-        for (i, unit) in units.enumerated() {
-            if cumulative >= offset { return unit }
-            cumulative += unit.text.count + 2  // +2 for the "\n\n" separator
-            // If the skip lands inside this unit (between its start
-            // and end), still prefer the *next* unit so we don't
-            // read partial content.
-            if cumulative > offset {
-                let nextIndex = i + 1
-                if units.indices.contains(nextIndex) {
-                    return units[nextIndex]
-                }
-                return unit
-            }
-        }
-        return units.last
-    }
+    // Paragraph splitting and offset-to-unit mapping moved to the
+    // shared `ContentUnitBuilder` so every format uses one source of
+    // truth for those operations.
 }
 
 // ========== BLOCK 01: TXT LIBRARY IMPORTER (UNITS) - END ==========

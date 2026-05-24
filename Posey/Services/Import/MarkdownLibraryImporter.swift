@@ -121,82 +121,8 @@ struct MarkdownLibraryImporter {
         return document
     }
 
-    // MARK: - Display block → ContentUnit mapping
-
-    /// Convert `MarkdownParser`'s `DisplayBlock`s into `ContentUnit`s.
-    /// The block kind → unit kind mapping is one-to-one for the
-    /// kinds Markdown produces.
-    static func buildUnits(from blocks: [DisplayBlock], documentID: UUID) -> [ContentUnit] {
-        var units: [ContentUnit] = []
-        var sequence = 10
-        for block in blocks {
-            let unit = self.unit(from: block, documentID: documentID, sequence: sequence)
-            units.append(unit)
-            sequence += 10
-        }
-        return units
-    }
-
-    private static func unit(from block: DisplayBlock, documentID: UUID, sequence: Int) -> ContentUnit {
-        switch block.kind {
-        case .heading(let level):
-            return ContentUnit(
-                documentID: documentID,
-                sequence: sequence,
-                kind: .heading,
-                text: block.text,
-                metadata: ContentUnitMetadata(headingLevel: level)
-            )
-        case .paragraph:
-            return ContentUnit(
-                documentID: documentID,
-                sequence: sequence,
-                kind: .prose,
-                text: block.text
-            )
-        case .bullet:
-            return ContentUnit(
-                documentID: documentID,
-                sequence: sequence,
-                kind: .listItem,
-                text: block.text,
-                metadata: ContentUnitMetadata(listMarker: block.displayPrefix ?? "• ")
-            )
-        case .numbered:
-            return ContentUnit(
-                documentID: documentID,
-                sequence: sequence,
-                kind: .listItem,
-                text: block.text,
-                metadata: ContentUnitMetadata(listMarker: block.displayPrefix ?? "1. ")
-            )
-        case .quote:
-            return ContentUnit(
-                documentID: documentID,
-                sequence: sequence,
-                kind: .blockquote,
-                text: block.text
-            )
-        case .horizontalRule:
-            return ContentUnit(
-                documentID: documentID,
-                sequence: sequence,
-                kind: .horizontalRule,
-                text: ""
-            )
-        case .visualPlaceholder:
-            // MD doesn't natively produce these, but the type allows
-            // it. Render as an image-kind unit; the image data will
-            // be missing so it renders as the placeholder bar.
-            return ContentUnit(
-                documentID: documentID,
-                sequence: sequence,
-                kind: .image,
-                text: block.text,
-                metadata: ContentUnitMetadata(imageID: block.imageID)
-            )
-        }
-    }
+    // Display block → ContentUnit mapping lives in
+    // `ContentUnitBuilder.units(from:documentID:)`.
 }
 
 // ========== BLOCK 01: MD LIBRARY IMPORTER (UNITS) - END ==========

@@ -82,7 +82,7 @@ struct RTFLibraryImporter {
             for: headings.map { (title: $0.title, plainTextOffset: $0.plainTextOffset) },
             in: plainText
         )
-        let skipUnitID = Self.firstUnit(in: units, atOrAfterPlainTextOffset: tocSkipOffset)?.id
+        let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: tocSkipOffset)?.id
         let skipSource = tocSkipOffset > 0 ? "heuristic" : ""
 
         // ── Pre-compute sentences per unit.
@@ -184,25 +184,7 @@ struct RTFLibraryImporter {
         return units
     }
 
-    /// Same offset-to-unit mapping helper TXT uses. Walks units in
-    /// sequence order; picks the first whose cumulative position is
-    /// at or after `offset`.
-    static func firstUnit(in units: [ContentUnit], atOrAfterPlainTextOffset offset: Int) -> ContentUnit? {
-        guard offset > 0 else { return units.first }
-        var cumulative = 0
-        for (i, unit) in units.enumerated() {
-            if cumulative >= offset { return unit }
-            cumulative += unit.text.count + 2
-            if cumulative > offset {
-                let nextIndex = i + 1
-                if units.indices.contains(nextIndex) {
-                    return units[nextIndex]
-                }
-                return unit
-            }
-        }
-        return units.last
-    }
+    // Offset-to-unit mapping is in `ContentUnitBuilder.firstUnit(...)`.
 }
 
 // ========== BLOCK 01: RTF LIBRARY IMPORTER (UNITS) - END ==========

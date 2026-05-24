@@ -276,7 +276,7 @@ final class AskPoseyPairwiseSummarizer {
             }
             var maxCos = 0.0
             for ref in references {
-                let c = DocumentEmbeddingIndex.cosine(v, ref)
+                let c = EmbeddingProvider.cosine(v, ref)
                 if c > maxCos { maxCos = c }
             }
             let s = SummarySentence(text: sentence, maxCosine: maxCos)

@@ -643,15 +643,13 @@ struct ReaderView: View {
         let idx = viewModel.currentSentenceIndex
         let segs = viewModel.segments
         let offset: Int = (idx >= 0 && idx < segs.count) ? segs[idx].startOffset : 0
-        let info: [AnyHashable: Any] = [
-            DocumentEmbeddingIndex.notificationDocumentIDKey: viewModel.document.id,
-            "offset": offset
-        ]
-        NotificationCenter.default.post(
-            name: .readerPositionDidUpdate,
-            object: nil,
-            userInfo: info
-        )
+        // 2026-05-23 — Step 8f: this notification used to drive the
+        // Phase B BackgroundEnhancementScheduler's reader-aware
+        // chunk-enhancement priority. With the scheduler torn out
+        // (along with its .readerPositionDidUpdate notification
+        // declaration), the post is gone too. A future polish pass
+        // can resurrect it on top of UnitEmbeddingService progress
+        // signals if that priority shaping proves valuable again.
     }
 
     private func publishRemoteState() {

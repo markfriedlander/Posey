@@ -53,11 +53,6 @@ actor PDFEnhancementService {
     // MARK: State
 
     private var databaseManager: DatabaseManager?
-    /// 2026-05-22 Phase 2.2 Step 7 — the embedding index is held here
-    /// so the enhancement runner can trigger indexing at end-of-Tier-3
-    /// on the corrected text rather than at persistence-time on the
-    /// Tier 1 first pass.
-    private var embeddingIndex: DocumentEmbeddingIndex?
 
     /// FIFO of document IDs waiting to be processed. We don't dedupe
     /// on enqueue — `processNext` is the gate that decides what to
@@ -87,16 +82,12 @@ actor PDFEnhancementService {
     /// Wire the live DatabaseManager. Must be called once at app
     /// launch before any enhancement work can run. Subsequent calls
     /// replace the manager (used by some test harnesses that swap
-    /// in a fresh DB mid-session). The `embeddingIndex` is optional
-    /// — when present the runner triggers indexing on the final
-    /// corrected text at end-of-Tier-3 instead of at persistence
-    /// time (Phase 2.2 Step 7).
-    func configure(databaseManager: DatabaseManager,
-                   embeddingIndex: DocumentEmbeddingIndex? = nil) {
+    /// in a fresh DB mid-session). End-of-enhancement indexing
+    /// always routes through `UnitEmbeddingService.shared` since
+    /// 8f's tear-down — no per-service wiring needed.
+    func configure(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
-        self.embeddingIndex = embeddingIndex
-        dbgLog("PDFEnhancementService: configured (embeddingIndex=%@)",
-               embeddingIndex == nil ? "nil" : "set")
+        dbgLog("PDFEnhancementService: configured")
     }
 
     // MARK: Public API
@@ -246,40 +237,12 @@ actor PDFEnhancementService {
             // Source PDF no longer needed once enhancement is done.
             PDFSourceStore.delete(documentID)
 
-            // Step 7 — trigger embedding indexing on the corrected
-            // text. PDFLibraryImporter.persistDocument no longer
-            // enqueues this for PDFs precisely so we can defer to
-            // here. If `embeddingIndex` wasn't wired we fall back
-            // to no-op + log (the doc will still be readable, just
-            // without Ask Posey RAG until a re-import).
-            if let index = embeddingIndex {
-                let doc: Document?
-                do {
-                    doc = try await MainActor.run { () throws -> Document? in
-                        try db.documents().first(where: { $0.id == documentID })
-                    }
-                } catch {
-                    dbgLog("PDFEnhancementService: failed to load doc for embedding handoff: %@",
-                           String(describing: error))
-                    doc = nil
-                }
-                if let doc {
-                    await MainActor.run {
-                        index.enqueueIndexing(doc)
-                    }
-                    dbgLog("PDFEnhancementService: embedding indexing enqueued for %@",
-                           documentID.uuidString)
-                }
-            } else {
-                dbgLog("PDFEnhancementService: no embeddingIndex wired; skipped indexing handoff for %@",
-                       documentID.uuidString)
-            }
-
-            // 2026-05-23 — Step 8b: the new unit-anchored chunker runs in
-            // parallel with the legacy one during the cutover. End-of-
-            // enhancement is the right hook — the corrected units are
-            // the source of truth and the chunk set should reflect them.
-            // Fire-and-forget; the service is actor-serialized internally.
+            // 2026-05-23 — Step 8f: the unit-anchored chunker runs
+            // at end-of-enhancement. The corrected units are the
+            // source of truth and the chunk set must reflect them.
+            // Fire-and-forget; the service is actor-serialized
+            // internally. (The legacy DocumentEmbeddingIndex handoff
+            // that used to live here was removed in 8f.)
             Task.detached {
                 await UnitEmbeddingService.shared.enqueueIndexing(
                     documentID: documentID, databaseManager: db
@@ -376,20 +339,10 @@ actor PDFEnhancementService {
         dbgLog("PDFEnhancementService: Tier 3 starting on %@ — %d suspect tokens (already done %d, total %d)",
                documentID.uuidString, toProcess.count, alreadyProcessed.count, allSuspects.count)
 
-        // Determine embedding kind for re-embeds on chunks the swap
-        // touches. Same logic as Tier 2.
-        let existingChunks: [StoredDocumentChunk]
-        do {
-            existingChunks = try await MainActor.run { try db.chunks(for: documentID) }
-        } catch {
-            dbgLog("PDFEnhancementService: Tier 3 — failed to read chunks for %@: %@",
-                   documentID.uuidString, String(describing: error))
-            return
-        }
-        // Tier 3 no longer re-embeds chunks inline (rebuild step 7b)
-        // — chunk-table embeddings are derived from units and will be
-        // regenerated by the unit-aware embedding chunker (step 8).
-        _ = existingChunks
+        // 2026-05-23 — Step 8f: the dead `existingChunks` read /
+        // legacy embedding-kind sniff was removed. End-of-tier
+        // chunker fire (UnitEmbeddingService) handles chunk
+        // regeneration on the updated units.
 
         var processedCount = 0
         var appliedCount = 0
@@ -533,21 +486,9 @@ actor PDFEnhancementService {
         dbgLog("PDFEnhancementService: Tier 2 starting on %@ — %d pages (already-done %d, total flagged %d)",
                documentID.uuidString, toProcess.count, pagesDone.count, allFlagged.count)
 
-        // ── Determine embedding kind from existing chunks ───────
-        let existingChunks: [StoredDocumentChunk]
-        do {
-            existingChunks = try await MainActor.run {
-                try db.chunks(for: documentID)
-            }
-        } catch {
-            dbgLog("PDFEnhancementService: failed to read existing chunks for %@: %@",
-                   documentID.uuidString, String(describing: error))
-            return
-        }
-        // Tier 2 no longer re-embeds chunks inline (rebuild step 7b)
-        // — chunk-table embeddings are derived from units and get
-        // regenerated by the unit-aware embedding chunker (step 8).
-        _ = existingChunks
+        // 2026-05-23 — Step 8f: existing-chunks read removed.
+        // Tier 2 page swaps work directly on units now; the
+        // chunker fires end-of-enhancement.
 
         // ── Work loop with priority + locks + cancellation ──────
         var deferralCounts: [Int: Int] = [:]  // pageIndex → defer count
@@ -600,7 +541,6 @@ actor PDFEnhancementService {
             for (qi, page) in workQueue.enumerated() {
                 if !pageIsLockedForUpdate(page.pageIndex,
                                           boundaries: boundaries,
-                                          chunks: existingChunks,
                                           documentID: documentID,
                                           snapshot: snapshot) {
                     pickedIndex = qi
@@ -698,29 +638,23 @@ actor PDFEnhancementService {
         dbgLog("PDFEnhancementService: Tier 2 finished on %@", documentID.uuidString)
     }
 
-    /// True iff updating page `pageIndex` would touch a chunk the
-    /// reader is currently rendering or TTS is currently speaking.
+    /// 2026-05-23 — Step 8f: pre-rebuild this checked whether a
+    /// page swap would touch a chunk the reader was viewing or
+    /// TTS was speaking, using legacy plainText-offset chunks.
+    /// With the legacy chunks table gone the precise lookup is no
+    /// longer available. For now: always report "not locked" and
+    /// rely on the `maxLockDeferralsPerPage` defensive cap above to
+    /// guarantee forward progress. The worst case is rare and
+    /// recoverable: a user looking at exactly the page Tier 2 is
+    /// rewriting may see text update once underneath them. A
+    /// future polish pass can rebuild this on top of unit_id
+    /// overlap when ReaderObservation grows a unit-aware surface.
     private func pageIsLockedForUpdate(
         _ pageIndex: Int,
         boundaries: [Int],
-        chunks: [StoredDocumentChunk],
         documentID: UUID,
         snapshot: ReaderObservation.Snapshot
     ) -> Bool {
-        // Compute the plainText range for this page.
-        guard pageIndex < boundaries.count else { return false }
-        let lo = boundaries[pageIndex]
-        let hi = (pageIndex + 1 < boundaries.count) ? boundaries[pageIndex + 1] : Int.max
-        let overlapping = chunks.filter { $0.startOffset < hi && $0.endOffset > lo }
-        // Only check locks if this is the document the reader has open.
-        guard snapshot.openDocumentID == documentID else { return false }
-        for chunk in overlapping {
-            let chunkID = ReaderObservation.ChunkID(
-                documentID: documentID, chunkIndex: chunk.chunkIndex
-            )
-            if snapshot.ttsInUseChunk == chunkID { return true }
-            if snapshot.visibleChunks.contains(chunkID) { return true }
-        }
         return false
     }
 
@@ -744,28 +678,10 @@ actor PDFEnhancementService {
         }
     }
 
-    // MARK: Segmenter + embedder hookup
-
-    /// Re-segment `text` into chunks via the same sentence-aware
-    /// chunker `DocumentEmbeddingIndex` uses, then embed each chunk
-    /// against the document's existing embedding kind so retrieval
-    /// stays consistent. Static helper — no actor isolation needed.
-    nonisolated static func segmentAndEmbed(text: String, kind: String) -> [StoredDocumentChunk] {
-        let cfg = DocumentEmbeddingIndexConfiguration.default
-        let chunks = DocumentEmbeddingIndex.chunk(text, configuration: cfg)
-        return chunks.map { c in
-            let vector = DocumentEmbeddingIndex.embedTextWithKind(text: c.text, kind: kind)
-            return StoredDocumentChunk(
-                chunkIndex: c.chunkIndex,
-                startOffset: c.startOffset,
-                endOffset: c.endOffset,
-                text: c.text,
-                embedding: vector,
-                embeddingKind: kind,
-                pageStart: 0, pageEnd: 0, revision: 0, sourceTier: "tier2_vision"
-            )
-        }
-    }
+    // 2026-05-23 — Step 8f: the `segmentAndEmbed` static helper
+    // fed the legacy `DatabaseManager.rewritePageText` transaction,
+    // which was itself deleted earlier in the rebuild (commit
+    // `862883a`). With no callers remaining, the helper is gone too.
 }
 
 // ========== BLOCK 01: PDF ENHANCEMENT SERVICE - END ==========

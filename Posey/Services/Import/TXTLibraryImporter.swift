@@ -19,13 +19,10 @@ import Foundation
 /// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct TXTLibraryImporter {
     let databaseManager: DatabaseManager
-    let embeddingIndex: DocumentEmbeddingIndex?
     private let textLoader = TXTDocumentImporter()
 
-    init(databaseManager: DatabaseManager,
-         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+    init(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
-        self.embeddingIndex = embeddingIndex
     }
 
     func importDocument(from url: URL) throws -> Document {
@@ -135,7 +132,6 @@ struct TXTLibraryImporter {
             contentEndOffset: contentEndOffset,
             skipSource: skipSource
         )
-        embeddingIndex?.enqueueIndexing(document)
         // 2026-05-23 — Step 8b: new unit-anchored chunker runs in
         // parallel with the legacy one during the cutover.
         let docID = document.id

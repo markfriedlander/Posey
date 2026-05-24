@@ -1,7 +1,19 @@
 import Foundation
+import NaturalLanguage
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
+
+// 2026-05-23 — Step 8f: these notifications used to live on
+// BackgroundEnhancementScheduler (which listened to pause itself
+// during user AFM turns) and were extension-declared there. With
+// the scheduler torn out, the only remaining poster is AskPoseyService
+// itself; the names are kept so any future listener (or test
+// harness) can still subscribe.
+extension Notification.Name {
+    static let askPoseyAFMDidBegin = Notification.Name("askPosey.afmDidBegin")
+    static let askPoseyAFMDidEnd   = Notification.Name("askPosey.afmDidEnd")
+}
 
 // ========== BLOCK 01: PROTOCOL - START ==========
 /// Read-only interface the Ask Posey UI calls when classifying an
@@ -763,8 +775,29 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         //       Madness"). Single capitalized words are excluded
         //       (too noisy — sentence-initial words trip it).
         var candidates: Set<String> = []
-        for e in DocumentEmbeddingIndex.extractEntities(from: answer) {
-            candidates.insert(e)
+        // 2026-05-23 — Step 8f: inlined named-entity extraction
+        // (used to live on DocumentEmbeddingIndex). NLTagger pass
+        // captures person / place / organization names so the
+        // anti-fabrication check below can verify each one appears
+        // verbatim in the document.
+        do {
+            let tagger = NLTagger(tagSchemes: [.nameType])
+            tagger.string = answer
+            let opts: NLTagger.Options = [.omitPunctuation, .omitWhitespace, .joinNames]
+            tagger.enumerateTags(
+                in: answer.startIndex..<answer.endIndex,
+                unit: .word,
+                scheme: .nameType,
+                options: opts
+            ) { tag, range in
+                if let t = tag,
+                   t == .personalName || t == .placeName || t == .organizationName {
+                    let token = String(answer[range])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !token.isEmpty { candidates.insert(token) }
+                }
+                return true
+            }
         }
         candidates.formUnion(extractQuotedStrings(from: answer))
         candidates.formUnion(extractTitleCasePhrases(from: answer))

@@ -14,14 +14,11 @@ import Foundation
 /// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct DOCXLibraryImporter {
     let databaseManager: DatabaseManager
-    let embeddingIndex: DocumentEmbeddingIndex?
     private let textLoader = DOCXDocumentImporter()
     private let displayParser = DOCXDisplayParser()
 
-    init(databaseManager: DatabaseManager,
-         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+    init(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
-        self.embeddingIndex = embeddingIndex
     }
 
     func importDocument(from url: URL) throws -> Document {
@@ -139,7 +136,6 @@ struct DOCXLibraryImporter {
             playbackSkipUntilOffset: tocSkipOffset,
             skipSource: skipSource
         )
-        embeddingIndex?.enqueueIndexing(document)
         let docID = document.id
         let dbRef = databaseManager
         Task.detached {

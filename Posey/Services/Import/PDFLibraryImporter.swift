@@ -23,13 +23,10 @@ import Foundation
 /// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct PDFLibraryImporter {
     let databaseManager: DatabaseManager
-    let embeddingIndex: DocumentEmbeddingIndex?
     private let importer = PDFDocumentImporter()
 
-    init(databaseManager: DatabaseManager,
-         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+    init(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
-        self.embeddingIndex = embeddingIndex
     }
 
     func importDocument(from url: URL) throws -> Document {

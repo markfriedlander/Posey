@@ -245,10 +245,12 @@ struct LibraryView: View {
                 // smooth before background AFM work begins competing
                 // for resources. The scheduler is idempotent and self-
                 // exits when there's no pending work.
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 5_000_000_000) // 5s
-                    viewModel.enhancementScheduler?.start()
-                }
+                // 2026-05-23 — Step 8f: the Phase B
+                // enhancementScheduler start-on-task hook was torn
+                // out with the scheduler itself. PDF Tier 2/3
+                // enhancement remains; that runs via
+                // PDFEnhancementService.shared.bootstrap which
+                // PoseyApp invokes at launch.
                 // M9 release-binary hygiene: the local API server is
                 // a development tool. DEBUG builds force-on the
                 // antenna at launch (developer convenience); RELEASE
@@ -419,70 +421,20 @@ final class LibraryViewModel: ObservableObject {
     @Published var apiConnectionInfo: String? = nil
 
     let databaseManager: DatabaseManager
-    /// Shared Ask Posey embedding index. Built once per LibraryViewModel
-    /// instance and handed to every importer so chunks land at import
-    /// time across all formats (format-parity standing policy).
-    private lazy var embeddingIndex: DocumentEmbeddingIndex = {
-        // Wire the AFM-backed metadata extractor when AFM is available.
-        // On older OS versions or devices without AFM, the closure is
-        // nil and DocumentEmbeddingIndex skips the metadata enhancement
-        // stage — content chunks still get indexed, just without the
-        // synthesized metadata chunk.
-        var extractor: DocumentEmbeddingIndex.MetadataExtractorClosure? = nil
-        #if canImport(FoundationModels)
-        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-            let service = DocumentMetadataService()
-            extractor = { document in
-                await service.extractMetadata(from: document)
-            }
-        }
-        #endif
-        let index = DocumentEmbeddingIndex(
-            database: databaseManager,
-            metadataExtractor: extractor
-        )
-        // 2026-05-22 Phase 2.2 Step 7 — hand the live embedding
-        // index to PDFEnhancementService so it can trigger indexing
-        // on the corrected text at end-of-Tier-3 instead of at
-        // persistence time. Re-configures the service (replaces the
-        // databaseManager-only configuration from PoseyApp.onAppear).
-        let mgr = databaseManager
-        Task { await PDFEnhancementService.shared.configure(databaseManager: mgr, embeddingIndex: index) }
-        return index
-    }()
-
-    /// Phase B background-enhancement scheduler. Held lazily so it
-    /// only spins up if AFM is available; on older OS versions this
-    /// stays nil and Phase B is a no-op (Phase A still functional).
-    @MainActor lazy var enhancementScheduler: BackgroundEnhancementScheduler? = {
-        #if canImport(FoundationModels)
-        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-            let enhancer = DocumentChunkEnhancer()
-            let enhanceClosure: DocumentChunkContextClosure = { text, summary, title in
-                await enhancer.contextNote(
-                    forChunk: text,
-                    documentSummary: summary,
-                    documentTitle: title)
-            }
-            let embedClosure: BackgroundEnhancementScheduler.ChunkEmbedClosure = { text, kind in
-                DocumentEmbeddingIndex.embedTextWithKind(text: text, kind: kind)
-            }
-            return BackgroundEnhancementScheduler(
-                database: databaseManager,
-                enhance: enhanceClosure,
-                embedText: embedClosure
-            )
-        }
-        #endif
-        return nil
-    }()
-    private lazy var txtLibraryImporter      = TXTLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
-    private lazy var markdownLibraryImporter = MarkdownLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
-    private lazy var rtfLibraryImporter      = RTFLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
-    private lazy var docxLibraryImporter     = DOCXLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
-    private lazy var htmlLibraryImporter     = HTMLLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
-    private lazy var epubLibraryImporter     = EPUBLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
-    private lazy var pdfLibraryImporter      = PDFLibraryImporter(databaseManager: databaseManager, embeddingIndex: embeddingIndex)
+    // 2026-05-23 — Step 8f: the lazy `embeddingIndex`
+    // (DocumentEmbeddingIndex) and the Phase B
+    // `enhancementScheduler` (BackgroundEnhancementScheduler) lived
+    // here before. Both removed in 8f's tear-down. Importers no
+    // longer take an embedding-index parameter; PDF enhancement
+    // routes its end-of-Tier-3 chunker fire through
+    // UnitEmbeddingService.shared directly.
+    private lazy var txtLibraryImporter      = TXTLibraryImporter(databaseManager: databaseManager)
+    private lazy var markdownLibraryImporter = MarkdownLibraryImporter(databaseManager: databaseManager)
+    private lazy var rtfLibraryImporter      = RTFLibraryImporter(databaseManager: databaseManager)
+    private lazy var docxLibraryImporter     = DOCXLibraryImporter(databaseManager: databaseManager)
+    private lazy var htmlLibraryImporter     = HTMLLibraryImporter(databaseManager: databaseManager)
+    private lazy var epubLibraryImporter     = EPUBLibraryImporter(databaseManager: databaseManager)
+    private lazy var pdfLibraryImporter      = PDFLibraryImporter(databaseManager: databaseManager)
     // Task 13 #1 (2026-05-03): the LocalAPIServer type and instance
     // exist only in DEBUG builds. Release binaries do not ship the
     // HTTP listener, the bearer-token handling, or any port-bind
@@ -521,41 +473,43 @@ final class LibraryViewModel: ObservableObject {
     /// already skips documents that ARE indexed, so this is safe to
     /// call unconditionally.
     func healAbandonedIndexing() {
+        // 2026-05-23 — Step 8f: routes through UnitEmbeddingService
+        // (idempotent — replaceAllUnitEmbeddingChunks atomically
+        // rebuilds the chunk set for each doc). The 200-char floor
+        // is preserved so trivially-short docs don't churn.
         do {
             let docs = try databaseManager.documents()
+            let dbRef = databaseManager
             for doc in docs {
-                // Skip empty / tiny docs — they may genuinely produce
-                // zero chunks (single sentence, all-whitespace, etc.).
-                // 200 chars is the smallest realistic content boundary.
                 guard doc.characterCount >= 200 else { continue }
-                let count = (try? databaseManager.chunkCount(for: doc.id)) ?? 0
+                let count = (try? databaseManager.unitEmbeddingChunks(for: doc.id).count) ?? 0
                 if count == 0 {
                     dbgLog("LibraryViewModel: heal-on-launch — re-enqueueing %@ (%d chars, 0 chunks)",
                            doc.title, doc.characterCount)
-                    embeddingIndex.enqueueIndexing(doc)
+                    let docID = doc.id
+                    Task.detached {
+                        await UnitEmbeddingService.shared.enqueueIndexing(
+                            documentID: docID, databaseManager: dbRef
+                        )
+                    }
                 }
             }
         } catch {
-            // Don't `present` — heal is best-effort, not a user-facing
-            // failure. Worst case is the doc stays unindexed and Ask
-            // Posey reports "I can't find that" the way it does today.
             dbgLog("LibraryViewModel: heal-on-launch aborted: %@", "\(error)")
         }
     }
 
     func deleteDocument(_ document: Document) {
         do {
-            // 2026-05-22 — Cancel any in-flight embedding-index job
-            // for this document BEFORE the row is removed. Without
-            // this, the embedding pipeline's main-actor write step
-            // could fire after the delete and hit a FOREIGN KEY
-            // constraint failure when it tries to insert chunks
-            // against a no-longer-existing documents row.
-            embeddingIndex.cancelIndexing(for: document.id)
-            // 2026-05-22 Phase 2.2 Step 4 — cancel background
-            // enhancement for the same reason: a Tier 2 / Tier 3
-            // update mid-flight against a deleted document would
-            // hit FK failures.
+            // 2026-05-23 — Step 8f: explicit cancellation of the
+            // legacy embedding-index in-flight job was removed
+            // here. UnitEmbeddingService is actor-serialized; its
+            // FK-vulnerable writes can't race a delete because the
+            // delete cascades via SQLite's ON DELETE CASCADE
+            // (document_units → unit_embedding_chunks). PDF
+            // enhancement still needs the explicit cancel below
+            // because its Tier 2/3 work runs on a separate actor
+            // queue not bounded by SQLite FK semantics.
             Task { await PDFEnhancementService.shared.cancel(document.id) }
             try databaseManager.deleteDocument(document)
             // 2026-05-22 Phase 2.2 Step 5 — drop the source PDF
@@ -812,11 +766,11 @@ extension LibraryViewModel {
                 guard let doc = docs.first(where: { $0.id == id }) else {
                     return #"{"error":"Document not found"}"#
                 }
-                // 2026-05-22 — Cancel in-flight indexing first (FK
-                // race fix). Mirrors LibraryViewModel.deleteDocument.
-                embeddingIndex.cancelIndexing(for: doc.id)
-                // 2026-05-22 Phase 2.2 Step 4 — cancel any in-flight
-                // background enhancement for this document.
+                // 2026-05-23 — Step 8f: explicit legacy-index
+                // cancellation removed (see LibraryViewModel
+                // .deleteDocument). PDF enhancement still wants the
+                // explicit cancel — its actor queue isn't bounded
+                // by SQLite cascade semantics.
                 Task { await PDFEnhancementService.shared.cancel(doc.id) }
                 try databaseManager.deleteDocument(doc)
                 // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecar.
@@ -834,11 +788,8 @@ extension LibraryViewModel {
 
             case "RESET_ALL":
                 let docs = try databaseManager.documents()
-                // 2026-05-22 — Cancel any in-flight indexing across
-                // the wipe (FK race fix).
-                for doc in docs { embeddingIndex.cancelIndexing(for: doc.id) }
-                // 2026-05-22 Phase 2.2 Step 4 — cancel background
-                // enhancements before deleting.
+                // 2026-05-23 — Step 8f: explicit legacy-index
+                // cancellation removed (see deleteDocument).
                 Task {
                     for doc in docs { await PDFEnhancementService.shared.cancel(doc.id) }
                 }
@@ -930,143 +881,49 @@ extension LibraryViewModel {
                 ])
 
             case "SET_EMBEDDING_PROVIDER":
-                // 2026-05-04 — Layer 2 benchmark verb. Args:
-                //   nlSentence | nlContextual | coreMLMiniLM
-                // Switches the provider used by future indexing AND
-                // by query embedding for chunks of the matching kind.
-                // No automatic reindex — use REINDEX_DOCUMENT after
-                // switching to actually use the new provider for
-                // existing docs.
-                let raw = arg ?? ""
-                guard let provider = DocumentEmbeddingIndex.EmbeddingProvider(rawValue: raw) else {
-                    let valid = DocumentEmbeddingIndex.EmbeddingProvider.allCases.map { $0.rawValue }.joined(separator: ", ")
-                    return #"{"error":"Usage: SET_EMBEDDING_PROVIDER:<\#(valid)>"}"#
-                }
-                DocumentEmbeddingIndex.preferredProvider = provider
-                return json(["embeddingProvider": provider.rawValue])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"SET_EMBEDDING_PROVIDER removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "GET_EMBEDDING_PROVIDER":
-                return json(["embeddingProvider": DocumentEmbeddingIndex.preferredProvider.rawValue])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"GET_EMBEDDING_PROVIDER removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "REINDEX_DOCUMENT":
-                // 2026-05-04 — RAG fix verb. Wipes existing chunks
-                // and rebuilds the embedding index for one doc using
-                // current chunking config (e.g. after TOC-skip
-                // landed). Args: <doc-id>.
-                //
-                // 2026-05-05 — Switched from indexIfNeeded (synchronous,
-                // no metadata enhancement) to enqueueIndexing (async,
-                // triggers AFM metadata extraction + synthetic chunk
-                // insertion). Returns immediately with chunkCount = 0
-                // because the work is dispatched in the background;
-                // poll LIST_CHUNKS or GET_DOCUMENT_METADATA to see
-                // when it completes.
+                // 2026-05-23 — Step 8f: rewired to the new
+                // unit-anchored chunker. Atomically rebuilds the
+                // chunk set for `id` from the document's units, then
+                // fills embeddings under the active backend.
                 guard let idStr = arg, let id = UUID(uuidString: idStr) else {
                     return #"{"error":"Usage: REINDEX_DOCUMENT:<doc-id>"}"#
                 }
                 let docs = try databaseManager.documents()
-                guard let doc = docs.first(where: { $0.id == id }) else {
+                guard docs.first(where: { $0.id == id }) != nil else {
                     return #"{"error":"Document not found"}"#
                 }
-                try databaseManager.deleteChunks(for: id)
-                embeddingIndex.enqueueIndexing(doc)
+                let dbRef = databaseManager
+                Task.detached {
+                    await UnitEmbeddingService.shared.enqueueIndexing(
+                        documentID: id, databaseManager: dbRef
+                    )
+                }
                 return json([
                     "reindexed": true,
                     "id": id.uuidString,
-                    "note": "Reindexing dispatched in background — metadata extraction will run after chunking completes."
+                    "note": "Re-chunking + re-embedding dispatched in background. Poll LIST_UNIT_CHUNKS for completion."
                 ])
 
             case "RESET_DOCUMENT_METADATA":
-                // 2026-05-05 — Clear extracted metadata so re-extraction
-                // can run on the next REINDEX_DOCUMENT (without this,
-                // enhanceMetadata short-circuits on the existing
-                // extracted_at > 0 sentinel). Used during testing.
-                // Writes a sentinel record with extractedAt = epoch 0;
-                // documentMetadata(for:) returns nil for that row, so
-                // the "already extracted" check fails and re-extraction
-                // fires on the next pass.
-                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Usage: RESET_DOCUMENT_METADATA:<doc-id>"}"#
-                }
-                let cleared = StoredDocumentMetadata(
-                    title: nil,
-                    authors: [],
-                    year: nil,
-                    documentType: nil,
-                    summary: nil,
-                    extractedAt: Date(timeIntervalSince1970: 0),
-                    detectedNonEnglish: false
-                )
-                try databaseManager.saveDocumentMetadata(cleared, for: id)
-                return json(["reset": true, "id": id.uuidString])
+                // 2026-05-23 — Step 8f: removed alongside the
+                // synthetic-metadata / DocumentMetadataService surface.
+                _ = arg
+                return #"{"error":"RESET_DOCUMENT_METADATA removed in Step 8f."}"#
 
             case "EXTRACT_METADATA_NOW":
-                // 2026-05-05 — Diagnostic verb for the metadata
-                // extraction path. Bypasses the chunking pipeline; calls
-                // DocumentMetadataService directly and returns the raw
-                // result, including AFM availability + any error
-                // captured at the call site.
-                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Usage: EXTRACT_METADATA_NOW:<doc-id>"}"#
-                }
-                let docs = try databaseManager.documents()
-                guard let doc = docs.first(where: { $0.id == id }) else {
-                    return #"{"error":"Document not found"}"#
-                }
-                #if canImport(FoundationModels)
-                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-                    let model = SystemLanguageModel.default
-                    let availabilityStr: String
-                    switch model.availability {
-                    case .available: availabilityStr = "available"
-                    case .unavailable(let reason): availabilityStr = "unavailable(\(reason))"
-                    @unknown default: availabilityStr = "unknown"
-                    }
-                    if model.availability != .available {
-                        return json(["extracted": false,
-                                     "reason": "AFM availability: \(availabilityStr)"])
-                    }
-                    // Call the service AND also catch the error inline
-                    // so we can return what AFM actually said.
-                    let snippet = String(doc.plainText.prefix(4000))
-                    let session = LanguageModelSession(
-                        model: model,
-                        instructions: "You extract structured metadata from documents. Return concise factual fields. Do not invent. Use empty strings for unknown fields. The summary should be one or two complete sentences."
-                    )
-                    do {
-                        let response = try await session.respond(
-                            to: """
-                            Below is the opening of a document. Extract its metadata.
-                            ----- DOCUMENT OPENING -----
-                            \(snippet)
-                            ----- END DOCUMENT OPENING -----
-                            """,
-                            generating: DocumentMetadataPayload.self
-                        )
-                        let payload = response.content
-                        return json([
-                            "extracted": true,
-                            "afmAvailability": availabilityStr,
-                            "title": payload.title,
-                            "authors": payload.authors,
-                            "year": payload.year,
-                            "documentType": payload.documentType,
-                            "summary": payload.summary
-                        ])
-                    } catch {
-                        return json([
-                            "extracted": false,
-                            "afmAvailability": availabilityStr,
-                            "errorType": "\(type(of: error))",
-                            "errorDescription": "\(error)"
-                        ])
-                    }
-                } else {
-                    return json(["extracted": false, "reason": "iOS 26 / macOS 26 required"])
-                }
-                #else
-                return json(["extracted": false, "reason": "FoundationModels framework not available at compile time"])
-                #endif
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"EXTRACT_METADATA_NOW removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "RUN_METADATA_CHAIN":
                 // 2026-05-05 — Diagnostic: directly run enhanceMetadata
@@ -1074,274 +931,39 @@ extension LibraryViewModel {
                 // Bypasses the dispatch chain inside enqueueIndexing
                 // so we can isolate whether the issue is the chain
                 // plumbing vs the enhancement logic itself.
-                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Usage: RUN_METADATA_CHAIN:<doc-id>"}"#
-                }
-                let docs = try databaseManager.documents()
-                guard let doc = docs.first(where: { $0.id == id }) else {
-                    return #"{"error":"Document not found"}"#
-                }
-                #if canImport(FoundationModels)
-                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-                    let service = DocumentMetadataService()
-                    let extractor: DocumentEmbeddingIndex.MetadataExtractorClosure = { d in
-                        await service.extractMetadata(from: d)
-                    }
-                    await embeddingIndex.enhanceMetadata(doc, extractor: extractor)
-                    let after = try? databaseManager.documentMetadata(for: id)
-                    let stored = try databaseManager.chunks(for: id)
-                    let synthCount = stored.filter {
-                        DocumentEmbeddingIndex.isSyntheticKind($0.embeddingKind)
-                    }.count
-                    return json([
-                        "ranChain": true,
-                        "metadataExtracted": after != nil,
-                        "syntheticChunkCount": synthCount,
-                        "lastFailureReason": DocumentMetadataService.lastFailureReason
-                    ])
-                } else {
-                    return json(["error": "iOS 26 / macOS 26 required"])
-                }
-                #else
-                return json(["error": "FoundationModels framework not available"])
-                #endif
-
-            case "PHASE_B_DEBUG":
-                // 2026-05-05 — Surface the scheduler's internal state
-                // for debugging when chunks aren't getting processed.
-                #if canImport(FoundationModels)
-                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-                    let lastFail = DocumentChunkEnhancer.lastFailureReason
-                    let pendingDocs = (try? databaseManager.documentsWithPendingChunks()) ?? []
-                    let info = ProcessInfo.processInfo
-                    return json([
-                        "schedulerWired": enhancementScheduler != nil,
-                        "isPaused": enhancementScheduler?.isPausedForUserAFM ?? false,
-                        "currentReadingDocumentID": enhancementScheduler?.currentReadingDocumentID?.uuidString ?? "",
-                        "currentReadingOffset": enhancementScheduler?.currentReadingOffset ?? -1,
-                        "pendingDocumentCount": pendingDocs.count,
-                        "lowPowerMode": info.isLowPowerModeEnabled,
-                        "thermalState": "\(info.thermalState)",
-                        "lastEnhancerFailure": lastFail
-                    ])
-                }
-                #endif
-                return json(["schedulerWired": false])
-
-            case "PHASE_B_STATUS":
-                // 2026-05-05 — Show enhanced/failed/pending counts
-                // for a document, with the AFM-vs-fallback split
-                // surfaced so the user can see how many chunks
-                // landed via AFM vs via the deterministic fallback.
-                // The "enhanced" total counts both, since both result
-                // in a real context note on the chunk; the split
-                // tells you the QUALITY mix (AFM is more targeted,
-                // fallback is attribution + entities + summary).
-                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Usage: PHASE_B_STATUS:<doc-id>"}"#
-                }
-                let split = try databaseManager.chunkEnhancementCountsBySource(for: id)
-                let enhanced = split.afm + split.fallback
-                let total = enhanced + split.failed + split.pending
-                let afmRate = enhanced == 0 ? 0.0 : (100.0 * Double(split.afm) / Double(enhanced))
-                return json([
-                    "documentID": id.uuidString,
-                    "enhanced": enhanced,
-                    "afm": split.afm,
-                    "fallback": split.fallback,
-                    "failed": split.failed,
-                    "pending": split.pending,
-                    "total": total,
-                    "afmAcceptRate": afmRate
-                ])
-
-            case "PHASE_B_START":
-                // Force-start the scheduler. Useful for tests that
-                // import a doc and want enhancement to kick off
-                // without waiting for the library .task to fire.
-                if let scheduler = enhancementScheduler {
-                    scheduler.start()
-                    return json(["started": true])
-                } else {
-                    return json(["started": false, "reason": "AFM unavailable"])
-                }
-
-            case "PHASE_B_STOP":
-                if let scheduler = enhancementScheduler {
-                    scheduler.stop()
-                    return json(["stopped": true])
-                } else {
-                    return json(["stopped": false, "reason": "scheduler nil"])
-                }
+                // 2026-05-23 — Step 8f: RUN_METADATA_CHAIN,
+                // PHASE_B_DEBUG, PHASE_B_STATUS, PHASE_B_START,
+                // PHASE_B_STOP all torn out — the synthetic-metadata
+                // chunk path and the Phase B chunk enhancer / scheduler
+                // are gone. Return a friendly note so any lingering
+                // test harness that hits these gets a clear signal.
+                _ = arg
+                return #"{"error":"Verb removed in Step 8f (synthetic-metadata + Phase B chunk enhancement torn out)."}"#
 
             case "INDEXING_STATE":
-                // 2026-05-13 — A3 verification verb. Surfaces the live
-                // IndexingTracker state for autonomous race-trigger tests.
-                // Optional arg: <doc-id> to scope to one document. With
-                // no arg, dumps state for every in-flight document across
-                // all three enhancement stages.
-                //
-                // The reader's Ask Posey menu shows
-                //   "Still learning this document — N%"
-                // iff `IndexingTracker.unifiedProgress(for:)` returns a
-                // non-nil value (which itself requires `isEnhancing` to
-                // be true). This verb proves that condition is observable
-                // during the import → index race window without needing
-                // to AX-scrape the unfurled menu.
-                let tracker = IndexingTracker.sharedForChat
-                func snapshot(for id: UUID) -> [String: Any] {
-                    var dict: [String: Any] = [
-                        "documentID": id.uuidString,
-                        "isIndexing": tracker.isIndexing(id),
-                        "isEnhancing": tracker.isEnhancing(id)
-                    ]
-                    if let prog = tracker.unifiedProgress(for: id) {
-                        dict["unifiedProgress"] = prog
-                        dict["unifiedProgressPercent"] = Int((prog * 100).rounded())
-                    }
-                    if let p = tracker.indexingProgress[id] {
-                        dict["stage1"] = [
-                            "processed": p.processed,
-                            "total": p.total,
-                            "fraction": p.fraction
-                        ]
-                    }
-                    dict["stage2MetadataRunning"] = tracker
-                        .metadataExtractingDocumentIDs.contains(id)
-                    if let s = tracker.chunkEnhancementSnapshots[id] {
-                        dict["stage3"] = [
-                            "enhanced": s.enhanced,
-                            "total": s.total,
-                            "fraction": s.fraction
-                        ]
-                    }
-                    return dict
-                }
-                if let idStr = arg, !idStr.isEmpty,
-                   let id = UUID(uuidString: idStr) {
-                    return json(snapshot(for: id))
-                }
-                let active = tracker.indexingDocumentIDs
-                    .union(tracker.metadataExtractingDocumentIDs)
-                    .union(Set(tracker.chunkEnhancementSnapshots.keys))
-                return json([
-                    "activeCount": active.count,
-                    "documents": active.map { snapshot(for: $0) }
-                ])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"INDEXING_STATE removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "ENHANCE_CHUNK_NOW":
-                // 2026-05-05 — Diagnostic: run the chunk enhancer on
-                // ONE chunk in isolation and report what AFM said
-                // (or what error). Used to iterate on the enhancer
-                // prompt without waiting for the whole library.
-                // Args: <doc-id>:<chunk-index>
-                let raw = arg ?? ""
-                let parts = raw.split(separator: ":", maxSplits: 1,
-                                      omittingEmptySubsequences: false)
-                guard parts.count == 2,
-                      let id = UUID(uuidString: String(parts[0])),
-                      let chunkIdx = Int(String(parts[1])) else {
-                    return #"{"error":"Usage: ENHANCE_CHUNK_NOW:<doc-id>:<chunk-index>"}"#
-                }
-                #if canImport(FoundationModels)
-                if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-                    let chunks = try databaseManager.chunks(for: id)
-                    guard let target = chunks.first(where: { $0.chunkIndex == chunkIdx }) else {
-                        return #"{"error":"Chunk not found"}"#
-                    }
-                    let docs = try databaseManager.documents()
-                    let doc = docs.first(where: { $0.id == id })
-                    let metadata = try? databaseManager.documentMetadata(for: id)
-                    let title = doc?.title ?? "Untitled"
-                    let summary = metadata?.summary
-                    let enhancer = DocumentChunkEnhancer()
-                    DocumentChunkEnhancer.lastFailureReason = ""
-                    let note = await enhancer.contextNote(
-                        forChunk: target.text,
-                        documentSummary: summary,
-                        documentTitle: title)
-                    return json([
-                        "chunkIndex": chunkIdx,
-                        "chunkTextPreview": String(target.text.prefix(300)),
-                        "afmNote": note ?? "",
-                        "succeeded": note != nil && !(note?.isEmpty ?? true),
-                        "lastFailureReason": DocumentChunkEnhancer.lastFailureReason
-                    ])
-                }
-                #endif
-                return json(["error": "AFM unavailable"])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"ENHANCE_CHUNK_NOW removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "RETRY_REFUSED":
-                // 2026-05-05 — Reset all ctx_status=2 chunks back to
-                // pending so the scheduler retries them with the
-                // current enhancer prompt. Used to test prompt
-                // iterations on the same content.
-                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Usage: RETRY_REFUSED:<doc-id>"}"#
-                }
-                let resetCount = try databaseManager.resetFailedChunks(for: id)
-                return json([
-                    "documentID": id.uuidString,
-                    "resetToPending": resetCount
-                ])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"RETRY_REFUSED removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "LIST_REFUSED_CHUNKS":
-                // 2026-05-05 — Diagnostic: list chunks that AFM
-                // refused during Phase B enhancement (ctx_status = 2),
-                // with full text. Lets us inspect what content
-                // triggered AFM's safety system so we can iterate
-                // on prompt design or implement a fallback path.
-                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Usage: LIST_REFUSED_CHUNKS:<doc-id>"}"#
-                }
-                let stored = try databaseManager.chunks(for: id)
-                let candidates = try databaseManager.unenhancedChunks(for: id)
-                let candIndices = Set(candidates.map { $0.chunkIndex })
-                // ctx_status=2 chunks aren't in unenhancedChunks (which
-                // only returns ctx_status=0). Get them via direct query.
-                let refused = try databaseManager.enhancedChunkRecords(for: id, limit: 500)
-                    .filter { $0.ctxStatus == 2 }
-                let items: [[String: Any]] = refused.map { rec in
-                    let fullChunk = stored.first { $0.chunkIndex == rec.chunkIndex }
-                    return [
-                        "chunkIndex": rec.chunkIndex,
-                        "startOffset": rec.startOffset,
-                        "text": fullChunk?.text ?? rec.text
-                    ]
-                }
-                _ = candIndices
-                return json([
-                    "documentID": id.uuidString,
-                    "refusedCount": items.count,
-                    "chunks": items
-                ])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"LIST_REFUSED_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "LIST_ENHANCED_CHUNKS":
-                // 2026-05-05 — Show which chunks have been ctx-enhanced
-                // with their context notes. Args: <doc-id>[:<limit>].
-                let raw = arg ?? ""
-                let parts = raw.split(separator: ":", maxSplits: 1,
-                                      omittingEmptySubsequences: false)
-                guard parts.count >= 1,
-                      let id = UUID(uuidString: String(parts[0])) else {
-                    return #"{"error":"Usage: LIST_ENHANCED_CHUNKS:<doc-id>[:<limit>]"}"#
-                }
-                let limit = parts.count >= 2 ? (Int(String(parts[1])) ?? 20) : 20
-                let canonical = try databaseManager.enhancedChunkRecords(for: id, limit: limit)
-                let items: [[String: Any]] = canonical.map { rec in
-                    [
-                        "chunkIndex": rec.chunkIndex,
-                        "startOffset": rec.startOffset,
-                        "ctxStatus": rec.ctxStatus,
-                        "contextNote": rec.contextNote ?? "",
-                        "textPreview": String(rec.text.prefix(120))
-                    ]
-                }
-                return json([
-                    "documentID": id.uuidString,
-                    "returned": items.count,
-                    "chunks": items
-                ])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"LIST_ENHANCED_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "GET_ENHANCEMENT_STATUS":
                 // 2026-05-22 Phase 2.2 Step 7 — diagnostic verb.
@@ -1447,56 +1069,14 @@ extension LibraryViewModel {
                 ])
 
             case "GET_DOCUMENT_METADATA":
-                // 2026-05-05 — Read extracted metadata for a document.
-                // Returns nil-valued fields when extraction hasn't run.
-                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Usage: GET_DOCUMENT_METADATA:<doc-id>"}"#
-                }
-                guard let metadata = try databaseManager.documentMetadata(for: id) else {
-                    return json([
-                        "documentID": id.uuidString,
-                        "extracted": false
-                    ])
-                }
-                var result: [String: Any] = [
-                    "documentID": id.uuidString,
-                    "extracted": true,
-                    "extractedAt": ISO8601DateFormatter().string(from: metadata.extractedAt),
-                    "authors": metadata.authors,
-                    "detectedNonEnglish": metadata.detectedNonEnglish
-                ]
-                if let title = metadata.title { result["title"] = title }
-                if let year = metadata.year { result["year"] = year }
-                if let type = metadata.documentType { result["documentType"] = type }
-                if let summary = metadata.summary { result["summary"] = summary }
-                return json(result)
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"GET_DOCUMENT_METADATA removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "LIST_SYNTHETIC_CHUNKS":
-                // 2026-05-05 — Diagnostic verb to inspect synthetic
-                // chunks for a document. Filters document_chunks by
-                // embedding_kind suffix ":syn-meta" so we can verify
-                // the metadata enhancement actually landed.
-                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Usage: LIST_SYNTHETIC_CHUNKS:<doc-id>"}"#
-                }
-                let stored = try databaseManager.chunks(for: id)
-                let synthetic = stored.filter {
-                    DocumentEmbeddingIndex.isSyntheticKind($0.embeddingKind)
-                }
-                let items: [[String: Any]] = synthetic.map { c in
-                    [
-                        "chunkIndex": c.chunkIndex,
-                        "embeddingKind": c.embeddingKind,
-                        "startOffset": c.startOffset,
-                        "endOffset": c.endOffset,
-                        "text": c.text
-                    ]
-                }
-                return json([
-                    "documentID": id.uuidString,
-                    "syntheticChunkCount": items.count,
-                    "chunks": items
-                ])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"LIST_SYNTHETIC_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "LIST_UNIT_CHUNKS":
                 // 2026-05-23 — Step 8b: inspect the NEW unit-anchored
@@ -1531,287 +1111,29 @@ extension LibraryViewModel {
                 ])
 
             case "LIST_CHUNKS":
-                // 2026-05-04 — RAG audit verb. Args:
-                //   <doc-id>[:offset[:limit]]
-                // Returns chunk metadata + text preview. Used by the
-                // Layer 1 chunking audit to inspect what's actually
-                // in the index per format.
-                //
-                // 2026-05-14 (B2) — Default behavior changed: returns
-                // EVERY chunk when no offset/limit is supplied,
-                // because the previous default of 20 silently hid
-                // tail chunks and produced a phantom-truncation
-                // misread that wasted hours on A9. The `totalChunks`
-                // field in the response was supposed to be the
-                // sanity check; it isn't enough when the caller
-                // anchors on the visible rows. The pagination form
-                // remains available for very-large-document audits.
-                let parts = (arg ?? "").split(separator: ":", maxSplits: 2,
-                                              omittingEmptySubsequences: false)
-                guard parts.count >= 1, let id = UUID(uuidString: String(parts[0])) else {
-                    return #"{"error":"Usage: LIST_CHUNKS:<doc-id>[:offset[:limit]]"}"#
-                }
-                let offset: Int = parts.count >= 2 ? (Int(parts[1]) ?? 0) : 0
-                let stored = try databaseManager.chunks(for: id)
-                let total = stored.count
-                // limit unset → return every remaining chunk.
-                let limit: Int = parts.count >= 3 ? (Int(parts[2]) ?? total) : total
-                let slice = Array(stored.dropFirst(offset).prefix(limit))
-                let items: [[String: Any]] = slice.map { c in
-                    [
-                        "chunkIndex": c.chunkIndex,
-                        "startOffset": c.startOffset,
-                        "endOffset": c.endOffset,
-                        "length": c.endOffset - c.startOffset,
-                        "embeddingKind": c.embeddingKind,
-                        "preview": String(c.text.prefix(120)),
-                        "tail": String(c.text.suffix(60))
-                    ]
-                }
-                return json(["totalChunks": total, "offset": offset,
-                             "returned": slice.count, "chunks": items])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"LIST_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "EMBED_QUERY_CONTEXTUAL":
-                // 2026-05-04 — Layer 2 benchmark verb. Args:
-                //   <doc-id>:<query>
-                // Re-embeds `query` AND every chunk using
-                // NLContextualEmbedding, computes cosine, returns
-                // top-K. Used to A/B test contextual vs. NLEmbedding
-                // on known-failing audit cases before committing to
-                // a re-index. Slow (re-embeds every chunk per call)
-                // but only used in development.
-                let raw = arg ?? ""
-                guard let colonIdx = raw.firstIndex(of: ":") else {
-                    return #"{"error":"Usage: EMBED_QUERY_CONTEXTUAL:<doc-id>:<query>"}"#
-                }
-                let idStr = String(raw[..<colonIdx])
-                let query = String(raw[raw.index(after: colonIdx)...])
-                guard let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Invalid document ID"}"#
-                }
-                let stored = try databaseManager.chunks(for: id)
-                guard let embedder = DocumentEmbeddingIndex.contextualEmbedder(for: .english) else {
-                    return #"{"error":"NLContextualEmbedding unavailable on this device (iOS 17+ required, model assets must download)"}"#
-                }
-                guard let qVec = DocumentEmbeddingIndex.embedContextual(query, with: embedder) else {
-                    return #"{"error":"Failed to embed query contextually"}"#
-                }
-                var scored: [(Int, Int, Double, String)] = []
-                for c in stored.prefix(500) { // cap for speed
-                    if let cv = DocumentEmbeddingIndex.embedContextual(c.text, with: embedder) {
-                        let s = DocumentEmbeddingIndex.cosine(qVec, cv)
-                        scored.append((c.chunkIndex, c.startOffset, s, String(c.text.prefix(80))))
-                    }
-                }
-                let topK = scored.sorted { $0.2 > $1.2 }.prefix(15)
-                let items: [[String: Any]] = topK.map { (idx, off, sim, prev) in
-                    ["chunkIndex": idx, "startOffset": off, "similarity": sim, "preview": prev]
-                }
-                return json(["query": query, "scoredChunks": scored.count,
-                             "totalChunks": stored.count, "topMatches": items])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"EMBED_QUERY_CONTEXTUAL removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "EMBED_QUERY":
-                // 2026-05-04 — RAG audit verb. Args:
-                //   <doc-id>:<query>
-                // Returns the query embedding (truncated) plus the
-                // top-K cosine similarities against every chunk in
-                // the document. Used by the Layer 2 embedding-quality
-                // audit to verify that semantically similar
-                // questions and answers cluster correctly.
-                let raw = arg ?? ""
-                guard let colonIdx = raw.firstIndex(of: ":") else {
-                    return #"{"error":"Usage: EMBED_QUERY:<doc-id>:<query>"}"#
-                }
-                let idStr = String(raw[..<colonIdx])
-                let query = String(raw[raw.index(after: colonIdx)...])
-                guard let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Invalid document ID"}"#
-                }
-                let stored = try databaseManager.chunks(for: id)
-                let kind = stored.first?.embeddingKind ?? "en-sentence"
-                // Match the query embedder to the chunks' embedding kind.
-                let qVec: [Double]
-                if kind == "en-contextual" {
-                    if let ctx = DocumentEmbeddingIndex.contextualEmbedder(for: .english),
-                       let v = DocumentEmbeddingIndex.embedContextual(query, with: ctx) {
-                        qVec = v
-                    } else {
-                        qVec = [Double](repeating: 0, count: 384)
-                    }
-                } else if kind == "en-minilm" {
-                    qVec = DocumentEmbeddingIndex.embedMiniLMSync(query) ?? [Double](repeating: 0, count: 384)
-                } else {
-                    let language = DocumentEmbeddingIndex.language(forKind: kind)
-                    let embedder = DocumentEmbeddingIndex.embedder(for: language)
-                    qVec = DocumentEmbeddingIndex.embed(query, with: embedder)
-                }
-                let scored: [(Int, Int, Double, String)] = stored.map { c in
-                    let s = DocumentEmbeddingIndex.cosine(qVec, c.embedding)
-                    return (c.chunkIndex, c.startOffset, s, String(c.text.prefix(80)))
-                }
-                let topK = scored.sorted { $0.2 > $1.2 }.prefix(20)
-                let items: [[String: Any]] = topK.map { (idx, off, sim, prev) in
-                    ["chunkIndex": idx, "startOffset": off,
-                     "similarity": sim, "preview": prev]
-                }
-                return json(["query": query, "totalChunks": stored.count,
-                             "topMatches": items])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"EMBED_QUERY removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "RAG_TRACE":
-                // 2026-05-05 — Generalized RAG diagnostic. Args:
-                //   <doc-id>:<query>[:<topK>]
-                // Runs the production hybrid retrieval path
-                // (`searchHybridDiagnostic`) and returns the score
-                // decomposition for the top-K chunks: cosine, lexical,
-                // entity-boost, combined, rank, plus the FULL chunk
-                // text. Lets us answer "did retrieval find the right
-                // chunk and at what rank, was it the cosine or lexical
-                // signal that surfaced it, did the entity boost matter"
-                // — exactly the questions chunking-vs-prompt-vs-AFM
-                // debugging needs answered. See tools/posey_rag_debug.py
-                // for the orchestrator that uses this.
-                let raw = arg ?? ""
-                let parts = raw.split(separator: ":", maxSplits: 2,
-                                      omittingEmptySubsequences: false)
-                guard parts.count >= 2,
-                      let id = UUID(uuidString: String(parts[0])) else {
-                    return #"{"error":"Usage: RAG_TRACE:<doc-id>:<query>[:<topK>]"}"#
-                }
-                // The query may itself contain colons; if topK was
-                // supplied, parts[2] holds the rest. Detect topK vs
-                // a colon-bearing query: if the LAST trailing
-                // ":<integer>" parses as Int and parts.count == 3,
-                // treat it as topK; otherwise re-glue.
-                let query: String
-                let topK: Int
-                if parts.count == 3,
-                   let candidate = Int(String(parts[2]).trimmingCharacters(in: .whitespaces)) {
-                    query = String(parts[1])
-                    topK = max(1, min(candidate, 50))
-                } else if parts.count == 3 {
-                    query = String(parts[1]) + ":" + String(parts[2])
-                    topK = 10
-                } else {
-                    query = String(parts[1])
-                    topK = 10
-                }
-                guard !query.isEmpty else {
-                    return #"{"error":"Empty query"}"#
-                }
-                let totalChunks = try databaseManager.chunkCount(for: id)
-                guard totalChunks > 0 else {
-                    return #"{"error":"No chunks indexed for document"}"#
-                }
-                let diagnostic = try embeddingIndex.searchHybridDiagnostic(
-                    documentID: id, query: query)
-                let provider = diagnostic.first?.chunk.embeddingKind ?? "unknown"
-                let topItems: [[String: Any]] = diagnostic.prefix(topK).map { r in
-                    [
-                        "rank": r.rank,
-                        "chunkIndex": r.chunk.chunkIndex,
-                        "startOffset": r.chunk.startOffset,
-                        "endOffset": r.chunk.endOffset,
-                        "cosine": r.cosine,
-                        "lexical": r.lexical,
-                        "entityBoosted": r.entityBoosted,
-                        "combined": r.combined,
-                        "embeddingKind": r.chunk.embeddingKind,
-                        "text": r.chunk.text
-                    ]
-                }
-                return json([
-                    "query": query,
-                    "topK": topK,
-                    "totalChunks": totalChunks,
-                    "embeddingProvider": provider,
-                    "topMatches": topItems
-                ])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"RAG_TRACE removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "RAG_FIND":
-                // 2026-05-05 — Ground-truth probe. Args:
-                //   <doc-id>:<keyword>
-                // Case-insensitive substring search in the document's
-                // plainText. Returns every match offset and the chunk
-                // that owns each offset (by [startOffset, endOffset)
-                // range). Answers: "is the answer literally in the
-                // document, where, and which chunk(s) hold it." When
-                // paired with RAG_TRACE you can see whether retrieval
-                // surfaced the chunk that contains the verbatim answer
-                // or whether something earlier in the pipeline failed.
-                //
-                // The keyword is treated as a literal substring (no
-                // regex). Multi-word phrases work as long as they
-                // appear contiguous in the plainText. To probe a
-                // pattern you'd need to chain multiple RAG_FIND calls
-                // and union the results.
-                let raw = arg ?? ""
-                guard let colonIdx = raw.firstIndex(of: ":") else {
-                    return #"{"error":"Usage: RAG_FIND:<doc-id>:<keyword>"}"#
-                }
-                let idStr = String(raw[..<colonIdx])
-                let keyword = String(raw[raw.index(after: colonIdx)...])
-                guard let id = UUID(uuidString: idStr) else {
-                    return #"{"error":"Invalid document ID"}"#
-                }
-                guard !keyword.isEmpty else {
-                    return #"{"error":"Empty keyword"}"#
-                }
-                let docs = try databaseManager.documents()
-                guard let doc = docs.first(where: { $0.id == id }) else {
-                    return #"{"error":"Document not found"}"#
-                }
-                let haystack = doc.plainText.lowercased()
-                let needle = keyword.lowercased()
-                var matchOffsets: [Int] = []
-                var searchStart = haystack.startIndex
-                while searchStart < haystack.endIndex,
-                      let found = haystack.range(of: needle, range: searchStart..<haystack.endIndex) {
-                    let off = haystack.distance(from: haystack.startIndex, to: found.lowerBound)
-                    matchOffsets.append(off)
-                    searchStart = found.upperBound
-                    if matchOffsets.count >= 200 { break } // safety cap
-                }
-                // Map offsets to chunks. A chunk owns offset O when
-                // startOffset <= O < endOffset. With 10% overlap an
-                // offset may belong to up to two chunks; we report
-                // both so the diagnostic doesn't lie about which
-                // window retrieval would actually rank.
-                let stored = try databaseManager.chunks(for: id)
-                let matchItems: [[String: Any]] = matchOffsets.map { offset in
-                    let owners = stored.filter {
-                        offset >= $0.startOffset && offset < $0.endOffset
-                    }
-                    let ownerInfo: [[String: Any]] = owners.map { c in
-                        [
-                            "chunkIndex": c.chunkIndex,
-                            "startOffset": c.startOffset,
-                            "endOffset": c.endOffset
-                        ]
-                    }
-                    // Excerpt: 60 chars before + keyword + 60 chars
-                    // after, from the ORIGINAL plainText (preserves
-                    // case). Helps eyeball context without firing a
-                    // separate GET_PLAIN_TEXT.
-                    let plain = doc.plainText
-                    let plainStart = plain.index(plain.startIndex,
-                        offsetBy: max(0, offset - 60))
-                    let plainEnd = plain.index(plain.startIndex,
-                        offsetBy: min(plain.count, offset + keyword.count + 60))
-                    let excerpt = String(plain[plainStart..<plainEnd])
-                    return [
-                        "offset": offset,
-                        "chunks": ownerInfo,
-                        "excerpt": excerpt
-                    ]
-                }
-                return json([
-                    "documentID": id.uuidString,
-                    "keyword": keyword,
-                    "matchCount": matchOffsets.count,
-                    "matches": matchItems,
-                    "totalChunks": stored.count,
-                    "documentLength": doc.plainText.count
-                ])
+                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
+                _ = arg
+                return #"{\"error\":\"RAG_FIND removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
             case "GET_ASK_POSEY_HISTORY":
                 // 2026-05-05 — RAG diagnostic helper. Args:

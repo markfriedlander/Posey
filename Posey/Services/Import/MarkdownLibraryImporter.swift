@@ -18,13 +18,10 @@ import Foundation
 /// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct MarkdownLibraryImporter {
     let databaseManager: DatabaseManager
-    let embeddingIndex: DocumentEmbeddingIndex?
     private let importer = MarkdownDocumentImporter()
 
-    init(databaseManager: DatabaseManager,
-         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+    init(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
-        self.embeddingIndex = embeddingIndex
     }
 
     func importDocument(from url: URL) throws -> Document {
@@ -117,7 +114,6 @@ struct MarkdownLibraryImporter {
             plainText: parsed.plainText,
             characterCount: parsed.plainText.count
         )
-        embeddingIndex?.enqueueIndexing(document)
         let docID = document.id
         let dbRef = databaseManager
         Task.detached {

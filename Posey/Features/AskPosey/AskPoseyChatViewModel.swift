@@ -139,14 +139,10 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// a closure that calls IndexingTracker.isEnhancing(_:).
     var isStillIndexingChecker: ((UUID) -> Bool)?
 
-    /// Lazily-constructed embedding index for M6 RAG retrieval.
-    /// Built on first need from `databaseManager` so M5's empty-RAG
-    /// path doesn't pay any setup cost. `nil` whenever the view
-    /// model has no DB (preview / unit-test paths).
-    private lazy var embeddingIndex: DocumentEmbeddingIndex? = {
-        guard let db = databaseManager else { return nil }
-        return DocumentEmbeddingIndex(database: db)
-    }()
+    // 2026-05-23 — Step 8f: the lazy `embeddingIndex`
+    // (DocumentEmbeddingIndex) was torn out. RAG retrieval routes
+    // exclusively through HybridRetriever now (built per-call in
+    // retrieveRAGChunks).
 
     /// Token budget passed to the prompt builder. Single tuning point.
     private let budget: AskPoseyTokenBudget
@@ -342,7 +338,7 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         // wins (tests pass explicit budgets); only the default
         // gets the adaptive swap.
         if budget == .afmDefault,
-           documentPlainText.count >= DocumentEmbeddingIndexConfiguration.longDocumentThresholdChars {
+           documentPlainText.count >= UnitEmbeddingChunker.Configuration.longDocumentThresholdChars {
             self.budget = .forLongDocument()
         } else {
             self.budget = budget
@@ -816,341 +812,43 @@ private extension AskPoseyChatViewModel {
     /// top-of-list, and meta-questions get reliable grounding
     /// regardless of scope. Cost is small (~1800 chars).
     func retrieveRAGChunks(for question: String) -> [RetrievedChunk] {
-        // 2026-05-23 — Step 8c (fixed 8h pass): try the new RRF-based
-        // HybridRetriever first. If it returns results, those become
-        // the organic chunk set for this turn and we SKIP the legacy
-        // index.searchHybrid call (avoids injecting near-duplicate
-        // content from both stores). If it returns empty (chunks
-        // haven't been built for this doc yet, embeddings still
-        // loading, or the chunker hasn't run), fall through to legacy
-        // searchHybrid so this turn still has retrieval.
-        //
-        // Critical: do NOT early-return here. The downstream pipeline
-        // (front-matter prepend, Wayback stripping, dedup, relevance
-        // filter, sort) still has to run for both paths. The bug
-        // shipped in 8c's commit short-circuited that work; this
-        // version pre-populates `translated` from the new path and
-        // lets the existing pipeline finish.
-        var preTranslatedFromNewPath: [RetrievedChunk] = []
-        if let db = databaseManager {
-            let retriever = HybridRetriever(database: db)
-            let outcome = retriever.retrieve(
-                documentID: documentID, query: question, limit: ragTopK
-            )
-            if !outcome.results.isEmpty {
-                preTranslatedFromNewPath = outcome.results.map { rc in
-                    RetrievedChunk(
-                        chunkID: rc.chunkID,
-                        startOffset: rc.startOffset,
-                        text: TextNormalizer.stripWaybackPrintHeaders(rc.text),
-                        relevance: rc.relevance
-                    )
-                }
-                self.lastRetrievalTopRelevance = outcome.topRelevance
-                self.lastRetrievalBM25Excluded = outcome.bm25Excluded
-            }
-        }
-
-        guard let index = embeddingIndex else {
-            // Even with no legacy index we can still ship the new
-            // path's chunks (if any). The downstream pipeline handles
-            // an empty `results` array.
-            if !preTranslatedFromNewPath.isEmpty {
-                // Inline minimal merge: no front-matter source available
-                // without the index, so just sort + filter and return.
-                return preTranslatedFromNewPath
-                    .filter { $0.startOffset < 0 || $0.relevance >= 0.40 }
-                    .sorted { $0.relevance > $1.relevance }
-            }
+        // 2026-05-23 — Step 8f: retrieval flows exclusively through
+        // HybridRetriever (semantic via the active EmbeddingProvider
+        // backend over unit_embedding_chunks + BM25 via FTS5 mirror,
+        // fused via Reciprocal Rank Fusion). The legacy
+        // DocumentEmbeddingIndex path was removed in this slice.
+        guard let db = databaseManager else {
             self.lastRetrievalTopRelevance = 0
             self.lastRetrievalBM25Excluded = false
             return []
         }
-
-        // Legacy `results` is only populated when the new path
-        // returned nothing — otherwise we let the new chunks be the
-        // organic retrieval and skip the legacy call.
-        var results: [DocumentEmbeddingSearchResult] = []
-        if preTranslatedFromNewPath.isEmpty {
-            do {
-                results = try index.searchHybrid(documentID: documentID, query: question, limit: ragTopK)
-            } catch {
-                dbgLog("AskPosey RAG search failed: \(error)")
-                self.lastRetrievalTopRelevance = 0
-                self.lastRetrievalBM25Excluded = false
-                return []
-            }
-            self.lastRetrievalTopRelevance = results.first?.similarity ?? 0
-            self.lastRetrievalBM25Excluded = false
+        let retriever = HybridRetriever(database: db)
+        let outcome = retriever.retrieve(
+            documentID: documentID, query: question, limit: ragTopK
+        )
+        self.lastRetrievalTopRelevance = outcome.topRelevance
+        self.lastRetrievalBM25Excluded = outcome.bm25Excluded
+        let translated: [RetrievedChunk] = outcome.results.map { rc in
+            RetrievedChunk(
+                chunkID: rc.chunkID,
+                startOffset: rc.startOffset,
+                text: TextNormalizer.stripWaybackPrintHeaders(rc.text),
+                relevance: rc.relevance
+            )
         }
-
-        // 2026-05-04 — Skip front-matter prepend when there's an
-        // anchor. Real-conversation testing showed front-matter
-        // chunks (title page / contributor list / prologue work
-        // items) competing with the user's actual passage focus —
-        // for "what's next on THIS" questions, AFM was answering
-        // from the prologue's "Run clean memory test" content
-        // instead of the immediate-following sentence in the
-        // surrounding context. The user is asking about a specific
-        // passage; the document's title-page metadata is noise here.
-        // Document-scope queries (no anchor) still get front matter
-        // prepended — that's where it actually helps ("who wrote
-        // this", "what is this about").
-        let skipFrontMatter = anchor != nil
-
-        // Front-matter injection — runs for EVERY invocation
-        // (passage or document scope). Always prepend the document's
-        // first 4 chunks so the prompt sees the title page + table
-        // of contents + contributor list. Two chunks (~900 chars at
-        // the default 450 char chunk size) covered only the abstract
-        // on real-world tests; 4 (~1800 chars) reliably reaches
-        // contributor names listed below the abstract. Deduplicates
-        // against any cosine match for the same chunk ID.
-        // Long documents (1.6M-char books) use 2000-char chunks
-        // (Task 4 #6 A) which means each front-matter chunk costs
-        // ~800 tokens. 4 of them × 800 = 3200 tokens — that's more
-        // than the entire RAG budget for long-doc mode and crowds
-        // out the entity-index hits that actually answer
-        // mid-book questions. Drop to 1 front-matter chunk for
-        // long docs (titles + author + abstract still fit in
-        // 2000 chars at the start of the document); short docs
-        // keep all 4.
-        let frontMatterLimit: Int = skipFrontMatter ? 0 : (documentPlainText.count
-            >= DocumentEmbeddingIndexConfiguration.longDocumentThresholdChars
-            ? 1 : 4)
-        // 2026-05-05 — Front-matter relevance lowered from 1.0 to 0.30.
-        // The diagnostic harness caught a BUDGET MISS where the answer
-        // chunk for "What is an example of an advantage of using ADR?"
-        // ranked at cosine 0.66 in retrieval but got dropped because 4
-        // front-matter chunks (artificially relevance=1.0) ate the RAG
-        // token budget first. Front matter is a fallback for when
-        // retrieval is weak — it shouldn't crowd out high-confidence
-        // organic hits. With 0.30, front-matter beats only-weak
-        // retrieval (<0.30) and still gets included for "who wrote
-        // this" / "what's this about" questions where ALL organic
-        // chunks score low. Strong organic retrieval wins.
-        let frontMatterRelevance = 0.30
-        var frontMatter: [RetrievedChunk] = []
-        if !skipFrontMatter, let db = databaseManager {
-            let storedFront = (try? db.frontMatterChunks(for: documentID, limit: frontMatterLimit)) ?? []
-            for stored in storedFront {
-                let alreadyPresent = results.contains { $0.chunk.chunkIndex == stored.chunkIndex }
-                if alreadyPresent { continue }
-                frontMatter.append(RetrievedChunk(
-                    chunkID: stored.chunkIndex,
-                    startOffset: stored.startOffset,
-                    // Strip Wayback Machine print-header artifacts at
-                    // chunk-fetch time so existing imports get the
-                    // benefit without re-indexing. The embedding
-                    // vector still scores against un-stripped text
-                    // (cosine retrieval was good enough to surface
-                    // this chunk for "what's this paper about");
-                    // AFM gets the cleaned text so it doesn't choke
-                    // on dozens of repeated URLs.
-                    text: TextNormalizer.stripWaybackPrintHeaders(stored.text),
-                    relevance: frontMatterRelevance
-                ))
-            }
-        }
-
-        guard !results.isEmpty || !frontMatter.isEmpty else { return [] }
-
-        // Reference text for cosine dedup: anchor + recent STM. We
-        // don't include the conversation summary here because the
-        // summary is by definition compressed — its embedding doesn't
-        // accurately reflect the verbatim content a chunk might
-        // duplicate. Skip dedup entirely if the index can't embed the
-        // reference (an offline-language fallback edge case).
-        let referenceText = referenceTextForDedup()
-        let referenceVector = referenceText.isEmpty
-            ? [Double]()
-            : index.embed(referenceText, forDocument: documentID)
-
-        // Translate to RetrievedChunk and dedup. When the new path
-        // served this turn (`preTranslatedFromNewPath` non-empty),
-        // seed `translated` with those chunks — they've already
-        // been through Wayback stripping, just need to flow through
-        // dedup + sort + filter alongside any legacy results
-        // (legacy `results` will be empty in that case, so we just
-        // run dedup on the pre-translated set).
-        var translated: [RetrievedChunk] = preTranslatedFromNewPath
-        for result in results {
-            if !referenceVector.isEmpty {
-                let chunkVector = result.chunk.embedding
-                let sim = DocumentEmbeddingIndex.cosineSimilarity(referenceVector, chunkVector)
-                if sim >= ragDedupThreshold {
-                    // Skip — too similar to what the prompt already
-                    // contains verbatim. Diagnostic logs only; no
-                    // user-facing surface in M6.
-                    continue
-                }
-            }
-            translated.append(RetrievedChunk(
-                chunkID: result.chunk.chunkIndex,
-                startOffset: result.chunk.startOffset,
-                text: TextNormalizer.stripWaybackPrintHeaders(result.chunk.text),
-                relevance: result.similarity
-            ))
-        }
-        // 2026-05-04 — Verbatim phrase fallback REMOVED. The hybrid
-        // retrieval (cosine + lexical, see searchHybrid) now subsumes
-        // it as a first-class ranking signal — chunks containing
-        // verbatim query phrases get a high lexical score and rank
-        // alongside (often above) cosine matches. The fallback is
-        // no longer needed.
-        //
-        // 2026-05-05 — Sort the merged list (front-matter + organic
-        // retrieval) by relevance descending before returning, so the
-        // RAG budget enforcer in renderRAGBlock takes them in true
-        // relevance order. Without this, front-matter-first array
-        // order combined with the budget enforcer's "drop from the
-        // tail" behavior caused high-confidence answer chunks to be
-        // dropped while low-confidence front-matter ate the budget.
-        // Stable sort: chunks with equal relevance retain their
-        // original ordering (front-matter first, then organic).
-        let merged = frontMatter + translated
-        // 2026-05-05 — Drop chunks with relevance < 0.40 from the AFM
-        // input. Mark caught a low-confidence (empty-circle) pill in
-        // a sources strip — the chunk had been passed to AFM and AFM
-        // cited it, but the relevance was below our "weak grounding"
-        // threshold. Filter here so AFM never sees sub-40% material
-        // and can't cite it. Synthetic metadata chunks (startOffset
-        // < 0) are exempt — their relevance is artificially set and
-        // they're curated content, not retrieval results.
-        let final = merged
+        // Filter + sort (matches the legacy tail logic). Chunks with
+        // `startOffset < 0` (the unit-anchored sentinel) are exempt
+        // from the relevance floor — RRF scores live in a different
+        // numeric band than the 0.40 cosine threshold the floor was
+        // calibrated for, and the dedup-as-fabrication-guard already
+        // happens via Layer-2 prompt rules + the anti-confab guard.
+        return translated
             .filter { $0.startOffset < 0 || $0.relevance >= 0.40 }
             .sorted { $0.relevance > $1.relevance }
-        // 2026-05-14 (B-tier diagnostic) — Log retrieval pipeline
-        // stats so the antenna's LOGS verb can show why a question
-        // wound up with `chunksInjected: 0`. results = searchHybrid
-        // output; frontMatter = unconditional first-N chunks;
-        // translated = post-conversation-dedup organic chunks;
-        // final = post-relevance-filter merged list.
-        dbgLog("retrieveRAGChunks: results=%d frontMatter=%d translated=%d final=%d",
-               results.count, frontMatter.count, translated.count, final.count)
-        return final
     }
 
-    /// 2026-05-04 — DEPRECATED. Kept temporarily so any test code
-    /// or future restoration has a reference; not called by the
-    /// runtime path anymore. Hybrid retrieval (DocumentEmbeddingIndex
-    /// .searchHybrid) now does this as a first-class ranking signal.
-    /// Verbatim noun-phrase fallback retrieval. See call site for
-    /// the failure modes this addresses. Approach:
-    /// 1. Tokenize the question, drop stopwords, keep tokens ≥3 chars.
-    /// 2. Build candidate phrases from longest (most specific) down
-    ///    to single words. Stop at the first window size that hits.
-    /// 3. For each phrase, scan the document plain text for
-    ///    case-insensitive substring matches.
-    /// 4. Map each match offset to its containing chunk via
-    ///    startOffset / endOffset. Return up to `maxMatches` distinct
-    ///    chunks that aren't already in the candidate pool.
-    /// Empty return when nothing matches — caller falls back to the
-    /// embedding-only result, same as before.
-    func verbatimPhraseChunks(for question: String, excluding alreadyHave: Set<Int>, maxMatches: Int = 3) -> [RetrievedChunk] {
-        // Common-word stoplist. Conservative — better to miss a
-        // hit than to scan the doc for "the" or "is" and inject
-        // chunks that everywhere mention common words.
-        let stopwords: Set<String> = [
-            "the", "is", "are", "was", "were", "be", "been", "being",
-            "of", "in", "on", "at", "to", "for", "with", "from", "by",
-            "and", "or", "but", "not", "no", "nor", "so",
-            "a", "an", "this", "that", "these", "those", "it", "its",
-            "they", "them", "their", "there", "here",
-            "what", "who", "where", "when", "why", "how", "which",
-            "does", "do", "did", "doing", "done", "has", "have", "had",
-            "tell", "told", "say", "said", "ask", "asked",
-            "me", "my", "mine", "you", "your", "yours", "i", "we", "us", "our",
-            "about", "please", "also", "too", "any", "some", "all",
-            "can", "could", "would", "should", "will", "may", "might", "must",
-            "mention", "mentioned", "mentions", "discuss", "discussed", "discusses",
-            "explain", "explains", "explained", "describe", "describes", "described",
-            "give", "gave", "given", "show", "shows", "showed", "shown",
-            "yes", "yeah", "ok", "okay", "thanks", "thank",
-            "book", "document", "article", "paper", "text", "chapter",
-            "passage", "section", "page", "story",
-            "thing", "things", "stuff", "kind", "type", "sort", "way",
-            "really", "very", "much", "many", "more", "less",
-            "good", "bad", "well", "right", "wrong", "fine"
-        ]
-        let rawTokens = question
-            .lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-        let contentTokens = rawTokens.filter { !stopwords.contains($0) && $0.count >= 3 }
-        guard !contentTokens.isEmpty else { return [] }
 
-        guard let db = databaseManager else { return [] }
-        let stored: [StoredDocumentChunk] = (try? db.chunks(for: documentID)) ?? []
-        guard !stored.isEmpty else { return [] }
 
-        // Use NSString for fast substring search. We keep ranges in
-        // UTF-16 units, which match the (NSString-backed) startOffset
-        // / endOffset coordinates the rest of the indexing pipeline
-        // uses (chunks(for:) writes startOffset/endOffset that come
-        // from `(text as NSString).length`-style math at chunk time).
-        let docNS = documentPlainText as NSString
-        let docLowerNS = (documentPlainText as NSString).lowercased as NSString
-
-        var matchedChunkIds = Set<Int>(alreadyHave)
-        var matched: [RetrievedChunk] = []
-
-        // Longest content phrase first (most specific). Multi-word
-        // phrases only — single-word matches on common content terms
-        // ("editor", "year", "title") pull too much noise into the
-        // candidate pool and crowd out the embedding-best chunks.
-        // Exception: if the question itself only has one content
-        // token, single-word search is the only option.
-        let maxWindow = min(contentTokens.count, 4)
-        let minWindow = contentTokens.count == 1 ? 1 : 2
-        outer: for windowSize in stride(from: maxWindow, through: minWindow, by: -1) {
-            for start in 0...(contentTokens.count - windowSize) {
-                let phrase = contentTokens[start..<(start + windowSize)].joined(separator: " ")
-                let phraseNS = phrase as NSString
-                guard phraseNS.length >= 3 else { continue }
-                var searchRange = NSRange(location: 0, length: docLowerNS.length)
-                while searchRange.length > 0 {
-                    let found = docLowerNS.range(of: phrase as String, options: [.literal], range: searchRange)
-                    if found.location == NSNotFound { break }
-                    // Map UTF-16 offset to chunk via startOffset bounds.
-                    let offset = found.location
-                    if let chunk = stored.first(where: { offset >= $0.startOffset && offset < $0.endOffset }),
-                       !matchedChunkIds.contains(chunk.chunkIndex) {
-                        matchedChunkIds.insert(chunk.chunkIndex)
-                        matched.append(RetrievedChunk(
-                            chunkID: chunk.chunkIndex,
-                            startOffset: chunk.startOffset,
-                            // High relevance but distinguishable from
-                            // 1.0 front-matter sentinel.
-                            text: TextNormalizer.stripWaybackPrintHeaders(chunk.text),
-                            relevance: 0.97
-                        ))
-                        if matched.count >= maxMatches { break outer }
-                    }
-                    let next = found.location + found.length
-                    if next >= docLowerNS.length { break }
-                    searchRange = NSRange(location: next, length: docLowerNS.length - next)
-                }
-            }
-            if !matched.isEmpty { break }
-        }
-        _ = docNS  // silence unused warning; kept for symmetry / future use
-        return matched
-    }
-
-    /// Concatenate anchor + recent verbatim STM into a single string
-    /// the embedding model can embed for dedup comparison. Empty
-    /// when there's nothing to dedup against.
-    func referenceTextForDedup() -> String {
-        var parts: [String] = []
-        if let anchor, !anchor.trimmedDisplayText.isEmpty {
-            parts.append(anchor.trimmedDisplayText)
-        }
-        for message in historyForPromptBuilder.suffix(keepVerbatimRecent) {
-            parts.append(message.content)
-        }
-        return parts.joined(separator: "\n\n")
-    }
 }
 // ========== BLOCK 02B: RAG RETRIEVAL (M6) - END ==========
 
@@ -2095,18 +1793,15 @@ extension AskPoseyChatViewModel {
             let depolished = AskPoseyPromptBuilder.stripPolishPreamble(metadata.finalText)
             let commaDeduped = AskPoseyPromptBuilder.dedupeRepeatedListItems(depolished)
             let stripped = AskPoseyPromptBuilder.dedupeNumberedListItems(commaDeduped)
-            guard let index = embeddingIndex,
-                  !metadata.chunksInjected.isEmpty else { return stripped }
-            let chunkRefs = metadata.chunksInjected.enumerated().map { (i, c) in
-                (chunkID: c.chunkID, citationNumber: i + 1, text: c.text)
-            }
-            // Threshold + delta come from the named constants on
-            // DocumentEmbeddingIndex (single source of truth).
-            return index.attributeCitations(
-                text: stripped,
-                chunks: chunkRefs,
-                documentID: documentID
-            )
+            // 2026-05-23 — Step 8f: citation attribution used to be
+            // a DocumentEmbeddingIndex.attributeCitations call that
+            // re-embedded chunks + answer sentences and chose the
+            // best-cosine chunk per sentence. With the legacy index
+            // torn out, citations now stay as the model wrote them
+            // (already [N] tagged in the AFM prompt body). A future
+            // polish pass can rebuild attribution on top of
+            // EmbeddingProvider; deferred.
+            return stripped
         }()
 
         if let index = messages.firstIndex(where: { $0.id == placeholderID }) {

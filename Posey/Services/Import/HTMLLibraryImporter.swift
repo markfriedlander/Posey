@@ -17,14 +17,11 @@ import Foundation
 /// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct HTMLLibraryImporter {
     let databaseManager: DatabaseManager
-    let embeddingIndex: DocumentEmbeddingIndex?
     private let importer = HTMLDocumentImporter()
     private let displayParser = HTMLDisplayParser()
 
-    init(databaseManager: DatabaseManager,
-         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+    init(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
-        self.embeddingIndex = embeddingIndex
     }
 
     @MainActor
@@ -152,7 +149,6 @@ struct HTMLLibraryImporter {
             contentEndOffset: contentEndOffset,
             skipSource: skipSource
         )
-        embeddingIndex?.enqueueIndexing(document)
         let docID = document.id
         let dbRef = databaseManager
         Task.detached {

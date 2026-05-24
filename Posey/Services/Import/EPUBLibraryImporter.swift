@@ -23,14 +23,11 @@ import Foundation
 /// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct EPUBLibraryImporter {
     let databaseManager: DatabaseManager
-    let embeddingIndex: DocumentEmbeddingIndex?
     private let importer = EPUBDocumentImporter()
     private let displayParser = EPUBDisplayParser()
 
-    init(databaseManager: DatabaseManager,
-         embeddingIndex: DocumentEmbeddingIndex? = nil) {
+    init(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
-        self.embeddingIndex = embeddingIndex
     }
 
     func importDocument(from url: URL) throws -> Document {
@@ -144,7 +141,6 @@ struct EPUBLibraryImporter {
             contentEndOffset: contentEndOffset,
             skipSource: computed.skipSource
         )
-        embeddingIndex?.enqueueIndexing(document)
         let docID = document.id
         let dbRef = databaseManager
         Task.detached {

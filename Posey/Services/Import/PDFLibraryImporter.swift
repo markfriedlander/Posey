@@ -1,7 +1,26 @@
 import Foundation
 
-// ========== BLOCK 01: PDF LIBRARY IMPORTER - START ==========
+// ========== BLOCK 01: PDF LIBRARY IMPORTER (UNITS) - START ==========
 
+/// Imports PDF files into the unit-based content model.
+///
+/// **What changed in the rebuild:** the importer emits an ordered
+/// list of `ContentUnit`s with explicit `pageBreak` units between
+/// pages (carrying the page index in `metadata.pageNumber`) and
+/// prose / image units for each page's content. Page-aware
+/// affordances (TOC page-jump, etc.) derive page positions from
+/// these `pageBreak` units instead of the form-feed-separated
+/// `displayText` string.
+///
+/// Phase 2.2 background enhancement (Tier 2 Vision + Tier 3 AFM)
+/// is **still enqueued for unit-based PDFs in this commit**, and
+/// **still operates on the legacy `plain_text` / `document_chunks`
+/// stores**. The persister populates those stores by joining unit
+/// text, so Tier 2/3 see coherent input. A follow-up commit in the
+/// same rebuild slice rewrites Tier 2/3 to mutate units directly;
+/// at that point the legacy stores get retired.
+///
+/// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct PDFLibraryImporter {
     let databaseManager: DatabaseManager
     let embeddingIndex: DocumentEmbeddingIndex?
@@ -13,64 +32,169 @@ struct PDFLibraryImporter {
         self.embeddingIndex = embeddingIndex
     }
 
-    /// Full synchronous import — parse and persist in one call.
-    /// Used for formats where OCR is not needed (fast path).
     func importDocument(from url: URL) throws -> Document {
-        // 2026-05-16 (B8) — Reject anything that isn't a PDF at the door.
         try FormatPrecheck.checkPDF(url: url)
         let parsed = try importer.loadDocument(from: url)
-        // 2026-05-22 Phase 2.2 Step 5 — read source bytes from the
-        // import URL so the background enhancement runner has them
-        // after the temp URL is unlinked.
         let sourceData = (try? Data(contentsOf: url)) ?? nil
-        return try persistParsedDocument(parsed, from: url, sourceData: sourceData)
+        return try persistParsedPDF(parsed, from: url, sourceData: sourceData)
     }
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "pdf") throws -> Document {
         let parsed = try importer.loadDocument(fromData: rawData)
-        let doc = try persistDocument(
-            title: parsed.title ?? title,
+        let doc = try persistAsUnits(
+            parsed: parsed,
+            titleFallback: title,
             fileName: fileName,
-            fileType: fileType,
-            displayText: parsed.displayText,
-            plainText: parsed.plainText,
-            playbackSkipUntilOffset: parsed.tocSkipUntilOffset
+            fileType: fileType
         )
         try saveImages(parsed.images, for: doc.id)
-        try saveTOCEntries(parsed.tocEntries, for: doc.id)
-        // 2026-05-22 — see persistParsedDocument(_:from:) for context.
         PageFlagsStore.write(
             flags: parsed.pageFlags,
             for: doc.id,
             fileName: fileName,
             pageCount: parsed.pageFlags.count
         )
-        // 2026-05-22 Phase 2.2 Step 5 — persist content_boundaries +
-        // source PDF for the background enhancement window.
         try? databaseManager.setContentBoundaries(parsed.contentBoundaries, for: doc.id)
         _ = PDFSourceStore.save(rawData, for: doc.id)
-        // 2026-05-22 Phase 2.2 Step 4 — enqueue background enhancement.
         enqueueEnhancement(documentID: doc.id, pageFlags: parsed.pageFlags)
         return doc
     }
 
-    /// 2026-05-22 Phase 2.2 Step 4 — bridge the synchronous import
-    /// path to the background `PDFEnhancementService`.
-    ///
-    /// Behavior:
-    /// - If any page is flagged for Tier 2, set
-    ///   `enhancement_status = 'pending'` synchronously and dispatch
-    ///   an actor-isolated `enqueue` via a fire-and-forget Task. The
-    ///   service will pick the document up and walk it through Tier 2
-    ///   → Tier 3 → embedding (Steps 5-7).
-    /// - If no pages are flagged, we STILL enqueue — Tier 3 (AFM
-    ///   fusion repair) runs on any PDF with ≥ 1 suspect token,
-    ///   regardless of Tier 2 outcome. The runner will skip Tier 2
-    ///   internally when there's nothing flagged, then check suspect
-    ///   tokens; if zero, it'll mark status = 'complete' and exit.
-    ///
-    /// Status update is best-effort — failures log but don't throw,
-    /// matching the existing pageFlags-sidecar pattern.
+    /// Async-friendly entry. Same shape as the legacy
+    /// `persistParsedDocument(_:from:)` — kept for compatibility
+    /// with PoseyApp / LocalAPI callers.
+    func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL) throws -> Document {
+        try persistParsedPDF(parsed, from: url, sourceData: try? Data(contentsOf: url))
+    }
+
+    func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL, sourceData: Data?) throws -> Document {
+        try persistParsedPDF(parsed, from: url, sourceData: sourceData)
+    }
+
+    private func persistParsedPDF(
+        _ parsed: ParsedPDFDocument,
+        from url: URL,
+        sourceData: Data?
+    ) throws -> Document {
+        // Strip duplicate file extensions (e.g. "report.pdf.pdf" → "report.pdf").
+        let rawFilename = url.lastPathComponent
+        let ext = url.pathExtension.lowercased()
+        let withoutExt = (rawFilename as NSString).deletingPathExtension
+        let fileName = (withoutExt as NSString).pathExtension.lowercased() == ext ? withoutExt : rawFilename
+        let titleFallback = (fileName as NSString).deletingPathExtension
+
+        let doc = try persistAsUnits(
+            parsed: parsed,
+            titleFallback: titleFallback,
+            fileName: fileName,
+            fileType: ext
+        )
+        try saveImages(parsed.images, for: doc.id)
+
+        PageFlagsStore.write(
+            flags: parsed.pageFlags,
+            for: doc.id,
+            fileName: fileName,
+            pageCount: parsed.pageFlags.count
+        )
+        try? databaseManager.setContentBoundaries(parsed.contentBoundaries, for: doc.id)
+        if let sourceData {
+            _ = PDFSourceStore.save(sourceData, for: doc.id)
+        }
+        enqueueEnhancement(documentID: doc.id, pageFlags: parsed.pageFlags)
+
+        return doc
+    }
+
+    // MARK: - Unit persistence
+
+    private func persistAsUnits(
+        parsed: ParsedPDFDocument,
+        titleFallback: String,
+        fileName: String,
+        fileType: String
+    ) throws -> Document {
+        let existingDocument = try databaseManager.existingDocument(
+            matchingFileName: fileName,
+            fileType: fileType,
+            plainText: parsed.plainText,
+            displayText: parsed.displayText
+        )
+        let documentID = existingDocument?.id ?? UUID()
+        let title = parsed.title ?? titleFallback
+
+        // ── Build units from displayText (preserves form-feed
+        // ── page boundaries as pageBreak units, image markers as
+        // ── image units, paragraph runs as prose units).
+        let units = ContentUnitBuilder.unitsFromPDFDisplayText(
+            parsed.displayText,
+            documentID: documentID
+        )
+
+        // ── Sentences from prose-bearing units.
+        let sentences = SentenceIndexer.sentences(for: units)
+
+        // ── Smart-skip: PDF's tocSkipUntilOffset is a plainText
+        // ── offset (PDFTOCDetector heuristic). Map to a unit.
+        let skipOffset = parsed.tocSkipUntilOffset
+        let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: skipOffset)?.id
+        let skipSource = skipOffset > 0 ? "heuristic" : ""
+
+        // ── TOC pass-through.
+        let tocEntries: [StoredTOCEntry] = parsed.tocEntries.map {
+            StoredTOCEntry(
+                title: $0.title,
+                plainTextOffset: $0.plainTextOffset,
+                playOrder: $0.playOrder,
+                level: $0.level
+            )
+        }
+
+        let parsedDoc = ParsedDocument(
+            id: documentID,
+            title: title,
+            fileName: fileName,
+            fileType: fileType,
+            units: units,
+            sentences: sentences,
+            toc: tocEntries,
+            skipUnitID: skipUnitID,
+            skipSource: skipSource,
+            contentEndUnitID: nil
+        )
+        try databaseManager.persistParsedDocument(parsedDoc)
+
+        if existingDocument == nil {
+            try databaseManager.upsertReadingPosition(.initial(for: documentID))
+        }
+
+        let now = Date()
+        let document = Document(
+            id: documentID,
+            title: title,
+            fileName: fileName,
+            fileType: fileType,
+            importedAt: existingDocument?.importedAt ?? now,
+            modifiedAt: now,
+            displayText: parsed.displayText,
+            plainText: parsed.plainText,
+            characterCount: parsed.plainText.count,
+            playbackSkipUntilOffset: skipOffset,
+            skipSource: skipSource
+        )
+
+        // PDF embedding indexing is still deferred to end-of-Tier-3
+        // by PDFEnhancementService so embeddings are built against
+        // the corrected text rather than Tier 1's first pass.
+        // Nothing to enqueue here.
+
+        return document
+    }
+
+    /// 2026-05-22 Phase 2.2 Step 4 — bridge to the background
+    /// `PDFEnhancementService`. Unchanged in shape during the
+    /// rebuild; Tier 2/3 still operate on plain_text / chunks
+    /// until the follow-up commit retargets them onto units.
     private func enqueueEnhancement(documentID: UUID, pageFlags: [PDFPageFlags]) {
         do {
             try databaseManager.updateEnhancementState(
@@ -87,156 +211,12 @@ struct PDFLibraryImporter {
         }
     }
 
-    /// Persist an already-parsed document. Called on the main thread after
-    /// async PDF parsing completes. DatabaseManager must stay on main thread.
-    func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL) throws -> Document {
-        try persistParsedDocument(parsed, from: url, sourceData: try? Data(contentsOf: url))
-    }
-
-    /// Variant that accepts the source PDF bytes for Phase 2.2 source
-    /// persistence. The sync path reads them from the temp URL before
-    /// the defer-cleanup runs; the async path can also supply them
-    /// from a Data buffer it already has.
-    func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL, sourceData: Data?) throws -> Document {
-        // Strip duplicate file extensions (e.g. "report.pdf.pdf" → "report.pdf")
-        // so the title fallback and stored fileName are clean.
-        let rawFilename = url.lastPathComponent
-        let ext = url.pathExtension.lowercased()
-        let withoutExt = (rawFilename as NSString).deletingPathExtension
-        let fileName = (withoutExt as NSString).pathExtension.lowercased() == ext ? withoutExt : rawFilename
-        let titleFallback = (fileName as NSString).deletingPathExtension
-
-        let doc = try persistDocument(
-            title: parsed.title ?? titleFallback,
-            fileName: fileName,
-            fileType: ext,
-            displayText: parsed.displayText,
-            plainText: parsed.plainText,
-            playbackSkipUntilOffset: parsed.tocSkipUntilOffset
-        )
-        try saveImages(parsed.images, for: doc.id)
-        try saveTOCEntries(parsed.tocEntries, for: doc.id)
-
-        // 2026-05-22 — Phase 1 of the Tier 1/2 PDF extraction
-        // architecture. Persist per-page confidence-detector output
-        // as a JSON sidecar keyed by document UUID. Calibration data
-        // only at this phase — nothing in the import path branches
-        // on these flags. Inspect via `LIST_PAGE_FLAGS:<doc-id>`.
-        PageFlagsStore.write(
-            flags: parsed.pageFlags,
-            for: doc.id,
-            fileName: fileName,
-            pageCount: parsed.pageFlags.count
-        )
-
-        // 2026-05-22 Phase 2.2 Step 5 — persist content_boundaries
-        // (universal — for PDF these are page offsets; for other
-        // formats the corresponding importer fills in chapter /
-        // section / heading offsets per Mark's architectural
-        // direction) and save the source PDF bytes for the
-        // background enhancement window.
-        try? databaseManager.setContentBoundaries(parsed.contentBoundaries, for: doc.id)
-        if let sourceData {
-            _ = PDFSourceStore.save(sourceData, for: doc.id)
-        }
-
-        // 2026-05-22 Phase 2.2 Step 4 — kick off background
-        // enhancement for PDFs. The runner (Steps 5-7) decides
-        // whether Tier 2 / Tier 3 work is needed and transitions
-        // the document through tier2 → tier3 → complete (or 'na'
-        // if neither tier has work).
-        enqueueEnhancement(documentID: doc.id, pageFlags: parsed.pageFlags)
-
-        return doc
-    }
-}
-
-// ========== BLOCK 01: PDF LIBRARY IMPORTER - END ==========
-
-// ========== BLOCK 02: PDF LIBRARY IMPORTER - PERSISTENCE - START ==========
-
-extension PDFLibraryImporter {
-    private func persistDocument(
-        title: String,
-        fileName: String,
-        fileType: String,
-        displayText: String,
-        plainText: String,
-        playbackSkipUntilOffset: Int = 0
-    ) throws -> Document {
-        let now = Date()
-        let existing = try databaseManager.existingDocument(
-            matchingFileName: fileName,
-            fileType: fileType,
-            plainText: plainText,
-            displayText: displayText
-        )
-
-        let document = Document(
-            id: existing?.id ?? UUID(),
-            title: title,
-            fileName: fileName,
-            fileType: fileType,
-            importedAt: existing?.importedAt ?? now,
-            modifiedAt: now,
-            displayText: displayText,
-            plainText: plainText,
-            characterCount: plainText.count,
-            playbackSkipUntilOffset: playbackSkipUntilOffset,
-            // 2026-05-21 — PDF's `tocSkipUntilOffset` comes from the
-            // PDFTOCDetector heuristic (dot-leader Contents page).
-            // Gutenberg-PDF distributions aren't wired in yet, so
-            // any skip here is by definition heuristic; user will
-            // see the smart-skip prompt on first open.
-            skipSource: playbackSkipUntilOffset > 0 ? "heuristic" : ""
-        )
-
-        try databaseManager.upsertDocument(document)
-
-        if existing == nil {
-            try databaseManager.upsertReadingPosition(.initial(for: document.id))
-        }
-
-        // 2026-05-22 Phase 2.2 Step 7 — for PDFs the embedding
-        // index runs AFTER Tier 2 + Tier 3 finish (kicked off by
-        // PDFEnhancementService at end of enhancement) so embeddings
-        // are built on the corrected text. For non-PDF formats and
-        // for PDFs that hit this path without enhancement (e.g.
-        // legacy re-imports on databases that predate Phase 2.2)
-        // enqueue immediately as before.
-        if fileType.lowercased() == "pdf" {
-            // PDF: defer to PDFEnhancementService end-of-Tier-3 hook.
-            // This avoids embedding Tier 1 text that's about to be
-            // corrected, which would force a full re-index.
-        } else {
-            embeddingIndex?.enqueueIndexing(document)
-        }
-
-        return document
-    }
-
-    /// Delete stale image records then insert the new set. Called after every
-    /// import so reimports don't leave orphaned blobs under old image IDs.
     private func saveImages(_ images: [PageImageRecord], for documentID: UUID) throws {
         try databaseManager.deleteImages(for: documentID)
         for image in images {
             try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
         }
     }
-
-    /// Persist TOC entries via the existing `document_toc` table. The
-    /// shared insert path deduplicates and rewrites on every import.
-    private func saveTOCEntries(_ entries: [PDFTOCEntry], for documentID: UUID) throws {
-        let stored = entries.map {
-            StoredTOCEntry(
-                title: $0.title,
-                plainTextOffset: $0.plainTextOffset,
-                playOrder: $0.playOrder,
-                level: $0.level
-            )
-        }
-        try databaseManager.insertTOCEntries(stored, for: documentID)
-    }
 }
 
-// ========== BLOCK 02: PDF LIBRARY IMPORTER - PERSISTENCE - END ==========
+// ========== BLOCK 01: PDF LIBRARY IMPORTER (UNITS) - END ==========

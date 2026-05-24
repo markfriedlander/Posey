@@ -64,6 +64,75 @@ enum ContentUnitBuilder {
         return units(from: blocks, documentID: documentID)
     }
 
+    /// PDF-specific: walk a form-feed-separated displayText, emit a
+    /// `pageBreak` unit at each page boundary, then prose / image
+    /// units for the page's content. Page numbers are 0-based and
+    /// stored in `metadata.pageNumber`; the reader's page map is
+    /// derived by querying for `pageBreak` units.
+    ///
+    /// VisualPageMarker recognition (`[[POSEY_VISUAL_PAGE:N:uuid]]`)
+    /// is preserved from `PDFDisplayParser` — a page that consists
+    /// entirely of one of these markers becomes a single `.image`
+    /// unit.
+    static func unitsFromPDFDisplayText(
+        _ displayText: String,
+        documentID: UUID
+    ) -> [ContentUnit] {
+        let pageSeparator = "\u{000C}"
+        let normalized = displayText
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return [] }
+
+        var units: [ContentUnit] = []
+        var sequence = 10
+        let pages = normalized.components(separatedBy: pageSeparator)
+        for (pageIndex, rawPage) in pages.enumerated() {
+            let page = rawPage.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !page.isEmpty else { continue }
+
+            // Page break before each page's content.
+            units.append(ContentUnit(
+                documentID: documentID,
+                sequence: sequence,
+                kind: .pageBreak,
+                text: "",
+                metadata: ContentUnitMetadata(pageNumber: pageIndex)
+            ))
+            sequence += 10
+
+            // Whole-page visual marker?
+            if let (visualPageNumber, imageID) = PDFDocumentImporter.parseVisualPageMarker(from: page) {
+                units.append(ContentUnit(
+                    documentID: documentID,
+                    sequence: sequence,
+                    kind: .image,
+                    text: "Visual content on page \(visualPageNumber)",
+                    metadata: ContentUnitMetadata(imageID: imageID)
+                ))
+                sequence += 10
+                continue
+            }
+
+            // Paragraph-split prose.
+            let paragraphs = page
+                .components(separatedBy: "\n\n")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            for paragraph in paragraphs {
+                units.append(ContentUnit(
+                    documentID: documentID,
+                    sequence: sequence,
+                    kind: .prose,
+                    text: paragraph
+                ))
+                sequence += 10
+            }
+        }
+        return units
+    }
+
     /// Single-block conversion, exposed so formats with mixed
     /// content (image interleaving, page breaks) can call it from
     /// their own loops.

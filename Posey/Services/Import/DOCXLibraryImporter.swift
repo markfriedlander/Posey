@@ -1,9 +1,22 @@
 import Foundation
 
+// ========== BLOCK 01: DOCX LIBRARY IMPORTER (UNITS) - START ==========
+
+/// Imports DOCX files into the unit-based content model.
+///
+/// **What changed in the rebuild:** the importer now runs
+/// `DOCXDisplayParser` at import time (instead of at reader-open
+/// time) and converts the resulting `DisplayBlock`s into
+/// `ContentUnit`s. Images stored in the side-store table are
+/// surfaced as `.image` units interleaved at their displayText
+/// positions. `SentenceIndexer` pre-segments per unit.
+///
+/// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct DOCXLibraryImporter {
     let databaseManager: DatabaseManager
     let embeddingIndex: DocumentEmbeddingIndex?
     private let textLoader = DOCXDocumentImporter()
+    private let displayParser = DOCXDisplayParser()
 
     init(databaseManager: DatabaseManager,
          embeddingIndex: DocumentEmbeddingIndex? = nil) {
@@ -12,7 +25,6 @@ struct DOCXLibraryImporter {
     }
 
     func importDocument(from url: URL) throws -> Document {
-        // 2026-05-16 (B8) — Reject anything that isn't ZIP-shaped.
         try FormatPrecheck.checkDOCX(url: url)
         let parsed = try textLoader.loadDocument(from: url)
         return try importNormalizedDocument(
@@ -48,27 +60,74 @@ struct DOCXLibraryImporter {
         images: [PageImageRecord],
         headings: [DOCXDocumentImporter.DOCXHeadingEntry]
     ) throws -> Document {
-        let now = Date()
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
             fileType: fileType,
             plainText: plainText
         )
+        let documentID = existingDocument?.id ?? UUID()
 
-        // 2026-05-07 (parity #6 closure): TOC playback skip.
-        // If the doc has a heading whose title is "Contents" or
-        // "Table of Contents" (case-insensitive), set the playback
-        // skip offset to the next heading after it. Mirrors PDF/EPUB
-        // skip-on-playback behavior for DOCX. Without this, TTS reads
-        // "Table of contents" out loud at the start of every doc that
-        // has one.
-        let tocSkipUntilOffset = TOCSkipDetector.skipOffset(
+        // ── Run the display parser at import time (was reader-open).
+        let blocks = displayParser.parse(displayText: displayText)
+
+        // ── Convert blocks to units. DOCXDisplayParser only emits
+        // ── blocks when the doc has inline images; plain-paragraph
+        // ── DOCXs fall back to plainText paragraph splitting.
+        let units = ContentUnitBuilder.unitsPreferringBlocks(
+            blocks: blocks,
+            plainText: plainText,
+            documentID: documentID
+        )
+
+        // ── Smart-skip: heading-based TOCSkipDetector.
+        let tocSkipOffset = TOCSkipDetector.skipOffset(
             for: headings.map { (title: $0.title, plainTextOffset: $0.plainTextOffset) },
             in: plainText
         )
+        let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: tocSkipOffset)?.id
+        let skipSource = tocSkipOffset > 0 ? "heuristic" : ""
 
+        // ── Sentences.
+        let sentences = SentenceIndexer.sentences(for: units)
+
+        // ── TOC entries (same shape as before).
+        let tocEntries: [StoredTOCEntry] = headings.enumerated().map { (idx, h) in
+            StoredTOCEntry(
+                title: h.title,
+                plainTextOffset: h.plainTextOffset,
+                playOrder: idx + 1,
+                level: h.level
+            )
+        }
+
+        let parsedDoc = ParsedDocument(
+            id: documentID,
+            title: title,
+            fileName: fileName,
+            fileType: fileType,
+            units: units,
+            sentences: sentences,
+            toc: tocEntries,
+            skipUnitID: skipUnitID,
+            skipSource: skipSource,
+            contentEndUnitID: nil
+        )
+        try databaseManager.persistParsedDocument(parsedDoc)
+
+        // Persist inline images (still in the side-store table; the
+        // .image unit's metadata.imageID references them).
+        try databaseManager.deleteImages(for: documentID)
+        for image in images {
+            try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
+        }
+
+        if existingDocument == nil {
+            try databaseManager.upsertReadingPosition(.initial(for: documentID))
+        }
+
+        let now = Date()
         let document = Document(
-            id: existingDocument?.id ?? UUID(),
+            id: documentID,
             title: title,
             fileName: fileName,
             fileType: fileType,
@@ -77,44 +136,19 @@ struct DOCXLibraryImporter {
             displayText: displayText,
             plainText: plainText,
             characterCount: plainText.count,
-            playbackSkipUntilOffset: tocSkipUntilOffset,
-            // 2026-05-21 — DOCX uses the heading-based TOCSkipDetector,
-            // not Gutenberg. Any forward skip is heuristic.
-            skipSource: tocSkipUntilOffset > 0 ? "heuristic" : ""
+            playbackSkipUntilOffset: tocSkipOffset,
+            skipSource: skipSource
         )
-
-        try databaseManager.upsertDocument(document)
-
-        // Persist inline images. Drop any prior images first so
-        // reimports don't accumulate orphans.
-        try databaseManager.deleteImages(for: document.id)
-        for image in images {
-            try databaseManager.insertImage(id: image.imageID, documentID: document.id, data: image.data)
-        }
-
-        // 2026-05-06 — Persist heading-style paragraphs as TOC entries.
-        // The extractor surfaced (level, title, plainTextOffset) for
-        // every paragraph styled as Heading1-9 or Title. Only insert
-        // if at least one heading was found.
-        if !headings.isEmpty {
-            let stored = headings.enumerated().map { (idx, h) in
-                StoredTOCEntry(
-                    title: h.title,
-                    plainTextOffset: h.plainTextOffset,
-                    playOrder: idx + 1,
-                    level: h.level
-                )
-            }
-            try databaseManager.insertTOCEntries(stored, for: document.id)
-        }
-
-        if existingDocument == nil {
-            try databaseManager.upsertReadingPosition(.initial(for: document.id))
-        }
-
-        // Ask Posey embedding index — best-effort (logs on failure).
         embeddingIndex?.enqueueIndexing(document)
-
         return document
     }
 }
+
+// ========== BLOCK 01: DOCX LIBRARY IMPORTER (UNITS) - END ==========
+
+// MarkdownLibraryImporter.buildUnits / firstUnit reused as the
+// shared display-block → unit converter and offset-to-unit mapper.
+// Keeping them in MarkdownLibraryImporter for now to avoid moving
+// them mid-rollout; they'll find a permanent home (probably
+// `Posey/Services/Import/ContentUnitBuilder.swift`) during the
+// cleanup pass.

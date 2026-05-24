@@ -1,9 +1,25 @@
 import Foundation
 
+// ========== BLOCK 01: HTML LIBRARY IMPORTER (UNITS) - START ==========
+
+/// Imports HTML files into the unit-based content model.
+///
+/// **What changed in the rebuild:** the importer now runs
+/// `HTMLDisplayParser` at import time and converts its `DisplayBlock`
+/// output into `ContentUnit`s via the shared `ContentUnitBuilder`.
+/// Images are persisted to the side-store unchanged. The existing
+/// Gutenberg / in-prose-TOC / Gutenberg-catalog skip detection runs
+/// against plainText and the resulting offset is mapped to a unit
+/// via `ContentUnitBuilder.firstUnit(...)`.
+///
+/// `SentenceIndexer` pre-segments per unit at import time.
+///
+/// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct HTMLLibraryImporter {
     let databaseManager: DatabaseManager
     let embeddingIndex: DocumentEmbeddingIndex?
     private let importer = HTMLDocumentImporter()
+    private let displayParser = HTMLDisplayParser()
 
     init(databaseManager: DatabaseManager,
          embeddingIndex: DocumentEmbeddingIndex? = nil) {
@@ -13,16 +29,7 @@ struct HTMLLibraryImporter {
 
     @MainActor
     func importDocument(from url: URL) async throws -> Document {
-        // 2026-05-16 (B8) — Reject binary content at the door.
         try FormatPrecheck.checkTextLike(url: url, declaredType: "html")
-        // Task 8 #4 (2026-05-03): URL-based import resolves inline
-        // <img> references against the file's containing directory.
-        // The resulting document carries a separate displayText (with
-        // [[POSEY_VISUAL_PAGE:0:uuid]] markers) and plainText (markers
-        // stripped, suitable for TTS + embeddings).
-        //
-        // 2026-05-22 — Now async: Readability pre-pass runs inside
-        // loadDocument and strips site chrome on real-world web HTML.
         let parsed = try await importer.loadDocument(from: url)
         return try importNormalizedDocument(
             title: url.deletingPathExtension().lastPathComponent,
@@ -37,17 +44,6 @@ struct HTMLLibraryImporter {
 
     @MainActor
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "html") async throws -> Document {
-        // Data-based import (e.g. via local API upload): no
-        // surrounding directory means we can't resolve relative
-        // <img> paths. Falls back to plain-text-only extraction;
-        // inline images carried as data: URIs would still need
-        // additional code to surface — punted as a Mark-review
-        // item if it ever matters. Documented in NEXT.md.
-        //
-        // 2026-05-22 — loadTextAsync runs the Readability pre-pass.
-        // 2026-05-06 (parity #3): heading extraction works on raw HTML
-        // and is independent of the inline-image extraction path, so
-        // it works on data-based import too.
         let parsed = try await importer.loadTextAsync(fromData: rawData)
         return try importNormalizedDocument(
             title: title,
@@ -69,40 +65,81 @@ struct HTMLLibraryImporter {
         images: [PageImageRecord],
         headings: [HTMLDocumentImporter.HTMLHeadingEntry]
     ) throws -> Document {
-        let now = Date()
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
             fileType: fileType,
             plainText: plainText
         )
+        let documentID = existingDocument?.id ?? UUID()
 
-        // 2026-05-21 — Layered content-start detection (same shape as
-        // EPUBLibraryImporter):
-        //   1. Gutenberg `*** START` marker → skip license preamble
-        //   2. In-prose TOC region → skip the Contents listing too
-        // The detectors are pure functions on plainText, format-agnostic.
-        let gutenbergStart = GutenbergBoundaryDetector.detect(in: plainText).contentStartOffset ?? 0
-        // 2026-05-22 — Multi-edition Gutenberg catalog page (illustrated
-        // Alice shape). Skip past it before the in-prose TOC detector
-        // runs.
-        let postCatalog = GutenbergCatalogDetector.endOfCatalogRegion(in: plainText, after: gutenbergStart) ?? gutenbergStart
-        let postTOC = InProseTOCDetector.endOfTOCRegion(in: plainText, after: postCatalog) ?? postCatalog
-        let skip = max(postCatalog, postTOC)
-        let contentEnd = GutenbergBoundaryDetector.detect(in: plainText).contentEndOffset ?? 0
-        // 2026-05-21 skip-source classification (locked rule):
-        // Gutenberg marker wins for the whole skip; otherwise any
-        // forward motion is "heuristic".
-        let skipSource: String
-        if gutenbergStart > 0 {
-            skipSource = "gutenberg"
-        } else if skip > 0 {
-            skipSource = "heuristic"
-        } else {
-            skipSource = ""
+        // ── Run the display parser at import time.
+        let blocks = displayParser.parse(displayText: displayText)
+
+        // ── Convert blocks to units. HTMLDisplayParser only emits
+        // ── blocks when the doc has inline images; plain HTML
+        // ── (Readability-stripped articles, etc.) falls back to
+        // ── plainText paragraph splitting.
+        let units = ContentUnitBuilder.unitsPreferringBlocks(
+            blocks: blocks,
+            plainText: plainText,
+            documentID: documentID
+        )
+
+        // ── Smart-skip: same layered detection.
+        let boundaryResult = GutenbergBoundaryDetector.detect(in: plainText)
+        let gutenbergStart = boundaryResult.contentStartOffset ?? 0
+        let postCatalog = GutenbergCatalogDetector.endOfCatalogRegion(
+            in: plainText, after: gutenbergStart
+        ) ?? gutenbergStart
+        let postTOC = InProseTOCDetector.endOfTOCRegion(
+            in: plainText, after: postCatalog
+        ) ?? postCatalog
+        let skipOffset = max(postCatalog, postTOC)
+        let contentEndOffset = boundaryResult.contentEndOffset ?? 0
+        let skipSource: String = {
+            if gutenbergStart > 0 { return "gutenberg" }
+            if skipOffset > 0   { return "heuristic" }
+            return ""
+        }()
+        let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: skipOffset)?.id
+        let contentEndUnitID: UUID? = {
+            guard contentEndOffset > 0 else { return nil }
+            return ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: contentEndOffset)?.id
+        }()
+
+        // ── Sentences.
+        let sentences = SentenceIndexer.sentences(for: units)
+
+        // ── TOC entries.
+        let tocEntries = resolveHeadingOffsets(headings, in: plainText)
+
+        let parsedDoc = ParsedDocument(
+            id: documentID,
+            title: title,
+            fileName: fileName,
+            fileType: fileType,
+            units: units,
+            sentences: sentences,
+            toc: tocEntries,
+            skipUnitID: skipUnitID,
+            skipSource: skipSource,
+            contentEndUnitID: contentEndUnitID
+        )
+        try databaseManager.persistParsedDocument(parsedDoc)
+
+        // Persist inline images.
+        try databaseManager.deleteImages(for: documentID)
+        for image in images {
+            try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
         }
 
+        if existingDocument == nil {
+            try databaseManager.upsertReadingPosition(.initial(for: documentID))
+        }
+
+        let now = Date()
         let document = Document(
-            id: existingDocument?.id ?? UUID(),
+            id: documentID,
             title: title,
             fileName: fileName,
             fileType: fileType,
@@ -111,47 +148,17 @@ struct HTMLLibraryImporter {
             displayText: displayText,
             plainText: plainText,
             characterCount: plainText.count,
-            playbackSkipUntilOffset: skip,
-            contentEndOffset: contentEnd,
+            playbackSkipUntilOffset: skipOffset,
+            contentEndOffset: contentEndOffset,
             skipSource: skipSource
         )
-
-        try databaseManager.upsertDocument(document)
-
-        // Task 8 #4: persist inline images. Drop any prior images
-        // first so reimports don't accumulate orphans.
-        try databaseManager.deleteImages(for: document.id)
-        for image in images {
-            try databaseManager.insertImage(id: image.imageID, documentID: document.id, data: image.data)
-        }
-
-        // 2026-05-06 (parity #3): persist HTML headings as TOC entries
-        // with their level. The plainText offset is found by sequential
-        // search — each heading is matched left-to-right starting from
-        // the cursor of the previous match so duplicates in the body
-        // (e.g. "Introduction" appearing in both a heading and a later
-        // paragraph) don't all collapse to the same offset.
-        if !headings.isEmpty {
-            let stored = resolveHeadingOffsets(headings, in: plainText)
-            if !stored.isEmpty {
-                try databaseManager.insertTOCEntries(stored, for: document.id)
-            }
-        }
-
-        if existingDocument == nil {
-            try databaseManager.upsertReadingPosition(.initial(for: document.id))
-        }
-
-        // Ask Posey embedding index — best-effort (logs on failure).
         embeddingIndex?.enqueueIndexing(document)
-
         return document
     }
 
-    /// For each `HTMLHeadingEntry`, find its title in `plainText`
-    /// starting from the running cursor. Skips a heading whose title
-    /// can't be located. Returns `StoredTOCEntry` rows in document
-    /// order with sequential `playOrder`.
+    /// Find each heading's title in plainText sequentially. Unchanged
+    /// from the legacy importer — heading titles are content strings
+    /// rather than offsets so we have to search.
     private func resolveHeadingOffsets(
         _ headings: [HTMLDocumentImporter.HTMLHeadingEntry],
         in plainText: String
@@ -179,3 +186,5 @@ struct HTMLLibraryImporter {
         return out
     }
 }
+
+// ========== BLOCK 01: HTML LIBRARY IMPORTER (UNITS) - END ==========

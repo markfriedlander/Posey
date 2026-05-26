@@ -406,7 +406,7 @@ struct ReaderView: View {
                 publishReadingPositionForEnhancement()
             }
             .modifier(ReaderRemoteSnapshotPublisher(viewModel: viewModel, publish: publishRemoteState))
-            .onChange(of: viewModel.focusedDisplayBlockID) { _, _ in
+            .onChange(of: viewModel.focusedUnitID) { _, _ in
                 lastProgrammaticScrollAt = Date()
                 viewModel.scrollToCurrentSentence(with: proxy, animated: true)
             }
@@ -651,18 +651,21 @@ struct ReaderView: View {
         RemoteControlState.shared.segmentTexts = segments.enumerated().map { i, seg in
             (index: i, text: seg.text, startOffset: seg.startOffset, endOffset: seg.endOffset)
         }
-        RemoteControlState.shared.displayBlockTexts = viewModel.displayBlocks.enumerated().map { i, block in
+        // Step 9 — displayBlocks gone; publish units instead so the
+        // antenna's LIST_DISPLAY_BLOCKS_MATCHING verb keeps working
+        // against the new shape.
+        RemoteControlState.shared.displayBlockTexts = viewModel.units.enumerated().map { i, unit in
             let kindLabel: String
-            switch block.kind {
-            case .heading(let level): kindLabel = "heading\(level)"
-            case .paragraph: kindLabel = "paragraph"
-            case .bullet: kindLabel = "bullet"
-            case .numbered: kindLabel = "numbered"
-            case .quote: kindLabel = "quote"
-            case .visualPlaceholder: kindLabel = "visualPlaceholder"
+            switch unit.kind {
+            case .heading: kindLabel = "heading\(unit.metadata.headingLevel ?? 1)"
+            case .prose: kindLabel = "paragraph"
+            case .listItem: kindLabel = "bullet"
+            case .blockquote: kindLabel = "quote"
+            case .image: kindLabel = "visualPlaceholder"
+            case .pageBreak: kindLabel = "pageBreak"
             case .horizontalRule: kindLabel = "horizontalRule"
             }
-            return (index: i, kind: kindLabel, text: block.text, startOffset: block.startOffset, endOffset: block.endOffset)
+            return (index: i, kind: kindLabel, text: unit.text, startOffset: 0, endOffset: unit.text.count)
         }
     }
 
@@ -1075,251 +1078,23 @@ struct ReaderView: View {
         .padding(.bottom, 6)
     }
 
-    /// 2026-05-22 — Renders a markdown horizontal rule (`---`/`***`/`___`)
-    /// as a thin centered separator. Same understated treatment as the
-    /// end-of-book colophon's separator: a 60pt-wide 0.5pt line at
-    /// 0.25 opacity, with a comfortable amount of vertical breathing
-    /// room above and below so it reads as a section break.
-    private func horizontalRuleView() -> some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.25))
-            .frame(width: 60, height: 0.5)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.vertical, 18)
-            .accessibilityIdentifier("reader.horizontalRule")
-    }
-
-    private func visualPlaceholder(block: DisplayBlock) -> some View {
-        // 2026-05-13 (A1) — show a Continue affordance below the visual
-        // when it's the focused paused block, so non-Motion users have a
-        // clear in-context way to resume playback without hunting for
-        // the chrome's Play button. Hidden in Motion mode (no pause) and
-        // hidden once the user has moved past this block.
-        let isPausedHere = viewModel.focusedDisplayBlockID == block.id
-            && viewModel.playbackState == .paused
-            && viewModel.readingStyle != .motion
-        return VStack(alignment: .leading, spacing: 10) {
-            Group {
-                if let imageID = block.imageID,
-                   let data = viewModel.imageData(for: imageID),
-                   let uiImage = UIImage(data: data) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .contentShape(Rectangle())
-                        .onTapGesture { expandedImageItem = ExpandedImageItem(id: imageID) }
-                        .overlay(alignment: .bottomTrailing) {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.caption)
-                                .padding(6)
-                                .background(.ultraThinMaterial, in: Circle())
-                                .padding(8)
-                        }
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Visual Element", systemImage: "photo.on.rectangle.angled")
-                            .font(.headline)
-                        Text(block.text)
-                            .font(.body)
-                        Text("Playback pauses here so you can inspect this visual before continuing.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding()
-                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                }
-            }
-            if isPausedHere {
-                Button {
-                    viewModel.togglePlayback()
-                } label: {
-                    Label("Continue", systemImage: "play.fill")
-                        .font(.callout.weight(.semibold))
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("reader.visualPlaceholder.continue")
-                .remoteRegister("reader.visualPlaceholder.continue") {
-                    viewModel.togglePlayback()
-                }
-                .transition(.opacity)
-            }
-        }
-    }
-
-    /// M8 Reading Style render-path opacity. `.standard` returns 1.0
-    /// for everything (current behavior). `.focus` dims non-active
-    /// non-search-match segments to 0.45 so the eye is naturally
-    /// drawn to the brightest one. `.immersive` applies a smooth
-    /// distance-based falloff so sentences fade out as they move
-    /// away from the active row. Search matches stay at full
-    /// opacity in any mode so the search affordance never gets
-    /// eaten by the dimming pass.
-    private func segmentOpacity(_ segment: TextSegment) -> Double {
-        if viewModel.isCurrentSearchMatch(segment: segment) { return 1.0 }
-        if viewModel.isSearchMatch(segment: segment) { return 1.0 }
-        switch viewModel.readingStyle {
-        case .standard:
-            // 2026-05-22 — Apple Music–style lyrics dimming: non-active
-            // rows recede to ~45% opacity so the highlighted sentence
-            // becomes the clear focal point. Was 1.0 (no dimming) before.
-            return viewModel.isActive(segment: segment) ? 1.0 : 0.45
-        case .focus:
-            return viewModel.isActive(segment: segment) ? 1.0 : 0.45
-        case .immersive, .motion:
-            return immersiveOpacity(forDistanceFromActive: viewModel.distanceFromActive(segment: segment))
-        }
-    }
-
-    /// Display-block variant of `segmentOpacity`.
-    private func blockOpacity(_ block: DisplayBlock) -> Double {
-        if viewModel.isCurrentSearchMatch(block: block) { return 1.0 }
-        if viewModel.isSearchMatch(block: block) { return 1.0 }
-        switch viewModel.readingStyle {
-        case .standard:
-            // 2026-05-22 — Apple Music–style lyrics dimming. Non-active
-            // rows recede so the highlighted sentence draws the eye.
-            return viewModel.isActive(block: block) ? 1.0 : 0.45
-        case .focus:
-            return viewModel.isActive(block: block) ? 1.0 : 0.45
-        case .immersive, .motion:
-            return immersiveOpacity(forDistanceFromActive: viewModel.distanceFromActive(block: block))
-        }
-    }
-
-    /// M8 Immersive scale factor. Active row at 1.0, falls off to
-    /// 0.85 at distance 1, then keeps shrinking gently. `.motion`
-    /// uses the same curve but the user typically only sees the
-    /// active row anyway since it's the largest.
-    private func segmentScale(_ segment: TextSegment) -> Double {
-        switch viewModel.readingStyle {
-        case .standard, .focus:
-            return 1.0
-        case .immersive, .motion:
-            return immersiveScale(forDistanceFromActive: viewModel.distanceFromActive(segment: segment))
-        }
-    }
-
-    private func blockScale(_ block: DisplayBlock) -> Double {
-        switch viewModel.readingStyle {
-        case .standard, .focus:
-            return 1.0
-        case .immersive, .motion:
-            return immersiveScale(forDistanceFromActive: viewModel.distanceFromActive(block: block))
-        }
-    }
-
-    /// Distance-based opacity curve for Immersive / Motion. Active
-    /// row at 1.0; falls off geometrically with each row away. After
-    /// 4 rows of distance the row is ~5% opacity — invisible but
-    /// preserved in the layout so scrolling stays smooth.
-    private func immersiveOpacity(forDistanceFromActive distance: Int) -> Double {
-        guard distance > 0 else { return 1.0 }
-        let raw = 1.0 - 0.30 * Double(distance)
-        return max(0.05, raw)
-    }
-
-    /// Distance-based scale curve. Active row at 1.0; gentle 15%
-    /// shrink per row outward, floor at 0.55.
-    private func immersiveScale(forDistanceFromActive distance: Int) -> Double {
-        guard distance > 0 else { return 1.0 }
-        let raw = 1.0 - 0.15 * Double(distance)
-        return max(0.55, raw)
-    }
-
-    /// M8 Motion mode: the active sentence renders at ~1.6× the
-    /// configured font size, all other rows at the normal size. The
-    /// distance-based opacity already handles fade — Motion just
-    /// upscales the centerpiece.
-    private func motionFontSize(forSegment segment: TextSegment) -> CGFloat {
-        guard isMotionRenderActive else { return viewModel.fontSize }
-        return viewModel.isActive(segment: segment)
-            ? viewModel.fontSize * 1.6
-            : viewModel.fontSize
-    }
-
-    // MARK: Heading styling on the sentence-row path (parity #3)
-
-    /// Sentence-row font: heading styling overrides Motion's enlarged
-    /// active-sentence size. A chapter title shouldn't enlarge to the
-    /// motion-emphasis size when the user lands on it; the heading
-    /// scale already conveys importance and Motion's purpose is to
-    /// emphasise the active body sentence, not headings.
-    private func segmentFont(for segment: TextSegment, headingLevel: Int?) -> Font {
-        if let level = headingLevel {
-            return .system(size: ReaderViewModel.headingFontSize(body: viewModel.fontSize, level: level))
-        }
-        return .system(size: motionFontSize(forSegment: segment))
-    }
-
-    private func segmentWeight(headingLevel: Int?) -> Font.Weight {
-        guard let level = headingLevel else { return .regular }
-        return ReaderViewModel.headingWeight(level: level)
-    }
-
-    /// Top padding for a sentence row that is a heading. The first
-    /// row in the document gets no extra space (no preceding section
-    /// to separate from).
-    private func segmentTopPadding(headingLevel: Int?, isFirst: Bool) -> CGFloat {
-        guard !isFirst, let level = headingLevel else { return 0 }
-        return ReaderViewModel.headingTopSpacing(level: level)
-    }
-
-    /// Top padding for a displayBlock heading row. Same rule: the
-    /// first block in the document doesn't get extra space.
-    private func headingTopPadding(for block: DisplayBlock) -> CGFloat {
-        guard block.id != 0, case .heading(let level) = block.kind else { return 0 }
-        return ReaderViewModel.headingTopSpacing(level: level)
-    }
-
-    /// Whether the render path should treat the current state as
-    /// "Motion is on." Resolves the user's three-setting choice:
-    /// .off never engages, .on always engages, .auto engages when
-    /// CoreMotion reports the device is moving (and the user has
-    /// consented). Reads `viewModel.isDeviceMoving` so it tracks
-    /// the detector's @Published flag.
-    private var isMotionRenderActive: Bool {
-        guard viewModel.readingStyle == .motion else { return false }
-        switch viewModel.motionPreference {
-        case .off:  return false
-        case .on:   return true
-        case .auto: return viewModel.motionAutoConsent && viewModel.isDeviceMoving
-        }
-    }
-
-    /// Motion mode centers the active sentence both vertically (via
-    /// the scroll anchor) and horizontally so the user reading
-    /// hands-free has a single bright row to follow.
-    private var motionAlignment: Alignment {
-        isMotionRenderActive ? .center : .leading
-    }
-
-    private var motionTextAlignment: TextAlignment {
-        isMotionRenderActive ? .center : .leading
-    }
-
-    private func segmentBackground(_ segment: TextSegment) -> Color {
-        if viewModel.isCurrentSearchMatch(segment: segment) {
-            return Color.primary.opacity(0.28)
-        } else if viewModel.isSearchMatch(segment: segment) {
-            return Color.primary.opacity(0.10)
-        } else if viewModel.isActive(segment: segment) {
-            return Color.primary.opacity(0.14)
-        }
-        return Color.clear
-    }
-
-    private func blockBackground(_ block: DisplayBlock) -> Color {
-        if viewModel.isCurrentSearchMatch(block: block) {
-            return Color.primary.opacity(0.28)
-        } else if viewModel.isSearchMatch(block: block) {
-            return Color.primary.opacity(0.10)
-        } else if viewModel.isActive(block: block) {
-            return Color.primary.opacity(0.14)
-        }
-        return Color.clear
-    }
+    // Step 9 — legacy renderer helpers deleted: horizontalRuleView,
+    // visualPlaceholder(block:), segmentOpacity/Scale/Font/Weight/
+    // TopPadding/Background, blockOpacity/Scale/Background,
+    // headingTopPadding, motionFontSize, isMotionRenderActive,
+    // motionAlignment, motionTextAlignment, immersiveOpacity,
+    // immersiveScale. The unified UnitRowView replaces all of them;
+    // its built-in `attributedProse` does the active-sentence
+    // highlight, and the renderer no longer has dual paths.
+    //
+    // M8 reading-style dimming (Standard / Focus / Immersive / Motion)
+    // is tracked for re-introduction on top of UnitRowView in a
+    // follow-up — the units-based renderer needs an equivalent of
+    // `isActive(unit:)` + opacity / scale modifiers. For now, every
+    // row renders at full opacity / scale — same visual baseline as
+    // Standard mode without dimming. The reading-style toggle is
+    // still functional (it controls TTS announcements + motion mode
+    // gating), it just doesn't drive visual dimming on this commit.
 
     /// 2026-05-04 — Auto-fade restored (Mark, evening). Chrome
     /// reveals when summoned, fades after 3 s of no interaction.
@@ -1804,7 +1579,7 @@ private struct ReaderRemoteSnapshotPublisher: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onChange(of: viewModel.segments.count) { _, _ in publish() }
-            .onChange(of: viewModel.displayBlocks.count) { _, _ in publish() }
+            .onChange(of: viewModel.units.count) { _, _ in publish() }
     }
 }
 
@@ -1859,8 +1634,18 @@ private struct ReaderRemoteControlPlaybackObservers: ViewModifier {
             .onReceive(viewModel.$readingStyle) { style in
                 RemoteControlState.shared.readingStyle = style.rawValue
             }
-            .onReceive(viewModel.$focusedDisplayBlockID) { id in
-                RemoteControlState.shared.focusedDisplayBlockID = id
+            .onReceive(viewModel.$focusedUnitID) { id in
+                // Step 9 — units-based focused-row signal replaces
+                // focusedDisplayBlockID. RemoteControlState's field
+                // is still Int-typed; publish the unit's sequence
+                // (a stable monotonic identifier per doc) so the
+                // antenna verifier can still see a value change.
+                guard let unitID = id else {
+                    RemoteControlState.shared.focusedDisplayBlockID = nil
+                    return
+                }
+                let seq = viewModel.units.first(where: { $0.id == unitID })?.sequence
+                RemoteControlState.shared.focusedDisplayBlockID = seq
             }
     }
 }
@@ -2845,17 +2630,10 @@ final class ReaderViewModel: ObservableObject {
     /// position was last persisted) and skips the now-playing reinstall
     /// (the controller is already wired).
     private func reloadContentAfterSkipChange() async {
-        let snapshot = self.document
-        let computed = await Task.detached(priority: .userInitiated) {
-            ReaderViewModel.computeContent(for: snapshot)
-        }.value
-        self.segments = computed.segments
-        self.displayBlocks = ReaderViewModel.applyHeadingStyling(
-            to: computed.displayBlocks,
-            tocEntries: self.tocEntries
-        )
-        self.visualPauseMapAll = computed.visualPauseMap
-        self.applyVisualBlockMotionPolicy()
+        // Step 9 — rebuilt on top of the units pipeline. Re-snapshots
+        // units + sentences from the DB with the (new) skip / content-
+        // end window applied, then jumps to offset 0.
+        await self.loadContent()
         self.jumpToOffset(0)
     }
 
@@ -3095,7 +2873,7 @@ final class ReaderViewModel: ObservableObject {
     }
     @Published private(set) var currentSentenceIndex: Int = 0
     @Published private(set) var playbackState: SpeechPlaybackService.PlaybackState = .idle
-    @Published private(set) var focusedDisplayBlockID: Int?
+    // Step 9 — focusedDisplayBlockID deleted; focusedUnitID replaces it.
     @Published var isShowingError = false
     @Published var errorMessage = ""
     @Published var noteDraft = ""
@@ -3140,20 +2918,14 @@ final class ReaderViewModel: ObservableObject {
     /// (both inline citations and sources strip pills count).
     func jumpToOffsetFromCitation(_ plainTextOffset: Int) {
         let targetIndex = segments.lastIndex(where: { $0.startOffset <= plainTextOffset }) ?? 0
-        // Resolve the unique block whose startOffset is the largest
-        // value <= plainTextOffset. That's the SINGLE block
-        // containing the cited offset; the pill renders against
-        // this exact block so densely-packed byline-style content
-        // doesn't produce multiple pills.
-        let canonicalBlockOffset = displayBlocks
-            .last(where: { $0.startOffset <= plainTextOffset })?.startOffset
-            ?? plainTextOffset
-        // Set context BEFORE the jump so the pill is in place when
-        // the row renders post-scroll.
+        // Step 9 — canonicalBlockStartOffset still set for any
+        // legacy consumer; `isCitedRow(unit:)` (the units-based
+        // pill rule) keys off `citedSentenceIndex` and ignores the
+        // block offset, so its exact value no longer matters.
         citationReturnContext = CitationReturnContext(
             citedOffset: plainTextOffset,
             citedSentenceIndex: targetIndex,
-            canonicalBlockStartOffset: canonicalBlockOffset,
+            canonicalBlockStartOffset: plainTextOffset,
             arrivedAt: Date()
         )
         jumpToOffset(plainTextOffset)
@@ -3216,7 +2988,8 @@ final class ReaderViewModel: ObservableObject {
     /// Pre-computed at content-load so `UnitRowView` doesn't have to
     /// filter the full sentence list on every redraw.
     @Published private(set) var sentencesByUnit: [UUID: [Sentence]] = [:]
-    @Published private(set) var displayBlocks: [DisplayBlock] = []
+    // Step 9 — `displayBlocks` deleted. The unified renderer walks
+    // `units` and stages sentence highlight via `sentencesByUnit`.
     /// Table of contents entries for this document. Empty if not available.
     @Published private(set) var tocEntries: [StoredTOCEntry] = []
 
@@ -3270,28 +3043,18 @@ final class ReaderViewModel: ObservableObject {
     /// until then. Consumers that need the mapping should gate on
     /// `isLoading == false` (or `segments.isEmpty == false`).
     ///
-    /// 2026-05-13 (A1) — split into two maps activated by readingStyle:
-    ///   - `visualPauseMapAll`: every sentence-after-image, populated
-    ///     once at content load. The active map below filters this
-    ///     based on whether Motion mode is on.
-    ///   - `visualPauseBlockIDsBySentenceIndex`: the ACTIVE pause map.
-    ///     In Motion mode, empty (no pausing). In every other mode,
-    ///     equals `visualPauseMapAll` (PDF + EPUB + DOCX + HTML all
-    ///     follow the same Motion-aware logic now).
-    private var visualPauseMapAll: [Int: Int] = [:]
-    private var visualPauseBlockIDsBySentenceIndex: [Int: Int] = [:]
-    /// Step 9 — units flavor of the visual-pause map. Keys: sentence
-    /// index. Values: the `.image` unit's id whose "next sentence"
-    /// triggered the pause. Populated by the units loader; used by
-    /// `pauseForVisualUnitIfNeeded(...)` (the units-aware counterpart
-    /// of `pauseForVisualBlockIfNeeded`).
+    /// Step 9 — units-based visual-pause maps. Keys: sentence index.
+    /// Values: the `.image` unit's id whose "next sentence" triggers
+    /// the pause. `visualPauseUnitIDsBySentenceIndex` is the raw set
+    /// from `computeContentFromUnits`; the *Active* counterpart is
+    /// applied by `applyVisualBlockMotionPolicy()` based on the user's
+    /// imageHandling preference (.pauseAtImages vs .skipImages).
     private var visualPauseUnitIDsBySentenceIndex: [Int: UUID] = [:]
     private var visualPauseActiveUnitIDsBySentenceIndex: [Int: UUID] = [:]
     @Published private(set) var focusedUnitID: UUID? = nil
     private var acknowledgedVisualUnitIDs: Set<UUID> = []
     private var cancellables: Set<AnyCancellable> = []
     private var didRunAutomationActions = false
-    private var acknowledgedVisualBlockIDs: Set<Int> = []
     /// The async task that builds the heavy content (segmentation,
     /// display block parsing, visual-pause map). Tests await this via
     /// `awaitContentLoaded()`; the reader view doesn't need to —
@@ -3339,16 +3102,11 @@ final class ReaderViewModel: ObservableObject {
     /// without crossing actor boundaries.
     fileprivate struct LoadedContent: Sendable {
         let segments: [TextSegment]
-        let displayBlocks: [DisplayBlock]
-        let visualPauseMap: [Int: Int]
         /// Step 9 — units + filtered sentences for the unified renderer.
-        /// Legacy callers (computeContent over plainText) pass empty
-        /// arrays; the new computeContentFromUnits populates them.
         let units: [ContentUnit]
         let sentences: [Sentence]
-        /// Sentence-id → first prose unit it lives inside. Populated
-        /// only on the units path. Used by `applyVisualPause*` to map
-        /// "next sentence after this image unit" to a sentence index.
+        /// Sentence index → image-unit id. Drives pause-at-image when
+        /// playback reaches the first sentence following an image.
         let visualPauseUnitIDsBySentenceIndex: [Int: UUID]
     }
 
@@ -3364,50 +3122,8 @@ final class ReaderViewModel: ObservableObject {
     /// `headingLevel(forOffset:)` below, which the renderer consults
     /// per-row so plain-text formats also get level-aware heading
     /// styling — the parity policy that matters here.
-    private static func applyHeadingStyling(
-        to blocks: [DisplayBlock],
-        tocEntries: [StoredTOCEntry]
-    ) -> [DisplayBlock] {
-        guard !blocks.isEmpty, !tocEntries.isEmpty else { return blocks }
-        // Map each plainText offset to the deepest level seen at it
-        // (defensive: if two entries collide, the more-specific level
-        // wins so we don't downgrade a section heading to a chapter).
-        var levelByOffset: [Int: Int] = [:]
-        for e in tocEntries {
-            levelByOffset[e.plainTextOffset] = max(levelByOffset[e.plainTextOffset] ?? 0, e.level)
-        }
-        return blocks.map { block in
-            guard let level = levelByOffset[block.startOffset],
-                  case .paragraph = block.kind else { return block }
-            return DisplayBlock(
-                id: block.id,
-                kind: .heading(level: level),
-                text: block.text,
-                displayPrefix: block.displayPrefix,
-                startOffset: block.startOffset,
-                endOffset: block.endOffset,
-                imageID: block.imageID
-            )
-        }
-    }
-
-    /// Heading level for a sentence-row whose `startOffset` matches a
-    /// TOC entry, with a small fuzz window for offset drift caused by
-    /// the segmenter joining a short heading line with the following
-    /// paragraph. Returns nil when the row isn't a heading.
-    func headingLevel(forSegmentStartOffset offset: Int) -> Int? {
-        guard !tocEntries.isEmpty else { return nil }
-        // Cache the offset → level map once; tocEntries doesn't change
-        // after load. Tiny array so the recompute cost is trivial.
-        for entry in tocEntries {
-            // Allow tiny drift; the segmenter sometimes shifts by 1–2
-            // chars when a heading lacks terminal punctuation.
-            if abs(entry.plainTextOffset - offset) <= 2 {
-                return entry.level
-            }
-        }
-        return nil
-    }
+    // Step 9 — `applyHeadingStyling` + `headingLevel(forSegmentStartOffset:)`
+    // deleted. Real `.heading` units carry the level now.
 
     /// Heavy synchronous compute. Runs on a background dispatch queue
     /// from `loadContent`. Pure function (only reads from `document`),
@@ -3513,12 +3229,6 @@ final class ReaderViewModel: ObservableObject {
             }
         }
 
-        // Legacy displayBlocks intentionally empty — the units-based
-        // renderer doesn't consume them. Kept on LoadedContent only
-        // until the legacy field is removed from the struct.
-        let displayBlocks: [DisplayBlock] = []
-        let visualPauseMap: [Int: Int] = [:]
-
         // Suppress unused-parameter warnings on the bridge fields.
         _ = skipGlobalOffset
         _ = endGlobalOffset
@@ -3526,76 +3236,18 @@ final class ReaderViewModel: ObservableObject {
 
         return LoadedContent(
             segments: segments,
-            displayBlocks: displayBlocks,
-            visualPauseMap: visualPauseMap,
             units: filteredUnits,
             sentences: filteredSentences,
             visualPauseUnitIDsBySentenceIndex: visualPauseUnitIDsBySentenceIndex
         )
     }
 
-    nonisolated fileprivate static func computeContent(
-        for document: Document
-    ) -> LoadedContent {
-        let skipUntil = max(0, document.playbackSkipUntilOffset)
-        // 2026-05-21 — `contentEndOffset` is the symmetric counterpart of
-        // `playbackSkipUntilOffset`: segments and display blocks whose
-        // startOffset is at or past this offset are filtered out of the
-        // reader entirely. Set by the Gutenberg boundary detector when
-        // it locates a `*** END OF THE PROJECT GUTENBERG EBOOK ***`
-        // marker. Zero = no end boundary, behaves as today.
-        let contentEnd = max(0, document.contentEndOffset)
-        let allSegments = SentenceSegmenter().segments(for: document.plainText)
-        let preTailSegments = (skipUntil > 0)
-            ? allSegments.filter { $0.startOffset >= skipUntil }
-            : allSegments
-        let bodySegments = (contentEnd > 0)
-            ? preTailSegments.filter { $0.startOffset < contentEnd }
-            : preTailSegments
-        // Re-number IDs to be 0-based contiguous (the rest of the view
-        // model treats segment.id as an array index — see currentSegment,
-        // playPauseImageName, marker navigation, etc.).
-        let segments: [TextSegment] = bodySegments.enumerated().map { index, seg in
-            TextSegment(id: index, text: seg.text, startOffset: seg.startOffset, endOffset: seg.endOffset)
-        }
-        let rawBlocks: [DisplayBlock]
-        if document.fileType == "md" || document.fileType == "markdown" {
-            rawBlocks = MarkdownParser().parse(markdown: document.displayText).blocks
-        } else if document.fileType == "pdf" {
-            rawBlocks = PDFDisplayParser().parse(displayText: document.displayText).blocks
-        } else if document.fileType == "epub" {
-            rawBlocks = EPUBDisplayParser().parse(displayText: document.displayText)
-        } else if document.fileType == "docx" {
-            rawBlocks = DOCXDisplayParser().parse(displayText: document.displayText)
-        } else if document.fileType == "html" || document.fileType == "htm" {
-            rawBlocks = HTMLDisplayParser().parse(displayText: document.displayText)
-        } else {
-            rawBlocks = []
-        }
-        let preTailBlocks: [DisplayBlock] = (skipUntil > 0)
-            ? rawBlocks.filter { $0.startOffset >= skipUntil }
-            : rawBlocks
-        let bodyBlocks: [DisplayBlock] = (contentEnd > 0)
-            ? preTailBlocks.filter { $0.startOffset < contentEnd }
-            : preTailBlocks
-        let displayBlocks = ReaderViewModel.splitParagraphBlocks(bodyBlocks, segments: segments)
-        let visualPauseMap = ReaderViewModel.buildVisualPauseIndexMap(
-            displayBlocks: displayBlocks,
-            segments: segments
-        )
-        // Legacy path doesn't have units yet — empty arrays. Docs
-        // imported before the units rebuild fall back to the old
-        // displayBlocks render. New imports always go through
-        // computeContentFromUnits.
-        return LoadedContent(
-            segments: segments,
-            displayBlocks: displayBlocks,
-            visualPauseMap: visualPauseMap,
-            units: [],
-            sentences: [],
-            visualPauseUnitIDsBySentenceIndex: [:]
-        )
-    }
+    // Step 9 — legacy `computeContent(for:)` deleted. Every importer
+    // now persists `document_units` + `document_sentences`, so the
+    // reader's only load path is `computeContentFromUnits(...)`.
+    // The legacy path's invocations of NLTokenizer + *DisplayParser +
+    // splitParagraphBlocks / buildVisualPauseIndexMap all die with
+    // this deletion.
 
     /// Async loader. Runs the heavy compute on a userInitiated
     /// background queue, then applies results on main and clears
@@ -3662,16 +3314,21 @@ final class ReaderViewModel: ObservableObject {
                 )
             }.value
         } else {
-            // Legacy path — NLTokenizer over plainText.
-            computed = await Task.detached(priority: .userInitiated) {
-                ReaderViewModel.computeContent(for: document)
-            }.value
+            // Step 9 — legacy path deleted. If a doc has zero units
+            // it can't be rendered. This should never happen in
+            // practice — every importer persists units. The loader
+            // bails by leaving `segments` empty and clearing
+            // `isLoading`; the reader shows an empty scrollview.
+            computed = LoadedContent(
+                segments: [],
+                units: [],
+                sentences: [],
+                visualPauseUnitIDsBySentenceIndex: [:]
+            )
         }
 
         // 1. Heavy results.
         self.segments = computed.segments
-        self.displayBlocks = computed.displayBlocks
-        self.visualPauseMapAll = computed.visualPauseMap
         // Step 9 — units-based renderer state.
         self.units = computed.units
         self.sentences = computed.sentences
@@ -3693,15 +3350,9 @@ final class ReaderViewModel: ObservableObject {
         // 2. DB side dishes (cheap).
         self.tocEntries = (try? databaseManager.tocEntries(for: document.id)) ?? []
         self.pageMap = DocumentPageMap.build(for: document, tocEntries: self.tocEntries)
-
-        // 2a. Heading-styling parity (#3). Re-tag paragraph blocks
-        // whose startOffset matches a TOC entry as .heading so they
-        // render with the unified bold + larger treatment. Cheap pass
-        // over the already-built blocks.
-        self.displayBlocks = ReaderViewModel.applyHeadingStyling(
-            to: self.displayBlocks,
-            tocEntries: self.tocEntries
-        )
+        // Step 9 — TOC-offset → heading-style bridge deleted. Headings
+        // are now real `.heading` units emitted at import time and
+        // styled by `UnitRowView.headingRow`.
 
         // 3. Position restore + playback prepare (depend on segments).
         //    Wrapped so a DB error here doesn't leave the reader
@@ -3773,9 +3424,8 @@ final class ReaderViewModel: ObservableObject {
         )
     }
 
-    var usesDisplayBlocks: Bool {
-        displayBlocks.isEmpty == false
-    }
+    // Step 9 — `usesDisplayBlocks` deleted; the renderer no longer
+    // has dual paths.
 
     var playPauseImageName: String {
         switch playbackState {
@@ -3830,11 +3480,11 @@ final class ReaderViewModel: ObservableObject {
             playbackService.pause()
             persistPosition()
         case .paused:
-            focusedDisplayBlockID = nil
+            focusedUnitID = nil
             playbackState = .playing
             playbackService.play(segments: segments, startingAt: currentSentenceIndex)
         case .idle, .finished:
-            focusedDisplayBlockID = nil
+            focusedUnitID = nil
             playbackState = .playing
             playbackService.play(segments: segments, startingAt: currentSentenceIndex)
         }
@@ -3849,7 +3499,7 @@ final class ReaderViewModel: ObservableObject {
     }
 
     func restartFromBeginning() {
-        focusedDisplayBlockID = nil
+        focusedUnitID = nil
         currentSentenceIndex = 0
         playbackService.stop()
         playbackService.prepare(at: currentSentenceIndex)
@@ -4069,15 +3719,10 @@ final class ReaderViewModel: ObservableObject {
         guard let signal = searchScrollSignal else { return }
         let idx = signal.segmentIndex
         guard segments.indices.contains(idx) else { return }
-        let scrollID: Int
-        if usesDisplayBlocks {
-            let seg = segments[idx]
-            scrollID = displayBlocks.first(where: {
-                seg.startOffset < $0.endOffset && seg.endOffset > $0.startOffset
-            })?.id ?? idx
-        } else {
-            scrollID = idx
-        }
+        // Step 9 — units-based scroll. The match's sentence belongs
+        // to a unit; scroll to that unit's id.
+        guard idx < sentences.count else { return }
+        let scrollID = sentences[idx].unitID
         if Self.reduceMotionEnabled {
             proxy.scrollTo(scrollID, anchor: .center)
         } else {
@@ -4108,23 +3753,8 @@ final class ReaderViewModel: ObservableObject {
         return segment.id == searchMatchIndices[pos]
     }
 
-    func isSearchMatch(block: DisplayBlock) -> Bool {
-        guard !searchMatchIndices.isEmpty else { return false }
-        return searchMatchIndices.contains { idx in
-            guard segments.indices.contains(idx) else { return false }
-            let seg = segments[idx]
-            return seg.startOffset < block.endOffset && seg.endOffset > block.startOffset
-        }
-    }
-
-    func isCurrentSearchMatch(block: DisplayBlock) -> Bool {
-        guard let pos = currentSearchMatchPosition,
-              searchMatchIndices.indices.contains(pos) else { return false }
-        let idx = searchMatchIndices[pos]
-        guard segments.indices.contains(idx) else { return false }
-        let seg = segments[idx]
-        return seg.startOffset < block.endOffset && seg.endOffset > block.startOffset
-    }
+    // Step 9 — isSearchMatch(block:) + isCurrentSearchMatch(block:)
+    // deleted. The unified renderer doesn't render DisplayBlocks.
 
     private func emitSearchScroll(to segmentIndex: Int) {
         searchScrollCounter += 1
@@ -4151,33 +3781,8 @@ final class ReaderViewModel: ObservableObject {
         return abs(segment.id - currentSentenceIndex)
     }
 
-    /// Display-block variant of `distanceFromActive`. Computes the
-    /// distance between this block's anchor sentence and the
-    /// currently-active sentence. Blocks that don't carry a sentence
-    /// anchor (visual-only PDF pages) report a generous default
-    /// (effectively "far") so the falloff treats them as background.
-    func distanceFromActive(block: DisplayBlock) -> Int {
-        if isActive(block: block) { return 0 }
-        // Block-to-segment proxy: find the segment whose start offset
-        // matches the block's start; failing that, walk to the
-        // nearest segment by character offset. Unknown → far.
-        if let sentenceForBlock = segments.firstIndex(where: { $0.startOffset >= block.startOffset && $0.startOffset < block.endOffset }) {
-            return abs(sentenceForBlock - currentSentenceIndex)
-        }
-        return 8
-    }
-
-    func isActive(block: DisplayBlock) -> Bool {
-        if focusedDisplayBlockID == block.id {
-            return true
-        }
-
-        guard let segment = currentSegment else {
-            return false
-        }
-
-        return segment.startOffset < block.endOffset && segment.endOffset > block.startOffset
-    }
+    // Step 9 — distanceFromActive(block:) + isActive(block:) deleted.
+    // The unified renderer doesn't render DisplayBlocks.
 
     func annotationSymbol(for segment: TextSegment) -> String? {
         let segmentNotes = notes.filter { note in
@@ -4195,47 +3800,12 @@ final class ReaderViewModel: ObservableObject {
         return nil
     }
 
-    func annotationSymbol(for block: DisplayBlock) -> String? {
-        let blockNotes = notes.filter { note in
-            note.startOffset >= block.startOffset && note.startOffset < block.endOffset
-        }
-
-        if blockNotes.contains(where: { $0.kind == .note }) {
-            return "note.text"
-        }
-
-        if blockNotes.contains(where: { $0.kind == .bookmark }) {
-            return "bookmark.fill"
-        }
-
-        return nil
-    }
-
-    func displayText(for block: DisplayBlock) -> String {
-        if let displayPrefix = block.displayPrefix {
-            return "\(displayPrefix) \(block.text)"
-        }
-
-        return block.text
-    }
-
-    func font(for block: DisplayBlock) -> Font {
-        switch block.kind {
-        case .heading(let level):
-            return .system(size: ReaderViewModel.headingFontSize(body: fontSize, level: level))
-        default:
-            return .system(size: fontSize)
-        }
-    }
-
-    func fontWeight(for block: DisplayBlock) -> Font.Weight {
-        switch block.kind {
-        case .heading(let level):
-            return ReaderViewModel.headingWeight(level: level)
-        default:
-            return .regular
-        }
-    }
+    // Step 9 — annotationSymbol(for: block), displayText(for: block),
+    // font(for: block), fontWeight(for: block) all deleted. The
+    // unified UnitRowView renders by `unit.kind` and resolves notes
+    // by intersecting note offsets against the unit's text range
+    // (annotation indicators are a follow-up polish — they were on
+    // the legacy renderer's row chrome which is now gone).
 
     /// 2026-05-06 (parity #3) — single source of truth for heading
     /// typography across both render paths (displayBlocks rows and
@@ -4285,16 +3855,9 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
-    func foregroundStyle(for block: DisplayBlock) -> Color {
-        switch block.kind {
-        case .quote:
-            return .secondary
-        case .visualPlaceholder:
-            return .primary
-        default:
-            return .primary
-        }
-    }
+    // Step 9 — foregroundStyle(for: block) deleted; UnitRowView styles
+    // by kind directly (blockquote uses italic + secondary indent bar;
+    // images use a placeholder if image data is missing).
 
     func previewText(for note: Note) -> String {
         guard let index = segments.firstIndex(where: { segment in
@@ -4352,19 +3915,8 @@ final class ReaderViewModel: ObservableObject {
         return segments[currentSentenceIndex]
     }
 
-    private var currentDisplayBlockID: Int? {
-        if let focusedDisplayBlockID {
-            return focusedDisplayBlockID
-        }
-
-        guard let segment = currentSegment else {
-            return nil
-        }
-
-        return displayBlocks.first(where: { block in
-            segment.startOffset < block.endOffset && segment.endOffset > block.startOffset
-        })?.id
-    }
+    // Step 9 — `currentDisplayBlockID` deleted. `activeUnitID` is the
+    // replacement; scrollToCurrentSentence consumes it directly.
 
     private func boundedSentenceIndex(_ candidate: Int) -> Int {
         guard segments.isEmpty == false else {
@@ -4409,19 +3961,9 @@ final class ReaderViewModel: ObservableObject {
     }
 
     private func markerSentenceIndex(direction: Int) -> Int? {
-        if usesDisplayBlocks,
-           let currentBlockIndex = currentDisplayBlockIndex {
-            var nextBlockIndex = currentBlockIndex + direction
-            while displayBlocks.indices.contains(nextBlockIndex) {
-                if let candidateIndex = sentenceIndex(forOffset: displayBlocks[nextBlockIndex].startOffset),
-                   candidateIndex != currentSentenceIndex {
-                    return candidateIndex
-                }
-                nextBlockIndex += direction
-            }
-            return nil
-        }
-
+        // Step 9 — sentence-level marker nav (delete legacy block-jump
+        // path). Previous / Next move by one sentence in the
+        // pre-filtered sentences list.
         let nextSentenceIndex = currentSentenceIndex + direction
         guard segments.indices.contains(nextSentenceIndex) else {
             return nil
@@ -4429,25 +3971,9 @@ final class ReaderViewModel: ObservableObject {
         return nextSentenceIndex
     }
 
-    private func sentenceIndex(forOffset offset: Int) -> Int? {
-        segments.firstIndex(where: { segment in
-            offset >= segment.startOffset && offset < segment.endOffset
-        }) ?? segments.lastIndex(where: { segment in
-            offset >= segment.startOffset
-        })
-    }
-
-    private var currentDisplayBlockIndex: Int? {
-        guard let blockID = currentDisplayBlockID else {
-            return nil
-        }
-
-        return displayBlocks.firstIndex(where: { $0.id == blockID })
-    }
-
     private func jump(toSentenceIndex sentenceIndex: Int, shouldRestartPlayback: Bool) {
         let boundedIndex = boundedSentenceIndex(sentenceIndex)
-        focusedDisplayBlockID = nil
+        focusedUnitID = nil
         currentSentenceIndex = boundedIndex
         if shouldRestartPlayback {
             playbackService.restart(segments: segments, startingAt: boundedIndex)
@@ -4502,26 +4028,10 @@ final class ReaderViewModel: ObservableObject {
     }
 
     private func pauseForVisualBlockIfNeeded(atSentenceIndex sentenceIndex: Int) {
-        // Step 9 — units-aware path takes priority when the units
-        // map is populated (any doc imported via the units pipeline).
-        if !visualPauseActiveUnitIDsBySentenceIndex.isEmpty {
-            pauseForVisualUnitIfNeeded(atSentenceIndex: sentenceIndex)
-            return
-        }
-        guard playbackService.state == .playing,
-              let visualBlockID = visualPauseBlockIDsBySentenceIndex[sentenceIndex],
-              acknowledgedVisualBlockIDs.contains(visualBlockID) == false else {
-            return
-        }
-
-        guard let visualBlock = displayBlocks.first(where: { $0.id == visualBlockID }) else {
-            focusedDisplayBlockID = nil
-            return
-        }
-
-        acknowledgedVisualBlockIDs.insert(visualBlock.id)
-        focusedDisplayBlockID = visualBlock.id
-        playbackService.pause()
+        // Step 9 — legacy block branch deleted. Units-aware path is
+        // the only path now; entry point keeps its name so playback
+        // service callers don't need rewiring.
+        pauseForVisualUnitIfNeeded(atSentenceIndex: sentenceIndex)
     }
 
     private func pauseForVisualUnitIfNeeded(atSentenceIndex sentenceIndex: Int) {
@@ -4563,120 +4073,29 @@ final class ReaderViewModel: ObservableObject {
     /// "Image." announcement; `.pauseAtImages` stops playback at the
     /// image and surfaces the inline Continue affordance.
     func applyVisualBlockMotionPolicy() {
+        // Step 9 — units flavor only. .skipImages → empty active map
+        // + per-image announcement. .pauseAtImages → active map mirrors
+        // the raw map; playback service stays silent at the image.
         switch imageHandling {
         case .skipImages:
-            visualPauseBlockIDsBySentenceIndex = [:]
             visualPauseActiveUnitIDsBySentenceIndex = [:]
-            // Announcements come from EITHER map — whichever flavor
-            // populated entries for the current doc.
             var announcements: [Int: String] = [:]
-            for (sentenceIndex, _) in visualPauseMapAll {
-                announcements[sentenceIndex] = "Image."
-            }
             for (sentenceIndex, _) in visualPauseUnitIDsBySentenceIndex {
                 announcements[sentenceIndex] = "Image."
             }
             playbackService.visualAnnouncementText = announcements
         case .pauseAtImages:
-            visualPauseBlockIDsBySentenceIndex = visualPauseMapAll
             visualPauseActiveUnitIDsBySentenceIndex = visualPauseUnitIDsBySentenceIndex
             playbackService.visualAnnouncementText = [:]
         }
     }
 
-    nonisolated private static func buildVisualPauseIndexMap(displayBlocks: [DisplayBlock], segments: [TextSegment]) -> [Int: Int] {
-        guard displayBlocks.isEmpty == false, segments.isEmpty == false else {
-            return [:]
-        }
-
-        var mapping: [Int: Int] = [:]
-
-        for (blockIndex, block) in displayBlocks.enumerated() where block.kind == .visualPlaceholder {
-            var nextBlockIndex = blockIndex + 1
-            while displayBlocks.indices.contains(nextBlockIndex) {
-                let candidateBlock = displayBlocks[nextBlockIndex]
-                if let sentenceIndex = sentenceIndex(forOffset: candidateBlock.startOffset, segments: segments) {
-                    mapping[sentenceIndex] = block.id
-                    break
-                }
-                nextBlockIndex += 1
-            }
-        }
-
-        return mapping
-    }
-
-    nonisolated private static func sentenceIndex(forOffset offset: Int, segments: [TextSegment]) -> Int? {
-        segments.firstIndex(where: { segment in
-            offset >= segment.startOffset && offset < segment.endOffset
-        }) ?? segments.lastIndex(where: { segment in
-            offset >= segment.startOffset
-        })
-    }
-
-    // ========== BLOCK VM-SPLIT: PARAGRAPH BLOCK SPLITTING - START ==========
-
-    /// Replaces each `.paragraph` DisplayBlock with one sub-block per TTS segment
-    /// that starts within it.  Non-paragraph blocks (headings, images, bullets,
-    /// quotes) pass through unchanged with reassigned sequential IDs.
-    ///
-    /// After splitting, `isActive(block:)` returns true only for the one block
-    /// containing the active utterance — so highlight and auto-scroll target
-    /// exactly what is being spoken rather than an entire paragraph.
-    nonisolated private static func splitParagraphBlocks(
-        _ blocks: [DisplayBlock],
-        segments: [TextSegment]
-    ) -> [DisplayBlock] {
-        var result: [DisplayBlock] = []
-        for block in blocks {
-            guard block.kind == .paragraph else {
-                result.append(DisplayBlock(
-                    id: result.count,
-                    kind: block.kind,
-                    text: block.text,
-                    displayPrefix: block.displayPrefix,
-                    startOffset: block.startOffset,
-                    endOffset: block.endOffset,
-                    imageID: block.imageID
-                ))
-                continue
-            }
-
-            // Segments that START within this paragraph's offset range.
-            // Using startOffset (not overlap) ensures each segment maps to
-            // exactly one block — no duplicates across paragraph boundaries.
-            let inBlock = segments.filter { seg in
-                seg.startOffset >= block.startOffset && seg.startOffset < block.endOffset
-            }
-
-            if inBlock.isEmpty {
-                // Rare: paragraph too short to own a segment start (content is
-                // absorbed into an adjacent segment by the tokenizer). Keep as-is.
-                result.append(DisplayBlock(
-                    id: result.count,
-                    kind: .paragraph,
-                    text: block.text,
-                    displayPrefix: nil,
-                    startOffset: block.startOffset,
-                    endOffset: block.endOffset
-                ))
-            } else {
-                for seg in inBlock {
-                    result.append(DisplayBlock(
-                        id: result.count,
-                        kind: .paragraph,
-                        text: seg.text,
-                        displayPrefix: nil,
-                        startOffset: seg.startOffset,
-                        endOffset: seg.endOffset
-                    ))
-                }
-            }
-        }
-        return result
-    }
-
-    // ========== BLOCK VM-SPLIT: PARAGRAPH BLOCK SPLITTING - END ==========
+    // Step 9 — `buildVisualPauseIndexMap` + `sentenceIndex(forOffset:)`
+    // static + `splitParagraphBlocks` all deleted. The units flavor
+    // (`computeContentFromUnits` → `visualPauseUnitIDsBySentenceIndex`)
+    // is the only path. Sentence rows are no longer derived from
+    // paragraph splitting either — the units pipeline computes
+    // sentences at import time via `SentenceIndexer`.
 
     private func loadNotes() {
         do {
@@ -4984,36 +4403,40 @@ private struct TOCSheet: View {
     }
     @State private var selectedTab: TOCTab = .contents
 
-    /// Image entries derived from displayBlocks at render time. Each
-    /// entry pairs an imageID with the document offset and a context
-    /// sentence (the prose sentence at or just before the image
-    /// placeholder). Tap → jumpToOffset(offset) + dismiss.
+    /// Image entries derived from `.image` units. Each entry pairs the
+    /// unit's imageID with the document offset (the next sentence's
+    /// startOffset) and a context sentence. Tap → jumpToOffset(offset)
+    /// + dismiss.
     private struct ImageEntry: Identifiable {
-        let id: Int            // displayBlock.id (stable per load)
-        let imageID: String?   // nil for text-only placeholders
+        let id: UUID
+        let imageID: String?
         let offset: Int
         let contextSentence: String
     }
     private var imageEntries: [ImageEntry] {
         let segments = viewModel.segments
-        return viewModel.displayBlocks
-            .filter { $0.kind == .visualPlaceholder }
-            .map { block in
-                // Context: prefer the segment whose startOffset is
-                // closest to the placeholder, with a slight preference
-                // for the segment AFTER (which the image flows into).
-                let context: String
-                if let afterIdx = segments.firstIndex(where: { $0.startOffset >= block.startOffset }) {
-                    context = segments[afterIdx].text
-                } else if let beforeIdx = segments.lastIndex(where: { $0.startOffset < block.startOffset }) {
-                    context = segments[beforeIdx].text
-                } else {
-                    context = block.text
+        let sentences = viewModel.sentences
+        let units = viewModel.units
+        return units
+            .enumerated()
+            .filter { _, unit in unit.kind == .image }
+            .map { idx, unit -> ImageEntry in
+                // Context: first sentence in the next prose-bearing
+                // unit after this image; falls back to the image
+                // caption (unit.text).
+                var context = unit.text
+                var offset = 0
+                if let nextProse = units[(idx + 1)...].first(where: { $0.kind.carriesProseText }),
+                   let nextSentence = sentences.first(where: { $0.unitID == nextProse.id }),
+                   let segIdx = sentences.firstIndex(of: nextSentence),
+                   segments.indices.contains(segIdx) {
+                    context = segments[segIdx].text
+                    offset = segments[segIdx].startOffset
                 }
                 return ImageEntry(
-                    id: block.id,
-                    imageID: block.imageID,
-                    offset: block.startOffset,
+                    id: unit.id,
+                    imageID: unit.metadata.imageID,
+                    offset: offset,
                     contextSentence: context
                 )
             }

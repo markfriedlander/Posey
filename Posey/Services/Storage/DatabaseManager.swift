@@ -76,55 +76,81 @@ final class DatabaseManager: @unchecked Sendable {
 
 extension DatabaseManager {
     func documents() throws -> [Document] {
+        // **Step 10 — derived plainText / displayText.** The columns
+        // `display_text` and `plain_text` no longer exist; both fields
+        // on Document are populated by joining prose-bearing units
+        // (the same algorithm the persister used when it still wrote
+        // the columns). One small SELECT + N derivations; on a typical
+        // library that's <100ms even for tens of docs.
         let sql = """
-        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset, content_end_offset, skip_source
+        SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source
         FROM documents
         ORDER BY imported_at DESC;
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
 
-        var documents: [Document] = []
+        var rows: [(id: UUID, title: String, fileName: String, fileType: String, importedAt: Date, modifiedAt: Date, characterCount: Int, playbackSkipUntilOffset: Int, contentEndOffset: Int, skipSource: String)] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             guard
                 let idText = sqliteString(statement, index: 0),
                 let id = UUID(uuidString: idText),
                 let title = sqliteString(statement, index: 1),
                 let fileName = sqliteString(statement, index: 2),
-                let fileType = sqliteString(statement, index: 3),
-                let plainText = sqliteString(statement, index: 7)
+                let fileType = sqliteString(statement, index: 3)
             else { continue }
-
-            documents.append(Document(
+            rows.append((
                 id: id,
                 title: title,
                 fileName: fileName,
                 fileType: fileType,
                 importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
                 modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
-                displayText: sqliteString(statement, index: 6) ?? plainText,
-                plainText: plainText,
-                characterCount: Int(sqlite3_column_int64(statement, 8)),
-                playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 9)),
-                contentEndOffset: Int(sqlite3_column_int64(statement, 10)),
-                skipSource: sqliteString(statement, index: 11) ?? ""
+                characterCount: Int(sqlite3_column_int64(statement, 6)),
+                playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 7)),
+                contentEndOffset: Int(sqlite3_column_int64(statement, 8)),
+                skipSource: sqliteString(statement, index: 9) ?? ""
+            ))
+        }
+
+        // Now derive plainText per row (the SELECT statement above is
+        // finalized — safe to issue per-doc unit queries).
+        var documents: [Document] = []
+        documents.reserveCapacity(rows.count)
+        for row in rows {
+            let derived = (try? plainText(for: row.id)) ?? ""
+            documents.append(Document(
+                id: row.id,
+                title: row.title,
+                fileName: row.fileName,
+                fileType: row.fileType,
+                importedAt: row.importedAt,
+                modifiedAt: row.modifiedAt,
+                displayText: derived,
+                plainText: derived,
+                characterCount: row.characterCount,
+                playbackSkipUntilOffset: row.playbackSkipUntilOffset,
+                contentEndOffset: row.contentEndOffset,
+                skipSource: row.skipSource
             ))
         }
         return documents
     }
 
     func upsertDocument(_ document: Document) throws {
+        // **Step 10 — plain_text / display_text columns dropped.**
+        // INSERT omits them; the doc's plainText/displayText fields
+        // are derived from units at row-read time. Persistence of the
+        // text lives entirely in `document_units` now.
         let sql = """
-        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset, content_end_offset, skip_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             file_name = excluded.file_name,
             file_type = excluded.file_type,
             imported_at = excluded.imported_at,
             modified_at = excluded.modified_at,
-            display_text = excluded.display_text,
-            plain_text = excluded.plain_text,
             character_count = excluded.character_count,
             playback_skip_until_offset = excluded.playback_skip_until_offset,
             content_end_offset = excluded.content_end_offset,
@@ -139,12 +165,10 @@ extension DatabaseManager {
         try bind(document.fileType, at: 4, for: statement)
         sqlite3_bind_double(statement, 5, document.importedAt.timeIntervalSince1970)
         sqlite3_bind_double(statement, 6, document.modifiedAt.timeIntervalSince1970)
-        try bind(document.displayText, at: 7, for: statement)
-        try bind(document.plainText, at: 8, for: statement)
-        sqlite3_bind_int64(statement, 9, sqlite3_int64(document.characterCount))
-        sqlite3_bind_int64(statement, 10, sqlite3_int64(document.playbackSkipUntilOffset))
-        sqlite3_bind_int64(statement, 11, sqlite3_int64(document.contentEndOffset))
-        try bind(document.skipSource, at: 12, for: statement)
+        sqlite3_bind_int64(statement, 7, sqlite3_int64(document.characterCount))
+        sqlite3_bind_int64(statement, 8, sqlite3_int64(document.playbackSkipUntilOffset))
+        sqlite3_bind_int64(statement, 9, sqlite3_int64(document.contentEndOffset))
+        try bind(document.skipSource, at: 10, for: statement)
 
         try step(statement)
     }
@@ -170,45 +194,74 @@ extension DatabaseManager {
     }
 
     func existingDocument(matchingFileName fileName: String, fileType: String, plainText: String, displayText: String? = nil) throws -> Document? {
+        // **Step 10 — dedup via derived plainText.** With the
+        // `plain_text` / `display_text` columns dropped, the old
+        // `WHERE plain_text=? AND display_text=?` match isn't
+        // available. New shape: narrow to file_name + file_type +
+        // character_count (cheap indexable predicates) then derive
+        // each candidate's plainText from units and confirm against
+        // the importer-supplied string. The character_count predicate
+        // makes this O(1) in the common case (different docs of same
+        // name almost always differ in length), with at most a small
+        // number of unit-derivations for the genuine-collision case.
         let sql = """
-        SELECT id, title, file_name, file_type, imported_at, modified_at, display_text, plain_text, character_count, playback_skip_until_offset, content_end_offset, skip_source
+        SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source
         FROM documents
-        WHERE file_name = ? AND file_type = ? AND plain_text = ? AND display_text = ?
-        LIMIT 1;
+        WHERE file_name = ? AND file_type = ? AND character_count = ?;
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
 
         try bind(fileName, at: 1, for: statement)
         try bind(fileType, at: 2, for: statement)
-        try bind(plainText, at: 3, for: statement)
-        try bind(displayText ?? plainText, at: 4, for: statement)
+        sqlite3_bind_int64(statement, 3, sqlite3_int64(plainText.count))
 
-        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        // Collect all id candidates first (single-statement lifecycle).
+        var candidateIDs: [(id: UUID, row: (String, String, String, Date, Date, Int, Int, Int, String))] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard
+                let idText = sqliteString(statement, index: 0),
+                let id = UUID(uuidString: idText),
+                let title = sqliteString(statement, index: 1),
+                let storedFileName = sqliteString(statement, index: 2),
+                let storedFileType = sqliteString(statement, index: 3)
+            else { continue }
+            candidateIDs.append((
+                id: id,
+                row: (
+                    title, storedFileName, storedFileType,
+                    Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
+                    Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
+                    Int(sqlite3_column_int64(statement, 6)),
+                    Int(sqlite3_column_int64(statement, 7)),
+                    Int(sqlite3_column_int64(statement, 8)),
+                    sqliteString(statement, index: 9) ?? ""
+                )
+            ))
+        }
 
-        guard
-            let idText = sqliteString(statement, index: 0),
-            let id = UUID(uuidString: idText),
-            let title = sqliteString(statement, index: 1),
-            let storedFileName = sqliteString(statement, index: 2),
-            let storedFileType = sqliteString(statement, index: 3),
-            let storedText = sqliteString(statement, index: 7)
-        else { return nil }
-
-        return Document(
-            id: id,
-            title: title,
-            fileName: storedFileName,
-            fileType: storedFileType,
-            importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
-            modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
-            displayText: sqliteString(statement, index: 6) ?? storedText,
-            plainText: storedText,
-            characterCount: Int(sqlite3_column_int64(statement, 8)),
-            playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 9)),
-            contentEndOffset: Int(sqlite3_column_int64(statement, 10)),
-            skipSource: sqliteString(statement, index: 11) ?? ""
-        )
+        // Confirm via derived plainText. First exact match wins.
+        for candidate in candidateIDs {
+            let derived = (try? self.plainText(for: candidate.id)) ?? ""
+            guard derived == plainText else { continue }
+            let (title, sFile, sType, imported, modified, chars, skipOff, endOff, source) = candidate.row
+            return Document(
+                id: candidate.id,
+                title: title,
+                fileName: sFile,
+                fileType: sType,
+                importedAt: imported,
+                modifiedAt: modified,
+                displayText: derived,
+                plainText: derived,
+                characterCount: chars,
+                playbackSkipUntilOffset: skipOff,
+                contentEndOffset: endOff,
+                skipSource: source
+            )
+        }
+        _ = displayText  // dedup is plainText-only post-Step-10
+        return nil
     }
 }
 
@@ -949,13 +1002,23 @@ extension DatabaseManager {
                 file_type TEXT NOT NULL,
                 imported_at REAL NOT NULL,
                 modified_at REAL NOT NULL,
-                display_text TEXT NOT NULL DEFAULT '',
-                plain_text TEXT NOT NULL,
                 character_count INTEGER NOT NULL
             );
             """)
 
-        try addColumnIfNeeded(table: "documents", column: "display_text", definition: "TEXT NOT NULL DEFAULT ''")
+        // **Step 10 — drop the derived plain_text / display_text
+        // columns.** Both are computed from `document_units` on demand
+        // via `plainText(for:)` / `displayText(for:)`. The legacy
+        // columns lingered for backward compat during the rebuild;
+        // with chunks-on-units (Step 8) + unified renderer (Step 9)
+        // shipped, nothing reads the columns anymore. SQLite 3.35+
+        // supports DROP COLUMN (every iOS 16+ device ships ≥ 3.39).
+        // Safe no-op on fresh DBs where the columns never existed.
+        try dropColumnIfPresent(table: "documents", column: "plain_text")
+        try dropColumnIfPresent(table: "documents", column: "display_text")
+        // (`content_boundaries` is preserved — PDFEnhancementService
+        // still reads it directly for page-range arithmetic.
+        // Rebuilding it on page_break units is a follow-up.)
         // playback_skip_until_offset = character offset in plainText past which
         // the reader should auto-jump on first open. Used by the PDF TOC
         // detector, the EPUB front-matter detector, and (2026-05-21) the
@@ -1397,6 +1460,22 @@ extension DatabaseManager {
         try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition);")
     }
 
+    /// **Step 10 helper.** Drop a column from a table if it still
+    /// exists. Wraps SQLite 3.35+ `ALTER TABLE ... DROP COLUMN`
+    /// (every iOS 16+ device ships ≥ 3.39, so available everywhere
+    /// Posey supports). No-op if the column was already dropped.
+    private func dropColumnIfPresent(table: String, column: String) throws {
+        let statement = try prepareStatement(sql: "PRAGMA table_info(\(table));")
+        defer { sqlite3_finalize(statement) }
+        var found = false
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if sqliteString(statement, index: 1) == column { found = true; break }
+        }
+        if found {
+            try execute("ALTER TABLE \(table) DROP COLUMN \(column);")
+        }
+    }
+
     private func prepareStatement(sql: String) throws -> OpaquePointer? {
         var statement: OpaquePointer?
         if sqlite3_prepare_v2(database, sql, -1, &statement, nil) != SQLITE_OK {
@@ -1596,15 +1675,34 @@ extension DatabaseManager {
         try step(statement)
     }
 
-    /// Read plainText for a document. Used by the enhancement service
-    /// to compute the current page range before rewriting it.
+    /// **Step 10 — derived from units.** Read plainText for a document
+    /// by joining prose-bearing units the same way the persister did
+    /// when it still wrote the `plain_text` column. Used by the
+    /// enhancement service to compute the current page range before
+    /// rewriting it; by ReaderView / LibraryView for legacy fallback
+    /// paths during the column-drop migration.
+    ///
+    /// Returns `nil` only when the document has no rows (caller's
+    /// distinct from empty-doc case where the result is `""`).
     func plainText(for documentID: UUID) throws -> String? {
-        let sql = "SELECT plain_text FROM documents WHERE id = ?;"
-        let statement = try prepareStatement(sql: sql)
-        defer { sqlite3_finalize(statement) }
-        try bind(documentID.uuidString, at: 1, for: statement)
-        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-        return sqliteString(statement, index: 0)
+        // Confirm document exists first so a nil return means "doc
+        // gone" rather than "doc with zero units" (which is a valid
+        // empty state).
+        guard try documentExists(documentID) else { return nil }
+        let units = try units(for: documentID)
+        return units
+            .filter { $0.kind.carriesProseText }
+            .map(\.text)
+            .joined(separator: "\n\n")
+    }
+
+    /// **Step 10 — derived from units.** Mirror of `plainText(for:)`.
+    /// For non-PDF docs, `displayText` historically equaled
+    /// `plainText`. For PDFs, displayText included form-feed page
+    /// separators — that semantic moved to `pageBreak` units, so the
+    /// derived form just joins prose units like plainText.
+    func displayText(for documentID: UUID) throws -> String? {
+        try plainText(for: documentID)
     }
 
 }
@@ -2107,31 +2205,33 @@ extension DatabaseManager {
     func persistParsedDocument(_ parsed: ParsedDocument) throws {
         try execute("BEGIN TRANSACTION;")
         do {
-            // Derive legacy text fields by joining prose-bearing
-            // units. Newline separator between units. This keeps the
-            // pre-rebuild reader path functional for any format that
-            // hasn't switched to units yet (and during the rollout
-            // window for the format that's mid-flip).
+            // **Step 10 — derived plainText / displayText.** The
+            // legacy `plain_text` / `display_text` columns are gone;
+            // both forms derive from joining prose-bearing units on
+            // demand via `plainText(for:)`. Persister no longer
+            // writes them. `character_count` is still stored — it's
+            // the easiest indexable predicate for the dedup query.
             let proseUnits = parsed.units.filter { $0.kind.carriesProseText }
-            let joinedText = proseUnits.map(\.text).joined(separator: "\n\n")
+            let characterCount = proseUnits
+                .map(\.text)
+                .joined(separator: "\n\n")
+                .count
             let now = Date()
 
             // Insert / update document header.
             let docSQL = """
             INSERT INTO documents (
                 id, title, file_name, file_type, imported_at, modified_at,
-                display_text, plain_text, character_count,
+                character_count,
                 playback_skip_until_offset, content_end_offset, skip_source,
                 skip_unit_id, content_end_unit_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 file_name = excluded.file_name,
                 file_type = excluded.file_type,
                 modified_at = excluded.modified_at,
-                display_text = excluded.display_text,
-                plain_text = excluded.plain_text,
                 character_count = excluded.character_count,
                 skip_source = excluded.skip_source,
                 skip_unit_id = excluded.skip_unit_id,
@@ -2145,19 +2245,17 @@ extension DatabaseManager {
             try bind(parsed.fileType, at: 4, for: docStmt)
             sqlite3_bind_double(docStmt, 5, now.timeIntervalSince1970)
             sqlite3_bind_double(docStmt, 6, now.timeIntervalSince1970)
-            try bind(joinedText, at: 7, for: docStmt)
-            try bind(joinedText, at: 8, for: docStmt)
-            sqlite3_bind_int64(docStmt, 9, sqlite3_int64(joinedText.count))
-            try bind(parsed.skipSource, at: 10, for: docStmt)
+            sqlite3_bind_int64(docStmt, 7, sqlite3_int64(characterCount))
+            try bind(parsed.skipSource, at: 8, for: docStmt)
             if let s = parsed.skipUnitID {
-                try bind(s.uuidString, at: 11, for: docStmt)
+                try bind(s.uuidString, at: 9, for: docStmt)
             } else {
-                sqlite3_bind_null(docStmt, 11)
+                sqlite3_bind_null(docStmt, 9)
             }
             if let e = parsed.contentEndUnitID {
-                try bind(e.uuidString, at: 12, for: docStmt)
+                try bind(e.uuidString, at: 10, for: docStmt)
             } else {
-                sqlite3_bind_null(docStmt, 12)
+                sqlite3_bind_null(docStmt, 10)
             }
             try step(docStmt)
 

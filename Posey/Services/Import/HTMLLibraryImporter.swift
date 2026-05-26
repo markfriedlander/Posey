@@ -28,28 +28,47 @@ struct HTMLLibraryImporter {
     func importDocument(from url: URL) async throws -> Document {
         try FormatPrecheck.checkTextLike(url: url, declaredType: "html")
         let parsed = try await importer.loadDocument(from: url)
+        let rawHTML = (try? String(contentsOf: url, encoding: .utf8))
+            ?? (try? String(contentsOf: url, encoding: .isoLatin1))
+            ?? ""
+        let contentHash = try? ContentHasher.sha256(of: url)
+        let derived = TitleExtractor.fromHTML(rawHTML: rawHTML)
+        let title = TitleExtractor.resolve(
+            contentTitle: derived,
+            filename: url.lastPathComponent
+        )
         return try importNormalizedDocument(
-            title: url.deletingPathExtension().lastPathComponent,
+            title: title,
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
             displayText: parsed.displayText,
             plainText: parsed.plainText,
             images: parsed.images,
-            headings: parsed.headings
+            headings: parsed.headings,
+            contentHash: contentHash
         )
     }
 
     @MainActor
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "html") async throws -> Document {
         let parsed = try await importer.loadTextAsync(fromData: rawData)
+        let rawHTML = String(data: rawData, encoding: .utf8)
+            ?? String(data: rawData, encoding: .isoLatin1)
+            ?? ""
+        let contentHash = ContentHasher.sha256(rawData)
+        let derived = TitleExtractor.fromHTML(rawHTML: rawHTML)
+        let resolved = title.isEmpty
+            ? TitleExtractor.resolve(contentTitle: derived, filename: fileName)
+            : title
         return try importNormalizedDocument(
-            title: title,
+            title: resolved,
             fileName: fileName,
             fileType: fileType,
             displayText: parsed.text,
             plainText: parsed.text,
             images: [],
-            headings: parsed.headings
+            headings: parsed.headings,
+            contentHash: contentHash
         )
     }
 
@@ -60,12 +79,14 @@ struct HTMLLibraryImporter {
         displayText: String,
         plainText: String,
         images: [PageImageRecord],
-        headings: [HTMLDocumentImporter.HTMLHeadingEntry]
+        headings: [HTMLDocumentImporter.HTMLHeadingEntry],
+        contentHash: String?
     ) throws -> Document {
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
             fileType: fileType,
-            plainText: plainText
+            plainText: plainText,
+            contentHash: contentHash
         )
         let documentID = existingDocument?.id ?? UUID()
 
@@ -131,7 +152,10 @@ struct HTMLLibraryImporter {
             toc: tocEntries,
             skipUnitID: skipUnitID,
             skipSource: skipSource,
-            contentEndUnitID: contentEndUnitID
+            playbackSkipUntilOffset: skipOffset,
+            contentEndOffset: contentEndOffset,
+            contentEndUnitID: contentEndUnitID,
+            contentHash: contentHash
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 
@@ -158,7 +182,8 @@ struct HTMLLibraryImporter {
             characterCount: plainText.count,
             playbackSkipUntilOffset: skipOffset,
             contentEndOffset: contentEndOffset,
-            skipSource: skipSource
+            skipSource: skipSource,
+            contentHash: contentHash
         )
         let docID = document.id
         let dbRef = databaseManager

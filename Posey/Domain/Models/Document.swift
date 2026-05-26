@@ -46,4 +46,11 @@ struct Document: Identifiable, Equatable, Hashable {
     ///                      read from the beginning. `playbackSkipUntilOffset`
     ///                      has been reset to 0. Do not prompt again.
     var skipSource: String = ""
+
+    /// **Bundle 2b (2026-05-26)** — content-hash dedup. SHA-256 hex
+    /// of the raw source-file bytes. Lets the library detect
+    /// duplicate imports without relying on the post-enhancement
+    /// plainText (which can drift after Tier 2 / Tier 3 edits).
+    /// Nullable for rows imported before this column existed.
+    var contentHash: String? = nil
 }

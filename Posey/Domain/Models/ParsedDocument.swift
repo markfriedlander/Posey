@@ -51,10 +51,32 @@ struct ParsedDocument: Sendable {
     ///   • `"heuristic"` — prompt the user once
     let skipSource: String
 
+    /// **Bundle 2d (2026-05-26)** — character offset in the derived
+    /// plainText where the reader should auto-jump on first open
+    /// (skip past Gutenberg preamble, in-prose TOC, etc.). Zero
+    /// means no skip. Previously the persister always wrote 0 to
+    /// the `playback_skip_until_offset` column even when the
+    /// importer had computed a real value — meaning TXT Gutenberg
+    /// docs opened at the license preamble. Now persisted faithfully.
+    let playbackSkipUntilOffset: Int
+
+    /// Character offset where the reader should treat the document
+    /// as ended (Gutenberg license trailer). Zero means "play to
+    /// the end." Same bug, same fix as the skip offset above.
+    let contentEndOffset: Int
+
     /// The unit past which the reader should treat the document as
     /// ended (Gutenberg license trailer, etc.). `nil` means "play to
     /// the end."
     let contentEndUnitID: UUID?
+
+    /// **Bundle 2b (2026-05-26)** — content-hash dedup. SHA-256 hex
+    /// of the raw source-file bytes. Each library importer computes
+    /// it from the bytes it loaded (URL or Data input). Nil for
+    /// older importer paths that haven't been wired yet — persister
+    /// stores NULL and the existingDocument query falls back to
+    /// plainText comparison.
+    let contentHash: String?
 }
 
 // ========== BLOCK 01: PARSED DOCUMENT - END ==========

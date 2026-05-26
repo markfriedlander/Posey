@@ -33,16 +33,19 @@ struct PDFLibraryImporter {
         try FormatPrecheck.checkPDF(url: url)
         let parsed = try importer.loadDocument(from: url)
         let sourceData = (try? Data(contentsOf: url)) ?? nil
-        return try persistParsedPDF(parsed, from: url, sourceData: sourceData)
+        let contentHash = sourceData.map { ContentHasher.sha256($0) }
+        return try persistParsedPDF(parsed, from: url, sourceData: sourceData, contentHash: contentHash)
     }
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "pdf") throws -> Document {
         let parsed = try importer.loadDocument(fromData: rawData)
+        let contentHash = ContentHasher.sha256(rawData)
         let doc = try persistAsUnits(
             parsed: parsed,
             titleFallback: title,
             fileName: fileName,
-            fileType: fileType
+            fileType: fileType,
+            contentHash: contentHash
         )
         try saveImages(parsed.images, for: doc.id)
         PageFlagsStore.write(
@@ -61,17 +64,25 @@ struct PDFLibraryImporter {
     /// `persistParsedDocument(_:from:)` — kept for compatibility
     /// with PoseyApp / LocalAPI callers.
     func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL) throws -> Document {
-        try persistParsedPDF(parsed, from: url, sourceData: try? Data(contentsOf: url))
+        let sourceData = try? Data(contentsOf: url)
+        return try persistParsedPDF(
+            parsed, from: url, sourceData: sourceData,
+            contentHash: sourceData.map { ContentHasher.sha256($0) }
+        )
     }
 
     func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL, sourceData: Data?) throws -> Document {
-        try persistParsedPDF(parsed, from: url, sourceData: sourceData)
+        try persistParsedPDF(
+            parsed, from: url, sourceData: sourceData,
+            contentHash: sourceData.map { ContentHasher.sha256($0) }
+        )
     }
 
     private func persistParsedPDF(
         _ parsed: ParsedPDFDocument,
         from url: URL,
-        sourceData: Data?
+        sourceData: Data?,
+        contentHash: String?
     ) throws -> Document {
         // Strip duplicate file extensions (e.g. "report.pdf.pdf" → "report.pdf").
         let rawFilename = url.lastPathComponent
@@ -84,7 +95,8 @@ struct PDFLibraryImporter {
             parsed: parsed,
             titleFallback: titleFallback,
             fileName: fileName,
-            fileType: ext
+            fileType: ext,
+            contentHash: contentHash
         )
         try saveImages(parsed.images, for: doc.id)
 
@@ -109,13 +121,15 @@ struct PDFLibraryImporter {
         parsed: ParsedPDFDocument,
         titleFallback: String,
         fileName: String,
-        fileType: String
+        fileType: String,
+        contentHash: String?
     ) throws -> Document {
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
             fileType: fileType,
             plainText: parsed.plainText,
-            displayText: parsed.displayText
+            displayText: parsed.displayText,
+            contentHash: contentHash
         )
         let documentID = existingDocument?.id ?? UUID()
         let title = parsed.title ?? titleFallback
@@ -169,7 +183,10 @@ struct PDFLibraryImporter {
             toc: tocEntries,
             skipUnitID: skipUnitID,
             skipSource: skipSource,
-            contentEndUnitID: nil
+            playbackSkipUntilOffset: skipOffset,
+            contentEndOffset: 0,
+            contentEndUnitID: nil,
+            contentHash: contentHash
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 
@@ -189,7 +206,8 @@ struct PDFLibraryImporter {
             plainText: parsed.plainText,
             characterCount: parsed.plainText.count,
             playbackSkipUntilOffset: skipOffset,
-            skipSource: skipSource
+            skipSource: skipSource,
+            contentHash: contentHash
         )
 
         // PDF embedding indexing is still deferred to end-of-Tier-3

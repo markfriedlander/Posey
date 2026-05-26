@@ -116,21 +116,32 @@ struct UnitRowView: View {
     }
 
     var body: some View {
-        switch unit.kind {
-        case .prose:
-            proseRow
-        case .heading:
-            headingRow
-        case .blockquote:
-            blockquoteRow
-        case .listItem:
-            listItemRow
-        case .image:
-            imageRow
-        case .pageBreak:
-            pageBreakRow
-        case .horizontalRule:
-            horizontalRuleRow
+        VStack(alignment: .leading, spacing: 0) {
+            switch unit.kind {
+            case .prose:
+                proseRow
+            case .heading:
+                headingRow
+            case .blockquote:
+                blockquoteRow
+            case .listItem:
+                listItemRow
+            case .image:
+                imageRow
+            case .pageBreak:
+                pageBreakRow
+            case .horizontalRule:
+                horizontalRuleRow
+            }
+            // **Bundle fix #1 (2026-05-26)** — annotation glyphs
+            // moved out of the prose overlay into a footer row
+            // below the unit. Mark's feedback: overlaying on top of
+            // the active highlighted sentence obscured the text.
+            // Footer renders only when annotations exist, takes
+            // zero height when absent, and trails right so a
+            // dense reader sees the glyph in their peripheral
+            // vision without it covering the text.
+            annotationFooter
         }
     }
 
@@ -146,7 +157,6 @@ struct UnitRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
             .textSelection(.enabled)
-            .overlay(alignment: .topTrailing) { annotationOverlay }
     }
 
     // MARK: - AttributedString builder (shared by prose / quote / list)
@@ -200,18 +210,24 @@ struct UnitRowView: View {
     /// Small note / bookmark glyph anchored top-trailing when this
     /// unit contains at least one annotation. Mirrors the per-row
     /// indicator the legacy renderer drew.
+    /// **Bundle fix #1 (2026-05-26)** — annotation footer.
+    /// Renders below the unit's text, right-aligned, small. Out of
+    /// the prose layout so glyphs never obscure the active
+    /// sentence. Tap targets remain padded for thumb-friendliness.
     @ViewBuilder
-    private var annotationOverlay: some View {
+    private var annotationFooter: some View {
         if hasNote || hasBookmark {
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
                 if hasBookmark {
                     Button {
                         onTapBookmark?()
                     } label: {
                         Image(systemName: "bookmark.fill")
                             .font(.system(size: bodyFontSize * 0.6))
-                            .foregroundStyle(Color.primary.opacity(0.55))
-                            .padding(4)  // expand tap area without growing visible glyph
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 2)
+                            .padding(.horizontal, 4)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -223,15 +239,15 @@ struct UnitRowView: View {
                     } label: {
                         Image(systemName: "note.text")
                             .font(.system(size: bodyFontSize * 0.65))
-                            .foregroundStyle(Color.primary.opacity(0.55))
-                            .padding(4)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 2)
+                            .padding(.horizontal, 4)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open note")
                 }
             }
-            .padding(.trailing, 4)
             .padding(.top, 2)
             .accessibilityIdentifier("reader.unit.annotationIndicator")
         }
@@ -252,7 +268,6 @@ struct UnitRowView: View {
             .padding(.top, bodyFontSize * 0.75)
             .padding(.bottom, bodyFontSize * 0.3)
             .textSelection(.enabled)
-            .overlay(alignment: .topTrailing) { annotationOverlay }
     }
 
     // MARK: - Blockquote
@@ -269,7 +284,6 @@ struct UnitRowView: View {
                 .textSelection(.enabled)
         }
         .padding(.vertical, 4)
-        .overlay(alignment: .topTrailing) { annotationOverlay }
     }
 
     // MARK: - List item
@@ -286,7 +300,6 @@ struct UnitRowView: View {
                 .textSelection(.enabled)
         }
         .padding(.vertical, 2)
-        .overlay(alignment: .topTrailing) { annotationOverlay }
     }
 
     // MARK: - Image

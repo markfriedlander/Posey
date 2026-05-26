@@ -63,12 +63,19 @@ struct LibraryView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(document.title)
                             .font(.headline)
-                        // 2026-05-22 Phase 2.2 Step 8 — reading-time
-                        // label replaces the raw character count. Shows
-                        // total time when unstarted, time-remaining when
-                        // in progress, and a "Completed" indicator when
-                        // the reader has reached the document's end.
-                        // Tracks TTS rate changes via UserDefaults notifications.
+                        // **Bundle 2c (2026-05-26)** — edition
+                        // disambiguation. When two library cards
+                        // share a title (e.g. two Alice editions),
+                        // surface the filename as a small subtitle
+                        // so the user can tell them apart. Hidden
+                        // for unique titles to keep the card clean.
+                        if viewModel.isTitleAmbiguous(for: document) {
+                            Text(document.fileName)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                         LibraryReadingTimeLabel(
                             document: document,
                             databaseManager: viewModel.databaseManager
@@ -453,6 +460,24 @@ final class LibraryViewModel: ObservableObject {
         } catch {
             present(error)
         }
+        rebuildAmbiguousTitleSet()
+    }
+
+    /// **Bundle 2c (2026-05-26)** — set of titles that appear on two
+    /// or more documents. Used by the library card to decide whether
+    /// to surface the filename as an "edition" subtitle.
+    @Published private(set) var ambiguousTitles: Set<String> = []
+
+    private func rebuildAmbiguousTitleSet() {
+        var counts: [String: Int] = [:]
+        for doc in documents { counts[doc.title, default: 0] += 1 }
+        ambiguousTitles = Set(counts.filter { $0.value > 1 }.keys)
+    }
+
+    /// True when at least one other library document shares this
+    /// document's title — drives the filename-as-subtitle disambiguation.
+    func isTitleAmbiguous(for document: Document) -> Bool {
+        ambiguousTitles.contains(document.title)
     }
 
     /// 2026-05-14 (B1) — Heal-on-launch for documents whose Ask Posey

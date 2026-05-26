@@ -3400,7 +3400,31 @@ final class ReaderViewModel: ObservableObject {
             )
         }
 
-        // 1. Heavy results.
+        // **Bundle 2e (2026-05-26)** — restore the saved position
+        // BEFORE publishing the segments array. Large EPUBs used to
+        // briefly render segment 0 (the post-skip first body sentence,
+        // visually fine but a flicker on resume) before the onChange
+        // scroll caught up. By computing the restored index against
+        // `computed.segments` and seeding `currentSentenceIndex`
+        // first, the first render already targets the right row.
+        let restoredIndex: Int = {
+            do {
+                let position = try databaseManager.readingPosition(for: document.id)
+                    ?? .initial(for: document.id)
+                return Self.restoreSentenceIndex(
+                    from: position,
+                    segments: computed.segments,
+                    skipUntil: document.playbackSkipUntilOffset
+                )
+            } catch {
+                self.present(error)
+                return 0
+            }
+        }()
+        self.currentSentenceIndex = restoredIndex
+
+        // 1. Heavy results — publish after currentSentenceIndex so
+        // the first render lands on the right row.
         self.segments = computed.segments
         // Step 9 — units-based renderer state.
         self.units = computed.units
@@ -3410,43 +3434,21 @@ final class ReaderViewModel: ObservableObject {
         // sentence indices that follow a page break so it can apply
         // a brief preUtteranceDelay to each.
         self.playbackService.pageBreakPauseSentenceIndices = computed.pageBreakPauseSentenceIndices
-        // Pre-compute the per-unit sentence index so UnitRowView's
-        // body recomputes are O(unitSentenceCount) not O(totalSentences).
         var byUnit: [UUID: [Sentence]] = [:]
         for sentence in computed.sentences {
             byUnit[sentence.unitID, default: []].append(sentence)
         }
         self.sentencesByUnit = byUnit
-        // Step 9 carve-outs — units changed, the per-unit caches
-        // (sentence-index base + annotation flags) need a wipe so
-        // they rebuild lazily against the fresh shape.
         self.sentenceIndexBaseByUnit.removeAll(keepingCapacity: true)
         self.unitAnnotationCache.removeAll(keepingCapacity: true)
-        // 2026-05-13 (A1) — apply Motion-aware filter immediately so the
-        // pause behavior matches the user's current readingStyle from the
-        // moment content lands. `applyVisualBlockMotionPolicy()` is the
-        // single source of truth; called again on every readingStyle
-        // change so switching modes mid-read takes effect right away.
         self.applyVisualBlockMotionPolicy()
 
         // 2. DB side dishes (cheap).
         self.tocEntries = (try? databaseManager.tocEntries(for: document.id)) ?? []
         self.pageMap = DocumentPageMap.build(for: document, tocEntries: self.tocEntries)
-        // Step 9 — TOC-offset → heading-style bridge deleted. Headings
-        // are now real `.heading` units emitted at import time and
-        // styled by `UnitRowView.headingRow`.
 
-        // 3. Position restore + playback prepare (depend on segments).
-        //    Wrapped so a DB error here doesn't leave the reader
-        //    permanently in the loading state.
-        do {
-            let position = try databaseManager.readingPosition(for: document.id)
-                ?? .initial(for: document.id)
-            self.currentSentenceIndex = self.restoreSentenceIndex(from: position)
-            self.playbackService.prepare(at: self.currentSentenceIndex)
-        } catch {
-            self.present(error)
-        }
+        // 3. Prepare playback for the restored index.
+        self.playbackService.prepare(at: self.currentSentenceIndex)
 
         // 4. Subscribe to playback events. Done AFTER prepare so the
         //    initial sink emission carries the restored sentence
@@ -4008,28 +4010,32 @@ final class ReaderViewModel: ObservableObject {
     }
 
     private func restoreSentenceIndex(from position: ReadingPosition) -> Int {
-        guard segments.isEmpty == false else {
-            return 0
-        }
+        Self.restoreSentenceIndex(
+            from: position,
+            segments: segments,
+            skipUntil: document.playbackSkipUntilOffset
+        )
+    }
 
-        // The saved character offset may fall inside a region that has been
-        // FILTERED OUT of segments (e.g. a PDF Table of Contents). In that
-        // case there's no segment to match — we land on the first body
-        // sentence (segment 0), which is now the natural start of the
-        // reading flow. This also handles the first-open case where the
-        // saved position is the default zero offset.
-        let skipUntil = document.playbackSkipUntilOffset
-        if skipUntil > 0, position.characterOffset < skipUntil {
-            return 0
-        }
-
+    /// **Bundle 2e (2026-05-26)** — pure variant callable before
+    /// `self.segments` is set. Lets `loadContent` compute the
+    /// restored index from the freshly-loaded segments array and
+    /// seed `currentSentenceIndex` BEFORE publishing segments, so
+    /// the very first render lands on the right row.
+    nonisolated fileprivate static func restoreSentenceIndex(
+        from position: ReadingPosition,
+        segments: [TextSegment],
+        skipUntil: Int
+    ) -> Int {
+        guard segments.isEmpty == false else { return 0 }
+        if skipUntil > 0, position.characterOffset < skipUntil { return 0 }
         if let offsetMatch = segments.firstIndex(where: { segment in
             position.characterOffset >= segment.startOffset && position.characterOffset < segment.endOffset
         }) {
             return offsetMatch
         }
-
-        return boundedSentenceIndex(position.sentenceIndex)
+        // Fallback: clamp the saved sentenceIndex to range.
+        return max(0, min(position.sentenceIndex, segments.count - 1))
     }
 
     private func jumpToMarker(direction: Int) {

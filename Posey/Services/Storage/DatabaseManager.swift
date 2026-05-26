@@ -83,14 +83,14 @@ extension DatabaseManager {
         // the columns). One small SELECT + N derivations; on a typical
         // library that's <100ms even for tens of docs.
         let sql = """
-        SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source
+        SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source, content_hash
         FROM documents
         ORDER BY imported_at DESC;
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
 
-        var rows: [(id: UUID, title: String, fileName: String, fileType: String, importedAt: Date, modifiedAt: Date, characterCount: Int, playbackSkipUntilOffset: Int, contentEndOffset: Int, skipSource: String)] = []
+        var rows: [(id: UUID, title: String, fileName: String, fileType: String, importedAt: Date, modifiedAt: Date, characterCount: Int, playbackSkipUntilOffset: Int, contentEndOffset: Int, skipSource: String, contentHash: String?)] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             guard
                 let idText = sqliteString(statement, index: 0),
@@ -109,7 +109,8 @@ extension DatabaseManager {
                 characterCount: Int(sqlite3_column_int64(statement, 6)),
                 playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 7)),
                 contentEndOffset: Int(sqlite3_column_int64(statement, 8)),
-                skipSource: sqliteString(statement, index: 9) ?? ""
+                skipSource: sqliteString(statement, index: 9) ?? "",
+                contentHash: sqliteString(statement, index: 10)
             ))
         }
 
@@ -131,7 +132,8 @@ extension DatabaseManager {
                 characterCount: row.characterCount,
                 playbackSkipUntilOffset: row.playbackSkipUntilOffset,
                 contentEndOffset: row.contentEndOffset,
-                skipSource: row.skipSource
+                skipSource: row.skipSource,
+                contentHash: row.contentHash
             ))
         }
         return documents
@@ -142,9 +144,10 @@ extension DatabaseManager {
         // INSERT omits them; the doc's plainText/displayText fields
         // are derived from units at row-read time. Persistence of the
         // text lives entirely in `document_units` now.
+        // **Bundle 2b (2026-05-26)** — content_hash added.
         let sql = """
-        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source, content_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             file_name = excluded.file_name,
@@ -154,7 +157,8 @@ extension DatabaseManager {
             character_count = excluded.character_count,
             playback_skip_until_offset = excluded.playback_skip_until_offset,
             content_end_offset = excluded.content_end_offset,
-            skip_source = excluded.skip_source;
+            skip_source = excluded.skip_source,
+            content_hash = excluded.content_hash;
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -169,6 +173,11 @@ extension DatabaseManager {
         sqlite3_bind_int64(statement, 8, sqlite3_int64(document.playbackSkipUntilOffset))
         sqlite3_bind_int64(statement, 9, sqlite3_int64(document.contentEndOffset))
         try bind(document.skipSource, at: 10, for: statement)
+        if let hash = document.contentHash, !hash.isEmpty {
+            try bind(hash, at: 11, for: statement)
+        } else {
+            sqlite3_bind_null(statement, 11)
+        }
 
         try step(statement)
     }
@@ -193,17 +202,56 @@ extension DatabaseManager {
         return sqlite3_step(statement) == SQLITE_ROW
     }
 
-    func existingDocument(matchingFileName fileName: String, fileType: String, plainText: String, displayText: String? = nil) throws -> Document? {
-        // **Step 10 — dedup via derived plainText.** With the
-        // `plain_text` / `display_text` columns dropped, the old
-        // `WHERE plain_text=? AND display_text=?` match isn't
-        // available. New shape: narrow to file_name + file_type +
-        // character_count (cheap indexable predicates) then derive
-        // each candidate's plainText from units and confirm against
-        // the importer-supplied string. The character_count predicate
-        // makes this O(1) in the common case (different docs of same
-        // name almost always differ in length), with at most a small
-        // number of unit-derivations for the genuine-collision case.
+    func existingDocument(matchingFileName fileName: String, fileType: String, plainText: String, displayText: String? = nil, contentHash: String? = nil) throws -> Document? {
+        // **Bundle 2b (2026-05-26)** — content-hash-based dedup.
+        // When the caller supplied a hash, prefer it: SHA-256 of raw
+        // source bytes is the only signal that survives Tier 2 / Tier
+        // 3 enhancement rewriting plainText post-import. Fall back to
+        // the character_count + derived-plainText path for legacy
+        // docs imported before the hash column existed.
+        if let hash = contentHash, !hash.isEmpty {
+            let hashSQL = """
+            SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source, content_hash
+            FROM documents
+            WHERE file_name = ? AND file_type = ? AND content_hash = ?
+            LIMIT 1;
+            """
+            let hStmt = try prepareStatement(sql: hashSQL)
+            defer { sqlite3_finalize(hStmt) }
+            try bind(fileName, at: 1, for: hStmt)
+            try bind(fileType, at: 2, for: hStmt)
+            try bind(hash, at: 3, for: hStmt)
+            if sqlite3_step(hStmt) == SQLITE_ROW,
+               let idText = sqliteString(hStmt, index: 0),
+               let id = UUID(uuidString: idText),
+               let title = sqliteString(hStmt, index: 1),
+               let storedFileName = sqliteString(hStmt, index: 2),
+               let storedFileType = sqliteString(hStmt, index: 3) {
+                let derived = (try? self.plainText(for: id)) ?? ""
+                return Document(
+                    id: id,
+                    title: title,
+                    fileName: storedFileName,
+                    fileType: storedFileType,
+                    importedAt: Date(timeIntervalSince1970: sqlite3_column_double(hStmt, 4)),
+                    modifiedAt: Date(timeIntervalSince1970: sqlite3_column_double(hStmt, 5)),
+                    displayText: derived,
+                    plainText: derived,
+                    characterCount: Int(sqlite3_column_int64(hStmt, 6)),
+                    playbackSkipUntilOffset: Int(sqlite3_column_int64(hStmt, 7)),
+                    contentEndOffset: Int(sqlite3_column_int64(hStmt, 8)),
+                    skipSource: sqliteString(hStmt, index: 9) ?? "",
+                    contentHash: sqliteString(hStmt, index: 10)
+                )
+            }
+            // Hash didn't match anything — incoming is a new doc.
+            // Don't fall through to the plainText path; that would
+            // match a different doc with same name + char count.
+            return nil
+        }
+
+        // Legacy path — file_name + file_type + character_count
+        // candidate set, confirmed by plainText comparison.
         let sql = """
         SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source
         FROM documents
@@ -257,7 +305,8 @@ extension DatabaseManager {
                 characterCount: chars,
                 playbackSkipUntilOffset: skipOff,
                 contentEndOffset: endOff,
-                skipSource: source
+                skipSource: source,
+                contentHash: nil
             )
         }
         _ = displayText  // dedup is plainText-only post-Step-10
@@ -1016,6 +1065,14 @@ extension DatabaseManager {
         // Safe no-op on fresh DBs where the columns never existed.
         try dropColumnIfPresent(table: "documents", column: "plain_text")
         try dropColumnIfPresent(table: "documents", column: "display_text")
+        // **Bundle 2b (2026-05-26)** — content-hash dedup. SHA-256 of
+        // the raw source-file bytes, hex-encoded. Nullable so existing
+        // rows imported before this migration don't get nuked; new
+        // imports always populate it. existingDocument prefers a hash
+        // match when both candidate and incoming have non-empty hashes;
+        // falls back to plainText comparison otherwise.
+        try addColumnIfNeeded(table: "documents", column: "content_hash",
+                              definition: "TEXT")
         // (`content_boundaries` is preserved — PDFEnhancementService
         // still reads it directly for page-range arithmetic.
         // Rebuilding it on page_break units is a follow-up.)
@@ -2219,23 +2276,27 @@ extension DatabaseManager {
             let now = Date()
 
             // Insert / update document header.
+            // **Bundle 2b (2026-05-26)** — content_hash threaded.
             let docSQL = """
             INSERT INTO documents (
                 id, title, file_name, file_type, imported_at, modified_at,
                 character_count,
                 playback_skip_until_offset, content_end_offset, skip_source,
-                skip_unit_id, content_end_unit_id
+                skip_unit_id, content_end_unit_id, content_hash
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 file_name = excluded.file_name,
                 file_type = excluded.file_type,
                 modified_at = excluded.modified_at,
                 character_count = excluded.character_count,
+                playback_skip_until_offset = excluded.playback_skip_until_offset,
+                content_end_offset = excluded.content_end_offset,
                 skip_source = excluded.skip_source,
                 skip_unit_id = excluded.skip_unit_id,
-                content_end_unit_id = excluded.content_end_unit_id;
+                content_end_unit_id = excluded.content_end_unit_id,
+                content_hash = excluded.content_hash;
             """
             let docStmt = try prepareStatement(sql: docSQL)
             defer { sqlite3_finalize(docStmt) }
@@ -2246,16 +2307,27 @@ extension DatabaseManager {
             sqlite3_bind_double(docStmt, 5, now.timeIntervalSince1970)
             sqlite3_bind_double(docStmt, 6, now.timeIntervalSince1970)
             sqlite3_bind_int64(docStmt, 7, sqlite3_int64(characterCount))
-            try bind(parsed.skipSource, at: 8, for: docStmt)
+            // **Bundle 2d (2026-05-26)** — the skip and end offsets
+            // were always being written as 0 literal. Now bound
+            // from ParsedDocument so the reader's skip-at-open path
+            // sees the real value for TXT / Gutenberg / etc.
+            sqlite3_bind_int64(docStmt, 8, sqlite3_int64(parsed.playbackSkipUntilOffset))
+            sqlite3_bind_int64(docStmt, 9, sqlite3_int64(parsed.contentEndOffset))
+            try bind(parsed.skipSource, at: 10, for: docStmt)
             if let s = parsed.skipUnitID {
-                try bind(s.uuidString, at: 9, for: docStmt)
+                try bind(s.uuidString, at: 11, for: docStmt)
             } else {
-                sqlite3_bind_null(docStmt, 9)
+                sqlite3_bind_null(docStmt, 11)
             }
             if let e = parsed.contentEndUnitID {
-                try bind(e.uuidString, at: 10, for: docStmt)
+                try bind(e.uuidString, at: 12, for: docStmt)
             } else {
-                sqlite3_bind_null(docStmt, 10)
+                sqlite3_bind_null(docStmt, 12)
+            }
+            if let h = parsed.contentHash, !h.isEmpty {
+                try bind(h, at: 13, for: docStmt)
+            } else {
+                sqlite3_bind_null(docStmt, 13)
             }
             try step(docStmt)
 

@@ -27,21 +27,36 @@ struct TXTLibraryImporter {
 
     func importDocument(from url: URL) throws -> Document {
         let plainText = try textLoader.loadText(from: url)
+        // Bundle 2a — content-derived title (Gutenberg `Title:` header
+        // or first short line) with cleaned-filename fallback.
+        let derived = TitleExtractor.fromTXT(plainText: plainText)
+        let title = TitleExtractor.resolve(
+            contentTitle: derived,
+            filename: url.lastPathComponent
+        )
+        let contentHash = try? ContentHasher.sha256(of: url)
         return try importNormalizedDocument(
-            title: url.deletingPathExtension().lastPathComponent,
+            title: title,
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
-            plainText: plainText
+            plainText: plainText,
+            contentHash: contentHash
         )
     }
 
     func importDocument(title: String, fileName: String, rawText: String, fileType: String = "txt") throws -> Document {
         let plainText = try textLoader.loadText(fromContents: rawText)
+        let derived = TitleExtractor.fromTXT(plainText: plainText)
+        let resolved = title.isEmpty
+            ? TitleExtractor.resolve(contentTitle: derived, filename: fileName)
+            : title
+        let contentHash = ContentHasher.sha256(Data(rawText.utf8))
         return try importNormalizedDocument(
-            title: title,
+            title: resolved,
             fileName: fileName,
             fileType: fileType,
-            plainText: plainText
+            plainText: plainText,
+            contentHash: contentHash
         )
     }
 
@@ -49,12 +64,14 @@ struct TXTLibraryImporter {
         title: String,
         fileName: String,
         fileType: String,
-        plainText: String
+        plainText: String,
+        contentHash: String?
     ) throws -> Document {
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
             fileType: fileType,
-            plainText: plainText
+            plainText: plainText,
+            contentHash: contentHash
         )
         let documentID = existingDocument?.id ?? UUID()
 
@@ -103,7 +120,10 @@ struct TXTLibraryImporter {
             toc: [],
             skipUnitID: skipUnitID,
             skipSource: skipSource,
-            contentEndUnitID: contentEndUnitID
+            playbackSkipUntilOffset: skipOffset,
+            contentEndOffset: contentEndOffset,
+            contentEndUnitID: contentEndUnitID,
+            contentHash: contentHash
         )
         try databaseManager.persistParsedDocument(parsed)
 
@@ -130,7 +150,8 @@ struct TXTLibraryImporter {
             characterCount: plainText.count,
             playbackSkipUntilOffset: skipOffset,
             contentEndOffset: contentEndOffset,
-            skipSource: skipSource
+            skipSource: skipSource,
+            contentHash: contentHash
         )
         // 2026-05-23 — Step 8b: new unit-anchored chunker runs in
         // parallel with the legacy one during the cutover.

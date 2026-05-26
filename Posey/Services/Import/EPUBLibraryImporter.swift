@@ -33,21 +33,33 @@ struct EPUBLibraryImporter {
     func importDocument(from url: URL) throws -> Document {
         try FormatPrecheck.checkEPUB(url: url)
         let parsed = try importer.loadDocument(from: url)
+        let contentHash = try? ContentHasher.sha256(of: url)
+        let title = TitleExtractor.resolve(
+            contentTitle: parsed.title,
+            filename: url.lastPathComponent
+        )
         return try importParsedDocument(
-            title: parsed.title ?? url.deletingPathExtension().lastPathComponent,
+            title: title,
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
-            parsed: parsed
+            parsed: parsed,
+            contentHash: contentHash
         )
     }
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "epub") throws -> Document {
         let parsed = try importer.loadDocument(fromData: rawData)
+        let contentHash = ContentHasher.sha256(rawData)
+        let resolved = TitleExtractor.resolve(
+            contentTitle: parsed.title ?? (title.isEmpty ? nil : title),
+            filename: fileName
+        )
         return try importParsedDocument(
-            title: parsed.title ?? title,
+            title: resolved,
             fileName: fileName,
             fileType: fileType,
-            parsed: parsed
+            parsed: parsed,
+            contentHash: contentHash
         )
     }
 
@@ -55,13 +67,15 @@ struct EPUBLibraryImporter {
         title: String,
         fileName: String,
         fileType: String,
-        parsed: ParsedEPUBDocument
+        parsed: ParsedEPUBDocument,
+        contentHash: String?
     ) throws -> Document {
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
             fileType: fileType,
             plainText: parsed.plainText,
-            displayText: parsed.displayText
+            displayText: parsed.displayText,
+            contentHash: contentHash
         )
         let documentID = existingDocument?.id ?? UUID()
 
@@ -122,7 +136,10 @@ struct EPUBLibraryImporter {
             toc: tocEntries,
             skipUnitID: skipUnitID,
             skipSource: computed.skipSource,
-            contentEndUnitID: contentEndUnitID
+            playbackSkipUntilOffset: computed.skipOffset,
+            contentEndOffset: contentEndOffset,
+            contentEndUnitID: contentEndUnitID,
+            contentHash: contentHash
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 
@@ -149,7 +166,8 @@ struct EPUBLibraryImporter {
             characterCount: parsed.plainText.count,
             playbackSkipUntilOffset: computed.skipOffset,
             contentEndOffset: contentEndOffset,
-            skipSource: computed.skipSource
+            skipSource: computed.skipSource,
+            contentHash: contentHash
         )
         let docID = document.id
         let dbRef = databaseManager

@@ -27,21 +27,40 @@ struct MarkdownLibraryImporter {
     func importDocument(from url: URL) throws -> Document {
         try FormatPrecheck.checkTextLike(url: url, declaredType: "md")
         let parsed = try importer.loadDocument(from: url)
+        // **Bundle 2a (2026-05-26)** — feed RAW markdown bytes to
+        // the extractor so the `# Heading` syntax is still visible.
+        // `parsed.plainText` has already stripped the `#` markers.
+        let raw = (try? String(contentsOf: url, encoding: .utf8))
+            ?? (try? String(contentsOf: url, encoding: .isoLatin1))
+            ?? parsed.plainText
+        let derived = TitleExtractor.fromMarkdown(plainText: raw)
+        let title = TitleExtractor.resolve(
+            contentTitle: derived,
+            filename: url.lastPathComponent
+        )
+        let contentHash = try? ContentHasher.sha256(of: url)
         return try importParsedDocument(
-            title: url.deletingPathExtension().lastPathComponent,
+            title: title,
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
-            parsed: parsed
+            parsed: parsed,
+            contentHash: contentHash
         )
     }
 
     func importDocument(title: String, fileName: String, rawText: String, fileType: String = "md") throws -> Document {
         let parsed = try importer.loadDocument(fromContents: rawText)
+        let derived = TitleExtractor.fromMarkdown(plainText: rawText)
+        let resolved = title.isEmpty
+            ? TitleExtractor.resolve(contentTitle: derived, filename: fileName)
+            : title
+        let contentHash = ContentHasher.sha256(Data(rawText.utf8))
         return try importParsedDocument(
-            title: title,
+            title: resolved,
             fileName: fileName,
             fileType: fileType,
-            parsed: parsed
+            parsed: parsed,
+            contentHash: contentHash
         )
     }
 
@@ -49,13 +68,15 @@ struct MarkdownLibraryImporter {
         title: String,
         fileName: String,
         fileType: String,
-        parsed: ParsedMarkdownDocument
+        parsed: ParsedMarkdownDocument,
+        contentHash: String?
     ) throws -> Document {
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
             fileType: fileType,
             plainText: parsed.plainText,
-            displayText: parsed.displayText
+            displayText: parsed.displayText,
+            contentHash: contentHash
         )
         let documentID = existingDocument?.id ?? UUID()
 
@@ -92,7 +113,10 @@ struct MarkdownLibraryImporter {
             toc: tocEntries,
             skipUnitID: nil,
             skipSource: "",
-            contentEndUnitID: nil
+            playbackSkipUntilOffset: 0,
+            contentEndOffset: 0,
+            contentEndUnitID: nil,
+            contentHash: contentHash
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 
@@ -112,7 +136,11 @@ struct MarkdownLibraryImporter {
             modifiedAt: now,
             displayText: parsed.displayText,
             plainText: parsed.plainText,
-            characterCount: parsed.plainText.count
+            characterCount: parsed.plainText.count,
+            playbackSkipUntilOffset: 0,
+            contentEndOffset: 0,
+            skipSource: "",
+            contentHash: contentHash
         )
         let docID = document.id
         let dbRef = databaseManager

@@ -24,27 +24,38 @@ struct DOCXLibraryImporter {
     func importDocument(from url: URL) throws -> Document {
         try FormatPrecheck.checkDOCX(url: url)
         let parsed = try textLoader.loadDocument(from: url)
+        let contentHash = try? ContentHasher.sha256(of: url)
+        let title = TitleExtractor.resolve(
+            contentTitle: parsed.coreTitle,
+            filename: url.lastPathComponent
+        )
         return try importNormalizedDocument(
-            title: url.deletingPathExtension().lastPathComponent,
+            title: title,
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
             displayText: parsed.displayText,
             plainText: parsed.plainText,
             images: parsed.images,
-            headings: parsed.headings
+            headings: parsed.headings,
+            contentHash: contentHash
         )
     }
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "docx") throws -> Document {
         let parsed = try textLoader.loadDocument(fromData: rawData)
+        let contentHash = ContentHasher.sha256(rawData)
+        let resolved = title.isEmpty
+            ? TitleExtractor.resolve(contentTitle: parsed.coreTitle, filename: fileName)
+            : title
         return try importNormalizedDocument(
-            title: title,
+            title: resolved,
             fileName: fileName,
             fileType: fileType,
             displayText: parsed.displayText,
             plainText: parsed.plainText,
             images: parsed.images,
-            headings: parsed.headings
+            headings: parsed.headings,
+            contentHash: contentHash
         )
     }
 
@@ -55,12 +66,14 @@ struct DOCXLibraryImporter {
         displayText: String,
         plainText: String,
         images: [PageImageRecord],
-        headings: [DOCXDocumentImporter.DOCXHeadingEntry]
+        headings: [DOCXDocumentImporter.DOCXHeadingEntry],
+        contentHash: String?
     ) throws -> Document {
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
             fileType: fileType,
-            plainText: plainText
+            plainText: plainText,
+            contentHash: contentHash
         )
         let documentID = existingDocument?.id ?? UUID()
 
@@ -117,7 +130,10 @@ struct DOCXLibraryImporter {
             toc: tocEntries,
             skipUnitID: skipUnitID,
             skipSource: skipSource,
-            contentEndUnitID: nil
+            playbackSkipUntilOffset: tocSkipOffset,
+            contentEndOffset: 0,
+            contentEndUnitID: nil,
+            contentHash: contentHash
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 
@@ -144,7 +160,8 @@ struct DOCXLibraryImporter {
             plainText: plainText,
             characterCount: plainText.count,
             playbackSkipUntilOffset: tocSkipOffset,
-            skipSource: skipSource
+            skipSource: skipSource,
+            contentHash: contentHash
         )
         let docID = document.id
         let dbRef = databaseManager

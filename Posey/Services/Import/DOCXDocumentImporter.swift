@@ -58,14 +58,34 @@ struct DOCXDocumentImporter {
         let plainTextOffset: Int
     }
 
-    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry]) {
+    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry], coreTitle: String?) {
         let data = try Data(contentsOf: url)
         return try loadDocument(fromData: data)
     }
 
-    func loadDocument(fromData data: Data) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry]) {
+    func loadDocument(fromData data: Data) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry], coreTitle: String?) {
         let archive = try archive(from: data)
         let documentXML = try archive.entryData(named: "word/document.xml")
+        // **Bundle 2a — DOCX `<dc:title>` extraction.** The
+        // `docProps/core.xml` part carries Dublin Core metadata
+        // including `<dc:title>`. Plenty of real-world DOCXs have
+        // this populated; we read it (best-effort) and pass it up
+        // to the library importer for use as the document title.
+        let coreTitle: String? = {
+            guard let coreData = try? archive.entryData(named: "docProps/core.xml"),
+                  let coreString = String(data: coreData, encoding: .utf8) else { return nil }
+            // Quick regex match — core.xml has exactly one <dc:title>.
+            guard let range = coreString.range(of: #"<dc:title[^>]*>([\s\S]*?)</dc:title>"#,
+                                               options: [.regularExpression, .caseInsensitive]) else { return nil }
+            let raw = String(coreString[range])
+            let inner = raw
+                .replacingOccurrences(of: #"<dc:title[^>]*>"#, with: "",
+                                      options: [.regularExpression, .caseInsensitive])
+                .replacingOccurrences(of: "</dc:title>", with: "",
+                                      options: [.caseInsensitive])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return inner.isEmpty ? nil : inner
+        }()
 
         // rId → archive path mapping for inline images. Best-effort —
         // a missing rels file yields an empty mapping (images won't
@@ -156,7 +176,7 @@ struct DOCXDocumentImporter {
             let plainOffset = max(0, displayOffset - markerLossPrefix[h.paragraphIndex])
             return DOCXHeadingEntry(level: h.level, title: h.title, plainTextOffset: plainOffset)
         }
-        return (normalizedDisplay, normalizedPlain, usedImages, docxHeadings)
+        return (normalizedDisplay, normalizedPlain, usedImages, docxHeadings, coreTitle)
     }
 // ========== BLOCK 02: ENTRY POINTS - END ==========
 

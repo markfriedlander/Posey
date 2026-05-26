@@ -918,6 +918,51 @@ extension LibraryViewModel {
                     "chunksInjectedCount": 3
                 ])
 
+            case "SET_LLM":
+                // **MLX verification (2026-05-26)** — write the selected
+                // model id into UserDefaults under
+                // `ModelCatalog.defaultsKey`. The next /ask turn calls
+                // `ModelCatalog.current()` which reads that key, so the
+                // model switch takes effect immediately on the next
+                // ask. Use the catalog id ("mlx-community/...") or the
+                // short alias ("gemma" / "qwen" / "llama" / "dolphin").
+                guard let raw = arg, !raw.isEmpty else {
+                    return #"{"error":"Usage: SET_LLM:<modelID> or SET_LLM:<alias>"}"#
+                }
+                let aliases: [String: ModelConfiguration] = [
+                    "afm": ModelCatalog.appleFoundation,
+                    "apple": ModelCatalog.appleFoundation,
+                    "gemma": ModelCatalog.gemma4_E2B,
+                    "qwen": ModelCatalog.qwen35_2B,
+                    "llama": ModelCatalog.llama32_3B,
+                    "dolphin": ModelCatalog.dolphin30_3B
+                ]
+                let resolved: ModelConfiguration? = {
+                    if let exact = ModelCatalog.model(id: raw) { return exact }
+                    return aliases[raw.lowercased()]
+                }()
+                guard let model = resolved else {
+                    let all = ModelCatalog.all.map(\.id).joined(separator: ", ")
+                    return #"{"error":"Unknown model. Known ids: \#(all). Aliases: afm, gemma, qwen, llama, dolphin"}"#
+                }
+                UserDefaults.standard.set(model.id, forKey: ModelCatalog.defaultsKey)
+                return json([
+                    "status": "set",
+                    "id": model.id,
+                    "displayName": model.displayName,
+                    "source": "\(model.source)"
+                ])
+
+            case "GET_LLM":
+                let model = ModelCatalog.current()
+                return json([
+                    "id": model.id,
+                    "displayName": model.displayName,
+                    "source": "\(model.source)",
+                    "sizeGB": model.sizeGB,
+                    "contextWindow": model.contextWindow
+                ])
+
             case "SET_EMBEDDING_PROVIDER":
                 // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
                 _ = arg

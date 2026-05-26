@@ -77,10 +77,12 @@ actor MLXService {
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
         guard model.source == .mlx, let repoID = model.hfRepoID else {
+            dbgLog("MLX: rejecting %@ — wrong source or missing repoID", model.id)
             throw LLMService.LLMError.modelUnavailable(modelID: model.id)
         }
-
+        dbgLog("MLX: streamChat begin model=%@ repoID=%@", model.id, repoID)
         let container = try await loadContainerIfNeeded(modelID: model.id, repoID: repoID)
+        dbgLog("MLX: container ready for %@", model.id)
 
         let chatMessages: [Chat.Message] = messages.map { msg in
             switch msg.role {
@@ -96,8 +98,16 @@ actor MLXService {
             chat: chatMessages,
             additionalContext: ["enable_thinking": false]
         )
-        let lmInput = try await container.prepare(input: userInput)
+        dbgLog("MLX: preparing input messages=%d", chatMessages.count)
+        let lmInput: LMInput
+        do {
+            lmInput = try await container.prepare(input: userInput)
+        } catch {
+            dbgLog("MLX: prepare threw: %@", "\(error)")
+            throw error
+        }
         let promptTokenCount = lmInput.text.tokens.size
+        dbgLog("MLX: prepared promptTokens=%d", promptTokenCount)
 
         // Per-turn pre-flight.
         let kvNeeded = Int64(promptTokenCount) * Int64(kvBytesPerTokenDefault)
@@ -105,9 +115,13 @@ actor MLXService {
         let safetyBytes: Int64 = 200 * 1024 * 1024
         let neededBytes = kvNeeded + scratchBytes + safetyBytes
         let availableBytes = Int64(os_proc_available_memory())
+        dbgLog("MLX: preflight kv+scratch+safety=%dMB available=%dMB",
+               Int(neededBytes / (1024*1024)),
+               Int(availableBytes / (1024*1024)))
         if availableBytes > 0 && availableBytes < neededBytes {
             let neededMB = Int(neededBytes / (1024 * 1024))
             let availableMB = Int(availableBytes / (1024 * 1024))
+            dbgLog("MLX: REJECTING preflight need=%dMB avail=%dMB", neededMB, availableMB)
             throw LLMService.LLMError.insufficientMemoryForTurn(
                 modelID: model.id,
                 promptTokens: promptTokenCount,
@@ -121,22 +135,28 @@ actor MLXService {
             temperature: Float(options.temperature)
         )
 
-        let stream = try await container.generate(input: lmInput, parameters: parameters)
-        var fullText = ""
-        var iterator = stream.makeAsyncIterator()
-        while let event = await iterator.next() {
-            switch event {
-            case .chunk(let text):
-                fullText += text
-                continuation.yield(fullText)
-            default:
-                // MLX's Generation enum has additional cases
-                // (`.info`, `.toolCall`, etc.) we don't act on
-                // here. A default arm keeps us forward-compatible.
-                continue
+        dbgLog("MLX: generate begin promptTokens=%d", promptTokenCount)
+        do {
+            let stream = try await container.generate(input: lmInput, parameters: parameters)
+            var fullText = ""
+            var iterator = stream.makeAsyncIterator()
+            var chunkCount = 0
+            while let event = await iterator.next() {
+                switch event {
+                case .chunk(let text):
+                    fullText += text
+                    chunkCount += 1
+                    continuation.yield(fullText)
+                default:
+                    continue
+                }
             }
+            dbgLog("MLX: generate finished chunks=%d totalLen=%d", chunkCount, fullText.count)
+            continuation.finish()
+        } catch {
+            dbgLog("MLX: generate threw: %@", "\(error)")
+            throw error
         }
-        continuation.finish()
     }
 
     // MARK: - Load coordination
@@ -179,6 +199,7 @@ actor MLXService {
             loadProgressByID[modelID] = 1.0
             return container
         } catch {
+            dbgLog("MLX: loadContainer threw for %@: %@", modelID, "\(error)")
             loadProgressByID[modelID] = 0.0
             throw LLMService.LLMError.generationFailed(underlying: error)
         }

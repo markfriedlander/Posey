@@ -2797,6 +2797,8 @@ final class ReaderViewModel: ObservableObject {
         do {
             try databaseManager.upsertDocument(updated)
             self.document = updated
+        } catch DatabaseManager.DatabaseError.foreignKeyViolation {
+            // Doc deleted under us — benign.
         } catch {
             present(error)
         }
@@ -2816,6 +2818,9 @@ final class ReaderViewModel: ObservableObject {
         do {
             try databaseManager.upsertDocument(updated)
             self.document = updated
+        } catch DatabaseManager.DatabaseError.foreignKeyViolation {
+            // Doc deleted under us — benign; bail out, nothing to reveal.
+            return
         } catch {
             present(error)
             return
@@ -3843,6 +3848,11 @@ final class ReaderViewModel: ObservableObject {
 
         do {
             try databaseManager.upsertReadingPosition(position)
+        } catch DatabaseManager.DatabaseError.foreignKeyViolation {
+            // Document was deleted under us (RESET_ALL / swipe-delete /
+            // DELETE_DOCUMENT verb fired while the reader was still
+            // mounted). Position is meaningless once the doc is gone —
+            // silent no-op, not a scary alert.
         } catch {
             present(error)
         }
@@ -4637,6 +4647,8 @@ final class ReaderViewModel: ObservableObject {
         do {
             try databaseManager.insertNote(note)
             loadNotes()
+        } catch DatabaseManager.DatabaseError.foreignKeyViolation {
+            // Doc deleted under us — benign.
         } catch {
             present(error)
         }

@@ -14,6 +14,14 @@ final class DatabaseManager: @unchecked Sendable {
         case prepareFailed(String)
         case stepFailed(String)
         case bindFailed(String)
+        /// SQLite reported `SQLITE_CONSTRAINT_FOREIGNKEY` (extended code 787).
+        /// Surfaced as a distinct case so callers can treat the "document
+        /// was deleted under us" race as benign (silent no-op) instead of
+        /// presenting a scary alert. Race window: reader writes a reading
+        /// position while RESET_ALL / DELETE_DOCUMENT cascade-deletes the
+        /// document row on main; the FK on reading_positions.document_id
+        /// then rejects the upsert.
+        case foreignKeyViolation(String)
 
         var errorDescription: String? {
             switch self {
@@ -25,6 +33,8 @@ final class DatabaseManager: @unchecked Sendable {
                 return "Posey could not execute a database statement: \(message)"
             case .bindFailed(let message):
                 return "Posey could not bind a database value: \(message)"
+            case .foreignKeyViolation(let message):
+                return "Posey could not satisfy a database relationship: \(message)"
             }
         }
     }
@@ -145,6 +155,18 @@ extension DatabaseManager {
         defer { sqlite3_finalize(statement) }
         try bind(document.id.uuidString, at: 1, for: statement)
         try step(statement)
+    }
+
+    /// Returns true iff a row exists in `documents` with the given id.
+    /// Used as a precheck before writes that would otherwise hit a FK
+    /// violation if the document was concurrently deleted (RESET_ALL,
+    /// DELETE_DOCUMENT antenna verb, swipe-to-delete).
+    func documentExists(_ id: UUID) throws -> Bool {
+        let sql = "SELECT 1 FROM documents WHERE id = ? LIMIT 1;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(id.uuidString, at: 1, for: statement)
+        return sqlite3_step(statement) == SQLITE_ROW
     }
 
     func existingDocument(matchingFileName fileName: String, fileType: String, plainText: String, displayText: String? = nil) throws -> Document? {
@@ -1385,6 +1407,16 @@ extension DatabaseManager {
 
     private func step(_ statement: OpaquePointer?) throws {
         if sqlite3_step(statement) != SQLITE_DONE {
+            // Distinguish FK violations so callers can treat the
+            // "doc was deleted under us" race as benign rather than
+            // surfacing a confusing alert.
+            // SQLITE_CONSTRAINT_FOREIGNKEY = 787 = SQLITE_CONSTRAINT (19)
+            // | (3 << 8). The compound macro isn't bridged into Swift;
+            // hardcode the literal.
+            let extended = sqlite3_extended_errcode(database)
+            if extended == 787 {
+                throw DatabaseError.foreignKeyViolation(lastErrorMessage())
+            }
             throw DatabaseError.stepFailed(lastErrorMessage())
         }
     }
@@ -2422,10 +2454,23 @@ extension DatabaseManager {
 
     /// Replace every chunk for `documentID` with the supplied set.
     /// Atomic: deletes old then inserts new in a single transaction.
+    ///
+    /// **Race guard:** `UnitEmbeddingService.enqueueIndexing` snapshots
+    /// units on main, releases the actor to chunk off-main, then comes
+    /// back to main to write. RESET_ALL / DELETE_DOCUMENT can cascade-
+    /// delete the document (and its units) during the off-main window,
+    /// after which the start_unit_id / end_unit_id FKs reject every
+    /// insert. We re-check document existence inside the transaction
+    /// and return silently if the doc is gone — DELETE already swept
+    /// any stragglers via cascade, so the table is in the right state.
     func replaceAllUnitEmbeddingChunks(_ chunks: [StoredUnitEmbeddingChunk],
                                        for documentID: UUID) throws {
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
+            if try !documentExists(documentID) {
+                try execute("ROLLBACK;")
+                return
+            }
             let deleteStmt = try prepareStatement(
                 sql: "DELETE FROM unit_embedding_chunks WHERE document_id = ?;"
             )

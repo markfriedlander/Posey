@@ -49,6 +49,30 @@ struct UnitRowView: View {
     /// styles it when `activeSentence?.unitID == unit.id`.
     let activeSentence: Sentence?
 
+    /// Index of the active sentence in the flat `sentences` array on
+    /// the VM. Used together with `sentenceIndexBase` and the per-
+    /// sentence index to compute distance-from-active, which feeds
+    /// the M8 reading-style dimming + scaling curves.
+    let activeSentenceIndex: Int
+
+    /// Flat-array index of THIS unit's first sentence (added to a
+    /// sentence's position within the unit to derive its global
+    /// flat-array index). Computed once at the call site so the row
+    /// doesn't need the full sentences list.
+    let sentenceIndexBase: Int
+
+    /// Reading style (Standard / Focus / Immersive / Motion) — drives
+    /// the dimming + scaling curves applied per-sentence.
+    let readingStyle: PlaybackPreferences.ReadingStyle
+
+    /// Note + bookmark presence flags for this unit, computed by the
+    /// VM from intersecting note offsets with the unit's plainText
+    /// range. The unit row overlays a small glyph at top-trailing
+    /// when either flag is set — preserves the annotation indicator
+    /// affordance the legacy renderer had per-row.
+    let hasNote: Bool
+    let hasBookmark: Bool
+
     /// User-controlled body font size. Threaded down so the row
     /// scales with reader preferences.
     let bodyFontSize: CGFloat
@@ -63,6 +87,24 @@ struct UnitRowView: View {
     /// `ReaderView`'s `.environment(\.openURL, …)` action handler.
     /// Format: `posey-sentence://<sentence-uuid>`.
     static let sentenceURLScheme = "posey-sentence"
+
+    // MARK: - Dimming curves (M8 reading-style)
+
+    /// Per-sentence opacity. Active sentence at 1.0; non-active at
+    /// 0.45 in Standard / Focus; distance-based geometric falloff in
+    /// Immersive / Motion (active 1.0; one row out 0.70; two out
+    /// 0.40; floor 0.05).
+    fileprivate func opacityForSentence(at flatIndex: Int) -> Double {
+        let distance = abs(flatIndex - activeSentenceIndex)
+        if distance == 0 { return 1.0 }
+        switch readingStyle {
+        case .standard, .focus:
+            return 0.45
+        case .immersive, .motion:
+            let raw = 1.0 - 0.30 * Double(distance)
+            return max(0.05, raw)
+        }
+    }
 
     var body: some View {
         switch unit.kind {
@@ -95,6 +137,7 @@ struct UnitRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
             .textSelection(.enabled)
+            .overlay(alignment: .topTrailing) { annotationOverlay }
     }
 
     // MARK: - AttributedString builder (shared by prose / quote / list)
@@ -111,7 +154,7 @@ struct UnitRowView: View {
         let plain = unit.text
         let active = (activeSentence?.unitID == unit.id) ? activeSentence : nil
 
-        for sentence in sentencesInUnit {
+        for (positionInUnit, sentence) in sentencesInUnit.enumerated() {
             guard sentence.intraStart >= 0,
                   sentence.intraEnd <= plain.count,
                   sentence.intraStart < sentence.intraEnd,
@@ -124,9 +167,15 @@ struct UnitRowView: View {
             }
             let range = attrLower..<attrUpper
             attributed[range].link = url
-            // Suppress link styling so the prose looks like prose,
-            // not a list of blue underlined items.
-            attributed[range].foregroundColor = Color.primary
+            // M8 reading-style dimming: per-sentence opacity by
+            // distance-from-active. Standard / Focus dim non-active
+            // rows to 0.45; Immersive / Motion apply a distance-based
+            // geometric falloff. Also suppresses the default link
+            // styling (blue + underline) — prose stays prose, not
+            // a list of underlined items.
+            let flatIdx = sentenceIndexBase + positionInUnit
+            let opacity = opacityForSentence(at: flatIdx)
+            attributed[range].foregroundColor = Color.primary.opacity(opacity)
             attributed[range].underlineStyle = nil
             // Active highlight on top of the link range — same
             // subtle background as the prior segment-row treatment.
@@ -135,6 +184,32 @@ struct UnitRowView: View {
             }
         }
         return attributed
+    }
+
+    // MARK: - Annotation overlay
+
+    /// Small note / bookmark glyph anchored top-trailing when this
+    /// unit contains at least one annotation. Mirrors the per-row
+    /// indicator the legacy renderer drew.
+    @ViewBuilder
+    private var annotationOverlay: some View {
+        if hasNote || hasBookmark {
+            HStack(spacing: 4) {
+                if hasBookmark {
+                    Image(systemName: "bookmark.fill")
+                        .font(.system(size: bodyFontSize * 0.6))
+                        .foregroundStyle(Color.primary.opacity(0.55))
+                }
+                if hasNote {
+                    Image(systemName: "note.text")
+                        .font(.system(size: bodyFontSize * 0.65))
+                        .foregroundStyle(Color.primary.opacity(0.55))
+                }
+            }
+            .padding(.trailing, 4)
+            .padding(.top, 2)
+            .accessibilityIdentifier("reader.unit.annotationIndicator")
+        }
     }
 
     // MARK: - Heading
@@ -152,6 +227,7 @@ struct UnitRowView: View {
             .padding(.top, bodyFontSize * 0.75)
             .padding(.bottom, bodyFontSize * 0.3)
             .textSelection(.enabled)
+            .overlay(alignment: .topTrailing) { annotationOverlay }
     }
 
     // MARK: - Blockquote
@@ -168,6 +244,7 @@ struct UnitRowView: View {
                 .textSelection(.enabled)
         }
         .padding(.vertical, 4)
+        .overlay(alignment: .topTrailing) { annotationOverlay }
     }
 
     // MARK: - List item
@@ -184,6 +261,7 @@ struct UnitRowView: View {
                 .textSelection(.enabled)
         }
         .padding(.vertical, 2)
+        .overlay(alignment: .topTrailing) { annotationOverlay }
     }
 
     // MARK: - Image

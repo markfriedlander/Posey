@@ -106,10 +106,16 @@ struct ReaderView: View {
                     // inside the row's `AttributedString`; the openURL
                     // action below dispatches to `jumpToSentenceID`.
                     ForEach(viewModel.units) { unit in
+                        let annotations = viewModel.annotationFlags(for: unit)
                         UnitRowView(
                             unit: unit,
                             sentencesInUnit: viewModel.sentencesByUnit[unit.id] ?? [],
                             activeSentence: viewModel.activeSentence,
+                            activeSentenceIndex: viewModel.currentSentenceIndex,
+                            sentenceIndexBase: viewModel.sentenceIndexBase(for: unit),
+                            readingStyle: viewModel.readingStyle,
+                            hasNote: annotations.hasNote,
+                            hasBookmark: annotations.hasBookmark,
                             bodyFontSize: viewModel.fontSize,
                             imageDataProvider: { viewModel.imageData(for: $0) }
                         )
@@ -3340,6 +3346,11 @@ final class ReaderViewModel: ObservableObject {
             byUnit[sentence.unitID, default: []].append(sentence)
         }
         self.sentencesByUnit = byUnit
+        // Step 9 carve-outs — units changed, the per-unit caches
+        // (sentence-index base + annotation flags) need a wipe so
+        // they rebuild lazily against the fresh shape.
+        self.sentenceIndexBaseByUnit.removeAll(keepingCapacity: true)
+        self.unitAnnotationCache.removeAll(keepingCapacity: true)
         // 2026-05-13 (A1) — apply Motion-aware filter immediately so the
         // pause behavior matches the user's current readingStyle from the
         // moment content lands. `applyVisualBlockMotionPolicy()` is the
@@ -4103,6 +4114,11 @@ final class ReaderViewModel: ObservableObject {
         } catch {
             present(error)
         }
+        // Step 9 carve-out — annotation indicators on unit rows.
+        // Whenever the notes list refreshes, the per-unit flag
+        // cache needs a wipe so the next render reflects new /
+        // deleted annotations.
+        invalidateUnitAnnotationCache()
         rebuildSavedAnnotations()
     }
 
@@ -4240,6 +4256,95 @@ final class ReaderViewModel: ObservableObject {
     }
 
     // ========== BLOCK VM-IMAGE: IMAGE LOADING - END ==========
+
+    // ========== BLOCK VM-UNIT: UNIT-ROW HELPERS - START ==========
+
+    /// Cached lookup: `unit.id → flat-array index of its first sentence
+    /// in `sentences``. Rebuilt whenever the sentence list changes.
+    /// Empty until content loads.
+    private var sentenceIndexBaseByUnit: [UUID: Int] = [:]
+
+    /// Returns the flat-array index of the FIRST sentence whose
+    /// `unitID == unit.id` in the document's filtered sentence list.
+    /// Used by `UnitRowView` to derive each sentence's global flat
+    /// index (base + position-within-unit) so distance-from-active
+    /// can be computed without scanning the whole list per redraw.
+    /// Falls back to `currentSentenceIndex` for non-prose units —
+    /// distance 0 keeps them at full opacity (they have no
+    /// sentences anyway, so the value doesn't matter visually).
+    func sentenceIndexBase(for unit: ContentUnit) -> Int {
+        if let cached = sentenceIndexBaseByUnit[unit.id] { return cached }
+        // Lazy compute + cache. Linear in the flat list; called once
+        // per unit per content load, so cheap in aggregate.
+        for (idx, sentence) in sentences.enumerated() where sentence.unitID == unit.id {
+            sentenceIndexBaseByUnit[unit.id] = idx
+            return idx
+        }
+        return currentSentenceIndex
+    }
+
+    /// Per-unit annotation flags. Computed by intersecting the
+    /// document's notes list against the unit's plainText range —
+    /// `[unitStart, unitEnd)` in the joined plainText coordinate
+    /// space. Cached on the VM so the per-row recompute stays
+    /// cheap; cache invalidated on note insert/delete.
+    private var unitAnnotationCache: [UUID: (hasNote: Bool, hasBookmark: Bool)] = [:]
+
+    struct UnitAnnotationFlags {
+        let hasNote: Bool
+        let hasBookmark: Bool
+    }
+
+    /// Public accessor (called from ReaderView's ForEach). Builds the
+    /// cache lazily — the first call for a doc walks the unit list to
+    /// compute every unit's plainText range; subsequent calls hit the
+    /// cache.
+    func annotationFlags(for unit: ContentUnit) -> UnitAnnotationFlags {
+        if let cached = unitAnnotationCache[unit.id] {
+            return UnitAnnotationFlags(hasNote: cached.hasNote, hasBookmark: cached.hasBookmark)
+        }
+        // Lazy build for this unit. Compute its plainText range by
+        // walking earlier prose-bearing units (cheap; small in
+        // practice).
+        var cursor = 0
+        var foundStart = 0
+        var foundEnd = 0
+        var firstProseSeen = false
+        for u in units {
+            if !u.kind.carriesProseText { continue }
+            if firstProseSeen { cursor += 2 }
+            firstProseSeen = true
+            let start = cursor
+            let end = cursor + u.text.count
+            cursor = end
+            if u.id == unit.id {
+                foundStart = start
+                foundEnd = end
+                break
+            }
+        }
+        // Intersect notes against the unit's range.
+        var hasNote = false
+        var hasBookmark = false
+        for note in notes where note.startOffset >= foundStart && note.startOffset < foundEnd {
+            switch note.kind {
+            case .note:     hasNote = true
+            case .bookmark: hasBookmark = true
+            }
+            if hasNote && hasBookmark { break }
+        }
+        let flags = (hasNote: hasNote, hasBookmark: hasBookmark)
+        unitAnnotationCache[unit.id] = flags
+        return UnitAnnotationFlags(hasNote: hasNote, hasBookmark: hasBookmark)
+    }
+
+    /// Invalidate the unit-annotation cache. Called after a note
+    /// insert / delete so the next row redraw sees fresh flags.
+    func invalidateUnitAnnotationCache() {
+        unitAnnotationCache.removeAll(keepingCapacity: true)
+    }
+
+    // ========== BLOCK VM-UNIT: UNIT-ROW HELPERS - END ==========
 
     // ========== BLOCK VM-TOC: TABLE OF CONTENTS NAVIGATION - START ==========
 

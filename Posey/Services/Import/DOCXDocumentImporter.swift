@@ -293,10 +293,66 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
         guard parser.parse() else {
             throw DOCXDocumentImporter.ImportError.unreadableDocument
         }
+        // **Heading inference fallback (Mark-requested 2026-05-26).**
+        //
+        // DOCXs authored without explicit `Heading1/HeadingN` style
+        // tags (hand-rolled docs, exports from minimal editors, the
+        // StructuredSample fixture) yield zero headings from the
+        // `<w:pStyle>` pass — even when the document obviously has
+        // a chapter title at the top. Heuristic fallback: scan the
+        // collected paragraphs for "title-like" lines and synthesize
+        // heading entries.
+        //
+        // A paragraph qualifies as an implicit heading when ALL of:
+        //   1. Length ≤ 80 chars (titles are short)
+        //   2. Doesn't end with `.`, `!`, `?`, `:`, `;`, `,` (no
+        //      sentence-terminal punctuation — prose paragraphs do)
+        //   3. Doesn't start with `• ` (not a list item — the
+        //      bullet marker is prepended by the extractor)
+        //   4. The next non-empty paragraph is "prose-shaped" —
+        //      ends with `.`, `!`, or `?` (so we're confident this
+        //      is a title introducing prose, not a header that's
+        //      part of a list of headers)
+        //
+        // Only runs when the structured-style pass produced zero
+        // headings — defensive: if even one Heading style is
+        // present, the doc was authored with structure and we
+        // shouldn't second-guess it.
+        var finalHeadings = extractor.headings
+        if finalHeadings.isEmpty {
+            for (idx, paragraph) in extractor.paragraphs.enumerated() {
+                guard paragraph.count <= 80,
+                      !paragraph.hasPrefix("• "),
+                      let lastChar = paragraph.last,
+                      !".!?:;,".contains(lastChar) else { continue }
+                // Look at next paragraph(s) for prose shape.
+                var nextIdx = idx + 1
+                while nextIdx < extractor.paragraphs.count {
+                    let next = extractor.paragraphs[nextIdx]
+                    if !next.isEmpty {
+                        if let nextLast = next.last,
+                           ".!?".contains(nextLast) {
+                            // Idiomatic heading — paragraph that introduces prose.
+                            // Level 1 for the first inferred heading at the document
+                            // start; level 2 for subsequent ones (rough subsection
+                            // pattern; better than not detecting at all).
+                            let level = finalHeadings.isEmpty ? 1 : 2
+                            finalHeadings.append(Heading(
+                                level: level,
+                                title: paragraph,
+                                paragraphIndex: idx
+                            ))
+                        }
+                        break
+                    }
+                    nextIdx += 1
+                }
+            }
+        }
         return Result(
             displayText: extractor.paragraphs.joined(separator: "\n\n"),
             usedImageIDs: extractor.usedImageIDs,
-            headings: extractor.headings
+            headings: finalHeadings
         )
     }
 

@@ -59,6 +59,19 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
     /// Empty in non-Motion modes (where the visual block triggers a pause
     /// via `pauseForVisualBlockIfNeeded` instead).
     var visualAnnouncementText: [Int: String] = [:]
+    /// **Reader UI bundle #4 — page-break pauses.** Set of sentence
+    /// indices that are the FIRST sentence after a page-break unit
+    /// in the document. The playback service applies a brief
+    /// `preUtteranceDelay` (≈0.4s) to each such utterance so the
+    /// listener hears a natural pause where the page turns — never
+    /// speaks the page marker, never highlights it. Populated by
+    /// `ReaderViewModel` from the units list at content-load.
+    var pageBreakPauseSentenceIndices: Set<Int> = []
+    /// Pre-utterance delay applied to a sentence whose index is in
+    /// `pageBreakPauseSentenceIndices`. Tuned to feel like a natural
+    /// page-turn beat rather than a TTS bug — Mark's spec said
+    /// "brief natural pause."
+    static let pageBreakPreUtteranceDelay: TimeInterval = 0.4
     /// Next segment index to feed into the synthesizer window.
     private var nextEnqueueIndex: Int = 0
 
@@ -277,6 +290,10 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
             if let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) {
                 utterance.voice = voice
             }
+        }
+        // Reader UI bundle #4 — brief pause across page breaks.
+        if pageBreakPauseSentenceIndices.contains(segment.id) {
+            utterance.preUtteranceDelay = Self.pageBreakPreUtteranceDelay
         }
         return utterance
     }

@@ -79,20 +79,22 @@ struct LibraryReadingTimeEstimate: Equatable {
 
     // MARK: Formatting
 
+    // Mark's spec (2026-05-26): single-letter abbreviations, no "~".
+    // 661 → "11h 1m"; 45 → "45m"; 1 → "1m"; 60 → "1h".
     private static func formatTotal(minutes: Int) -> String {
-        if minutes < 1 { return "<1 min" }
-        if minutes < 60 { return "\(minutes) min" }
+        if minutes < 1 { return "<1m" }
+        if minutes < 60 { return "\(minutes)m" }
         let h = minutes / 60
         let m = minutes % 60
-        return m == 0 ? "\(h) hr" : "\(h) hr \(m) min"
+        return m == 0 ? "\(h)h" : "\(h)h \(m)m"
     }
 
     private static func formatRemaining(minutes: Int) -> String {
         if minutes < 1 { return "Almost done" }
-        if minutes < 60 { return "\(minutes) min left" }
+        if minutes < 60 { return "\(minutes)m left" }
         let h = minutes / 60
         let m = minutes % 60
-        return m == 0 ? "\(h) hr left" : "\(h) hr \(m) min left"
+        return m == 0 ? "\(h)h left" : "\(h)h \(m)m left"
     }
 }
 

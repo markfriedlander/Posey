@@ -25,13 +25,18 @@ struct ReaderProgressEstimate: Equatable {
     /// there's nothing meaningful to display (empty/1-segment docs).
     let minutesRemaining: Int?
 
-    /// Compose a human label from `minutesRemaining`. Always
-    /// "~N min left" so the meter reads at a glance. Less than one
-    /// minute → "less than 1 min left". Done → "Done".
+    /// Compose a human label from `minutesRemaining`. Mark's spec
+    /// (2026-05-26): no leading "~", and minutes ≥ 60 render as
+    /// `Xh Ym` (e.g. 661 → "11h 1m"); under 60 stays compact (e.g.
+    /// 45 → "45m"); under 1 minute → "<1m left"; nil → "Done".
     var label: String {
         guard let mins = minutesRemaining else { return "Done" }
-        if mins < 1 { return "less than 1 min left" }
-        return "~\(mins) min left"
+        if mins < 1 { return "<1m left" }
+        if mins < 60 { return "\(mins)m left" }
+        let h = mins / 60
+        let m = mins % 60
+        if m == 0 { return "\(h)h left" }
+        return "\(h)h \(m)m left"
     }
 
     /// Compute a `ReaderProgressEstimate` from playback context.

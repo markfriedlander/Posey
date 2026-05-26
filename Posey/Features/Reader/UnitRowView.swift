@@ -73,6 +73,15 @@ struct UnitRowView: View {
     let hasNote: Bool
     let hasBookmark: Bool
 
+    /// **Reader UI bundle #3 — tap to navigate.** Fired when the
+    /// user taps the bookmark / note glyph in the annotation
+    /// overlay. ReaderView wires these to open the Notes sheet and
+    /// scroll to the relevant entry. Glyphs are *not* part of the
+    /// AttributedString — they're overlay UI — so they don't enter
+    /// the TTS or highlight paths.
+    let onTapBookmark: (() -> Void)?
+    let onTapNote: (() -> Void)?
+
     /// User-controlled body font size. Threaded down so the row
     /// scales with reader preferences.
     let bodyFontSize: CGFloat
@@ -196,14 +205,30 @@ struct UnitRowView: View {
         if hasNote || hasBookmark {
             HStack(spacing: 4) {
                 if hasBookmark {
-                    Image(systemName: "bookmark.fill")
-                        .font(.system(size: bodyFontSize * 0.6))
-                        .foregroundStyle(Color.primary.opacity(0.55))
+                    Button {
+                        onTapBookmark?()
+                    } label: {
+                        Image(systemName: "bookmark.fill")
+                            .font(.system(size: bodyFontSize * 0.6))
+                            .foregroundStyle(Color.primary.opacity(0.55))
+                            .padding(4)  // expand tap area without growing visible glyph
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open bookmark")
                 }
                 if hasNote {
-                    Image(systemName: "note.text")
-                        .font(.system(size: bodyFontSize * 0.65))
-                        .foregroundStyle(Color.primary.opacity(0.55))
+                    Button {
+                        onTapNote?()
+                    } label: {
+                        Image(systemName: "note.text")
+                            .font(.system(size: bodyFontSize * 0.65))
+                            .foregroundStyle(Color.primary.opacity(0.55))
+                            .padding(4)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open note")
                 }
             }
             .padding(.trailing, 4)
@@ -299,17 +324,28 @@ struct UnitRowView: View {
 
     // MARK: - Page break
 
+    /// **Reader UI bundle #4 — page-break visual treatment.**
+    /// Page-break units carry no text, never enter the sentences
+    /// array, and never see the TTS / highlight paths. Rendered as
+    /// a thin centered marker (rule | label | rule), so the user
+    /// reads it as structural information rather than content. Label
+    /// uses `.smallCaps()` + `.secondary` foreground so it sits
+    /// clearly outside the prose hierarchy. `accessibilityHidden`
+    /// keeps VoiceOver from reading it as a row.
     private var pageBreakRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             line
             if let page = unit.metadata.pageNumber {
                 Text("page \(page + 1)")
-                    .font(.system(size: bodyFontSize * 0.75))
-                    .foregroundStyle(Color.primary.opacity(0.4))
+                    .font(.system(size: bodyFontSize * 0.7).smallCaps())
+                    .tracking(1.5)
+                    .foregroundStyle(.secondary)
             }
             line
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, 14)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Page break")
     }
 
     // MARK: - Horizontal rule

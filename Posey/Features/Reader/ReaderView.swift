@@ -116,6 +116,12 @@ struct ReaderView: View {
                             readingStyle: viewModel.readingStyle,
                             hasNote: annotations.hasNote,
                             hasBookmark: annotations.hasBookmark,
+                            onTapBookmark: {
+                                openAnnotationFromGlyph(unit: unit, kind: .bookmark)
+                            },
+                            onTapNote: {
+                                openAnnotationFromGlyph(unit: unit, kind: .note)
+                            },
                             bodyFontSize: viewModel.fontSize,
                             imageDataProvider: { viewModel.imageData(for: $0) }
                         )
@@ -857,24 +863,56 @@ struct ReaderView: View {
         }
     }
 
+    /// **Reader UI bundle #3 — annotation-glyph tap.** Resolves the
+    /// note this unit's glyph references and opens the Notes sheet
+    /// scrolled to that entry. Looks up `viewModel.notes` for an
+    /// entry of the requested kind whose offset falls within the
+    /// unit's plainText range, then resolves the matching
+    /// `SavedAnnotation.id` so the existing
+    /// `.remoteScrollSavedAnnotations` notification can target it.
+    private func openAnnotationFromGlyph(unit: ContentUnit, kind: NoteKind) {
+        let range = viewModel.plainTextRange(for: unit)
+        let match = viewModel.notes.first { note in
+            note.kind == kind && note.startOffset >= range.lowerBound && note.startOffset < range.upperBound
+        }
+        guard let match else { return }
+        let entry = viewModel.savedAnnotations.first(where: { $0.noteID == match.id })
+        guard let entry else { return }
+        // Open the sheet first; the scroll notification fires only
+        // after the sheet's ScrollViewReader has rendered, so we
+        // post a small delay to land on the right entry.
+        revealChrome()
+        isShowingNotesSheet = true
+        let entryID = entry.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            NotificationCenter.default.post(
+                name: .remoteScrollSavedAnnotations,
+                object: nil,
+                userInfo: ["entryID": entryID]
+            )
+        }
+    }
+
     private var topControls: some View {
+        // Mark's spec (2026-05-26): Settings leftmost, Search middle,
+        // Notes rightmost — most-frequently-used action closest to the
+        // thumb. TOC (optional) sits between Settings and Search so
+        // the trio's relative order stays intact.
         HStack(spacing: 10) {
             Button {
                 revealChrome()
-                viewModel.isSearchActive = true
-                chromeFadeTask?.cancel()
+                isShowingPreferencesSheet = true
             } label: {
-                Image(systemName: "magnifyingglass")
+                Image(systemName: "slider.horizontal.3")
                     .font(.headline)
                     .foregroundStyle(chromeTint)
                     .frame(width: 44, height: 44)
             }
-            .remoteRegister("reader.search") {
+            .remoteRegister("reader.preferences") {
                 revealChrome()
-                viewModel.isSearchActive = true
-                chromeFadeTask?.cancel()
+                isShowingPreferencesSheet = true
             }
-            .accessibilityLabel("Search in document")
+            .accessibilityLabel("Reader preferences")
 
             if !viewModel.visibleTOCEntries.isEmpty {
                 Button {
@@ -895,18 +933,20 @@ struct ReaderView: View {
 
             Button {
                 revealChrome()
-                isShowingPreferencesSheet = true
+                viewModel.isSearchActive = true
+                chromeFadeTask?.cancel()
             } label: {
-                Image(systemName: "slider.horizontal.3")
+                Image(systemName: "magnifyingglass")
                     .font(.headline)
                     .foregroundStyle(chromeTint)
                     .frame(width: 44, height: 44)
             }
-            .remoteRegister("reader.preferences") {
+            .remoteRegister("reader.search") {
                 revealChrome()
-                isShowingPreferencesSheet = true
+                viewModel.isSearchActive = true
+                chromeFadeTask?.cancel()
             }
-            .accessibilityLabel("Reader preferences")
+            .accessibilityLabel("Search in document")
 
             Button {
                 revealChrome()
@@ -3114,6 +3154,10 @@ final class ReaderViewModel: ObservableObject {
         /// Sentence index → image-unit id. Drives pause-at-image when
         /// playback reaches the first sentence following an image.
         let visualPauseUnitIDsBySentenceIndex: [Int: UUID]
+        /// Reader UI bundle #4 — sentence indices that begin a new
+        /// page (first prose sentence after a `pageBreak` unit).
+        /// Playback applies a brief preUtteranceDelay to each.
+        let pageBreakPauseSentenceIndices: Set<Int>
     }
 
     /// Re-tag paragraph blocks whose `startOffset` matches a TOC
@@ -3235,6 +3279,27 @@ final class ReaderViewModel: ObservableObject {
             }
         }
 
+        // **Reader UI bundle #4 — page-break TTS pauses.** Same
+        // pattern as the visual-pause map: for every `.pageBreak`
+        // unit, locate the first sentence in the next prose unit
+        // and record its index. The playback service applies a
+        // ~0.4s preUtteranceDelay to those utterances. PageBreak
+        // units carry no text and never enter the sentences array,
+        // so they're never spoken or highlighted by construction.
+        var pageBreakPauseSentenceIndices: Set<Int> = []
+        for (uIdx, unit) in filteredUnits.enumerated() where unit.kind == .pageBreak {
+            for j in (uIdx + 1)..<filteredUnits.count {
+                let candidate = filteredUnits[j]
+                guard candidate.kind.carriesProseText else { continue }
+                let firstSentence = filteredSentences.first { $0.unitID == candidate.id }
+                if let s = firstSentence,
+                   let sentenceIndex = filteredSentences.firstIndex(of: s) {
+                    pageBreakPauseSentenceIndices.insert(sentenceIndex)
+                }
+                break
+            }
+        }
+
         // Suppress unused-parameter warnings on the bridge fields.
         _ = skipGlobalOffset
         _ = endGlobalOffset
@@ -3244,7 +3309,8 @@ final class ReaderViewModel: ObservableObject {
             segments: segments,
             units: filteredUnits,
             sentences: filteredSentences,
-            visualPauseUnitIDsBySentenceIndex: visualPauseUnitIDsBySentenceIndex
+            visualPauseUnitIDsBySentenceIndex: visualPauseUnitIDsBySentenceIndex,
+            pageBreakPauseSentenceIndices: pageBreakPauseSentenceIndices
         )
     }
 
@@ -3329,7 +3395,8 @@ final class ReaderViewModel: ObservableObject {
                 segments: [],
                 units: [],
                 sentences: [],
-                visualPauseUnitIDsBySentenceIndex: [:]
+                visualPauseUnitIDsBySentenceIndex: [:],
+                pageBreakPauseSentenceIndices: []
             )
         }
 
@@ -3339,6 +3406,10 @@ final class ReaderViewModel: ObservableObject {
         self.units = computed.units
         self.sentences = computed.sentences
         self.visualPauseUnitIDsBySentenceIndex = computed.visualPauseUnitIDsBySentenceIndex
+        // Reader UI bundle #4 — hand the playback service the
+        // sentence indices that follow a page break so it can apply
+        // a brief preUtteranceDelay to each.
+        self.playbackService.pageBreakPauseSentenceIndices = computed.pageBreakPauseSentenceIndices
         // Pre-compute the per-unit sentence index so UnitRowView's
         // body recomputes are O(unitSentenceCount) not O(totalSentences).
         var byUnit: [UUID: [Sentence]] = [:]
@@ -4342,6 +4413,26 @@ final class ReaderViewModel: ObservableObject {
     /// insert / delete so the next row redraw sees fresh flags.
     func invalidateUnitAnnotationCache() {
         unitAnnotationCache.removeAll(keepingCapacity: true)
+    }
+
+    /// **Reader UI bundle #3.** Return the half-open plainText offset
+    /// range `[unitStart, unitEnd)` for a given unit — the same
+    /// coordinate space `notes.startOffset` uses. Helper for
+    /// `openAnnotationFromGlyph` to find which notes belong to a
+    /// tapped row.
+    func plainTextRange(for unit: ContentUnit) -> Range<Int> {
+        var cursor = 0
+        var firstProseSeen = false
+        for u in units {
+            if !u.kind.carriesProseText { continue }
+            if firstProseSeen { cursor += 2 }
+            firstProseSeen = true
+            let start = cursor
+            let end = cursor + u.text.count
+            cursor = end
+            if u.id == unit.id { return start..<end }
+        }
+        return 0..<0
     }
 
     // ========== BLOCK VM-UNIT: UNIT-ROW HELPERS - END ==========

@@ -132,24 +132,34 @@ enum TitleExtractor {
         return nil
     }
 
-    /// TXT title — Gutenberg-style `Title: X` header line first, else
-    /// the first non-empty line if it's "title-shaped" (≤ 120 chars,
-    /// not terminal punctuation). Many text files start with metadata
-    /// or boilerplate that isn't a title; we err on the conservative
-    /// side and return nil rather than mistitle.
+    /// TXT title — handles three real-world patterns, in priority order:
+    ///
+    /// 1. **Legacy Gutenberg `Title: X` header** (older PG format, often
+    ///    with `Author:` / `Release Date:` / `Language:` siblings).
+    ///    Value can wrap onto indented continuation lines.
+    /// 2. **Modern Gutenberg `*** START ***` + title-as-content** (the
+    ///    real `02701_moby-dick.txt` shape). After the START marker,
+    ///    the first 1–2 non-empty lines are the title (`MOBY-DICK;` /
+    ///    `or, THE WHALE.`), terminated by `By <Author>` or `CHAPTER N`.
+    /// 3. **Plain TXT with no Gutenberg structure** — first short
+    ///    non-empty line, if it doesn't end with sentence punctuation.
+    ///
+    /// Returns nil when nothing reasonable is found; caller falls back
+    /// to the cleaned filename. 2026-05-26 — added cases 2 + 3 after
+    /// real-corpus verification surfaced that case 1 alone couldn't
+    /// title actual Moby Dick TXT.
     static func fromTXT(plainText: String) -> String? {
-        // Gutenberg header detection: scan first 200 lines for
-        // `Title: <X>`. Case-insensitive prefix match; the value can
-        // wrap onto subsequent lines indented with whitespace.
-        let lines = plainText.components(separatedBy: .newlines).prefix(200)
+        let allLines = plainText.components(separatedBy: .newlines)
+        let lines = Array(allLines.prefix(200))
+
+        // ── Case 1: legacy `Title:` header ──────────────────────────
         for (i, line) in lines.enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.lowercased().hasPrefix("title:") {
                 var value = String(trimmed.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-                // Continuation lines (indented in the original).
                 var j = i + 1
                 while j < lines.count {
-                    let next = lines[lines.index(lines.startIndex, offsetBy: j)]
+                    let next = lines[j]
                     if next.first == " " || next.first == "\t" {
                         let cont = next.trimmingCharacters(in: .whitespaces)
                         if cont.isEmpty { break }
@@ -157,15 +167,80 @@ enum TitleExtractor {
                         j += 1
                     } else { break }
                 }
-                return value.isEmpty ? nil : value
+                if !value.isEmpty { return value }
             }
         }
-        // Fall back to first non-empty line.
+
+        // ── Case 2: modern Gutenberg `*** START ***` + content ────
+        // Skip Gutenberg metadata + the START marker, then collect
+        // the first 1–2 non-empty short lines as the title (Moby's
+        // real shape: "MOBY-DICK;" / blank / "or, THE WHALE.").
+        // Stop at `By <Author>` / `Author:` / `CHAPTER N` / next
+        // `*** ` marker / a long prose line.
+        func isGutenbergMetadata(_ trimmed: String, _ lower: String) -> Bool {
+            return trimmed.hasPrefix("***")
+                || lower.hasPrefix("the project gutenberg")
+                || lower.hasPrefix("project gutenberg")
+                || lower.hasPrefix("this ebook is")
+                || lower.hasPrefix("release date:")
+                || lower.hasPrefix("language:")
+                || lower.hasPrefix("character set")
+                || lower.hasPrefix("posting date:")
+                || lower.hasPrefix("most recently updated:")
+                || lower.hasPrefix("produced by")
+                || lower.hasPrefix("credits:")
+                || lower.hasPrefix("ebook designed and")
+        }
+        func isTitleStopMarker(_ lower: String) -> Bool {
+            return lower.hasPrefix("by ")
+                || lower.hasPrefix("author:")
+                || lower.hasPrefix("chapter ")
+                || lower.hasPrefix("contents")
+                || lower.hasPrefix("etymology")
+                || lower.hasPrefix("foreword")
+                || lower.hasPrefix("preface")
+                || lower.hasPrefix("introduction")
+                || lower.hasPrefix("dedication")
+        }
+
+        var idx = 0
+        // Skip leading Gutenberg metadata + blanks.
+        while idx < lines.count {
+            let trimmed = lines[idx].trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || isGutenbergMetadata(trimmed, trimmed.lowercased()) {
+                idx += 1
+                continue
+            }
+            break
+        }
+        // Collect title pieces. Allow blank lines between pieces; stop
+        // at stop-markers, secondary `***`, or a prose-shaped long line.
+        var titleParts: [String] = []
+        var nonBlankSeen = 0
+        while idx < lines.count && nonBlankSeen < 4 {
+            let trimmed = lines[idx].trimmingCharacters(in: .whitespaces)
+            idx += 1
+            if trimmed.isEmpty { continue }
+            nonBlankSeen += 1
+            let lower = trimmed.lowercased()
+            if isTitleStopMarker(lower) || trimmed.hasPrefix("***") { break }
+            if trimmed.count > 100 { break }
+            titleParts.append(trimmed)
+        }
+        if !titleParts.isEmpty {
+            // Join with " ", strip trailing `.` only — preserve
+            // semicolons / commas internal to the title (Moby's
+            // "MOBY-DICK; or, THE WHALE.").
+            let joined = titleParts.joined(separator: " ")
+            return joined
+                .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        }
+
+        // ── Case 3: plain TXT — first short line as fallback ──────
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
             if trimmed.count > 120 { return nil }
-            // Avoid mistaking a sentence for a title.
             if let last = trimmed.last, ".!?".contains(last) { return nil }
             return trimmed
         }

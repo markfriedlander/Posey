@@ -132,7 +132,11 @@ struct PDFLibraryImporter {
             contentHash: contentHash
         )
         let documentID = existingDocument?.id ?? UUID()
-        let title = parsed.title ?? titleFallback
+        // Bundle 2a — prefer PDF metadata title, else cleaned filename.
+        let title = TitleExtractor.resolve(
+            contentTitle: parsed.title,
+            filename: titleFallback
+        )
 
         // ── Build units from displayText (preserves form-feed
         // ── page boundaries as pageBreak units, image markers as

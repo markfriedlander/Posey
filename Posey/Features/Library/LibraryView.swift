@@ -63,14 +63,14 @@ struct LibraryView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(document.title)
                             .font(.headline)
-                        // **Bundle 2c (2026-05-26)** — edition
-                        // disambiguation. When two library cards
-                        // share a title (e.g. two Alice editions),
-                        // surface the filename as a small subtitle
-                        // so the user can tell them apart. Hidden
-                        // for unique titles to keep the card clean.
-                        if viewModel.isTitleAmbiguous(for: document) {
-                            Text(document.fileName)
+                        // **Bundle 2c + follow-up (2026-05-26)** —
+                        // edition-disambiguation subtitle. Helper
+                        // hides the conditional behind a single
+                        // String? so SwiftUI's body type-checker
+                        // doesn't have to reason about the ternary
+                        // inline.
+                        if let subtitle = viewModel.editionSubtitle(for: document) {
+                            Text(subtitle)
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                                 .lineLimit(1)
@@ -478,6 +478,19 @@ final class LibraryViewModel: ObservableObject {
     /// document's title — drives the filename-as-subtitle disambiguation.
     func isTitleAmbiguous(for document: Document) -> Bool {
         ambiguousTitles.contains(document.title)
+    }
+
+    /// **Bundle 2 follow-up (2026-05-26)** — subtitle resolution for
+    /// the library card. Returns nil for unique titles; for ambiguous
+    /// titles, prefers the importer-supplied `editionLabel` (EPUB
+    /// illustrator metadata) and falls back to the filename when no
+    /// editionLabel is present.
+    func editionSubtitle(for document: Document) -> String? {
+        guard isTitleAmbiguous(for: document) else { return nil }
+        if let label = document.editionLabel, !label.isEmpty {
+            return label
+        }
+        return document.fileName
     }
 
     /// 2026-05-14 (B1) — Heal-on-launch for documents whose Ask Posey

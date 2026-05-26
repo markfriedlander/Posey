@@ -126,6 +126,22 @@ struct EPUBLibraryImporter {
             )
         }
 
+        // **Bundle 2 follow-up (2026-05-26)** — edition label from
+        // EPUB metadata. Prefer "Illustrated by <name>" when the OPF
+        // has a contributor with `opf:role="ill"`; else fall back to
+        // the creator (only useful when the creator alone
+        // disambiguates, which is rare for ambiguous-title cases
+        // but cheap to include).
+        let editionLabel: String? = {
+            if let ill = parsed.illustrator, !ill.isEmpty {
+                return "Illustrated by \(ill)"
+            }
+            if let creator = parsed.creator, !creator.isEmpty {
+                return creator
+            }
+            return nil
+        }()
+
         let parsedDoc = ParsedDocument(
             id: documentID,
             title: title,
@@ -139,7 +155,8 @@ struct EPUBLibraryImporter {
             playbackSkipUntilOffset: computed.skipOffset,
             contentEndOffset: contentEndOffset,
             contentEndUnitID: contentEndUnitID,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: editionLabel
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 
@@ -167,7 +184,8 @@ struct EPUBLibraryImporter {
             playbackSkipUntilOffset: computed.skipOffset,
             contentEndOffset: contentEndOffset,
             skipSource: computed.skipSource,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: editionLabel
         )
         let docID = document.id
         let dbRef = databaseManager

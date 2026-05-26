@@ -116,7 +116,8 @@ struct MarkdownLibraryImporter {
             playbackSkipUntilOffset: 0,
             contentEndOffset: 0,
             contentEndUnitID: nil,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: nil
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 
@@ -140,7 +141,8 @@ struct MarkdownLibraryImporter {
             playbackSkipUntilOffset: 0,
             contentEndOffset: 0,
             skipSource: "",
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: nil
         )
         let docID = document.id
         let dbRef = databaseManager

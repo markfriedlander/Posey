@@ -155,7 +155,8 @@ struct HTMLLibraryImporter {
             playbackSkipUntilOffset: skipOffset,
             contentEndOffset: contentEndOffset,
             contentEndUnitID: contentEndUnitID,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: nil
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 
@@ -183,7 +184,8 @@ struct HTMLLibraryImporter {
             playbackSkipUntilOffset: skipOffset,
             contentEndOffset: contentEndOffset,
             skipSource: skipSource,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: nil
         )
         let docID = document.id
         let dbRef = databaseManager

@@ -53,4 +53,13 @@ struct Document: Identifiable, Equatable, Hashable {
     /// plainText (which can drift after Tier 2 / Tier 3 edits).
     /// Nullable for rows imported before this column existed.
     var contentHash: String? = nil
+
+    /// **Bundle 2 follow-up (2026-05-26)** — edition-disambiguating
+    /// label surfaced on the library card when two cards share the
+    /// same title. Populated by importers from format-specific
+    /// metadata (EPUB: "Illustrated by X" from
+    /// `<dc:contributor opf:role="ill">`, else creator). Nil when
+    /// the importer has no disambiguating info — the library card
+    /// falls back to filename in that case.
+    var editionLabel: String? = nil
 }

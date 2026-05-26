@@ -190,7 +190,8 @@ struct PDFLibraryImporter {
             playbackSkipUntilOffset: skipOffset,
             contentEndOffset: 0,
             contentEndUnitID: nil,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: nil
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 

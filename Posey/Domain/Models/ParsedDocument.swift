@@ -77,6 +77,12 @@ struct ParsedDocument: Sendable {
     /// stores NULL and the existingDocument query falls back to
     /// plainText comparison.
     let contentHash: String?
+
+    /// **Bundle 2 follow-up (2026-05-26)** — edition-disambiguating
+    /// label. Threaded from the importer to the persister so the
+    /// library can surface "Illustrated by X" / "by Author" when
+    /// two cards share a title. Nil when no metadata is available.
+    let editionLabel: String?
 }
 
 // ========== BLOCK 01: PARSED DOCUMENT - END ==========

@@ -83,14 +83,14 @@ extension DatabaseManager {
         // the columns). One small SELECT + N derivations; on a typical
         // library that's <100ms even for tens of docs.
         let sql = """
-        SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source, content_hash
+        SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source, content_hash, edition_label
         FROM documents
         ORDER BY imported_at DESC;
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
 
-        var rows: [(id: UUID, title: String, fileName: String, fileType: String, importedAt: Date, modifiedAt: Date, characterCount: Int, playbackSkipUntilOffset: Int, contentEndOffset: Int, skipSource: String, contentHash: String?)] = []
+        var rows: [(id: UUID, title: String, fileName: String, fileType: String, importedAt: Date, modifiedAt: Date, characterCount: Int, playbackSkipUntilOffset: Int, contentEndOffset: Int, skipSource: String, contentHash: String?, editionLabel: String?)] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             guard
                 let idText = sqliteString(statement, index: 0),
@@ -110,7 +110,8 @@ extension DatabaseManager {
                 playbackSkipUntilOffset: Int(sqlite3_column_int64(statement, 7)),
                 contentEndOffset: Int(sqlite3_column_int64(statement, 8)),
                 skipSource: sqliteString(statement, index: 9) ?? "",
-                contentHash: sqliteString(statement, index: 10)
+                contentHash: sqliteString(statement, index: 10),
+                editionLabel: sqliteString(statement, index: 11)
             ))
         }
 
@@ -133,7 +134,8 @@ extension DatabaseManager {
                 playbackSkipUntilOffset: row.playbackSkipUntilOffset,
                 contentEndOffset: row.contentEndOffset,
                 skipSource: row.skipSource,
-                contentHash: row.contentHash
+                contentHash: row.contentHash,
+                editionLabel: row.editionLabel
             ))
         }
         return documents
@@ -146,8 +148,8 @@ extension DatabaseManager {
         // text lives entirely in `document_units` now.
         // **Bundle 2b (2026-05-26)** — content_hash added.
         let sql = """
-        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source, content_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO documents (id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source, content_hash, edition_label)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             file_name = excluded.file_name,
@@ -158,7 +160,8 @@ extension DatabaseManager {
             playback_skip_until_offset = excluded.playback_skip_until_offset,
             content_end_offset = excluded.content_end_offset,
             skip_source = excluded.skip_source,
-            content_hash = excluded.content_hash;
+            content_hash = excluded.content_hash,
+            edition_label = excluded.edition_label;
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -177,6 +180,11 @@ extension DatabaseManager {
             try bind(hash, at: 11, for: statement)
         } else {
             sqlite3_bind_null(statement, 11)
+        }
+        if let edition = document.editionLabel, !edition.isEmpty {
+            try bind(edition, at: 12, for: statement)
+        } else {
+            sqlite3_bind_null(statement, 12)
         }
 
         try step(statement)
@@ -211,7 +219,7 @@ extension DatabaseManager {
         // docs imported before the hash column existed.
         if let hash = contentHash, !hash.isEmpty {
             let hashSQL = """
-            SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source, content_hash
+            SELECT id, title, file_name, file_type, imported_at, modified_at, character_count, playback_skip_until_offset, content_end_offset, skip_source, content_hash, edition_label
             FROM documents
             WHERE file_name = ? AND file_type = ? AND content_hash = ?
             LIMIT 1;
@@ -241,7 +249,8 @@ extension DatabaseManager {
                     playbackSkipUntilOffset: Int(sqlite3_column_int64(hStmt, 7)),
                     contentEndOffset: Int(sqlite3_column_int64(hStmt, 8)),
                     skipSource: sqliteString(hStmt, index: 9) ?? "",
-                    contentHash: sqliteString(hStmt, index: 10)
+                    contentHash: sqliteString(hStmt, index: 10),
+                    editionLabel: sqliteString(hStmt, index: 11)
                 )
             }
             // Hash didn't match anything — incoming is a new doc.
@@ -306,7 +315,8 @@ extension DatabaseManager {
                 playbackSkipUntilOffset: skipOff,
                 contentEndOffset: endOff,
                 skipSource: source,
-                contentHash: nil
+                contentHash: nil,
+                editionLabel: nil
             )
         }
         _ = displayText  // dedup is plainText-only post-Step-10
@@ -1072,6 +1082,12 @@ extension DatabaseManager {
         // match when both candidate and incoming have non-empty hashes;
         // falls back to plainText comparison otherwise.
         try addColumnIfNeeded(table: "documents", column: "content_hash",
+                              definition: "TEXT")
+        // **Bundle 2 follow-up (2026-05-26)** — edition label
+        // (e.g. "Illustrated by Robinson") surfaced on the library
+        // card when two cards share a title. Nullable for back-
+        // compat; only EPUB writes it today.
+        try addColumnIfNeeded(table: "documents", column: "edition_label",
                               definition: "TEXT")
         // (`content_boundaries` is preserved — PDFEnhancementService
         // still reads it directly for page-range arithmetic.
@@ -2282,9 +2298,9 @@ extension DatabaseManager {
                 id, title, file_name, file_type, imported_at, modified_at,
                 character_count,
                 playback_skip_until_offset, content_end_offset, skip_source,
-                skip_unit_id, content_end_unit_id, content_hash
+                skip_unit_id, content_end_unit_id, content_hash, edition_label
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 file_name = excluded.file_name,
@@ -2296,7 +2312,8 @@ extension DatabaseManager {
                 skip_source = excluded.skip_source,
                 skip_unit_id = excluded.skip_unit_id,
                 content_end_unit_id = excluded.content_end_unit_id,
-                content_hash = excluded.content_hash;
+                content_hash = excluded.content_hash,
+                edition_label = excluded.edition_label;
             """
             let docStmt = try prepareStatement(sql: docSQL)
             defer { sqlite3_finalize(docStmt) }
@@ -2328,6 +2345,11 @@ extension DatabaseManager {
                 try bind(h, at: 13, for: docStmt)
             } else {
                 sqlite3_bind_null(docStmt, 13)
+            }
+            if let edition = parsed.editionLabel, !edition.isEmpty {
+                try bind(edition, at: 14, for: docStmt)
+            } else {
+                sqlite3_bind_null(docStmt, 14)
             }
             try step(docStmt)
 

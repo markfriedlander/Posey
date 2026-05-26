@@ -104,22 +104,28 @@ enum TitleExtractor {
     /// HTML title — `<title>` element, falling back to the first
     /// `<h1>` text. Tolerant of whitespace and case. Reads from
     /// raw HTML bytes so it can use a quick regex instead of pulling
-    /// in a full parser.
+    /// in a full parser. **Bundle 2 follow-up (2026-05-26)** — strips
+    /// the trailing site-name suffix that's nearly universal in real
+    /// HTML title tags ("Foo | Project Gutenberg", "Bar - Wikipedia",
+    /// "Baz – The New York Times"). The strip is conservative —
+    /// only fires when the trailing chunk looks site-name-shaped.
     static func fromHTML(rawHTML: String) -> String? {
         // `<title>...</title>` is unique in well-formed HTML.
         if let m = rawHTML.range(of: #"<title[^>]*>([\s\S]*?)</title>"#,
                                  options: [.regularExpression, .caseInsensitive]) {
             let raw = String(rawHTML[m])
-            // Strip the opening + closing tags.
             let inner = raw
                 .replacingOccurrences(of: #"<title[^>]*>"#, with: "",
                                       options: [.regularExpression, .caseInsensitive])
                 .replacingOccurrences(of: "</title>", with: "",
                                       options: [.caseInsensitive])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !inner.isEmpty { return decodeHTMLEntities(inner) }
+            if !inner.isEmpty {
+                return stripSiteSuffix(decodeHTMLEntities(inner))
+            }
         }
-        // First `<h1>` fallback.
+        // First `<h1>` fallback — h1 rarely carries site-name suffix,
+        // but we run the same stripper for consistency.
         if let m = rawHTML.range(of: #"<h1[^>]*>([\s\S]*?)</h1>"#,
                                  options: [.regularExpression, .caseInsensitive]) {
             let raw = String(rawHTML[m])
@@ -127,9 +133,69 @@ enum TitleExtractor {
                 .replacingOccurrences(of: #"<[^>]+>"#, with: "",
                                       options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !inner.isEmpty { return decodeHTMLEntities(inner) }
+            if !inner.isEmpty {
+                return stripSiteSuffix(decodeHTMLEntities(inner))
+            }
         }
         return nil
+    }
+
+    /// **Bundle 2 follow-up (2026-05-26).** Strip the trailing
+    /// `<sep> <site>` suffix from an HTML title where `<sep>` is one
+    /// of `|`, `-`, `–` (en-dash), `—` (em-dash) padded with spaces,
+    /// and `<site>` is "site-name-shaped":
+    ///
+    /// - ≤ 30 chars after trim
+    /// - No terminal sentence punctuation (`.!?`)
+    /// - Mostly alphabetic / spaces (≥ 60% letters)
+    /// - 1–5 words
+    ///
+    /// Examples:
+    /// - "Moby Dick; or The Whale | Project Gutenberg" → "Moby Dick;
+    ///   or The Whale"
+    /// - "Pride and Prejudice - Wikipedia" → "Pride and Prejudice"
+    /// - "Article Title – The New York Times" → "Article Title"
+    /// - "My Note - 2026-05-26" → unchanged (trailing chunk is
+    ///   date-shaped, not site-shaped)
+    /// - "Foo: A Bar - Baz" → "Foo: A Bar" (Baz is site-shaped)
+    ///
+    /// Conservative: prefers to leave the title alone when the
+    /// trailing chunk doesn't clearly look like a site name.
+    fileprivate static func stripSiteSuffix(_ title: String) -> String {
+        // Search for the last separator. Walk from the end so a
+        // title like "Foo | Bar - Site" strips just "Site".
+        let separators = [" | ", " - ", " – ", " — "]
+        var best: (sepRange: Range<String.Index>, tail: Substring)?
+        for sep in separators {
+            if let r = title.range(of: sep, options: .backwards) {
+                let candidateTail = title[r.upperBound...]
+                if best == nil || r.lowerBound > best!.sepRange.lowerBound {
+                    best = (r, candidateTail)
+                }
+            }
+        }
+        guard let (sepRange, tail) = best else { return title }
+        let trimmedTail = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isSiteNameShaped(trimmedTail) else { return title }
+        let head = title[..<sepRange.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return head.isEmpty ? title : head
+    }
+
+    private static func isSiteNameShaped(_ s: String) -> Bool {
+        guard !s.isEmpty, s.count <= 30 else { return false }
+        // No terminal sentence punctuation.
+        if let last = s.last, ".!?".contains(last) { return false }
+        // Word count 1–5.
+        let words = s.split(separator: " ")
+        guard words.count >= 1, words.count <= 5 else { return false }
+        // Mostly letters / spaces (≥ 60%). Reject mostly-digit tails
+        // (dates, version numbers).
+        let total = s.count
+        let letters = s.filter { $0.isLetter }.count
+        guard total > 0 else { return false }
+        let letterRatio = Double(letters) / Double(total)
+        return letterRatio >= 0.6
     }
 
     /// TXT title — handles three real-world patterns, in priority order:

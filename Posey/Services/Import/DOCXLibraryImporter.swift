@@ -133,7 +133,8 @@ struct DOCXLibraryImporter {
             playbackSkipUntilOffset: tocSkipOffset,
             contentEndOffset: 0,
             contentEndUnitID: nil,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: nil
         )
         try databaseManager.persistParsedDocument(parsedDoc)
 
@@ -161,7 +162,8 @@ struct DOCXLibraryImporter {
             characterCount: plainText.count,
             playbackSkipUntilOffset: tocSkipOffset,
             skipSource: skipSource,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: nil
         )
         let docID = document.id
         let dbRef = databaseManager

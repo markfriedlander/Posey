@@ -19,6 +19,15 @@ struct EPUBTOCEntry {
 
 struct ParsedEPUBDocument {
     let title: String?
+    /// **Bundle 2 follow-up (2026-05-26)** — edition-disambiguating
+    /// metadata extracted from the OPF's Dublin Core elements.
+    /// `creator` is the first `<dc:creator>`; `illustrator` is the
+    /// first `<dc:contributor opf:role="ill">`. The library card
+    /// surfaces these when two documents share the same title so
+    /// the user can tell editions apart (two Alice editions where
+    /// one is illustrated by Robinson, etc.).
+    let creator: String?
+    let illustrator: String?
     /// Normalized text with inline \x0c-delimited visual-image markers
     /// [[POSEY_VISUAL_PAGE:0:uuid]] at each <img> position.
     let displayText: String
@@ -355,6 +364,8 @@ extension EPUBDocumentImporter {
 
         return ParsedEPUBDocument(
             title: packageDoc.title,
+            creator: packageDoc.creator,
+            illustrator: packageDoc.illustrator,
             displayText: displayText,
             plainText: plainText,
             images: imageRecords,
@@ -818,15 +829,16 @@ extension EPUBDocumentImporter {
 
 private struct EPUBPackageDocument {
     let title: String?
+    /// First `<dc:creator>` in the OPF metadata block.
+    let creator: String?
+    /// First `<dc:contributor opf:role="ill">` in the OPF metadata
+    /// block — the illustrator. Surfaces "Illustrated by X" on the
+    /// library card when two cards share a title.
+    let illustrator: String?
     let manifestItems: [String: EPUBManifestItem]
     let spineItemReferences: [String]
-    /// Manifest item ID of the EPUB 3 nav document (properties="nav"), if present.
     let navItemID: String?
-    /// Manifest item ID of the EPUB 2 NCX document, if present. NCX items are not
-    /// added to manifestItems (they are not readable XHTML) but their href is needed
-    /// to parse TOC data.
     let ncxItemID: String?
-    /// href values keyed by manifest item ID — includes NCX items not in manifestItems.
     let allItemHrefs: [String: String]
 }
 
@@ -866,6 +878,8 @@ private final class EPUBContainerParser: NSObject, XMLParserDelegate {
 
 private final class EPUBPackageParser: NSObject, XMLParserDelegate {
     private var title: String?
+    private var creator: String?
+    private var illustrator: String?
     private var manifestItems: [String: EPUBManifestItem] = [:]
     private var allItemHrefs: [String: String] = [:]
     private var navItemID: String?
@@ -873,6 +887,16 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
     private var spineItemReferences: [String] = []
     private var collectingTitle = false
     private var currentTitle    = ""
+    // Bundle 2 follow-up — capture first `<dc:creator>` and the
+    // first `<dc:contributor opf:role="ill">`. Both fields are
+    // gathered as text inside the element; we tag the current
+    // contributor with `currentContributorIsIllustrator` so the
+    // closing tag knows whether to keep the value.
+    private var collectingCreator = false
+    private var currentCreator = ""
+    private var collectingContributor = false
+    private var currentContributor = ""
+    private var currentContributorIsIllustrator = false
 
     /// Media types and file suffixes that indicate a pure XML navigation structure
     /// (not readable XHTML content). The NCX is sometimes mislabelled as "text/xml"
@@ -891,6 +915,8 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
         }
         return EPUBPackageDocument(
             title: delegate.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+            creator: delegate.creator?.trimmingCharacters(in: .whitespacesAndNewlines),
+            illustrator: delegate.illustrator?.trimmingCharacters(in: .whitespacesAndNewlines),
             manifestItems: delegate.manifestItems,
             spineItemReferences: delegate.spineItemReferences,
             navItemID: delegate.navItemID,
@@ -904,6 +930,28 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
                 attributes attributeDict: [String: String] = [:]) {
         if matches(elementName, suffix: "title") {
             collectingTitle = true; currentTitle = ""; return
+        }
+        // **Bundle 2 follow-up (2026-05-26)** — capture first
+        // `<dc:creator>` and `<dc:contributor opf:role="ill">`.
+        if matches(elementName, suffix: "creator") {
+            // Only keep the first creator; subsequent ones ignored.
+            if creator == nil {
+                collectingCreator = true; currentCreator = ""
+            }
+            return
+        }
+        if matches(elementName, suffix: "contributor") {
+            let role = (attributeDict["opf:role"] ?? attributeDict["role"] ?? "").lowercased()
+            // "ill" is the OPF role code for illustrator. Some
+            // packages also use "art" or "edt" — we only target
+            // illustrator since that's the disambiguating signal
+            // Mark's Alice example called out.
+            if role == "ill", illustrator == nil {
+                collectingContributor = true
+                currentContributor = ""
+                currentContributorIsIllustrator = true
+            }
+            return
         }
         if matches(elementName, suffix: "item"),
            let id   = attributeDict["id"],
@@ -946,12 +994,25 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
         if collectingTitle { currentTitle.append(string) }
+        if collectingCreator { currentCreator.append(string) }
+        if collectingContributor { currentContributor.append(string) }
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String,
                 namespaceURI _: String?, qualifiedName _: String?) {
         if matches(elementName, suffix: "title") {
             collectingTitle = false; title = currentTitle
+        }
+        if matches(elementName, suffix: "creator"), collectingCreator {
+            collectingCreator = false
+            creator = currentCreator
+        }
+        if matches(elementName, suffix: "contributor"), collectingContributor {
+            collectingContributor = false
+            if currentContributorIsIllustrator {
+                illustrator = currentContributor
+            }
+            currentContributorIsIllustrator = false
         }
     }
 

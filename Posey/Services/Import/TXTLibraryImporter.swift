@@ -123,7 +123,8 @@ struct TXTLibraryImporter {
             playbackSkipUntilOffset: skipOffset,
             contentEndOffset: contentEndOffset,
             contentEndUnitID: contentEndUnitID,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: nil
         )
         try databaseManager.persistParsedDocument(parsed)
 
@@ -151,7 +152,8 @@ struct TXTLibraryImporter {
             playbackSkipUntilOffset: skipOffset,
             contentEndOffset: contentEndOffset,
             skipSource: skipSource,
-            contentHash: contentHash
+            contentHash: contentHash,
+            editionLabel: nil
         )
         // 2026-05-23 — Step 8b: new unit-anchored chunker runs in
         // parallel with the legacy one during the cutover.

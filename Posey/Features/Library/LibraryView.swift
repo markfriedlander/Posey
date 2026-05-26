@@ -998,6 +998,31 @@ extension LibraryViewModel {
                 _ = arg
                 return #"{\"error\":\"LIST_ENHANCED_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
+            case "LIST_UNITS_SUMMARY":
+                // Step 9 diagnostic — kind counts + first 10 units for
+                // a document. Used to verify heading promotion fired
+                // (DOCX/HTML/EPUB/PDF Phase 0 prerequisite work).
+                guard let raw = arg, let id = UUID(uuidString: raw) else {
+                    return #"{"error":"Usage: LIST_UNITS_SUMMARY:<doc-id>"}"#
+                }
+                let units = try databaseManager.units(for: id)
+                var kindCounts: [String: Int] = [:]
+                for u in units { kindCounts[u.kind.rawValue, default: 0] += 1 }
+                let samples: [[String: Any]] = units.prefix(10).map { u in
+                    [
+                        "seq": u.sequence,
+                        "kind": u.kind.rawValue,
+                        "level": u.metadata.headingLevel ?? -1,
+                        "preview": String(u.text.prefix(60))
+                    ]
+                }
+                return json([
+                    "documentID": id.uuidString,
+                    "totalUnits": units.count,
+                    "kindCounts": kindCounts,
+                    "samples": samples
+                ])
+
             case "READER_OBSERVATION":
                 // 8f follow-up #12 diagnostic — returns the live
                 // ReaderObservation snapshot so harness tests can

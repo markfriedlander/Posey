@@ -70,10 +70,20 @@ struct DOCXLibraryImporter {
         // ── Convert blocks to units. DOCXDisplayParser only emits
         // ── blocks when the doc has inline images; plain-paragraph
         // ── DOCXs fall back to plainText paragraph splitting.
-        let units = ContentUnitBuilder.unitsPreferringBlocks(
+        let baseUnits = ContentUnitBuilder.unitsPreferringBlocks(
             blocks: blocks,
             plainText: plainText,
             documentID: documentID
+        )
+        // ── Step 9 prerequisite — promote prose paragraphs whose
+        // ── offsets match heading entries into `.heading` units, so
+        // ── the unified UnitRowView renderer styles them by kind.
+        let headingLevelByOffset: [Int: Int] = Dictionary(
+            uniqueKeysWithValues: headings.map { ($0.plainTextOffset, $0.level) }
+        )
+        let units = ContentUnitBuilder.applyHeadingMarkers(
+            to: baseUnits,
+            headingLevelByOffset: headingLevelByOffset
         )
 
         // ── Smart-skip: heading-based TOCSkipDetector.

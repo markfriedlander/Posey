@@ -76,10 +76,21 @@ struct HTMLLibraryImporter {
         // ── blocks when the doc has inline images; plain HTML
         // ── (Readability-stripped articles, etc.) falls back to
         // ── plainText paragraph splitting.
-        let units = ContentUnitBuilder.unitsPreferringBlocks(
+        let baseUnits = ContentUnitBuilder.unitsPreferringBlocks(
             blocks: blocks,
             plainText: plainText,
             documentID: documentID
+        )
+        // ── Step 9 prerequisite — promote heading paragraphs into
+        // ── `.heading` units. Reuse the TOC resolution that already
+        // ── searches plainText for each heading's title.
+        let resolvedHeadings = resolveHeadingOffsets(headings, in: plainText)
+        let headingLevelByOffset: [Int: Int] = Dictionary(
+            uniqueKeysWithValues: resolvedHeadings.map { ($0.plainTextOffset, $0.level) }
+        )
+        let units = ContentUnitBuilder.applyHeadingMarkers(
+            to: baseUnits,
+            headingLevelByOffset: headingLevelByOffset
         )
 
         // ── Smart-skip: same layered detection.
@@ -107,8 +118,8 @@ struct HTMLLibraryImporter {
         // ── Sentences.
         let sentences = SentenceIndexer.sentences(for: units)
 
-        // ── TOC entries.
-        let tocEntries = resolveHeadingOffsets(headings, in: plainText)
+        // ── TOC entries (already resolved above for heading promotion).
+        let tocEntries = resolvedHeadings
 
         let parsedDoc = ParsedDocument(
             id: documentID,

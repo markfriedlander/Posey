@@ -123,9 +123,21 @@ struct PDFLibraryImporter {
         // ── Build units from displayText (preserves form-feed
         // ── page boundaries as pageBreak units, image markers as
         // ── image units, paragraph runs as prose units).
-        let units = ContentUnitBuilder.unitsFromPDFDisplayText(
+        let baseUnits = ContentUnitBuilder.unitsFromPDFDisplayText(
             parsed.displayText,
             documentID: documentID
+        )
+        // ── Step 9 prerequisite — promote heading paragraphs into
+        // ── `.heading` units using PDFTOCDetector output. Helper
+        // ── skips non-prose units (pageBreak / image) and only
+        // ── advances the offset cursor on prose-bearing kinds —
+        // ── matches the persister's plain_text join scheme.
+        let headingLevelByOffset: [Int: Int] = Dictionary(
+            uniqueKeysWithValues: parsed.tocEntries.map { ($0.plainTextOffset, $0.level) }
+        )
+        let units = ContentUnitBuilder.applyHeadingMarkers(
+            to: baseUnits,
+            headingLevelByOffset: headingLevelByOffset
         )
 
         // ── Sentences from prose-bearing units.

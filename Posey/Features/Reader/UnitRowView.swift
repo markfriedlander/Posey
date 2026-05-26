@@ -7,10 +7,21 @@ import SwiftUI
 /// Every format renders through this view; the look of any given
 /// unit is governed by its `kind`, not its format origin.
 ///
-/// **Sentence highlighting**: for prose-bearing units, when a
-/// sentence inside this unit is the playback-active sentence, the
-/// renderer highlights that range. Inactive units, and inactive
-/// portions of the active unit, render plainly.
+/// **Sentence highlighting + sentence-precise tap (Step 9)**: for
+/// prose-bearing units (prose / heading / blockquote / listItem),
+/// each sentence is rendered as its own range inside one
+/// `AttributedString`. The active sentence gets a subtle background
+/// tint; every sentence range carries a `posey-sentence://<uuid>`
+/// link so tapping a specific sentence inside a paragraph jumps
+/// playback there. SwiftUI's `Text(AttributedString)` lays the
+/// paragraph out as one continuous flow (no per-sentence row
+/// stacking — reading experience preserved) while keeping the link
+/// dispatch per-sentence-precise via `openURL`.
+///
+/// Link styling (the default blue + underline) is suppressed by
+/// overriding `foregroundColor` to `.primary` and clearing
+/// `underlineStyle` on every sentence range — visually identical to
+/// non-link prose.
 ///
 /// **Image units**: rendered from the side-store image referenced
 /// by `metadata.imageID`. Loading is best-effort; a failed load
@@ -19,14 +30,23 @@ import SwiftUI
 /// **Page-break / horizontal-rule**: a thin centered separator.
 ///
 /// 2026-05-23 — introduced as part of the architecture rebuild.
+/// 2026-05-26 — Step 9: wired live as the reader's renderer;
+/// sentence-link tap shape added; `sentencesInUnit` parameter added
+/// so the row can resolve the right sentences without re-filtering
+/// the document-wide list.
 struct UnitRowView: View {
     /// The unit to render.
     let unit: ContentUnit
 
-    /// The active sentence within this unit, when playback is
-    /// currently on a sentence inside this unit. `nil` when playback
-    /// isn't active on this unit (the common case for any row that
-    /// isn't the active one).
+    /// The sentences that belong to this unit, in playback order.
+    /// Empty for non-prose-bearing kinds (image / pageBreak /
+    /// horizontalRule). Supplied by the caller so the row doesn't
+    /// have to filter the document-wide sentences list on every
+    /// redraw — the parent VM keeps a `sentencesByUnit` lookup.
+    let sentencesInUnit: [Sentence]
+
+    /// The active sentence in the WHOLE document. The row only
+    /// styles it when `activeSentence?.unitID == unit.id`.
     let activeSentence: Sentence?
 
     /// User-controlled body font size. Threaded down so the row
@@ -38,6 +58,11 @@ struct UnitRowView: View {
     /// reader plumbing supplies a closure that consults the side
     /// store. Returns nil if loading fails.
     let imageDataProvider: (String) -> Data?
+
+    /// URL scheme used by the sentence-link tap shape. Parsed by
+    /// `ReaderView`'s `.environment(\.openURL, …)` action handler.
+    /// Format: `posey-sentence://<sentence-uuid>`.
+    static let sentenceURLScheme = "posey-sentence"
 
     var body: some View {
         switch unit.kind {
@@ -60,40 +85,55 @@ struct UnitRowView: View {
 
     // MARK: - Prose
 
-    /// Body paragraph. The active sentence's range is highlighted
-    /// with a subtle background tint while the rest of the unit
-    /// renders plainly. Range-attributed via `AttributedString` so
-    /// SwiftUI lays it out as one text view (no line-break artifacts
-    /// from splitting into pre/active/post Text views).
+    /// Body paragraph. Sentence ranges are tagged with
+    /// `posey-sentence://` URLs so tap-to-jump is sentence-precise;
+    /// the active sentence range gets a subtle background tint.
     private var proseRow: some View {
         Text(attributedProse)
             .font(.system(size: bodyFontSize))
             .lineSpacing(bodyFontSize * 0.35)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
+            .textSelection(.enabled)
     }
 
+    // MARK: - AttributedString builder (shared by prose / quote / list)
+
+    /// Lay sentence-link ranges, suppress link styling, apply the
+    /// active highlight. The same builder is used by every
+    /// prose-bearing kind — they share text-flow semantics and
+    /// differ only in surrounding chrome (italic for quote, bullet
+    /// for list, etc.). Heading uses its own builder below because
+    /// it doesn't need sentence-link granularity (one heading =
+    /// one sentence, basically).
     private var attributedProse: AttributedString {
         var attributed = AttributedString(unit.text)
-        guard let active = activeSentence,
-              active.unitID == unit.id,
-              active.intraStart >= 0,
-              active.intraEnd <= unit.text.count,
-              active.intraStart < active.intraEnd else {
-            return attributed
-        }
-        // Convert intra-unit character offsets to AttributedString indices.
-        // These are character-counted offsets into the same string we
-        // built the AttributedString from, so distance-based indexing is
-        // safe.
         let plain = unit.text
-        guard let lower = plain.index(plain.startIndex, offsetBy: active.intraStart, limitedBy: plain.endIndex),
-              let upper = plain.index(plain.startIndex, offsetBy: active.intraEnd, limitedBy: plain.endIndex),
-              let attrLower = AttributedString.Index(lower, within: attributed),
-              let attrUpper = AttributedString.Index(upper, within: attributed) else {
-            return attributed
+        let active = (activeSentence?.unitID == unit.id) ? activeSentence : nil
+
+        for sentence in sentencesInUnit {
+            guard sentence.intraStart >= 0,
+                  sentence.intraEnd <= plain.count,
+                  sentence.intraStart < sentence.intraEnd,
+                  let lower = plain.index(plain.startIndex, offsetBy: sentence.intraStart, limitedBy: plain.endIndex),
+                  let upper = plain.index(plain.startIndex, offsetBy: sentence.intraEnd, limitedBy: plain.endIndex),
+                  let attrLower = AttributedString.Index(lower, within: attributed),
+                  let attrUpper = AttributedString.Index(upper, within: attributed),
+                  let url = URL(string: "\(Self.sentenceURLScheme)://\(sentence.id.uuidString)") else {
+                continue
+            }
+            let range = attrLower..<attrUpper
+            attributed[range].link = url
+            // Suppress link styling so the prose looks like prose,
+            // not a list of blue underlined items.
+            attributed[range].foregroundColor = Color.primary
+            attributed[range].underlineStyle = nil
+            // Active highlight on top of the link range — same
+            // subtle background as the prior segment-row treatment.
+            if let active, sentence.id == active.id {
+                attributed[range].backgroundColor = Color.primary.opacity(0.12)
+            }
         }
-        attributed[attrLower..<attrUpper].backgroundColor = Color.primary.opacity(0.12)
         return attributed
     }
 
@@ -106,11 +146,12 @@ struct UnitRowView: View {
             1: 1.75, 2: 1.40, 3: 1.20, 4: 1.10, 5: 1.05, 6: 1.00
         ]
         let scale = multipliers[level] ?? 1.0
-        return Text(unit.text)
+        return Text(attributedProse)
             .font(.system(size: bodyFontSize * scale, weight: .bold))
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, bodyFontSize * 0.75)
             .padding(.bottom, bodyFontSize * 0.3)
+            .textSelection(.enabled)
     }
 
     // MARK: - Blockquote
@@ -124,6 +165,7 @@ struct UnitRowView: View {
                 .font(.system(size: bodyFontSize).italic())
                 .lineSpacing(bodyFontSize * 0.35)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
         }
         .padding(.vertical, 4)
     }
@@ -139,6 +181,7 @@ struct UnitRowView: View {
                 .font(.system(size: bodyFontSize))
                 .lineSpacing(bodyFontSize * 0.35)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
         }
         .padding(.vertical, 2)
     }

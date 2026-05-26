@@ -194,6 +194,84 @@ enum ContentUnitBuilder {
         }
     }
 
+    /// **Step 9 prerequisite — heading promotion.**
+    ///
+    /// Walk a unit list and re-kind any `.prose` unit whose paragraph
+    /// covers a heading offset (per `headingLevelByOffset`) into a
+    /// `.heading` unit with the matching level. Used by DOCX / HTML /
+    /// EPUB / PDF importers whose display parsers don't emit heading
+    /// blocks of their own; the `(title, plainTextOffset, level)`
+    /// records from each format's `parsed.headings` / `parsed.tocEntries`
+    /// surface get lifted into proper unit kinds so the unified
+    /// `UnitRowView` renderer can style them by `unit.kind`.
+    ///
+    /// Offset coordinate space matches the persister's `plain_text`:
+    /// prose-bearing units joined with `"\n\n"`. A heading offset
+    /// counts as "in" a unit when it falls inside `[unitStart,
+    /// unitEnd]` (inclusive of either edge — heading detectors
+    /// sometimes report the start of leading whitespace).
+    ///
+    /// Idempotent on `.heading` / `.listItem` / `.blockquote` units —
+    /// only `.prose` gets rewritten. Non-prose kinds (`.image`,
+    /// `.pageBreak`, `.horizontalRule`) advance the unit list but
+    /// don't contribute to the plain_text offset cursor.
+    ///
+    /// RTF doesn't use this helper because `RTFLibraryImporter.buildUnits`
+    /// already assigns heading kind inline as it splits paragraphs.
+    /// Markdown's `ContentUnitBuilder.units(from: blocks)` already
+    /// emits `.heading` units directly from `DisplayBlockKind.heading`.
+    /// TXT has no heading concept.
+    static func applyHeadingMarkers(
+        to units: [ContentUnit],
+        headingLevelByOffset: [Int: Int]
+    ) -> [ContentUnit] {
+        guard !headingLevelByOffset.isEmpty else { return units }
+        var out: [ContentUnit] = []
+        out.reserveCapacity(units.count)
+        var cursor = 0
+        var firstProseSeen = false
+        for unit in units {
+            if !unit.kind.carriesProseText {
+                out.append(unit)
+                continue
+            }
+            // "\n\n" separator before this prose-bearing unit, except
+            // the very first one — matches the persister's
+            // `joined(separator: "\n\n")` over prose-bearing units.
+            if firstProseSeen { cursor += 2 }
+            firstProseSeen = true
+            let start = cursor
+            let end = cursor + unit.text.count
+            cursor = end
+
+            // Only plain `.prose` gets rewritten. Pre-existing heading /
+            // list / quote kinds are preserved.
+            guard unit.kind == .prose else {
+                out.append(unit)
+                continue
+            }
+            // Heading detector may report the offset at the start of
+            // the paragraph proper or anywhere inside leading
+            // whitespace. Inclusive range check.
+            if let matched = (start...end).first(where: { headingLevelByOffset[$0] != nil }),
+               let level = headingLevelByOffset[matched] {
+                out.append(ContentUnit(
+                    id: unit.id,
+                    documentID: unit.documentID,
+                    sequence: unit.sequence,
+                    kind: .heading,
+                    text: unit.text,
+                    metadata: ContentUnitMetadata(headingLevel: level),
+                    revision: unit.revision,
+                    sourceTier: unit.sourceTier
+                ))
+            } else {
+                out.append(unit)
+            }
+        }
+        return out
+    }
+
     /// Map a plainText character offset (the coordinate space the
     /// existing smart-skip detectors operate in) to the first unit
     /// whose cumulative position is at or after the offset. Used by

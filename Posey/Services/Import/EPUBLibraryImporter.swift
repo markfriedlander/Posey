@@ -76,10 +76,20 @@ struct EPUBLibraryImporter {
 
         // ── Run display parser at import time, build units.
         let blocks = displayParser.parse(displayText: parsed.displayText)
-        let units = ContentUnitBuilder.unitsPreferringBlocks(
+        let baseUnits = ContentUnitBuilder.unitsPreferringBlocks(
             blocks: blocks,
             plainText: parsed.plainText,
             documentID: documentID
+        )
+        // ── Step 9 prerequisite — promote heading paragraphs into
+        // ── `.heading` units. EPUB's parsed.tocEntries already
+        // ── carry (title, plainTextOffset, level) tuples.
+        let headingLevelByOffset: [Int: Int] = Dictionary(
+            uniqueKeysWithValues: parsed.tocEntries.map { ($0.plainTextOffset, $0.level) }
+        )
+        let units = ContentUnitBuilder.applyHeadingMarkers(
+            to: baseUnits,
+            headingLevelByOffset: headingLevelByOffset
         )
 
         // ── Map smart-skip offset to a unit reference.

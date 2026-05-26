@@ -98,123 +98,52 @@ struct ReaderView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
 
-                    if viewModel.usesDisplayBlocks {
-                        ForEach(viewModel.displayBlocks) { block in
-                            Group {
-                                if block.kind == .visualPlaceholder {
-                                    visualPlaceholder(block: block)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                } else if block.kind == .horizontalRule {
-                                    // 2026-05-22 — Markdown `---`/`***`/`___`.
-                                    // Same treatment as the end-of-book colophon
-                                    // separator: thin, centered, understated.
-                                    horizontalRuleView()
-                                } else {
-                                    Text(viewModel.displayText(for: block))
-                                        .textSelection(.enabled)
-                                        .font(viewModel.font(for: block))
-                                        .fontWeight(viewModel.fontWeight(for: block))
-                                        .foregroundStyle(viewModel.foregroundStyle(for: block))
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
+                    // Step 9 — unified units-based renderer. Walks
+                    // every `ContentUnit` (prose / heading / blockquote
+                    // / listItem / image / pageBreak / horizontalRule)
+                    // and delegates to `UnitRowView`. Sentence-precise
+                    // tap is delivered via per-sentence link ranges
+                    // inside the row's `AttributedString`; the openURL
+                    // action below dispatches to `jumpToSentenceID`.
+                    ForEach(viewModel.units) { unit in
+                        UnitRowView(
+                            unit: unit,
+                            sentencesInUnit: viewModel.sentencesByUnit[unit.id] ?? [],
+                            activeSentence: viewModel.activeSentence,
+                            bodyFontSize: viewModel.fontSize,
+                            imageDataProvider: { viewModel.imageData(for: $0) }
+                        )
+                        .padding(.horizontal, 14)
+                        .id(unit.id)
+                        .accessibilityIdentifier("reader.unit.\(unit.id.uuidString)")
+                        // Citation pill — only on the cited unit.
+                        #if POSEY_ENABLE_ASK_POSEY
+                        .overlay(alignment: .topTrailing) {
+                            if isCitedRow(unit: unit) {
+                                citationReturnPill()
+                                    .padding(.trailing, 8)
+                                    .padding(.top, 2)
                             }
-                            .padding(.horizontal, 14)
-                            // 2026-05-06 (parity #3): extra top space
-                            // above a heading row so the section break
-                            // reads as one. First row in the doc
-                            // doesn't get the extra padding (block.id
-                            // == 0).
-                            .padding(.top, headingTopPadding(for: block))
-                            .padding(.vertical, 6)
-                            .opacity(blockOpacity(block))
-                            .scaleEffect(blockScale(block), anchor: .center)
-                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: viewModel.currentSentenceIndex)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(blockBackground(block))
-                            )
-                            .id(block.id)
-                            .accessibilityIdentifier("reader.segment.\(block.id)")
-                            // 2026-05-04 — Single-tap-to-jump
-                            // (Mark + cc, evening). Match the
-                            // read-aloud genre convention: tapping
-                            // a sentence jumps reading position
-                            // there. Works now because the outer
-                            // tap-to-toggle-chrome gesture was
-                            // removed (chrome is persistent), so
-                            // there's no competing single-tap
-                            // recogniser. Skip on visual-placeholder
-                            // blocks (no startOffset to jump to).
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                if block.kind != .visualPlaceholder {
-                                    viewModel.jumpToOffset(block.startOffset)
-                                }
-                            }
-                            // 2026-05-05 — Citation-return pill,
-                            // anchored top-trailing so it sits next
-                            // to the first line of the cited block.
-                            // 2026-05-19 — Wrapped in #if so the pill
-                            // (including its "Return to Ask Posey
-                            // conversation" a11y label) is fully
-                            // stripped from Release binaries.
-                            #if POSEY_ENABLE_ASK_POSEY
-                            .overlay(alignment: .topTrailing) {
-                                if isCitedRow(blockStartOffset: block.startOffset) {
-                                    citationReturnPill()
-                                        .padding(.trailing, 8)
-                                        .padding(.top, 2)
-                                }
-                            }
-                            #endif
                         }
-                    } else {
-                        ForEach(Array(viewModel.segments.enumerated()), id: \.element.id) { segIdx, segment in
-                            // 2026-05-06 (parity #3): sentence-row docs
-                            // (TXT, plain DOCX/HTML/EPUB without images,
-                            // RTF) get heading styling too. The
-                            // viewModel resolves a row's TOC level by
-                            // matching its startOffset against the
-                            // stored TOC; nil means body text.
-                            let segHeadingLevel = viewModel.headingLevel(forSegmentStartOffset: segment.startOffset)
-                            Text(segment.text)
-                                .textSelection(.enabled)
-                                .font(segmentFont(for: segment, headingLevel: segHeadingLevel))
-                                .fontWeight(segmentWeight(headingLevel: segHeadingLevel))
-                                .opacity(segmentOpacity(segment))
-                                .frame(maxWidth: .infinity, alignment: motionAlignment)
-                                .multilineTextAlignment(motionTextAlignment)
-                            .padding(.horizontal, 14)
-                            .padding(.top, segmentTopPadding(headingLevel: segHeadingLevel, isFirst: segIdx == 0))
-                            .padding(.vertical, 6)
-                            .scaleEffect(segmentScale(segment), anchor: .center)
-                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: viewModel.currentSentenceIndex)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(segmentBackground(segment))
-                            )
-                            .id(segment.id)
-                            .accessibilityIdentifier("reader.segment.\(segment.id)")
-                            // 2026-05-04 — Single-tap-to-jump
-                            // (see displayBlock branch comment).
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                viewModel.jumpToOffset(segment.startOffset)
+                        #endif
+                        // Tap-to-jump fallback for image / pageBreak /
+                        // horizontalRule rows that have no sentence
+                        // ranges (the openURL path covers prose-bearing
+                        // kinds). Image rows jump to the first
+                        // sentence of the next prose unit (matches the
+                        // legacy "tap-the-image-block" behavior).
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            guard !unit.kind.carriesProseText else { return }
+                            // Find first sentence whose unit follows
+                            // this one in sequence — caller's "click
+                            // through past this image" intent.
+                            if let firstAfter = viewModel.sentences.first(where: { s in
+                                guard let u = viewModel.units.first(where: { $0.id == s.unitID }) else { return false }
+                                return u.sequence > unit.sequence
+                            }) {
+                                viewModel.jumpToSentenceID(firstAfter.id)
                             }
-                            // 2026-05-05 — Citation-return pill,
-                            // anchored top-trailing on the cited
-                            // segment row.
-                            // 2026-05-19 — Wrapped in #if so the pill
-                            // is fully stripped from Release binaries.
-                            #if POSEY_ENABLE_ASK_POSEY
-                            .overlay(alignment: .topTrailing) {
-                                if isCitedRow(segmentIndex: segIdx) {
-                                    citationReturnPill()
-                                        .padding(.trailing, 14)
-                                        .padding(.top, 4)
-                                }
-                            }
-                            #endif
                         }
                     }
 
@@ -252,9 +181,25 @@ struct ReaderView: View {
                 .padding(.vertical)
             }
             .contentShape(Rectangle())
+            // Step 9 — sentence-precise tap. The per-sentence
+            // AttributedString ranges inside UnitRowView emit
+            // posey-sentence:// URLs on tap; intercept here, jump
+            // playback to the matching sentence, and return
+            // `.handled` so SwiftUI doesn't try to open the URL in
+            // Safari.
+            .environment(\.openURL, OpenURLAction { url in
+                guard url.scheme == UnitRowView.sentenceURLScheme,
+                      let host = url.host(),
+                      let sentenceID = UUID(uuidString: host) else {
+                    return .systemAction
+                }
+                viewModel.jumpToSentenceID(sentenceID)
+                return .handled
+            })
             // 2026-05-04 — Tap-to-toggle-chrome removed; single-tap
             // on a sentence row now jumps reading position there
-            // (per-row `.onTapGesture` in the ForEach blocks above).
+            // (sentence-link tap in UnitRowView, plus the per-unit
+            // `.onTapGesture` fallback for image / pageBreak rows).
             // Chrome auto-fades after 3 s and re-reveals on scroll
             // motion (any scroll position change brings it back —
             // belt-and-suspenders for the "I want the controls now"
@@ -1547,6 +1492,17 @@ struct ReaderView: View {
         // 80 chars" comparison that produced multiple pills on
         // densely-packed byline content.
         return blockStartOffset == ctx.canonicalBlockStartOffset
+    }
+
+    /// **Step 9 — citation pill on the unit-based renderer.**
+    /// True iff the unit contains the cited sentence (matched by the
+    /// citation context's sentence index — same data the segment-row
+    /// flavor compares against).
+    private func isCitedRow(unit: ContentUnit) -> Bool {
+        guard let ctx = viewModel.citationReturnContext else { return false }
+        let citedIdx = ctx.citedSentenceIndex
+        guard citedIdx >= 0, citedIdx < viewModel.sentences.count else { return false }
+        return viewModel.sentences[citedIdx].unitID == unit.id
     }
 
     private func openAskPosey(
@@ -3246,6 +3202,20 @@ final class ReaderViewModel: ObservableObject {
     /// render.
     @Published private(set) var isLoading: Bool = true
     @Published private(set) var segments: [TextSegment] = []
+    /// **Step 9 — units-based renderer.** Walking these and delegating
+    /// each to `UnitRowView` IS the renderer. `segments` is kept as a
+    /// derived flat array of sentence offsets that `SpeechPlaybackService`
+    /// continues to consume; `units` + `sentences` are the visual /
+    /// interaction surface.
+    @Published private(set) var units: [ContentUnit] = []
+    /// Pre-filtered sentence list — skip / content-end have already
+    /// been applied so `sentences[currentSentenceIndex]` ≡
+    /// `segments[currentSentenceIndex]` (same row across both arrays).
+    @Published private(set) var sentences: [Sentence] = []
+    /// Lookup table: unit_id → ordered sentences inside that unit.
+    /// Pre-computed at content-load so `UnitRowView` doesn't have to
+    /// filter the full sentence list on every redraw.
+    @Published private(set) var sentencesByUnit: [UUID: [Sentence]] = [:]
     @Published private(set) var displayBlocks: [DisplayBlock] = []
     /// Table of contents entries for this document. Empty if not available.
     @Published private(set) var tocEntries: [StoredTOCEntry] = []
@@ -3310,6 +3280,15 @@ final class ReaderViewModel: ObservableObject {
     ///     follow the same Motion-aware logic now).
     private var visualPauseMapAll: [Int: Int] = [:]
     private var visualPauseBlockIDsBySentenceIndex: [Int: Int] = [:]
+    /// Step 9 — units flavor of the visual-pause map. Keys: sentence
+    /// index. Values: the `.image` unit's id whose "next sentence"
+    /// triggered the pause. Populated by the units loader; used by
+    /// `pauseForVisualUnitIfNeeded(...)` (the units-aware counterpart
+    /// of `pauseForVisualBlockIfNeeded`).
+    private var visualPauseUnitIDsBySentenceIndex: [Int: UUID] = [:]
+    private var visualPauseActiveUnitIDsBySentenceIndex: [Int: UUID] = [:]
+    @Published private(set) var focusedUnitID: UUID? = nil
+    private var acknowledgedVisualUnitIDs: Set<UUID> = []
     private var cancellables: Set<AnyCancellable> = []
     private var didRunAutomationActions = false
     private var acknowledgedVisualBlockIDs: Set<Int> = []
@@ -3362,6 +3341,15 @@ final class ReaderViewModel: ObservableObject {
         let segments: [TextSegment]
         let displayBlocks: [DisplayBlock]
         let visualPauseMap: [Int: Int]
+        /// Step 9 — units + filtered sentences for the unified renderer.
+        /// Legacy callers (computeContent over plainText) pass empty
+        /// arrays; the new computeContentFromUnits populates them.
+        let units: [ContentUnit]
+        let sentences: [Sentence]
+        /// Sentence-id → first prose unit it lives inside. Populated
+        /// only on the units path. Used by `applyVisualPause*` to map
+        /// "next sentence after this image unit" to a sentence index.
+        let visualPauseUnitIDsBySentenceIndex: [Int: UUID]
     }
 
     /// Re-tag paragraph blocks whose `startOffset` matches a TOC
@@ -3489,16 +3477,49 @@ final class ReaderViewModel: ObservableObject {
             ))
         }
 
-        // Units-based docs render through the unified UnitRowView
-        // (added separately). The legacy displayBlocks path is left
-        // empty so the reader falls into its sentence-row code path
-        // for now; switching the renderer is the next step in the
-        // rebuild.
+        // Step 9 — emit the filtered sentence list parallel to segments
+        // so the renderer can walk it on a unit basis.
+        var filteredSentences: [Sentence] = []
+        filteredSentences.reserveCapacity(segments.count)
+        for sentence in sentences {
+            if let s = skipUnitSequence, sentence.unitSequence < s { continue }
+            if let e = contentEndUnitSequence, sentence.unitSequence >= e { continue }
+            filteredSentences.append(sentence)
+        }
+        // Filter the unit list by the same skip / content-end window
+        // so the renderer doesn't render pre-skip / post-end units.
+        let filteredUnits: [ContentUnit] = units.filter { unit in
+            if let s = skipUnitSequence, unit.sequence < s { return false }
+            if let e = contentEndUnitSequence, unit.sequence >= e { return false }
+            return true
+        }
+
+        // Visual-pause map (units flavor): for every `.image` unit,
+        // find the first sentence in the *next* prose-bearing unit
+        // and key the image unit's id by that sentence index.
+        var visualPauseUnitIDsBySentenceIndex: [Int: UUID] = [:]
+        for (uIdx, unit) in filteredUnits.enumerated() where unit.kind == .image {
+            // Find the next prose-bearing unit after this image.
+            for j in (uIdx + 1)..<filteredUnits.count {
+                let candidate = filteredUnits[j]
+                guard candidate.kind.carriesProseText else { continue }
+                // First sentence of that unit (lowest intra_start).
+                let firstSentence = filteredSentences.first { $0.unitID == candidate.id }
+                if let s = firstSentence,
+                   let sentenceIndex = filteredSentences.firstIndex(of: s) {
+                    visualPauseUnitIDsBySentenceIndex[sentenceIndex] = unit.id
+                }
+                break
+            }
+        }
+
+        // Legacy displayBlocks intentionally empty — the units-based
+        // renderer doesn't consume them. Kept on LoadedContent only
+        // until the legacy field is removed from the struct.
         let displayBlocks: [DisplayBlock] = []
         let visualPauseMap: [Int: Int] = [:]
 
-        // Suppress unused-parameter warnings on the bridge fields
-        // until the per-format flips wire them up.
+        // Suppress unused-parameter warnings on the bridge fields.
         _ = skipGlobalOffset
         _ = endGlobalOffset
         _ = document
@@ -3506,7 +3527,10 @@ final class ReaderViewModel: ObservableObject {
         return LoadedContent(
             segments: segments,
             displayBlocks: displayBlocks,
-            visualPauseMap: visualPauseMap
+            visualPauseMap: visualPauseMap,
+            units: filteredUnits,
+            sentences: filteredSentences,
+            visualPauseUnitIDsBySentenceIndex: visualPauseUnitIDsBySentenceIndex
         )
     }
 
@@ -3559,10 +3583,17 @@ final class ReaderViewModel: ObservableObject {
             displayBlocks: displayBlocks,
             segments: segments
         )
+        // Legacy path doesn't have units yet — empty arrays. Docs
+        // imported before the units rebuild fall back to the old
+        // displayBlocks render. New imports always go through
+        // computeContentFromUnits.
         return LoadedContent(
             segments: segments,
             displayBlocks: displayBlocks,
-            visualPauseMap: visualPauseMap
+            visualPauseMap: visualPauseMap,
+            units: [],
+            sentences: [],
+            visualPauseUnitIDsBySentenceIndex: [:]
         )
     }
 
@@ -3641,6 +3672,17 @@ final class ReaderViewModel: ObservableObject {
         self.segments = computed.segments
         self.displayBlocks = computed.displayBlocks
         self.visualPauseMapAll = computed.visualPauseMap
+        // Step 9 — units-based renderer state.
+        self.units = computed.units
+        self.sentences = computed.sentences
+        self.visualPauseUnitIDsBySentenceIndex = computed.visualPauseUnitIDsBySentenceIndex
+        // Pre-compute the per-unit sentence index so UnitRowView's
+        // body recomputes are O(unitSentenceCount) not O(totalSentences).
+        var byUnit: [UUID: [Sentence]] = [:]
+        for sentence in computed.sentences {
+            byUnit[sentence.unitID, default: []].append(sentence)
+        }
+        self.sentencesByUnit = byUnit
         // 2026-05-13 (A1) — apply Motion-aware filter immediately so the
         // pause behavior matches the user's current readingStyle from the
         // moment content lands. `applyVisualBlockMotionPolicy()` is the
@@ -4276,12 +4318,15 @@ final class ReaderViewModel: ObservableObject {
     private var nextScrollAnchor: UnitPoint = .center
 
     func scrollToCurrentSentence(with proxy: ScrollViewProxy, animated: Bool) {
-        let scrollTargetID: Int
-
-        if let blockID = currentDisplayBlockID {
-            scrollTargetID = blockID
-        } else if segments.isEmpty == false {
-            scrollTargetID = currentSentenceIndex
+        // Step 9 — units-based renderer. Scroll target is the active
+        // unit's id (matching the `.id(unit.id)` on each row).
+        // Visual-pause `focusedUnitID` wins when set so the user
+        // lands on the image row that just paused playback.
+        let scrollTargetID: UUID
+        if let focusedUnitID {
+            scrollTargetID = focusedUnitID
+        } else if let activeUnitID {
+            scrollTargetID = activeUnitID
         } else {
             return
         }
@@ -4457,6 +4502,12 @@ final class ReaderViewModel: ObservableObject {
     }
 
     private func pauseForVisualBlockIfNeeded(atSentenceIndex sentenceIndex: Int) {
+        // Step 9 — units-aware path takes priority when the units
+        // map is populated (any doc imported via the units pipeline).
+        if !visualPauseActiveUnitIDsBySentenceIndex.isEmpty {
+            pauseForVisualUnitIfNeeded(atSentenceIndex: sentenceIndex)
+            return
+        }
         guard playbackService.state == .playing,
               let visualBlockID = visualPauseBlockIDsBySentenceIndex[sentenceIndex],
               acknowledgedVisualBlockIDs.contains(visualBlockID) == false else {
@@ -4470,6 +4521,17 @@ final class ReaderViewModel: ObservableObject {
 
         acknowledgedVisualBlockIDs.insert(visualBlock.id)
         focusedDisplayBlockID = visualBlock.id
+        playbackService.pause()
+    }
+
+    private func pauseForVisualUnitIfNeeded(atSentenceIndex sentenceIndex: Int) {
+        guard playbackService.state == .playing,
+              let visualUnitID = visualPauseActiveUnitIDsBySentenceIndex[sentenceIndex],
+              acknowledgedVisualUnitIDs.contains(visualUnitID) == false else {
+            return
+        }
+        acknowledgedVisualUnitIDs.insert(visualUnitID)
+        focusedUnitID = visualUnitID
         playbackService.pause()
     }
 
@@ -4504,13 +4566,20 @@ final class ReaderViewModel: ObservableObject {
         switch imageHandling {
         case .skipImages:
             visualPauseBlockIDsBySentenceIndex = [:]
+            visualPauseActiveUnitIDsBySentenceIndex = [:]
+            // Announcements come from EITHER map — whichever flavor
+            // populated entries for the current doc.
             var announcements: [Int: String] = [:]
             for (sentenceIndex, _) in visualPauseMapAll {
+                announcements[sentenceIndex] = "Image."
+            }
+            for (sentenceIndex, _) in visualPauseUnitIDsBySentenceIndex {
                 announcements[sentenceIndex] = "Image."
             }
             playbackService.visualAnnouncementText = announcements
         case .pauseAtImages:
             visualPauseBlockIDsBySentenceIndex = visualPauseMapAll
+            visualPauseActiveUnitIDsBySentenceIndex = visualPauseUnitIDsBySentenceIndex
             playbackService.visualAnnouncementText = [:]
         }
     }
@@ -4794,6 +4863,33 @@ final class ReaderViewModel: ObservableObject {
         currentSentenceIndex = targetIndex
         persistPosition()
     }
+
+    /// **Step 9 — sentence-precise tap.**
+    ///
+    /// Dispatch target for `posey-sentence://<sentence-uuid>` taps
+    /// fired by `UnitRowView`'s per-sentence link ranges. Resolves
+    /// the sentence to its index in the flat `sentences` array
+    /// (which mirrors `segments` 1-1 post-filter) and snaps
+    /// playback there.
+    func jumpToSentenceID(_ sentenceID: UUID) {
+        guard let idx = sentences.firstIndex(where: { $0.id == sentenceID }) else { return }
+        stopPlayback()
+        currentSentenceIndex = idx
+        persistPosition()
+    }
+
+    /// The sentence currently active for highlight / TTS. Equal to
+    /// `sentences[currentSentenceIndex]` when in bounds, otherwise
+    /// nil — used by `UnitRowView` to decide whether to draw the
+    /// active-sentence background tint.
+    var activeSentence: Sentence? {
+        guard currentSentenceIndex >= 0, currentSentenceIndex < sentences.count else { return nil }
+        return sentences[currentSentenceIndex]
+    }
+
+    /// The unit that contains the active sentence. Used by
+    /// `scrollToCurrentSentence` to scroll to the right row.
+    var activeUnitID: UUID? { activeSentence?.unitID }
 
     /// Jump to the nearest sentence at the offset corresponding to the
     /// given 1-indexed page number. Returns true on a successful jump,

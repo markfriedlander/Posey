@@ -998,6 +998,21 @@ extension LibraryViewModel {
                 _ = arg
                 return #"{\"error\":\"LIST_ENHANCED_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
+            case "READER_OBSERVATION":
+                // 8f follow-up #12 diagnostic — returns the live
+                // ReaderObservation snapshot so harness tests can
+                // verify reader-aware lock plumbing fires (open
+                // document tracked, current unit resolved on
+                // sentence advance, state cleared on dismiss).
+                let snap = ReaderObservation.shared.snapshot()
+                return json([
+                    "openDocumentID": snap.openDocumentID?.uuidString ?? "",
+                    "currentOffset": snap.currentOffset ?? -1,
+                    "currentUnitID": snap.currentUnitID?.uuidString ?? "",
+                    "visibleChunkCount": snap.visibleChunks.count,
+                    "ttsInUseChunkIndex": snap.ttsInUseChunk?.chunkIndex ?? -1
+                ])
+
             case "GET_ENHANCEMENT_STATUS":
                 // 2026-05-22 Phase 2.2 Step 7 — diagnostic verb.
                 // Returns the document's enhancement_status state +

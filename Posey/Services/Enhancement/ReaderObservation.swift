@@ -77,6 +77,22 @@ final class ReaderObservation {
     /// chunk's text.
     private(set) var ttsInUseChunk: ChunkID?
 
+    /// **8f follow-up #12 — units-rebuild bridge.**
+    ///
+    /// Identity of the `document_units` row whose text covers the
+    /// reader's current active sentence. Published by `ReaderView` on
+    /// segment changes; consumed by `PDFEnhancementService` to decide
+    /// whether a Tier 2 page rewrite would yank text out from under
+    /// the user's eyes — it would, if the page's unit set contains
+    /// this id. nil when no document is open, or before the reader
+    /// has finished its first content load.
+    ///
+    /// Replaces the legacy `(documentID, chunkIndex)` lock surface
+    /// (`visibleChunks`, `ttsInUseChunk`) for page-level lock checks
+    /// in the post-rebuild architecture. The chunk-id fields are
+    /// kept for now in case future code resurrects per-chunk locks.
+    private(set) var currentUnitID: UUID?
+
     /// Posted whenever any of the four fields above changes — so the
     /// enhancement service can drain its per-chunk pending-update
     /// buffer when a chunk that was locked becomes free again.
@@ -93,6 +109,7 @@ final class ReaderObservation {
         currentOffset = nil
         visibleChunks = []
         ttsInUseChunk = nil
+        currentUnitID = nil
         post()
     }
 
@@ -114,6 +131,12 @@ final class ReaderObservation {
         post()
     }
 
+    func setCurrentUnit(_ id: UUID?) {
+        guard currentUnitID != id else { return }
+        currentUnitID = id
+        post()
+    }
+
     private func post() {
         NotificationCenter.default.post(name: ReaderObservation.didChange, object: nil)
     }
@@ -128,6 +151,7 @@ final class ReaderObservation {
         let currentOffset: Int?
         let visibleChunks: Set<ChunkID>
         let ttsInUseChunk: ChunkID?
+        let currentUnitID: UUID?
     }
 
     func snapshot() -> Snapshot {
@@ -135,7 +159,8 @@ final class ReaderObservation {
             openDocumentID: openDocumentID,
             currentOffset: currentOffset,
             visibleChunks: visibleChunks,
-            ttsInUseChunk: ttsInUseChunk
+            ttsInUseChunk: ttsInUseChunk,
+            currentUnitID: currentUnitID
         )
     }
 }

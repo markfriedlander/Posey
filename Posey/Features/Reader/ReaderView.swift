@@ -414,6 +414,7 @@ struct ReaderView: View {
                 viewModel.handleAppear()
                 revealChrome()
                 publishRemoteState()
+                publishReadingPositionForEnhancement()
                 ReaderChromeState.shared.isVisible = isChromeVisible
                 // Defer the initial scroll past the first layout pass so the
                 // LazyVStack has time to realize rows up to the saved sentence
@@ -431,6 +432,10 @@ struct ReaderView: View {
                     try? await Task.sleep(for: .milliseconds(180))
                     lastProgrammaticScrollAt = Date()
                     viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                    // #12 — segments have populated by now; publish
+                    // the resolved unit so the enhancement service's
+                    // page lock sees a real currentUnitID.
+                    publishReadingPositionForEnhancement()
                 }
             }
             .onChange(of: isChromeVisible) { _, newValue in
@@ -444,6 +449,10 @@ struct ReaderView: View {
                 viewModel.persistPosition()
                 viewModel.stopPlayback()
                 clearRemoteStateIfOurs()
+                // #12 — clear ReaderObservation so the enhancement
+                // service stops treating this doc as the foregrounded
+                // reader once the user navigates away.
+                ReaderObservation.shared.setOpenDocument(nil)
             }
             .onChange(of: viewModel.currentSentenceIndex) { _, _ in
                 lastProgrammaticScrollAt = Date()
@@ -637,12 +646,52 @@ struct ReaderView: View {
 
     /// 2026-05-23 — Step 8f: this used to post .readerPositionDidUpdate
     /// for the Phase B BackgroundEnhancementScheduler's reader-aware
-    /// priority. Scheduler + notification both torn out in 8f. Kept as
-    /// a no-op shell so existing call sites stay intact — if a future
-    /// polish pass wires reader position into something else, this is
-    /// the hook to repopulate.
+    /// priority. Scheduler + notification both torn out in 8f. **8f
+    /// follow-up #12 — re-wired** to publish to `ReaderObservation`
+    /// so `PDFEnhancementService.pageIsLockedForUpdate` can detect
+    /// when a Tier 2 page rewrite would touch the unit the reader is
+    /// currently sitting on. The published fields:
+    ///
+    ///   - `openDocumentID` — set once per reader-open, cleared on
+    ///     disappear. Kicks the hub into per-document tracking mode.
+    ///   - `currentOffset` — startOffset of the active segment, in
+    ///     plainText character coordinates.
+    ///   - `currentUnitID` — unit_id of the unit covering that
+    ///     offset, resolved via `DatabaseManager.unitID(documentID:
+    ///     plainTextOffset:)`. Strictly the lock signal that
+    ///     PDFEnhancementService consumes.
+    ///
+    /// Called from every place the reader's position can change:
+    /// `.onAppear` (after content loads), `.onChange(currentSentenceIndex)`,
+    /// and `.onChange(segments.count)` (handles late-arriving content).
+    /// `.onDisappear` clears `openDocumentID` (which the hub uses to
+    /// reset all per-document state, including currentUnitID).
     private func publishReadingPositionForEnhancement() {
-        // intentionally empty
+        let obs = ReaderObservation.shared
+        if obs.openDocumentID != viewModel.document.id {
+            obs.setOpenDocument(viewModel.document.id)
+        }
+        let segments = viewModel.segments
+        let idx = viewModel.currentSentenceIndex
+        guard idx >= 0, idx < segments.count else {
+            obs.setCurrentOffset(nil)
+            obs.setCurrentUnit(nil)
+            return
+        }
+        let offset = segments[idx].startOffset
+        obs.setCurrentOffset(offset)
+        // Resolve unit id off-actor via the DB helper. The hub
+        // setter is cheap (Int compare); the resolve is linear in
+        // unit count so on a 10k-unit doc it's ~100µs. Still
+        // dwarfed by the user reading at human speed.
+        let docID = viewModel.document.id
+        if let unitID = try? viewModel.databaseManager.unitID(
+            documentID: docID, plainTextOffset: offset
+        ) {
+            obs.setCurrentUnit(unitID)
+        } else {
+            obs.setCurrentUnit(nil)
+        }
     }
 
     private func publishRemoteState() {

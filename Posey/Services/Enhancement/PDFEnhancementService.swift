@@ -539,10 +539,13 @@ actor PDFEnhancementService {
             // of queue and try the next one.
             var pickedIndex: Int? = nil
             for (qi, page) in workQueue.enumerated() {
-                if !pageIsLockedForUpdate(page.pageIndex,
-                                          boundaries: boundaries,
-                                          documentID: documentID,
-                                          snapshot: snapshot) {
+                let locked = await pageIsLockedForUpdate(
+                    page.pageIndex,
+                    documentID: documentID,
+                    snapshot: snapshot,
+                    db: db
+                )
+                if !locked {
                     pickedIndex = qi
                     break
                 }
@@ -638,24 +641,48 @@ actor PDFEnhancementService {
         dbgLog("PDFEnhancementService: Tier 2 finished on %@", documentID.uuidString)
     }
 
-    /// 2026-05-23 — Step 8f: pre-rebuild this checked whether a
-    /// page swap would touch a chunk the reader was viewing or
-    /// TTS was speaking, using legacy plainText-offset chunks.
-    /// With the legacy chunks table gone the precise lookup is no
-    /// longer available. For now: always report "not locked" and
-    /// rely on the `maxLockDeferralsPerPage` defensive cap above to
-    /// guarantee forward progress. The worst case is rare and
-    /// recoverable: a user looking at exactly the page Tier 2 is
-    /// rewriting may see text update once underneath them. A
-    /// future polish pass can rebuild this on top of unit_id
-    /// overlap when ReaderObservation grows a unit-aware surface.
+    /// **8f follow-up #12 — unit-aware page lock.**
+    ///
+    /// Returns true when applying a Tier 2 rewrite to this page
+    /// would yank text out from under the reader's eyes — i.e.
+    /// the unit the user's current sentence sits in belongs to
+    /// this page's content unit set.
+    ///
+    /// Cheap path (no DB query) when:
+    ///   - The reader has no document open (`openDocumentID` nil)
+    ///   - The reader is on a different document
+    ///   - The reader hasn't resolved a current unit yet (e.g. mid-
+    ///     content-load, or sentence offset out of bounds)
+    ///
+    /// When all three above are false, query `unitIDsForPage` on
+    /// main and check membership. The query is linear in unit
+    /// count and runs at most once per page in the work-queue
+    /// loop — well within the budget for the per-page cadence.
+    ///
+    /// Defensive cap: `maxLockDeferralsPerPage` upstream still
+    /// applies if a chunk is *persistently* locked (user parked
+    /// on a page Tier 2 wants to rewrite). The worst case is
+    /// well-bounded.
     private func pageIsLockedForUpdate(
         _ pageIndex: Int,
-        boundaries: [Int],
         documentID: UUID,
-        snapshot: ReaderObservation.Snapshot
-    ) -> Bool {
-        return false
+        snapshot: ReaderObservation.Snapshot,
+        db: DatabaseManager
+    ) async -> Bool {
+        guard snapshot.openDocumentID == documentID,
+              let unitID = snapshot.currentUnitID else {
+            return false
+        }
+        let pageUnits: Set<UUID>
+        do {
+            pageUnits = try await MainActor.run {
+                try db.unitIDsForPage(documentID: documentID, pageNumber: pageIndex)
+            }
+        } catch {
+            // DB error → fail open (don't block forward progress).
+            return false
+        }
+        return pageUnits.contains(unitID)
     }
 
     /// Persist the tier2_pages_done set as JSON, best-effort.

@@ -1717,6 +1717,87 @@ extension DatabaseManager {
         return out
     }
 
+    /// **8f follow-up #12 — unit-aware page lock.**
+    ///
+    /// Return the set of `document_units.id`s that belong to the
+    /// PDF page identified by `pageNumber` (the value carried on
+    /// the `pageBreak` unit's metadata). A page's content is every
+    /// prose-bearing unit between its page-break marker and the
+    /// next page-break (or end of doc). The break unit itself is
+    /// excluded — it carries no text and locking it is meaningless.
+    ///
+    /// Returns an empty set if no break unit matches `pageNumber`
+    /// (e.g. non-PDF document, or page-break missing) so callers
+    /// can treat the page as not-locked without a special case.
+    /// Used by `PDFEnhancementService.pageIsLockedForUpdate` to
+    /// decide whether a Tier 2 page rewrite would yank text out
+    /// from under the user's eyes.
+    func unitIDsForPage(documentID: UUID,
+                        pageNumber: Int) throws -> Set<UUID> {
+        let allUnits = try units(for: documentID)
+        guard let breakIdx = allUnits.firstIndex(where: {
+            $0.kind == .pageBreak && $0.metadata.pageNumber == pageNumber
+        }) else {
+            return []
+        }
+        var endIdx = allUnits.count
+        for i in (breakIdx + 1)..<allUnits.count {
+            if allUnits[i].kind == .pageBreak {
+                endIdx = i
+                break
+            }
+        }
+        var out: Set<UUID> = []
+        for i in (breakIdx + 1)..<endIdx {
+            out.insert(allUnits[i].id)
+        }
+        return out
+    }
+
+    /// **8f follow-up #12 — unit-aware page lock.**
+    ///
+    /// Map a character offset in the document's derived plainText
+    /// back to the unit it falls inside. Returns nil if the offset
+    /// is negative, past end-of-doc, or falls in a gap between
+    /// prose units (which shouldn't happen given the persister's
+    /// invariants, but is defensive).
+    ///
+    /// Implementation: walks units in sequence order accumulating
+    /// the joined-prose text length the way the persister builds
+    /// `plain_text`: units that carry prose contribute their text
+    /// plus the `"\n\n"` separator that joins adjacent prose units
+    /// (matching `units.filter { $0.kind.carriesProseText }.map(\.text)
+    /// .joined(separator: "\n\n")`). Linear in unit count — fine
+    /// for the call frequency (once per active-sentence change).
+    func unitID(documentID: UUID,
+                plainTextOffset offset: Int) throws -> UUID? {
+        guard offset >= 0 else { return nil }
+        let allUnits = try units(for: documentID)
+        var cursor = 0
+        let prose = allUnits.filter { $0.kind.carriesProseText }
+        for (idx, unit) in prose.enumerated() {
+            let textLen = unit.text.count
+            // Range covered by this unit: [cursor, cursor + textLen).
+            if offset >= cursor && offset < cursor + textLen {
+                return unit.id
+            }
+            cursor += textLen
+            // Inter-unit separator "\n\n" between consecutive prose
+            // units — match the joining the persister does. Skip the
+            // bump after the final unit.
+            if idx < prose.count - 1 {
+                cursor += 2
+            }
+        }
+        // Offset equal to total length is end-of-doc — return the
+        // last prose unit so the lock still fires for a reader
+        // sitting at the very end.
+        if let last = prose.last, offset == cursor {
+            return last.id
+        }
+        return nil
+    }
+
     /// Fetch a single unit by id. Returns nil if not found (or
     /// document was deleted out from under it).
     func unit(withID id: UUID) throws -> ContentUnit? {

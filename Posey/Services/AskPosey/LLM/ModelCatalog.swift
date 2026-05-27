@@ -67,10 +67,10 @@ enum ModelCatalog {
 
     /// Qwen 3.5 2B Instruct (4-bit, MLX).
     static let qwen35_2B = ModelConfiguration(
-        id: "mlx-community/Qwen2.5-2B-Instruct-4bit",
+        id: "mlx-community/Qwen3.5-2B-MLX-4bit",
         displayName: "Qwen 3.5 2B",
         source: .mlx,
-        hfRepoID: "mlx-community/Qwen2.5-2B-Instruct-4bit",
+        hfRepoID: "mlx-community/Qwen3.5-2B-MLX-4bit",
         sizeGB: 1.5,
         contextWindow: 32768,
         layerOnePrompt: """

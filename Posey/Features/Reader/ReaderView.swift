@@ -2730,6 +2730,23 @@ final class ReaderViewModel: ObservableObject {
         updated.skipSource = "user_dismiss"
         do {
             try databaseManager.upsertDocument(updated)
+            // Defect #6 fix (2026-05-27 evening) — also clear the
+            // unit-level skip reference. `loadContent`'s units fast
+            // path filters by `unitSkipReferences().skipUnitID`, not
+            // by `playbackSkipUntilOffset`. Without clearing this,
+            // the reload below still hides everything before the
+            // skip unit, so the reader stays on the skip-anchored
+            // page even after `jumpToOffset(0)` runs (segments[0]
+            // is still the post-skip first sentence).
+            // contentEndUnitID is preserved — we're revealing the
+            // skipped prefix, not the post-end suffix.
+            let existing = (try? databaseManager.unitSkipReferences(for: document.id))
+                ?? (skipUnitID: nil, contentEndUnitID: nil)
+            try databaseManager.setUnitSkipReferences(
+                skipUnitID: nil,
+                contentEndUnitID: existing.contentEndUnitID,
+                for: document.id
+            )
             self.document = updated
         } catch DatabaseManager.DatabaseError.foreignKeyViolation {
             // Doc deleted under us — benign; bail out, nothing to reveal.

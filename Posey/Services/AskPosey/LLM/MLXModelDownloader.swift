@@ -728,6 +728,20 @@ final class MLXModelDownloader: ObservableObject {
         try? await Task.sleep(nanoseconds: 1_500_000_000)
 
         for modelID in pending {
+            // 2026-05-27 — clear in-flight markers that no longer
+            // correspond to a known catalog model. F6 swapped the
+            // broken `Qwen2.5-2B-Instruct-4bit` ID for the working
+            // `Qwen3.5-2B-MLX-4bit`, but the prior marker persisted
+            // and the downloader auto-resumed a download against a
+            // nonexistent repo on every launch. Catalog membership
+            // is the source of truth for "is this model a thing we
+            // care about" — if it's gone from the catalog, the
+            // marker is stale by definition.
+            if ModelCatalog.model(id: modelID) == nil {
+                clearInFlight(modelID)
+                dbgLog("MLX-DL: %@ no longer in catalog; clearing stale marker", modelID)
+                continue
+            }
             if isModelDownloaded(modelID) {
                 clearInFlight(modelID)
                 dbgLog("MLX-DL: %@ already downloaded; clearing in-flight marker", modelID)

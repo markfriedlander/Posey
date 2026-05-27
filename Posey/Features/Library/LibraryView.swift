@@ -1566,6 +1566,28 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "RESPOND_SKIP_PROMPT":
+                // 2026-05-27 — Drive the smart-skip bottom sheet
+                // programmatically. The native iOS alert this replaced
+                // couldn't be tested via the antenna. Args:
+                //   keep | jumpToChapter | chapter → confirmSkipKeep
+                //   beginning | startFromBeginning | fromTop → revealFromBeginning
+                let raw = arg?.lowercased() ?? ""
+                let normalized: String
+                switch raw {
+                case "keep", "jumptochapter", "chapter":      normalized = "keep"
+                case "beginning", "startfrombeginning", "fromtop": normalized = "beginning"
+                default: return #"{"error":"Usage: RESPOND_SKIP_PROMPT:<keep|beginning>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteRespondSkipPrompt,
+                        object: nil,
+                        userInfo: ["choice": normalized]
+                    )
+                }
+                return json(["status": "posted", "choice": normalized])
+
             case "DISMISS_SHEET":
                 await MainActor.run {
                     NotificationCenter.default.post(name: .remoteDismissPresentedSheet, object: nil)

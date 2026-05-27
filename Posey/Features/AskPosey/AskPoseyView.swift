@@ -404,6 +404,16 @@ struct AskPoseyView: View {
                 if RemoteControlState.shared.presentedSheet == "askPosey" {
                     RemoteControlState.shared.presentedSheet = nil
                 }
+                // 2026-05-27 — Cancel any in-flight generation when the
+                // user dismisses the sheet. Previously, a hung generation
+                // (Gemma jetsam, MLX wedge, AFM transient) left the sheet
+                // undismissible because `isResponding` stayed true and
+                // `.interactiveDismissDisabled(viewModel.isResponding)`
+                // blocked the swipe-down gesture. The dismiss-block is
+                // also gone now (below); cancelling on disappear keeps the
+                // app from continuing to run a generation the user has
+                // abandoned.
+                viewModel.cancelInFlight()
             }
             // No user-facing error alert. AFM failures already surface
             // as a friendly fallback bubble in the conversation thread
@@ -425,7 +435,17 @@ struct AskPoseyView: View {
         // detents are offered.
         .presentationDetents(detentsForCurrentDevice)
         .presentationContentInteraction(.scrolls)
-        .interactiveDismissDisabled(viewModel.isResponding)
+        // 2026-05-27 — Always allow swipe-down dismiss. Was previously
+        // gated on `viewModel.isResponding` to prevent the user from
+        // closing mid-generation. But when a generation wedged (Gemma
+        // jetsam, MLX call hang, transient AFM failure) `isResponding`
+        // stayed `true` indefinitely and the sheet became undismissible —
+        // the user was trapped until they killed the app. The cost of
+        // always-allowing is the user could swipe-dismiss during a real
+        // streaming answer and lose the in-progress text; the
+        // `cancelInFlight()` call in `.onDisappear` above cleans up the
+        // backend so we don't waste compute on an abandoned response.
+        .interactiveDismissDisabled(false)
         // Inline-citation tap dispatcher (Task 2 #25). Each `[N]`
         // marker in an assistant response is rendered as a markdown
         // link `[ⁿ](posey-cite://N)`; tapping it invokes this

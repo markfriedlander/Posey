@@ -27,6 +27,15 @@ extension Notification.Name {
     /// No userInfo. ReaderView observes; presents the Notes sheet.
     static let remoteOpenNotesSheet = Notification.Name("PoseyRemoteOpenNotesSheet")
 
+    /// 2026-05-27 — Antenna-driven response to the smart-skip bottom
+    /// sheet. userInfo["choice"]: "keep" / "jumpToChapter" / "chapter"
+    /// → confirmSkipKeep (keeps the heuristic skip).
+    /// "beginning" / "startFromBeginning" / "fromTop" → revealFromBeginning
+    /// (resets to offset 0). Posted by the LocalAPIServer's
+    /// `RESPOND_SKIP_PROMPT:<choice>` verb so the smart-skip flow can
+    /// be tested programmatically without UI interaction.
+    static let remoteRespondSkipPrompt = Notification.Name("PoseyRemoteRespondSkipPrompt")
+
     /// No userInfo. Observed by every modal sheet host
     /// (AskPoseyView, NotesSheet, etc.) — calls `dismiss()`.
     static let remoteDismissPresentedSheet = Notification.Name("PoseyRemoteDismissPresentedSheet")

@@ -1822,19 +1822,96 @@ private struct ReaderRemoteControlSearchObservers: ViewModifier {
 /// warm, a little personality. Gutenberg-detected skips never reach
 /// this modifier (shouldPromptForSkip returns false) — silent by
 /// design.
+///
+/// 2026-05-27 — Converted from `.confirmationDialog` (native iOS alert
+/// that blocks the screen, can't be dismissed programmatically, can't
+/// be antenna-tested) to a swipe-dismissable bottom sheet. Reasoning:
+/// the native alert was jarring when the user just wants to start
+/// reading; the sheet leaves the document visible behind it, can be
+/// ignored or swiped away, and can be driven by the local API via
+/// `RESPOND_SKIP_PROMPT:<keep|beginning>` for testing. Swipe-dismiss
+/// without choosing maps to `confirmSkipKeep()` — the reader is already
+/// at the skip offset, swiping down = "leave it as is, stop asking."
 private struct SmartSkipPromptModifier: ViewModifier {
     @ObservedObject var viewModel: ReaderViewModel
     func body(content: Content) -> some View {
-        content.confirmationDialog(
-            "This one starts with some housekeeping before the good stuff. Jump to the first chapter?",
-            isPresented: $viewModel.isPresentingSkipPrompt,
-            titleVisibility: .visible
-        ) {
-            Button("Jump to Chapter") {
-                viewModel.confirmSkipKeep()
+        content.sheet(isPresented: $viewModel.isPresentingSkipPrompt) {
+            // Swipe-down without choosing = same as "Jump to Chapter"
+            // (the reader is already at the skip offset; user just
+            // dismissed without changing anything). Stops the prompt
+            // from re-appearing.
+            viewModel.confirmSkipKeep()
+        } content: {
+            SmartSkipPromptSheet(viewModel: viewModel)
+        }
+    }
+}
+
+/// 2026-05-27 — Bottom-sheet body for the smart-skip prompt. Compact
+/// detent so the document stays visible behind it. Two action buttons,
+/// styled to match Posey's quiet/declarative voice.
+private struct SmartSkipPromptSheet: View {
+    @ObservedObject var viewModel: ReaderViewModel
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                Text("Skip the housekeeping?")
+                    .font(.headline)
+                Spacer()
             }
-            Button("Start from Beginning") {
+            Text("This one starts with some front-matter before the good stuff. Want to jump to the first chapter, or start from the beginning?")
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 10) {
+                Button {
+                    viewModel.confirmSkipKeep()
+                    dismiss()
+                } label: {
+                    Text("Jump to Chapter")
+                        .font(.body.weight(.medium))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("reader.skipPrompt.jumpToChapter")
+
+                Button {
+                    viewModel.revealFromBeginning()
+                    dismiss()
+                } label: {
+                    Text("Start from Beginning")
+                        .font(.body.weight(.medium))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("reader.skipPrompt.startFromBeginning")
+            }
+        }
+        .padding(20)
+        .presentationDetents([.height(240)])
+        .presentationDragIndicator(.visible)
+        .presentationBackgroundInteraction(.enabled)
+        .accessibilityIdentifier("reader.skipPrompt")
+        // Antenna-driven choice support. The local API posts
+        // `.remoteRespondSkipPrompt` with userInfo["choice"] ∈
+        // {"keep", "beginning"}; we dispatch to the matching handler
+        // and dismiss the sheet. Lets the antenna test the smart-skip
+        // flow without UI interaction.
+        .onReceive(NotificationCenter.default.publisher(for: .remoteRespondSkipPrompt)) { note in
+            let choice = (note.userInfo?["choice"] as? String)?.lowercased() ?? ""
+            switch choice {
+            case "keep", "jumptochapter", "chapter":
+                viewModel.confirmSkipKeep()
+                dismiss()
+            case "beginning", "startfrombeginning", "fromtop":
                 viewModel.revealFromBeginning()
+                dismiss()
+            default:
+                break
             }
         }
     }

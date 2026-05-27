@@ -261,6 +261,38 @@ actor MLXService {
         }
         dbgLog("MLX: extraEOSTokens for %@: count=%d", modelID, extraEOSTokens.count)
 
+        // Pre-flight memory refusal (faithful Hal pattern from
+        // Hal.swift:4871-4900 + ProcessMemoryGuard.swift). Refuse the load
+        // if iOS-reported available memory is below the model's estimated
+        // requirement. Without this, a load that exceeds the dirty-memory
+        // limit triggers jetsam and the process dies mid-load. Surfacing
+        // a user-visible error is strictly better than a silent process
+        // kill — the chat thread survives, the user sees what happened.
+        let availableMBPreflight = processAvailableMemoryMB()
+        let requiredMBPreflight = requiredMemoryMBForLoad(sizeGB: sizeGB)
+        dbgLog("MLX-MEM: loadModel pre-flight model=%@ availableMB=%.0f requiredMB=%.0f",
+               modelID, availableMBPreflight, requiredMBPreflight)
+        if availableMBPreflight < requiredMBPreflight {
+            let displayName = ModelCatalog.model(id: modelID)?.displayName ?? modelID
+            let msg = memoryRefusalMessage(
+                modelDisplayName: displayName,
+                availableMB: availableMBPreflight,
+                requiredMB: requiredMBPreflight
+            )
+            dbgLog("MLX-MEM: loadModel REFUSED — have %.0fMB, need %.0fMB",
+                   availableMBPreflight, requiredMBPreflight)
+            loadProgressByID[modelID] = 0.0
+            throw LLMService.LLMError.generationFailed(
+                underlying: NSError(domain: "MLXService", code: 102, userInfo: [
+                    NSLocalizedDescriptionKey: msg
+                ])
+            )
+        }
+
+        // Match LLMEval's MLX cache config (Hal does the same at
+        // Hal.swift:4903). 20 MB is the documented iOS example value.
+        Memory.cacheLimit = 20 * 1024 * 1024
+
         let mlxConfig = MLXLMCommon.ModelConfiguration(
             directory: localPath,
             extraEOSTokens: extraEOSTokens

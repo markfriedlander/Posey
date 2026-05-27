@@ -576,7 +576,24 @@ actor PDFEnhancementService {
                 continue
             }
 
-            let visionText = PDFTier2VisionExtractor.extract(pdfPage)
+            // 2026-05-27 — Run PDFWatermarkStripper on Vision OCR
+            // output. Tier 1 (PDFKit) already passes through the
+            // stripper at import time, so the persisted plainText is
+            // clean. But Tier 2 (Vision) bypassed the stripper — and
+            // Vision picks up watermarks PDFKit had stripped (the
+            // ChmMagic banner in Cryptography for Dummies is the
+            // canonical case: PDFKit reads it as a single per-page
+            // string the stripper recognizes, while Vision reads it
+            // as visually-rendered text that matches the same regex).
+            // Without stripping, the reconciler accepts the Vision
+            // text as "more text wins" and reintroduces the watermark.
+            let rawVisionText = PDFTier2VisionExtractor.extract(pdfPage)
+            let visionText = PDFWatermarkStripper.strip(rawVisionText)
+            if rawVisionText.count != visionText.count {
+                dbgLog("PDFEnhancementService: page %d on %@ — watermark stripped from Vision (%d → %d chars)",
+                       page.pageIndex, documentID.uuidString,
+                       rawVisionText.count, visionText.count)
+            }
 
             // Read current page text from plainText slice for the
             // reconciler comparison.

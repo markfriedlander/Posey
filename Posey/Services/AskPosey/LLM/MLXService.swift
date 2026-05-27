@@ -184,6 +184,56 @@ actor MLXService {
 
         defer { loadInFlight.remove(modelID) }
 
+        // Catalog lookup for sizeGB (used by swap headroom poll below AND
+        // the existing pre-flight further down).
+        let sizeGBForLoad = ModelCatalog.model(id: modelID)?.sizeGB
+
+        // 2026-05-27 — MLX→MLX swap unload (Hal pattern, Hal.swift:5588-5640).
+        // Previously this actor kept every loaded ModelContainer in the
+        // `containers` dict and never evicted; multiple loaded MLX models
+        // accumulated in memory until iOS jetsam-killed the app. Now: when
+        // loading a NEW modelID and any OTHER MLX model is already loaded,
+        // unload all of them first with the GPU-sync barrier + cache clear
+        // + memory-headroom poll Hal calibrated against this exact failure.
+        let otherLoadedIDs = containers.keys.filter { $0 != modelID }
+        if !otherLoadedIDs.isEmpty {
+            dbgLog("MLX-MEM: swap detected — unloading %d previous MLX container(s) before loading %@", otherLoadedIDs.count, modelID)
+            for previousID in otherLoadedIDs {
+                if let previousContainer = containers[previousID] {
+                    // GPU sync barrier — wait for all in-flight Metal command
+                    // buffers from the previous model's generation to complete
+                    // before tearing down its state. Without this, the previous
+                    // model's pending buffers fire against backing memory ARC has
+                    // just freed → mlx::core::gpu::check_error throws → SIGABRT.
+                    // Hal hit this on May-12. Same fix here.
+                    dbgLog("MLX-MEM: draining GPU before unloading %@", previousID)
+                    MLX.Stream.gpu.synchronize()
+                    _ = previousContainer
+                    containers.removeValue(forKey: previousID)
+                    loadProgressByID[previousID] = nil
+                }
+            }
+            // Free the GPU cache so iOS can reclaim the pages.
+            Memory.clearCache()
+            // Poll iOS available memory until we have headroom for the new
+            // model (up to 3s). Mach VM reclamation is lazy — without the
+            // poll, the next load starts before iOS has actually dropped
+            // the freed pages, and the new load peaks against an
+            // unrecovered memory ceiling.
+            let requiredMB = requiredMemoryMBForLoad(sizeGB: sizeGBForLoad)
+            let headroom = await waitForMemoryHeadroom(
+                requiredMB: requiredMB,
+                timeoutSeconds: 3.0
+            )
+            if headroom.success {
+                dbgLog("MLX-MEM: headroom reached after %d polls / %.2fs (availableMB=%.0f requiredMB=%.0f)",
+                       headroom.pollsTaken, headroom.elapsedSeconds, headroom.finalAvailableMB, requiredMB)
+            } else {
+                dbgLog("MLX-MEM: headroom NOT reached within 3s (availableMB=%.0f requiredMB=%.0f) — proceeding; load pre-flight will refuse if still insufficient",
+                       headroom.finalAvailableMB, requiredMB)
+            }
+        }
+
         // Step 1 — ensure the model files are on disk via the public
         // HF tree+resolve endpoints. The pre-port path called
         // `LLMModelFactory.loadContainer(configuration: .init(id: repoID))`
@@ -192,7 +242,7 @@ actor MLXService {
         // post-port path pre-downloads via `MLXModelDownloader` (Hal's
         // BackgroundDownloadCoordinator pattern, public endpoints, no
         // auth) and then loads from disk via `.directory` init.
-        let sizeGB = ModelCatalog.model(id: modelID)?.sizeGB
+        let sizeGB = sizeGBForLoad
         if !MLXModelDownloader.shared.isModelDownloaded(modelID) {
             dbgLog("MLX: model %@ not on disk; triggering pre-download", modelID)
             await MLXModelDownloader.shared.startDownload(modelID: modelID, repoID: repoID, sizeGB: sizeGB)

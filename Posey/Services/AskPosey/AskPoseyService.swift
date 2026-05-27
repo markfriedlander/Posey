@@ -233,8 +233,8 @@ nonisolated enum AskPoseyPrompts {
         lines.append("")
         lines.append("Classify the question into exactly one of:")
         lines.append("- immediate — the question is about the anchor passage above.")
-        lines.append("- search — the question is asking WHERE in the document something appears.")
-        lines.append("- general — the question requires broader document understanding.")
+        lines.append("- search — the question is asking WHERE in the document a specific phrase, term, or section appears (\"find the section about X\", \"where does the author discuss Y\", \"locate the passage about Z\"). NOT for questions that use \"find\" as a verb but want a substantive answer (\"find me a passage that argues X\", \"what's the most striking example of Y\", \"give me a specific moment where Z happens\" — those are general questions about content, not location queries).")
+        lines.append("- general — the question requires broader document understanding, including any interpretive, evaluative, comparative, or thematic question, even when phrased with verbs like \"find\", \"pick\", \"give me\", or \"show me\".")
         return lines.joined(separator: "\n")
     }
 }

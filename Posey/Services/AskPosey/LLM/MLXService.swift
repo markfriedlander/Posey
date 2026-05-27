@@ -130,9 +130,20 @@ actor MLXService {
             )
         }
 
+        // F13 (2026-05-27): pass per-model repetition penalty +
+        // context to `GenerateParameters`. The penalty alone is not
+        // enough — Hal documented that well-behaved MLX models still
+        // occasionally drift into a degenerate repetition loop deep
+        // into a long generation. The in-stream `MLXRepetitionGuard`
+        // brake below catches the residual case. See
+        // ModelConfiguration's docstring for the per-model values
+        // and the KV-quantization gotcha that's deliberately not
+        // ported.
         let parameters = GenerateParameters(
             maxTokens: 4096,
-            temperature: Float(options.temperature)
+            temperature: Float(options.temperature),
+            repetitionPenalty: model.repetitionPenalty,
+            repetitionContextSize: model.repetitionContextSize ?? 64  // matches Hal's pairing
         )
 
         dbgLog("MLX: generate begin promptTokens=%d", promptTokenCount)
@@ -141,17 +152,45 @@ actor MLXService {
             var fullText = ""
             var iterator = stream.makeAsyncIterator()
             var chunkCount = 0
-            while let event = await iterator.next() {
+
+            // F13 — in-stream repetition brake. Check every ~50 chars
+            // of generated output; on detection, break the loop, trim
+            // the residue + append an in-Posey-voice closing phrase,
+            // and yield the cleaned snapshot one last time so the UI
+            // settles on the trimmed text. See MLXRepetitionGuard.
+            var lastRepetitionCheck = 0
+            let repetitionCheckEvery = 50
+            var stoppedForRepetition = false
+
+            streamLoop: while let event = await iterator.next() {
                 switch event {
                 case .chunk(let text):
                     fullText += text
                     chunkCount += 1
                     continuation.yield(fullText)
+
+                    if fullText.count - lastRepetitionCheck >= repetitionCheckEvery {
+                        lastRepetitionCheck = fullText.count
+                        if MLXRepetitionGuard.detect(in: fullText) {
+                            dbgLog("MLX: repetition brake fired at %d chars", fullText.count)
+                            stoppedForRepetition = true
+                            break streamLoop
+                        }
+                    }
                 default:
                     continue
                 }
             }
-            dbgLog("MLX: generate finished chunks=%d totalLen=%d", chunkCount, fullText.count)
+
+            if stoppedForRepetition {
+                let cleaned = MLXRepetitionGuard.trim(fullText)
+                dbgLog("MLX: post-trim length %d (was %d)", cleaned.count, fullText.count)
+                fullText = cleaned
+                continuation.yield(fullText)
+            }
+
+            dbgLog("MLX: generate finished chunks=%d totalLen=%d brake=%@",
+                   chunkCount, fullText.count, stoppedForRepetition ? "true" : "false")
             continuation.finish()
         } catch {
             dbgLog("MLX: generate threw: %@", "\(error)")

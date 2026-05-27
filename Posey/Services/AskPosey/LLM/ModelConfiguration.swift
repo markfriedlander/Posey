@@ -62,6 +62,53 @@ struct ModelConfiguration: Sendable, Equatable, Identifiable {
     /// Nil for models that follow universal guidance without needing
     /// a per-model nudge. Hard cap 400 tokens (~1600 chars).
     let layerOnePrompt: String?
+
+    /// Per-token logit repetition penalty passed to
+    /// `GenerateParameters.repetitionPenalty`. Hal sets 1.1 across all
+    /// well-behaved MLX models — strong enough to discourage runaway
+    /// "the the the" loops, gentle enough not to distort natural
+    /// language phrasing. Nil for AFM (different generation path) and
+    /// for models documented to misbehave with a penalty applied
+    /// (Hal's Phi-4 case; not relevant in Posey's catalog).
+    ///
+    /// Note on KV-cache quantization (NOT ported from Hal): Hal exposes
+    /// a `kvCacheQuantizationBits` field but leaves it nil for every
+    /// model. Setting it to 4 for Gemma 4 E2B (the only natural
+    /// candidate) crashes — Gemma4Text.swift in mlx-swift-lm calls
+    /// `MLXFast.scaledDotProductAttention` directly with raw tensors
+    /// instead of routing through `attentionWithCacheUpdate`, so it
+    /// can't consume the quantized cache. Confirmed empirically by Hal
+    /// (see Hal Universal ModelCatalogService.swift:643-666). Field
+    /// omitted here per CLAUDE.md's "no future-format abstractions"
+    /// rule — re-add when mlx-swift-lm patches the Gemma path.
+    let repetitionPenalty: Float?
+
+    /// Context window the repetition penalty looks back over, passed to
+    /// `GenerateParameters.repetitionContextSize`. Hal pairs every model
+    /// that gets `repetitionPenalty: 1.1` with a 64-token context.
+    let repetitionContextSize: Int?
+
+    init(
+        id: String,
+        displayName: String,
+        source: Source,
+        hfRepoID: String?,
+        sizeGB: Double,
+        contextWindow: Int,
+        layerOnePrompt: String?,
+        repetitionPenalty: Float? = nil,
+        repetitionContextSize: Int? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.source = source
+        self.hfRepoID = hfRepoID
+        self.sizeGB = sizeGB
+        self.contextWindow = contextWindow
+        self.layerOnePrompt = layerOnePrompt
+        self.repetitionPenalty = repetitionPenalty
+        self.repetitionContextSize = repetitionContextSize
+    }
 }
 
 // ========== BLOCK 01: MODEL CONFIGURATION - END ==========

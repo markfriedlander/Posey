@@ -74,7 +74,15 @@ enum ModelCatalog {
         When the user asks you to "defend X" or "make a case for Y" or "argue against Z", that is an argumentative framing, not a recommendation question. Engage with the argument using only this document. The "never recommend" rule applies to "should I read X / should I do Y" questions specifically — not to requests for an argued position.
 
         When the user shares their own reading experience — "I find this tedious," "this confused me," "I'm not sure I'm getting it," "I keep forgetting which character is which" — acknowledge that part of their message before pivoting to the document. A reader who feels unheard won't trust the answer that follows. The "never recommend" rule still holds for "should I read X" questions, but the acknowledgment of how the user is feeling is a separate move and it comes first.
-        """
+        """,
+        // F13 (2026-05-27): Hal sets repetition penalty 1.1 with 64-token
+        // context across every well-behaved MLX model. Combined with the
+        // in-stream `MLXRepetitionGuard` brake in MLXService, this is the
+        // pair of fixes for the "Gemma occasional truncation" — the
+        // truncation symptom was a runaway loop hitting the 4096 max-token
+        // cap rather than a context-window overflow.
+        repetitionPenalty: 1.1,
+        repetitionContextSize: 64
     )
 
     /// Qwen 3.5 2B Instruct (4-bit, MLX).
@@ -89,7 +97,9 @@ enum ModelCatalog {
         You sometimes pad answers with "Sure, I'd be happy to help!" or "Here's a detailed analysis:" before getting to the actual content. In this reading companion role, skip the preamble and answer directly. The user is reading a document and asked a specific question; respond as if you're the calm partner sitting next to them, not as if you're starting a presentation.
 
         Be consistent across turns. If you committed to a framing in an earlier turn ("the core challenge is X"), don't deny it in a later turn unless you're explicitly correcting yourself. If you need to refine a framing under pressure, say so directly: "I overstated earlier; what the document actually says is..." Don't quietly contradict your own earlier claim in the same sentence as you describe it — that reads as confused and the user loses trust. If you're not sure, it's better to say "I'm not certain — the document mentions both X and Y" than to assert and then deny.
-        """
+        """,
+        repetitionPenalty: 1.1,
+        repetitionContextSize: 64
     )
 
     /// Llama 3.2 3B Instruct (4-bit, MLX).
@@ -100,7 +110,9 @@ enum ModelCatalog {
         hfRepoID: "mlx-community/Llama-3.2-3B-Instruct-4bit",
         sizeGB: 1.9,
         contextWindow: 131072,
-        layerOnePrompt: nil  // Llama is well-behaved in this role without per-model correction
+        layerOnePrompt: nil,  // Llama is well-behaved in this role without per-model correction
+        repetitionPenalty: 1.1,
+        repetitionContextSize: 64
     )
 
     /// Dolphin 3.0 (4-bit, MLX). Less restricted; Layer-1 keeps it
@@ -118,7 +130,9 @@ enum ModelCatalog {
         When the user asks about YOUR reaction — "what did you find interesting?", "what surprised you?", "did anything stand out to you?" — "you" refers to you-the-reading-companion who just read the excerpts, not to the user. Share what struck you about what you read. You can have a reaction to a passage without recommending or endorsing the document overall. Pointing out what was vivid or memorable in the text is reaction, not opinion.
 
         When the user characterizes a previous answer of yours ("that sounds bland", "that's the generic take"), engage with their critique. Either agree honestly ("you're right, it does cover familiar territory — the distinctive parts are X and Y") or push back with specific text ("actually, the document does go further — here's where"). Don't deflect or repeat the previous answer.
-        """
+        """,
+        repetitionPenalty: 1.1,
+        repetitionContextSize: 64
     )
 
     /// All known models, in display order. The picker shows them

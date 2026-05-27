@@ -65,8 +65,15 @@ struct HTMLDocumentImporter {
         let rawHTML = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .isoLatin1)
             ?? ""
+        // 2026-05-27 — Strip Wikipedia infobox / navbox / hatnote
+        // chrome BEFORE Readability runs. Readability keeps these
+        // because they sit inside <article>; stripping them at the
+        // raw-HTML stage lets the reader open at the article body
+        // instead of "Pride and Prejudice / Title page / Author /
+        // Jane Austen / Working title / First Impressions / …".
+        let preCleanedHTML = Self.stripWikipediaChrome(rawHTML: rawHTML)
         let cleanedHTML = await ReadabilityExtractor.extractArticleHTML(
-            rawHTML: rawHTML, baseURL: url
+            rawHTML: preCleanedHTML, baseURL: url
         )
         let workingData: Data
         if let cleanedHTML, let cleanedData = cleanedHTML.data(using: .utf8) {
@@ -167,8 +174,11 @@ struct HTMLDocumentImporter {
         let rawHTML = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .isoLatin1)
             ?? ""
+        // 2026-05-27 — Wikipedia chrome strip (same rationale as the
+        // url-based loadDocument path above).
+        let preCleanedHTML = Self.stripWikipediaChrome(rawHTML: rawHTML)
         let cleanedHTML = await ReadabilityExtractor.extractArticleHTML(
-            rawHTML: rawHTML, baseURL: nil
+            rawHTML: preCleanedHTML, baseURL: nil
         )
         let workingData: Data
         if let cleanedHTML, let cleanedData = cleanedHTML.data(using: .utf8) {
@@ -508,6 +518,45 @@ struct HTMLDocumentImporter {
             range: NSRange(text.startIndex..., in: text),
             withTemplate: " "
         )
+    }
+
+    /// 2026-05-27 — Strip Wikipedia-style infobox tables before
+    /// Readability runs. Wikipedia article imports were opening at the
+    /// infobox content ("Pride and Prejudice / Title page of the first
+    /// edition, 1813 / Author / Jane Austen / …") instead of the
+    /// article body. Readability keeps infoboxes because they're
+    /// inside the article element. Stripping them at the raw-HTML
+    /// stage moves the reader directly to the prose.
+    ///
+    /// The class match is conservative: `class="infobox"` or
+    /// `class="infobox <suffix>"` (Wikipedia uses `infobox biography`,
+    /// `infobox book`, `infobox vcard`, etc.). Plus `vertical-navbox`
+    /// and `navbox` which are chrome at article end. Non-Wikipedia HTML
+    /// rarely uses these class names; safe to apply unconditionally.
+    static func stripWikipediaChrome(rawHTML: String) -> String {
+        let patterns: [String] = [
+            // Infobox tables — match opening tag with class containing
+            // "infobox" word-boundary, then everything up to closing
+            // </table>. NSRegularExpression doesn't support nested
+            // table matching, but Wikipedia infoboxes don't nest tables
+            // inside themselves often enough for this to matter; if
+            // they do, we trim conservatively rather than aggressively.
+            #"(?si)<table[^>]*\bclass\s*=\s*["'][^"']*\binfobox\b[^"']*["'][^>]*>.*?</table\s*>"#,
+            // Navboxes (article-end chrome).
+            #"(?si)<table[^>]*\bclass\s*=\s*["'][^"']*\b(?:navbox|vertical-navbox)\b[^"']*["'][^>]*>.*?</table\s*>"#,
+            // Side-bar / hat-note / disambiguation chrome.
+            #"(?si)<(?:div|table)[^>]*\bclass\s*=\s*["'][^"']*\b(?:sidebar|hatnote|dablink)\b[^"']*["'][^>]*>.*?</(?:div|table)\s*>"#,
+        ]
+        var html = rawHTML
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            html = regex.stringByReplacingMatches(
+                in: html,
+                range: NSRange(html.startIndex..., in: html),
+                withTemplate: " "
+            )
+        }
+        return html
     }
 
     /// 2026-05-20 — Strip Project Gutenberg's `<p class="asterism">`

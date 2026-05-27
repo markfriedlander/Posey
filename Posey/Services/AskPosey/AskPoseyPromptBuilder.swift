@@ -114,6 +114,18 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
     /// fabrication is the canonical RAG failure mode.
     let lowConfidenceRetrieval: Bool
 
+    /// 2026-05-27 — Document-level grounding context for the anti-fabrication
+    /// entity check. The entity check builds its "haystack" from retrieved
+    /// chunks; on abstract questions, retrieval often misses the chunks
+    /// containing the title/author/publisher metadata, so the model
+    /// correctly citing the author (e.g. "Lewis Carroll" on Alice in
+    /// Wonderland) gets flagged as ungrounded. Passing the doc title and
+    /// full plainText here lets the entity check verify against the whole
+    /// document, not just the retrieval slice. Optional — when nil, the
+    /// check falls back to the chunks-only haystack (legacy behavior).
+    let documentTitle: String?
+    let documentPlainText: String?
+
     init(
         intent: AskPoseyIntent,
         anchor: AskPoseyAnchor?,
@@ -123,7 +135,9 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         documentChunks: [RetrievedChunk],
         currentQuestion: String,
         pairwiseSummaries: [String]? = nil,
-        lowConfidenceRetrieval: Bool = false
+        lowConfidenceRetrieval: Bool = false,
+        documentTitle: String? = nil,
+        documentPlainText: String? = nil
     ) {
         self.intent = intent
         self.anchor = anchor
@@ -134,6 +148,8 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         self.currentQuestion = currentQuestion
         self.pairwiseSummaries = pairwiseSummaries
         self.lowConfidenceRetrieval = lowConfidenceRetrieval
+        self.documentTitle = documentTitle
+        self.documentPlainText = documentPlainText
     }
 }
 

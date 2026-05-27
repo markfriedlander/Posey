@@ -1718,7 +1718,9 @@ extension AskPoseyChatViewModel {
                     documentChunks: chunks,
                     currentQuestion: trimmedInput,
                     pairwiseSummaries: pairwiseSummaries,
-                    lowConfidenceRetrieval: lowConfidence
+                    lowConfidenceRetrieval: lowConfidence,
+                    documentTitle: self.documentTitle,
+                    documentPlainText: self.documentPlainText
                 )
 
                 do {

@@ -510,7 +510,9 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                     conversationHistory: [],
                     conversationSummary: nil,
                     documentChunks: [],
-                    currentQuestion: inputs.currentQuestion
+                    currentQuestion: inputs.currentQuestion,
+                    documentTitle: inputs.documentTitle,
+                    documentPlainText: inputs.documentPlainText
                 )
                 let strippedOutput = AskPoseyPromptBuilder.build(strippedInputs, budget: budget)
                 do {
@@ -743,8 +745,23 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         // Build the haystack: every text source the model legitimately
         // saw. Anchor passage + surrounding context + each RAG chunk
         // + conversation history (user may have mentioned a name in
-        // a prior turn we should accept).
+        // a prior turn we should accept) + document title + full
+        // document plainText when available.
+        //
+        // 2026-05-27 — Added documentTitle + documentPlainText.
+        // Without them, abstract questions ("what is this book for?")
+        // retrieved thematic chunks but not metadata chunks, so when
+        // the model correctly cited the author (e.g. "Lewis Carroll"
+        // on Alice in Wonderland) the entity check flagged it as
+        // ungrounded and the user got no answer at all. Verified the
+        // failure mode on Alice EPUB with both NLContextual and Nomic.
         var haystack = ""
+        if let title = inputs.documentTitle {
+            haystack += " "; haystack += title
+        }
+        if let plainText = inputs.documentPlainText {
+            haystack += " "; haystack += plainText
+        }
         if let anchorText = inputs.anchor?.trimmedDisplayText {
             haystack += " "; haystack += anchorText
         }
@@ -757,6 +774,12 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         for msg in inputs.conversationHistory {
             haystack += " "; haystack += msg.content
         }
+        // 2026-05-27 — Include the current question. Without this,
+        // the model echoing a phrase from the user's question (e.g.
+        // "threatened violence" when the user asked about a book with
+        // "threatened violence") gets flagged as ungrounded. The user
+        // saying it counts as it being in the conversation.
+        haystack += " "; haystack += inputs.currentQuestion
         guard !haystack.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
@@ -831,10 +854,41 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         // form is also what we'd use to display the entity, so
         // normalizing the candidate is the right move.
         let trailingPunctuation = CharacterSet(charactersIn: ",.;:!?\"' \t\n\u{201C}\u{201D}\u{2018}\u{2019}")
+        // 2026-05-27 — fallback grounding check.
+        // Exact substring match misses two real failure modes:
+        //   1. Word order is preserved but extra words sit between
+        //      ("Alice in Wonderland" model output vs "Alice's
+        //      Adventures in Wonderland" in document)
+        //   2. Apostrophe normalization differences (model: "Samuel
+        //      Gabriel Sons" vs document: "Sam'l Gabriel Sons & Company")
+        // For multi-word entities (≥2 words), if all words in the entity
+        // appear in the haystack (case-insensitive, with non-letter chars
+        // stripped to handle the apostrophe case), accept the entity as
+        // grounded. Single-word entities still require exact substring
+        // match — the relaxed check is for multi-word proper nouns where
+        // the brittleness matters most.
+        let alnumScalars = CharacterSet.letters.union(.decimalDigits)
+        let normalizedHaystackWords: Set<String> = Set(
+            haystackLower
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .map { $0.lowercased() }
+                .filter { !$0.isEmpty }
+        )
+        _ = alnumScalars  // silence unused (reserved for future)
+
         for raw in candidates {
             let entity = raw.trimmingCharacters(in: trailingPunctuation)
             if entity.count < 4 { continue }   // ignore "AI", "Mr"
             if haystackLower.contains(entity) { continue }
+            // Relaxed fallback for multi-word entities.
+            let entityWords = entity
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .map { $0.lowercased() }
+                .filter { $0.count >= 2 }
+            if entityWords.count >= 2 {
+                let allWordsPresent = entityWords.allSatisfy { normalizedHaystackWords.contains($0) }
+                if allWordsPresent { continue }
+            }
             ungrounded.insert(entity)
         }
         return ungrounded

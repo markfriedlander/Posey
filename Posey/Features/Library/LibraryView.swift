@@ -964,14 +964,27 @@ extension LibraryViewModel {
                 ])
 
             case "SET_EMBEDDING_PROVIDER":
-                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
-                _ = arg
-                return #"{\"error\":\"SET_EMBEDDING_PROVIDER removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
+                // 2026-05-27 — rewired to the post-8f EmbedderMigrationCoordinator.
+                // Args: "nlcontextual" | "nomic". Triggers download (if needed) +
+                // re-embed migration. Returns immediately; poll GET_EMBEDDING_PROVIDER
+                // for state.
+                let raw = arg?.lowercased() ?? ""
+                let target: EmbeddingBackend
+                switch raw {
+                case "nlcontextual", "nl", "contextual": target = .nlContextual
+                case "nomic": target = .nomic
+                default: return #"{"error":"Usage: SET_EMBEDDING_PROVIDER:<nlcontextual|nomic>"}"#
+                }
+                await MainActor.run {
+                    EmbedderMigrationCoordinator.shared.beginSwitch(to: target, database: databaseManager)
+                }
+                return json(["status": "switching", "target": target.rawValue])
 
             case "GET_EMBEDDING_PROVIDER":
-                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
-                _ = arg
-                return #"{\"error\":\"GET_EMBEDDING_PROVIDER removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
+                // 2026-05-27 — rewired. Reports current backend + migration phase.
+                let current = EmbeddingBackend.current().rawValue
+                let phase = await MainActor.run { String(describing: EmbedderMigrationCoordinator.shared.currentPhase) }
+                return json(["current": current, "phase": phase])
 
             case "REINDEX_DOCUMENT":
                 // 2026-05-23 — Step 8f: rewired to the new
@@ -1954,6 +1967,22 @@ extension LibraryViewModel {
                 guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
                     return #"{"error":"Usage: OPEN_DOCUMENT:<docID>"}"#
                 }
+                // 2026-05-27 — make OPEN_DOCUMENT work from any UI state.
+                // Previously it only worked from library view; from inside
+                // a reader on another doc, it silently no-op'd. Now it:
+                //   1. Dismisses any open sheet
+                //   2. Navigates back to library (if currently in a reader)
+                //   3. Opens the target doc
+                // Done as a sequenced MainActor block so SwiftUI navigation
+                // settles between steps.
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteDismissPresentedSheet, object: nil)
+                }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteLibraryNavigateBack, object: nil)
+                }
+                try? await Task.sleep(nanoseconds: 400_000_000)
                 await MainActor.run {
                     NotificationCenter.default.post(name: .remoteOpenDocument, object: nil,
                                                     userInfo: ["documentID": docID])

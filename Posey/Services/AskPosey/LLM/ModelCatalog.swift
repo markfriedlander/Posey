@@ -92,10 +92,10 @@ enum ModelCatalog {
     /// Dolphin 3.0 (4-bit, MLX). Less restricted; Layer-1 keeps it
     /// from over-asserting.
     static let dolphin30_3B = ModelConfiguration(
-        id: "mlx-community/Dolphin3.0-Llama3.2-3B-4bit",
+        id: "mlx-community/dolphin3.0-llama3.2-3B-4Bit",
         displayName: "Dolphin 3.0",
         source: .mlx,
-        hfRepoID: "mlx-community/Dolphin3.0-Llama3.2-3B-4bit",
+        hfRepoID: "mlx-community/dolphin3.0-llama3.2-3B-4Bit",
         sizeGB: 1.9,
         contextWindow: 131072,
         layerOnePrompt: """

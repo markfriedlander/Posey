@@ -197,13 +197,39 @@ actor MLXService {
             dbgLog("MLX: model %@ not on disk; triggering pre-download", modelID)
             await MLXModelDownloader.shared.startDownload(modelID: modelID, repoID: repoID, sizeGB: sizeGB)
 
-            // Wait for completion via the .mlxModelDidDownload notification.
-            // BackgroundDownloadCoordinator posts this with userInfo["modelID"].
-            let notifications = NotificationCenter.default.notifications(named: .mlxModelDidDownload)
-            for await notification in notifications {
-                if let id = notification.userInfo?["modelID"] as? String, id == modelID {
+            // Wait for completion. BackgroundDownloadCoordinator posts
+            // .mlxModelDidDownload with userInfo["modelID"] on success.
+            // On failure, MLXModelDownloader sets downloadStates[modelID].error
+            // — we poll that alongside the notification so a permanent failure
+            // (e.g. 401/404 from HF, no network) surfaces promptly instead of
+            // hanging the /ask request indefinitely.
+            var didSucceed = false
+            let pollDeadline = Date().addingTimeInterval(60 * 30) // 30-minute outer cap
+            while Date() < pollDeadline {
+                if MLXModelDownloader.shared.isModelDownloaded(modelID) {
+                    didSucceed = true
                     break
                 }
+                if let state = await MainActor.run(body: { MLXModelDownloader.shared.downloadStates[modelID] }),
+                   let err = state.error {
+                    dbgLog("MLX: pre-download failed for %@: %@", modelID, err)
+                    loadProgressByID[modelID] = 0.0
+                    throw LLMService.LLMError.generationFailed(
+                        underlying: NSError(domain: "MLXService", code: 100, userInfo: [
+                            NSLocalizedDescriptionKey: err
+                        ])
+                    )
+                }
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
+            guard didSucceed else {
+                dbgLog("MLX: pre-download timed out (30 min) for %@", modelID)
+                loadProgressByID[modelID] = 0.0
+                throw LLMService.LLMError.generationFailed(
+                    underlying: NSError(domain: "MLXService", code: 101, userInfo: [
+                        NSLocalizedDescriptionKey: "Model download timed out after 30 minutes."
+                    ])
+                )
             }
             dbgLog("MLX: pre-download complete for %@", modelID)
         }

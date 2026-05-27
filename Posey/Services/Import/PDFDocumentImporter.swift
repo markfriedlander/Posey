@@ -234,9 +234,24 @@ extension PDFDocumentImporter {
                 // Require at least 10 chars of OCR text before treating a page as readable.
                 // Fewer than that (page numbers, "iii", lone captions) means the page is
                 // effectively visual — render it as an image stop instead.
-                if ocr.count >= 10 {
+                //
+                // 2026-05-27 — Also reject OCR output that looks like
+                // decorative cover-page typography (the GEB-cover
+                // failure mode: Vision returns "ANETERNAL GOLDEN BRAID
+                // HOFSTADTER" — fused long-caps tokens). Without this
+                // check those covers landed in the text path and the
+                // reader read them aloud verbatim.
+                if ocr.count >= 10 && !PDFPageConfidenceDetector.looksLikeDecorativeCoverOCR(ocr) {
                     pageContents.append(.text(ocr))
                     readableTextPages.append(ocr)
+                } else if ocr.count >= 10 {
+                    // Decorative cover detected — treat as visual.
+                    dbgLog("PDF import: page %d OCR rejected as decorative cover (%d chars)", index + 1, ocr.count)
+                    let imageID = UUID().uuidString
+                    if let pngData = renderPageToPNG(page) {
+                        imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))
+                    }
+                    pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
                 } else if pageIsEffectivelyBlank(page) {
                     // Task 8 #5 (2026-05-03 — pixel-uniformity
                     // blank detection): genuinely blank section-

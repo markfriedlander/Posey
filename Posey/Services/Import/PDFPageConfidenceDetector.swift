@@ -324,6 +324,31 @@ struct PDFPageConfidenceDetector {
     /// every letter character in it is uppercase. Non-letter characters
     /// (digits, punctuation) are ignored — "DON'T" still counts as an
     /// all-caps token, as does "VERSION1".
+    /// 2026-05-27 — Public surface for the importer to check OCR
+    /// output before accepting it. True iff the OCR text appears to
+    /// be decorative cover-page typography (the GEB-cover failure
+    /// mode: Vision returns "ANETERNALGOLDENBRAID" / similar fused
+    /// long-caps tokens). Used to route Vision OCR results back to
+    /// the image-placeholder path instead of accepting fused glyphs
+    /// as readable prose. Conservative — only fires when the signal
+    /// is unambiguous (≥ 1 long-caps token AND short-ish total
+    /// text). Caller passes already-extracted OCR text.
+    static func looksLikeDecorativeCoverOCR(_ ocrText: String) -> Bool {
+        let trimmed = ocrText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        // Short total text — covers don't have body copy.
+        // ≥ 200 chars looks like real body text; let it through.
+        guard trimmed.count < 200 else { return false }
+        let tokens = trimmed.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .map(String.init)
+        let longCaps = tokens.filter(isLongCapsToken)
+        // ≥ 1 long-caps token in short text is the cover signature.
+        // The GEB cover gives Vision "ANETERNAL", "GOLDEN", "BRAID",
+        // "HOFSTADTER" — all triggered. Real text rarely has even one
+        // 9+ char all-caps token within the first 200 chars.
+        return longCaps.count >= 1
+    }
+
     fileprivate static func isLongCapsToken(_ token: String) -> Bool {
         guard token.count >= longCapsTokenMinLength else { return false }
         var sawLetter = false

@@ -24,6 +24,25 @@ final class PoseyAppDelegate: NSObject, UIApplicationDelegate {
         UNUserNotificationCenter.current().delegate = self
         return true
     }
+
+    /// Routes iOS background-URLSession resume events to the MLX downloader's
+    /// `BackgroundDownloadCoordinator`. iOS calls this when the system needs
+    /// to deliver pending events for a background session whose identifier
+    /// matches `BackgroundDownloadCoordinator.backgroundSessionID` — including
+    /// after the app was terminated and relaunched specifically to handle them.
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        guard identifier == BackgroundDownloadCoordinator.backgroundSessionID else {
+            // Unknown background session identifier — call the handler so
+            // iOS doesn't keep us alive needlessly.
+            completionHandler()
+            return
+        }
+        BackgroundDownloadCoordinator.shared.backgroundCompletionHandler = completionHandler
+    }
 }
 // ========== BLOCK 01: APP DELEGATE - END ==========
 

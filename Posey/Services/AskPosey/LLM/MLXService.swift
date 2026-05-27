@@ -184,19 +184,73 @@ actor MLXService {
 
         defer { loadInFlight.remove(modelID) }
 
-        let mlxConfig = MLXLMCommon.ModelConfiguration(id: repoID)
+        // Step 1 — ensure the model files are on disk via the public
+        // HF tree+resolve endpoints. The pre-port path called
+        // `LLMModelFactory.loadContainer(configuration: .init(id: repoID))`
+        // which routes through `#hubDownloader()` against an authenticated
+        // HF endpoint and fails with 401 for Qwen/Dolphin/Gemma. The
+        // post-port path pre-downloads via `MLXModelDownloader` (Hal's
+        // BackgroundDownloadCoordinator pattern, public endpoints, no
+        // auth) and then loads from disk via `.directory` init.
+        let sizeGB = ModelCatalog.model(id: modelID)?.sizeGB
+        if !MLXModelDownloader.shared.isModelDownloaded(modelID) {
+            dbgLog("MLX: model %@ not on disk; triggering pre-download", modelID)
+            await MLXModelDownloader.shared.startDownload(modelID: modelID, repoID: repoID, sizeGB: sizeGB)
+
+            // Wait for completion via the .mlxModelDidDownload notification.
+            // BackgroundDownloadCoordinator posts this with userInfo["modelID"].
+            let notifications = NotificationCenter.default.notifications(named: .mlxModelDidDownload)
+            for await notification in notifications {
+                if let id = notification.userInfo?["modelID"] as? String, id == modelID {
+                    break
+                }
+            }
+            dbgLog("MLX: pre-download complete for %@", modelID)
+        }
+
+        guard let localPath = MLXModelDownloader.shared.localPath(for: modelID) else {
+            dbgLog("MLX: pre-download finished but localPath nil for %@; aborting", modelID)
+            loadProgressByID[modelID] = 0.0
+            throw LLMService.LLMError.generationFailed(
+                underlying: LLMService.LLMError.modelUnavailable(modelID: modelID)
+            )
+        }
+
+        // Step 2 — build the directory-anchored ModelConfiguration with
+        // per-model extraEOSTokens so chat-template turn markers stop
+        // generation at the natural turn boundary. Without these, Gemma /
+        // Phi / Qwen produce runaway output past the assistant turn.
+        // Llama and Dolphin (Llama-3.2 base) are well-behaved without
+        // extraEOSTokens — they fall through to the empty branch.
+        let idLower = modelID.lowercased()
+        let extraEOSTokens: Set<String>
+        if idLower.contains("gemma") {
+            extraEOSTokens = ["<end_of_turn>"]
+        } else if idLower.contains("phi") {
+            extraEOSTokens = ["<|end|>"]
+        } else if idLower.contains("qwen") {
+            extraEOSTokens = ["<turn|>"]
+        } else {
+            extraEOSTokens = []
+        }
+        dbgLog("MLX: extraEOSTokens for %@: count=%d", modelID, extraEOSTokens.count)
+
+        let mlxConfig = MLXLMCommon.ModelConfiguration(
+            directory: localPath,
+            extraEOSTokens: extraEOSTokens
+        )
+
         do {
+            // hubDownloader is provided but unused — the configuration
+            // carries a .directory URL (already local).
             let container = try await LLMModelFactory.shared.loadContainer(
                 from: #hubDownloader(),
                 using: #huggingFaceTokenizerLoader(),
-                configuration: mlxConfig,
-                progressHandler: { @Sendable [weak self] p in
-                    guard let self = self else { return }
-                    Task { await self.recordProgress(modelID: modelID, fraction: p.fractionCompleted) }
-                }
+                configuration: mlxConfig
             )
             containers[modelID] = container
             loadProgressByID[modelID] = 1.0
+            dbgLog("MLX: loadContainer success for %@", modelID)
             return container
         } catch {
             dbgLog("MLX: loadContainer threw for %@: %@", modelID, "\(error)")

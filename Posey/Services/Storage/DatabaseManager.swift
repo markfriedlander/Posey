@@ -1075,6 +1075,12 @@ extension DatabaseManager {
         // Safe no-op on fresh DBs where the columns never existed.
         try dropColumnIfPresent(table: "documents", column: "plain_text")
         try dropColumnIfPresent(table: "documents", column: "display_text")
+        // 2026-05-27 — drop legacy `content_boundaries` column. Was
+        // populated at import time and read by PDFEnhancementService
+        // for page-range arithmetic. Now derived on-the-fly from
+        // pageBreak units by `contentBoundaries(for:)`. Safe no-op
+        // on fresh installs.
+        try dropColumnIfPresent(table: "documents", column: "content_boundaries")
         // **Bundle 2b (2026-05-26)** — content-hash dedup. SHA-256 of
         // the raw source-file bytes, hex-encoded. Nullable so existing
         // rows imported before this migration don't get nuked; new
@@ -1089,9 +1095,9 @@ extension DatabaseManager {
         // compat; only EPUB writes it today.
         try addColumnIfNeeded(table: "documents", column: "edition_label",
                               definition: "TEXT")
-        // (`content_boundaries` is preserved — PDFEnhancementService
-        // still reads it directly for page-range arithmetic.
-        // Rebuilding it on page_break units is a follow-up.)
+        // (`content_boundaries` is dropped above; PDFEnhancementService
+        // now reads through the derived `contentBoundaries(for:)`
+        // function which walks pageBreak units. 2026-05-27.)
         // playback_skip_until_offset = character offset in plainText past which
         // the reader should auto-jump on first open. Used by the PDF TOC
         // detector, the EPUB front-matter detector, and (2026-05-21) the
@@ -1297,7 +1303,9 @@ extension DatabaseManager {
         // The enhancement service uses these at runtime to compute
         // which chunks overlap a given page/section being processed
         // by Tier 2 / Tier 3 — one mechanism, all seven formats.
-        try addColumnIfNeeded(table: "documents", column: "content_boundaries", definition: "TEXT NOT NULL DEFAULT '[]'")
+        // content_boundaries column removed 2026-05-27 — derived on-the-fly
+        // from pageBreak units by `contentBoundaries(for:)`. Drop migration
+        // is in the earlier dropColumnIfPresent block.
         // tier2_pages_done — JSON array of page indices Vision has
         // already processed for this document. Lets us resume a
         // partial run after relaunch without re-doing completed
@@ -1719,33 +1727,56 @@ extension DatabaseManager {
 /// downstream offsets across every linked table.
 extension DatabaseManager {
 
-    /// Read the content_boundaries array as `[Int]`. Returns empty
-    /// array on missing column or malformed JSON.
+    /// Derive the content_boundaries array on-the-fly from pageBreak
+    /// units. Mirrors the legacy `documents.content_boundaries` column
+    /// shape (which was dropped 2026-05-27): one entry per page that
+    /// has prose text; the value is the plainText offset where that
+    /// page's first prose unit begins.
+    ///
+    /// **Important alignment note (legacy invariant preserved):** the
+    /// array is indexed by the *sequence of pages-with-text*, NOT by
+    /// PDF page number. A pure-visual page (image-only) doesn't get an
+    /// entry. This matches the original importer's `readableTextPages`-
+    /// based derivation. PDFEnhancementService uses `page.pageIndex`
+    /// (a PDF page number) to index into this array, which is correct
+    /// for documents where every PDF page has text (the common case)
+    /// but mis-aligns for documents with interleaved visual-only
+    /// pages. That latent issue predates this change; preserving the
+    /// exact contract avoids regression while the column is removed.
     func contentBoundaries(for documentID: UUID) throws -> [Int] {
-        let sql = "SELECT content_boundaries FROM documents WHERE id = ?;"
-        let statement = try prepareStatement(sql: sql)
-        defer { sqlite3_finalize(statement) }
-        try bind(documentID.uuidString, at: 1, for: statement)
-        guard sqlite3_step(statement) == SQLITE_ROW,
-              let json = sqliteString(statement, index: 0),
-              let data = json.data(using: .utf8) else {
-            return []
+        let units = try self.units(for: documentID)
+        guard !units.isEmpty else { return [] }
+        var boundaries: [Int] = []
+        var runningOffset = 0
+        var emittedProse = false
+        var awaitingPageStart = false
+        let sepLen = 2  // "\n\n" between consecutive prose units
+        for unit in units {
+            switch unit.kind {
+            case .pageBreak:
+                awaitingPageStart = true
+            case .prose, .heading, .blockquote, .listItem:
+                if awaitingPageStart {
+                    if emittedProse { runningOffset += sepLen }
+                    boundaries.append(runningOffset)
+                    awaitingPageStart = false
+                } else if emittedProse {
+                    runningOffset += sepLen
+                } else if boundaries.isEmpty {
+                    // Fallback: prose with no preceding pageBreak.
+                    // Treat as page 0 starting at offset 0.
+                    boundaries.append(0)
+                }
+                runningOffset += unit.text.count
+                emittedProse = true
+            case .image, .horizontalRule:
+                // Don't contribute to plainText offset; if the only
+                // content on a page was an image, the page gets no
+                // boundary entry (legacy contract).
+                awaitingPageStart = false
+            }
         }
-        return (try? JSONDecoder().decode([Int].self, from: data)) ?? []
-    }
-
-    /// Write the content_boundaries array. Called once at import
-    /// time and updated incrementally by `rewritePageText` as Tier 2
-    /// swaps shift downstream offsets.
-    func setContentBoundaries(_ boundaries: [Int], for documentID: UUID) throws {
-        let data = try JSONEncoder().encode(boundaries)
-        let json = String(data: data, encoding: .utf8) ?? "[]"
-        let sql = "UPDATE documents SET content_boundaries = ? WHERE id = ?;"
-        let statement = try prepareStatement(sql: sql)
-        defer { sqlite3_finalize(statement) }
-        try bind(json, at: 1, for: statement)
-        try bind(documentID.uuidString, at: 2, for: statement)
-        try step(statement)
+        return boundaries
     }
 
     /// **Step 10 — derived from units.** Read plainText for a document

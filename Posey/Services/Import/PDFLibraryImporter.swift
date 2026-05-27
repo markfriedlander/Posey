@@ -54,7 +54,8 @@ struct PDFLibraryImporter {
             fileName: fileName,
             pageCount: parsed.pageFlags.count
         )
-        try? databaseManager.setContentBoundaries(parsed.contentBoundaries, for: doc.id)
+        // 2026-05-27 — setContentBoundaries removed; derived on-demand
+        // by DatabaseManager.contentBoundaries(for:).
         _ = PDFSourceStore.save(rawData, for: doc.id)
         enqueueEnhancement(documentID: doc.id, pageFlags: parsed.pageFlags)
         return doc
@@ -106,7 +107,8 @@ struct PDFLibraryImporter {
             fileName: fileName,
             pageCount: parsed.pageFlags.count
         )
-        try? databaseManager.setContentBoundaries(parsed.contentBoundaries, for: doc.id)
+        // 2026-05-27 — setContentBoundaries removed; derived on-demand
+        // by DatabaseManager.contentBoundaries(for:).
         if let sourceData {
             _ = PDFSourceStore.save(sourceData, for: doc.id)
         }

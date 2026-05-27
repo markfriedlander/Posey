@@ -36,13 +36,10 @@ struct ParsedPDFDocument: Sendable {
     /// this phase — nothing branches on `needsTier2` yet.** See
     /// `PDFPageConfidenceDetector` + DECISIONS.md (2026-05-22 late).
     let pageFlags: [PDFPageFlags]
-    /// 2026-05-22 Phase 2.2 Step 5 — universal content-boundary
-    /// offsets. For PDFs, this is the plainText offset where each
-    /// page begins (so element N is the start offset of page N).
-    /// Persisted via `documents.content_boundaries`; consumed by the
-    /// enhancement service to compute which chunks overlap a given
-    /// page being rescued by Tier 2.
-    let contentBoundaries: [Int]
+    // 2026-05-27 — `contentBoundaries` field removed. PDFEnhancementService
+    // now reads via DatabaseManager.contentBoundaries(for:), which derives
+    // from pageBreak units on demand. The importer no longer pre-computes
+    // or persists the array.
 }
 
 /// Carries a parsed TOC entry from importer to library to DB.
@@ -284,22 +281,9 @@ extension PDFDocumentImporter {
             }
         }
 
-        // 2026-05-22 Phase 2.2 Step 5 — compute content_boundaries
-        // (plainText offsets where each page begins) BEFORE the join
-        // + post-join normalize passes. Each entry corresponds to a
-        // page in `readableTextPages` (which is the array joined with
-        // "\n\n" to form prePlainText below). The post-join transforms
-        // (`stripPDFDimensionArtifacts`, `collapseWhitespaceInsideNumericBrackets`)
-        // may shift offsets by a handful of characters per occurrence;
-        // the enhancement service tolerates this — chunk-overlap math
-        // doesn't need character-exact precision.
-        var contentBoundaries: [Int] = []
-        contentBoundaries.reserveCapacity(readableTextPages.count)
-        var runningOffset = 0
-        for page in readableTextPages {
-            contentBoundaries.append(runningOffset)
-            runningOffset += page.count + 2 // "\n\n" separator
-        }
+        // 2026-05-27 — content_boundaries pre-computation removed.
+        // DatabaseManager.contentBoundaries(for:) now derives the
+        // same array on-demand from pageBreak units.
 
         // Join pages, then run a second collapseLineBreakHyphens pass so that
         // hyphens spanning a page boundary (word-\x0cword) are collapsed too.
@@ -417,8 +401,7 @@ extension PDFDocumentImporter {
             images: imageRecords,
             tocSkipUntilOffset: tocSkipUntilOffset,
             tocEntries: tocEntries,
-            pageFlags: pageFlags,
-            contentBoundaries: contentBoundaries
+            pageFlags: pageFlags
         )
     }
 

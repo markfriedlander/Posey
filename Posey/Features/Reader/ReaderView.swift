@@ -3252,6 +3252,16 @@ final class ReaderViewModel: ObservableObject {
         /// page (first prose sentence after a `pageBreak` unit).
         /// Playback applies a brief preUtteranceDelay to each.
         let pageBreakPauseSentenceIndices: Set<Int>
+        /// 2026-05-27 — Each unit's offset in the FULL (pre-skip)
+        /// plainText. Used by `annotationFlags(for:)` to map a unit
+        /// to its plainText range so notes (anchored to full-plainText
+        /// offsets in the DB) match the correct unit even when the
+        /// reader's `units` array is the skip-filtered subset. Without
+        /// this, the previous walk-and-accumulate ran cursor from 0
+        /// on filtered units and produced ranges that didn't intersect
+        /// any of the persisted note offsets — so annotation glyphs
+        /// silently never rendered on any skipped doc.
+        let fullPlainTextOffsetByUnitID: [UUID: Int]
     }
 
     /// Re-tag paragraph blocks whose `startOffset` matches a TOC
@@ -3404,7 +3414,8 @@ final class ReaderViewModel: ObservableObject {
             units: filteredUnits,
             sentences: filteredSentences,
             visualPauseUnitIDsBySentenceIndex: visualPauseUnitIDsBySentenceIndex,
-            pageBreakPauseSentenceIndices: pageBreakPauseSentenceIndices
+            pageBreakPauseSentenceIndices: pageBreakPauseSentenceIndices,
+            fullPlainTextOffsetByUnitID: cumulativeOffsetByUnitID
         )
     }
 
@@ -3490,7 +3501,8 @@ final class ReaderViewModel: ObservableObject {
                 units: [],
                 sentences: [],
                 visualPauseUnitIDsBySentenceIndex: [:],
-                pageBreakPauseSentenceIndices: []
+                pageBreakPauseSentenceIndices: [],
+                fullPlainTextOffsetByUnitID: [:]
             )
         }
 
@@ -3535,6 +3547,7 @@ final class ReaderViewModel: ObservableObject {
         self.sentencesByUnit = byUnit
         self.sentenceIndexBaseByUnit.removeAll(keepingCapacity: true)
         self.unitAnnotationCache.removeAll(keepingCapacity: true)
+        self.fullPlainTextOffsetByUnitID = computed.fullPlainTextOffsetByUnitID
         self.applyVisualBlockMotionPolicy()
 
         // 2. DB side dishes (cheap).
@@ -4461,6 +4474,14 @@ final class ReaderViewModel: ObservableObject {
     /// cheap; cache invalidated on note insert/delete.
     private var unitAnnotationCache: [UUID: (hasNote: Bool, hasBookmark: Bool)] = [:]
 
+    /// 2026-05-27 — Each unit's offset in the FULL (pre-skip) plainText.
+    /// Populated by loadContent from LoadedContent.fullPlainTextOffsetByUnitID.
+    /// Used by annotationFlags to compute each unit's plainText range
+    /// in DB-aligned coordinates (notes are anchored to full-plainText
+    /// offsets; walking the filtered units array from cursor=0 produces
+    /// post-skip-local offsets that don't intersect note offsets).
+    private var fullPlainTextOffsetByUnitID: [UUID: Int] = [:]
+
     struct UnitAnnotationFlags {
         let hasNote: Bool
         let hasBookmark: Bool
@@ -4474,26 +4495,23 @@ final class ReaderViewModel: ObservableObject {
         if let cached = unitAnnotationCache[unit.id] {
             return UnitAnnotationFlags(hasNote: cached.hasNote, hasBookmark: cached.hasBookmark)
         }
-        // Lazy build for this unit. Compute its plainText range by
-        // walking earlier prose-bearing units (cheap; small in
-        // practice).
-        var cursor = 0
-        var foundStart = 0
-        var foundEnd = 0
-        var firstProseSeen = false
-        for u in units {
-            if !u.kind.carriesProseText { continue }
-            if firstProseSeen { cursor += 2 }
-            firstProseSeen = true
-            let start = cursor
-            let end = cursor + u.text.count
-            cursor = end
-            if u.id == unit.id {
-                foundStart = start
-                foundEnd = end
-                break
-            }
+        // 2026-05-27 — use the full-plainText offset map instead of
+        // walking-and-accumulating cursor on the filtered units. Notes
+        // are persisted at full-plainText offsets (the unfiltered
+        // joined-prose offset space); annotationFlags must compute the
+        // unit's range in that same coordinate space. The previous
+        // walk started cursor=0 on the FILTERED units array, producing
+        // post-skip-local ranges that never intersected any persisted
+        // note offset on a doc with non-zero skip — so glyphs silently
+        // didn't render. Bug #annotation-glyph.
+        guard let foundStart = fullPlainTextOffsetByUnitID[unit.id], unit.kind.carriesProseText else {
+            // Non-prose units (image, pageBreak, horizontalRule) can't
+            // carry annotations directly. Cache + return empty.
+            let flags = (hasNote: false, hasBookmark: false)
+            unitAnnotationCache[unit.id] = flags
+            return UnitAnnotationFlags(hasNote: false, hasBookmark: false)
         }
+        let foundEnd = foundStart + unit.text.count
         // Intersect notes against the unit's range.
         var hasNote = false
         var hasBookmark = false

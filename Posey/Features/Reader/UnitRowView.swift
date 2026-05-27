@@ -217,15 +217,22 @@ struct UnitRowView: View {
     @ViewBuilder
     private var annotationFooter: some View {
         if hasNote || hasBookmark {
-            HStack(spacing: 6) {
+            // 2026-05-27 — glyphs were rendering at bodyFontSize*0.6/0.65 with
+            // .secondary tint, which on the device made them visible but
+            // not glanceable. Bumped to 0.85 + .primary opacity 0.7, with
+            // distinct shapes by design (bookmark.fill = filled
+            // bookmark, square.and.pencil = pencil-on-paper for notes —
+            // more recognizable as "I wrote something" than note.text's
+            // lines-on-paper which reads as "stationery").
+            HStack(spacing: 10) {
                 Spacer(minLength: 0)
                 if hasBookmark {
                     Button {
                         onTapBookmark?()
                     } label: {
                         Image(systemName: "bookmark.fill")
-                            .font(.system(size: bodyFontSize * 0.6))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: bodyFontSize * 0.85))
+                            .foregroundStyle(Color.primary.opacity(0.7))
                             .padding(.vertical, 2)
                             .padding(.horizontal, 4)
                             .contentShape(Rectangle())
@@ -237,9 +244,9 @@ struct UnitRowView: View {
                     Button {
                         onTapNote?()
                     } label: {
-                        Image(systemName: "note.text")
-                            .font(.system(size: bodyFontSize * 0.65))
-                            .foregroundStyle(.secondary)
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: bodyFontSize * 0.85))
+                            .foregroundStyle(Color.primary.opacity(0.7))
                             .padding(.vertical, 2)
                             .padding(.horizontal, 4)
                             .contentShape(Rectangle())
@@ -248,7 +255,7 @@ struct UnitRowView: View {
                     .accessibilityLabel("Open note")
                 }
             }
-            .padding(.top, 2)
+            .padding(.top, 4)
             .accessibilityIdentifier("reader.unit.annotationIndicator")
         }
     }

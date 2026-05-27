@@ -34,3 +34,11 @@ submission/
 # Internal development tools — local-API test runner, RAG harnesses,
 # antenna config, corpus generators. Local-only.
 tools/
+
+# Internal docs — local-only, tracked by the separate .posey-docs-git repo,
+# never pushed to GitHub. See tools/docs.sh for the wrapper.
+CLAUDE.md
+HISTORY.md
+NEXT.md
+docs-internal/
+.posey-docs-git/

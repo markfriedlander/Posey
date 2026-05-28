@@ -179,7 +179,42 @@ enum TitleExtractor {
         guard isSiteNameShaped(trimmedTail) else { return title }
         let head = title[..<sepRange.lowerBound]
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return head.isEmpty ? title : head
+        guard !head.isEmpty else { return title }
+
+        // 2026-05-27 — disambiguate when the suffix names a reference
+        // encyclopedia. Without this, a Wikipedia article about a
+        // famous work (e.g. "Pride and Prejudice - Wikipedia") gets
+        // stripped to just "Pride and Prejudice" and becomes
+        // indistinguishable from the actual novel in the library
+        // list. For these specific site names we keep a parenthetical
+        // disambiguator on the cleaned title.
+        let referenceSites: Set<String> = [
+            "wikipedia",
+            "wiktionary",
+            "wikisource",
+            "wikibooks",
+            "britannica",
+            "encyclopedia britannica",
+            "stanford encyclopedia of philosophy"
+        ]
+        if referenceSites.contains(trimmedTail.lowercased()) {
+            // Use a canonicalized capitalization for the suffix so it
+            // reads cleanly regardless of how the source spelled it.
+            let canonical: String
+            switch trimmedTail.lowercased() {
+            case "wikipedia":                       canonical = "Wikipedia"
+            case "wiktionary":                      canonical = "Wiktionary"
+            case "wikisource":                      canonical = "Wikisource"
+            case "wikibooks":                       canonical = "Wikibooks"
+            case "britannica", "encyclopedia britannica":
+                                                    canonical = "Britannica"
+            case "stanford encyclopedia of philosophy":
+                                                    canonical = "Stanford Encyclopedia"
+            default:                                canonical = trimmedTail
+            }
+            return "\(head) (\(canonical) article)"
+        }
+        return head
     }
 
     private static func isSiteNameShaped(_ s: String) -> Bool {

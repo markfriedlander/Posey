@@ -61,7 +61,21 @@ struct PDFTier2VisionExtractor {
             let avg = candidates.map(\.confidence).reduce(0, +) / Float(candidates.count)
             guard avg >= minAvgConfidence else { return "" }
 
-            return candidates.map(\.string).joined(separator: " ")
+            let raw = candidates.map(\.string).joined(separator: " ")
+
+            // 2026-05-28 — Apply the same watermark stripper that Tier 1
+            // runs on PDFKit text. PDFKit's text-stream extraction picks
+            // up the converter watermark ("This document was created by
+            // an unregistered ChmMagic…") on every page; the importer
+            // strips it before persistence. Tier 2 re-renders the page
+            // bitmap and Vision OCRs it, which faithfully reads the
+            // watermark back in. Without this strip, the reconciler
+            // would see Vision's larger char count + the watermark text
+            // and accept it as "more text," undoing the Tier 1 cleanup.
+            // Same pattern set covers ChmMagic + Aspose + Calibre +
+            // generic Evaluation-Only — all visible regardless of which
+            // extractor reads the page.
+            return PDFWatermarkStripper.strip(raw)
         }
     }
 

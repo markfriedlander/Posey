@@ -2,7 +2,7 @@ import XCTest
 @testable import Posey
 
 final class HTMLLibraryImporterTests: XCTestCase {
-    func testImportStoresHTMLAsReadableDocument() throws {
+    func testImportStoresHTMLAsReadableDocument() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -10,7 +10,10 @@ final class HTMLLibraryImporterTests: XCTestCase {
         let importer = HTMLLibraryImporter(databaseManager: manager)
         let fixtureURL = TestFixtureLoader.url(named: "StructuredSample", fileExtension: "html")
 
-        let document = try importer.importDocument(from: fixtureURL)
+        // 2026-05-28 — importDocument became async during Step 8/9 of
+        // the rebuild (units fast path + sentence indexing happen
+        // inside the import transaction). Test signature updated.
+        let document = try await importer.importDocument(from: fixtureURL)
         let storedDocument = try XCTUnwrap(try manager.documents().first)
 
         XCTAssertEqual(document.id, storedDocument.id)

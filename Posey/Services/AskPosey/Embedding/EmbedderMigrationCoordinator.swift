@@ -167,6 +167,20 @@ final class EmbedderMigrationCoordinator: ObservableObject {
         var processed = 0
         var successfullyEmbedded = 0
 
+        // 2026-05-28 — Perma-nil guard. Surfaced live on phone:
+        // when an embedder isn't producing vectors (Nomic's
+        // asset still downloading, or any other "embed returns
+        // nil" failure mode), the migration loops forever —
+        // every batch refetches the same NULL chunks, processed
+        // counter grows past total, no progress is ever made.
+        // The architecture doc has always claimed this guard
+        // existed; it didn't until now. After 2 consecutive
+        // batches with zero successful embeds, abort with .error
+        // so the user sees an honest failure rather than a stuck
+        // progress bar.
+        var consecutiveZeroSuccessBatches = 0
+        let maxZeroSuccessBatches = 2
+
         while true {
             if cancelRequested { currentPhase = .cancelled; return }
 
@@ -179,6 +193,7 @@ final class EmbedderMigrationCoordinator: ObservableObject {
             }
             if batch.isEmpty { break }
 
+            var batchSuccesses = 0
             // Embedding is CPU-bound; do it off the main actor
             // even though we report progress back on main. Each
             // row's UPDATE is on the DB's single-thread, which
@@ -198,6 +213,7 @@ final class EmbedderMigrationCoordinator: ObservableObject {
                             id: row.id, embedding: vector
                         )
                         successfullyEmbedded += 1
+                        batchSuccesses += 1
                     } catch {
                         // Skip + continue; row stays NULL.
                     }
@@ -209,6 +225,18 @@ final class EmbedderMigrationCoordinator: ObservableObject {
                 if processed % 8 == 0 || processed == total {
                     currentPhase = .migrating(processed: processed, total: total)
                 }
+            }
+
+            if batchSuccesses == 0 {
+                consecutiveZeroSuccessBatches += 1
+                if consecutiveZeroSuccessBatches >= maxZeroSuccessBatches {
+                    currentPhase = .error(
+                        "Embedder returned nil for \(maxZeroSuccessBatches * batchSize) consecutive chunks. The model may still be downloading. Try again in a moment."
+                    )
+                    return
+                }
+            } else {
+                consecutiveZeroSuccessBatches = 0
             }
         }
 

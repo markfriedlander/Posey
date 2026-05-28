@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Posey App Privacy Manifest
+
+	  Required by App Store as of iOS 17+ when an app uses any of the
+	  documented "required-reason APIs." Posey is fully on-device, no
+	  network telemetry, no third-party SDKs (the antenna server lives
+	  inside #if DEBUG and does not ship in Release).
+
+	  Categories declared below:
+
+	    - NSPrivacyAccessedAPICategoryUserDefaults (CA92.1)
+	      Posey persists per-user preferences (selected LLM, embedder,
+	      reading style, font size, dismissal flags, etc.) via
+	      @AppStorage + UserDefaults.standard. All of this is "info
+	      from the same app" — never read from or written to a shared
+	      defaults suite.
+
+	    - NSPrivacyAccessedAPICategoryFileTimestamp (C617.1)
+	      Posey reads file timestamps (creationDate, modificationDate)
+	      to inspect the user's imported documents and the local audio
+	      export cache for display in the library list and for cache
+	      management. The data is only displayed to the user on-device.
+
+	    - NSPrivacyAccessedAPICategoryDiskSpace (E174.1)
+	      MLXModelDownloader checks free disk space via
+	      volumeAvailableCapacityForImportantUsage before downloading
+	      a multi-GB LLM weight file, to surface an honest error if
+	      there isn't room — the check feeds the on-device UI only.
+	  -->
+
+	<key>NSPrivacyTracking</key>
+	<false/>
+
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

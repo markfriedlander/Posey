@@ -986,6 +986,20 @@ extension LibraryViewModel {
                 let phase = await MainActor.run { String(describing: EmbedderMigrationCoordinator.shared.currentPhase) }
                 return json(["current": current, "phase": phase])
 
+            case "CANCEL_EMBEDDING_MIGRATION":
+                // 2026-05-28 — cancellation surface for mid-flight Nomic
+                // re-embed. Without this, a user who switches embedder
+                // and changes their mind has to wait for the full
+                // migration to complete (can be 10+ minutes on a phone
+                // library with multiple large docs). Calls
+                // EmbedderMigrationCoordinator.cancel() which flips
+                // cancelRequested; the migrator checks at every chunk
+                // batch and bails to .cancelled cleanly.
+                await MainActor.run {
+                    EmbedderMigrationCoordinator.shared.cancel()
+                }
+                return json(["status": "cancel-requested"])
+
             case "REINDEX_DOCUMENT":
                 // 2026-05-23 — Step 8f: rewired to the new
                 // unit-anchored chunker. Atomically rebuilds the

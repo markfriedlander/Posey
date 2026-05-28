@@ -264,6 +264,34 @@ final class EmbeddingProvider: @unchecked Sendable {
 
         guard let repoID = EmbeddingBackend.nomic.modelID else { return }
 
+        // 2026-05-28 (#71) — Memory pre-flight refusal, mirroring the
+        // MLX pattern in `MLXService.loadModel`. Surfaced live during
+        // the post-N1 verification: the second Nomic re-migration in a
+        // single session jetsam-killed the app mid-load. UserDefaults
+        // persisted target=nomic so the relaunch recovered cleanly, but
+        // the kill is the failure mode we want to refuse-rather-than-
+        // crash. Better to leave the user on the prior embedder with a
+        // log line they can grep than to lose the process.
+        //
+        // Nomic on-disk size ≈ 522 MB; mmap-loaded effective resident
+        // memory uses the same 0.75× ratio Hal calibrated for MLX. The
+        // 250 MB safety margin covers Swift baseline + activation
+        // buffer. Same `requiredMemoryMBForLoad` helper as MLX.
+        let availableMB = processAvailableMemoryMB()
+        let requiredMB = requiredMemoryMBForLoad(sizeGB: 0.522)
+        if availableMB < requiredMB {
+            dbgLog("EMB-MEM: Nomic load REFUSED — availableMB=%.0f requiredMB=%.0f",
+                   availableMB, requiredMB)
+            // Allow retry next call when memory recovers. The fallback
+            // path (BM25-only retrieval) takes over until then.
+            lock.lock()
+            self.nomicLoadAttempted = false
+            lock.unlock()
+            return
+        }
+        dbgLog("EMB-MEM: Nomic load pre-flight OK — availableMB=%.0f requiredMB=%.0f",
+               availableMB, requiredMB)
+
         // The Nomic load triggers a ~522 MB HuggingFace fetch on
         // first use. Set the crash guard before attempting, clear
         // on success — if the load crashes the process, the next

@@ -859,11 +859,17 @@ struct ReaderView: View {
         } label: {
             Image(systemName: viewModel.playPauseImageName)
                 .font(.title3)
-                .foregroundStyle(.white.opacity(0.85))
+                // 2026-05-28 — same colorScheme-driven tint as the
+                // rest of the chrome (see chromeTint). Was hardcoded
+                // white-on-ultraThin = invisible in Light mode.
+                .foregroundStyle(chromeTint)
                 .frame(width: 56, height: 56)
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay(
-                    Circle().stroke(.white.opacity(0.10), lineWidth: 0.5)
+                    Circle().stroke(
+                        (colorScheme == .dark ? Color.white : Color.black).opacity(0.10),
+                        lineWidth: 0.5
+                    )
                 )
         }
         .buttonStyle(.plain)

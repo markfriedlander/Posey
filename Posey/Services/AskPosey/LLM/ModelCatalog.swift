@@ -73,7 +73,14 @@ enum ModelCatalog {
         source: .mlx,
         hfRepoID: "mlx-community/gemma-4-e2b-it-4bit",
         sizeGB: 2.9,
-        contextWindow: 8192,
+        // 2026-05-28 — verified against the mlx-community/gemma-4-e2b-it-4bit
+        // config.json: text_config.max_position_embeddings = 131072 (128K).
+        // Catalog previously claimed 8192 (16× understatement — that was
+        // the original_max_position_embeddings before RoPE scaling). The
+        // model architecture supports 128K; runtime memory on smaller
+        // devices may limit usable context lower, handled by
+        // ProcessMemoryGuard at load time.
+        contextWindow: 131072,
         layerOnePrompt: """
         For factual lookup questions ("what does the document say about X", "who is Y", "when did Z happen"), prefer concise answers. If the answer is one sentence, give one sentence. Don't recap the question. Don't enumerate every related fact in the document. Use lists only when the question is structurally asking for one.
 
@@ -100,8 +107,7 @@ enum ModelCatalog {
             "Conversational engagement on a passage"
         ],
         strugglesWith: [
-            "Long-document recall (8K context — shorter than Llama/Qwen)",
-            "Occasionally truncates very long answers"
+            "Occasionally truncates very long answers (the F13 repetition brake catches most of these, but not all)"
         ]
     )
 
@@ -112,7 +118,12 @@ enum ModelCatalog {
         source: .mlx,
         hfRepoID: "mlx-community/Qwen3.5-2B-MLX-4bit",
         sizeGB: 1.5,
-        contextWindow: 32768,
+        // 2026-05-28 — verified against the mlx-community/Qwen3.5-2B-MLX-4bit
+        // config.json: text_config.max_position_embeddings = 262144 (256K).
+        // Catalog previously claimed 32768 (8× understatement). Qwen3's
+        // native pretraining is 32K but YaRN extension reaches 256K in
+        // this MLX variant.
+        contextWindow: 262144,
         layerOnePrompt: """
         You sometimes pad answers with "Sure, I'd be happy to help!" or "Here's a detailed analysis:" before getting to the actual content. In this reading companion role, skip the preamble and answer directly. The user is reading a document and asked a specific question; respond as if you're the calm partner sitting next to them, not as if you're starting a presentation.
 
@@ -122,7 +133,7 @@ enum ModelCatalog {
         repetitionContextSize: 64,
         personality: "Quick and concise — handles long documents well; can read terse on short questions.",
         goodAt: [
-            "Long documents (32K context)",
+            "Very long documents (256K context — the largest in the catalog)",
             "Quick, structured answers and clean summaries",
             "Multi-step factual extraction"
         ],

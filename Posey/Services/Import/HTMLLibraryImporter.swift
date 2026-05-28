@@ -123,7 +123,16 @@ struct HTMLLibraryImporter {
         let postTOC = InProseTOCDetector.endOfTOCRegion(
             in: plainText, after: postCatalog
         ) ?? postCatalog
-        let skipOffset = max(postCatalog, postTOC)
+        let postFrontMatter = max(postCatalog, postTOC)
+        // 2026-05-27 — same chapter-advance as TXT importer. Gutenberg
+        // HTML editions (Moby Dick #2701, etc.) carry the same front-
+        // matter pattern: "By Herman Melville" / "Original Transcriber's
+        // Notes" before the first chapter. Without this, a reader opens
+        // the HTML edition at notes rather than at "Call me Ishmael."
+        // Returns nil for HTML without CHAPTER-numbered structure
+        // (e.g. Wikipedia articles), in which case the prior offset
+        // stays — leaving article-style HTML to open at the top.
+        let skipOffset = FirstChapterAdvance.detect(in: plainText, after: postFrontMatter) ?? postFrontMatter
         let contentEndOffset = boundaryResult.contentEndOffset ?? 0
         let skipSource: String = {
             if gutenbergStart > 0 { return "gutenberg" }

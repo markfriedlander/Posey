@@ -223,7 +223,16 @@ struct EPUBLibraryImporter {
             plainText: plainText,
             currentSkip: afterInProse
         )
-        let finalSkip = max(afterInProse, walkResult.newSkipOffset ?? afterInProse)
+        let postWalker = max(afterInProse, walkResult.newSkipOffset ?? afterInProse)
+        // 2026-05-27 — chapter-advance refinement. Pride and Prejudice
+        // EPUB opens at the Saintsbury Preface (offset ~2876) instead
+        // of "It is a truth universally acknowledged…" Chapter 1.
+        // FirstChapterAdvance scans for CHAPTER N. / Chapter I. /
+        // CHAPTER ONE. patterns within the next 80 KB and returns
+        // that offset on hit. Returns nil for non-chapter-structured
+        // EPUBs (encyclopedia entries, single-essay collections),
+        // where the prior offset stays.
+        let finalSkip = FirstChapterAdvance.detect(in: plainText, after: postWalker) ?? postWalker
 
         let source: String
         if gutenbergStart > 0 {

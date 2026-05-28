@@ -269,8 +269,31 @@ struct UnitRowView: View {
             1: 1.75, 2: 1.40, 3: 1.20, 4: 1.10, 5: 1.05, 6: 1.00
         ]
         let scale = multipliers[level] ?? 1.0
-        return Text(attributedProse)
-            .font(.system(size: bodyFontSize * scale, weight: .bold))
+        // Defect #10 (2026-05-27): when the importer's heading
+        // anchor lands inside a paragraph that contains BOTH the
+        // title and the opening body text (PDF / EPUB / DOCX / HTML
+        // commonly produce this), `metadata.titleLength` records how
+        // many characters belong to the title. The base attributed
+        // string already carries sentence-precise link ranges; we
+        // overlay a larger bold font on the title prefix only and
+        // restore the body font on the remainder. Returns a single
+        // Text so the whole unit lays out as one continuous block
+        // (heading + first paragraph) without losing the sentence
+        // link / highlight machinery.
+        var attributed = attributedProse
+        let baseFont = Font.system(size: bodyFontSize)
+        attributed.font = baseFont
+        let plain = unit.text
+        let titleLen = unit.metadata.titleLength ?? plain.count
+        if let lower = plain.index(plain.startIndex, offsetBy: 0, limitedBy: plain.endIndex),
+           let upper = plain.index(plain.startIndex, offsetBy: min(titleLen, plain.count), limitedBy: plain.endIndex),
+           let attrLower = AttributedString.Index(lower, within: attributed),
+           let attrUpper = AttributedString.Index(upper, within: attributed),
+           attrLower < attrUpper {
+            attributed[attrLower..<attrUpper].font = .system(size: bodyFontSize * scale, weight: .bold)
+        }
+        return Text(attributed)
+            .lineSpacing(bodyFontSize * 0.35)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, bodyFontSize * 0.75)
             .padding(.bottom, bodyFontSize * 0.3)

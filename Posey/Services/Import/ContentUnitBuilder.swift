@@ -246,11 +246,26 @@ enum ContentUnitBuilder {
     /// Markdown's `ContentUnitBuilder.units(from: blocks)` already
     /// emits `.heading` units directly from `DisplayBlockKind.heading`.
     /// TXT has no heading concept.
+    /// Heading marker as supplied by an importer. `title` is the
+    /// short title string the TOC/heading detector identified (e.g.
+    /// "Introduction", "Chapter 1. Loomings"). When provided and the
+    /// matched prose unit's text begins with the title but extends
+    /// past it (the "title + opening body in the same paragraph"
+    /// pattern that PDF / EPUB / DOCX / HTML imports often produce),
+    /// the resulting heading unit carries `metadata.titleLength` so
+    /// the renderer styles only the title portion as heading and the
+    /// remainder as body prose. Pass `title: nil` to fall back to
+    /// promoting the whole unit as a heading (legacy behavior).
+    struct HeadingMarker {
+        let level: Int
+        let title: String?
+    }
+
     static func applyHeadingMarkers(
         to units: [ContentUnit],
-        headingLevelByOffset: [Int: Int]
+        headingMarkersByOffset: [Int: HeadingMarker]
     ) -> [ContentUnit] {
-        guard !headingLevelByOffset.isEmpty else { return units }
+        guard !headingMarkersByOffset.isEmpty else { return units }
         var out: [ContentUnit] = []
         out.reserveCapacity(units.count)
         var cursor = 0
@@ -278,23 +293,58 @@ enum ContentUnitBuilder {
             // Heading detector may report the offset at the start of
             // the paragraph proper or anywhere inside leading
             // whitespace. Inclusive range check.
-            if let matched = (start...end).first(where: { headingLevelByOffset[$0] != nil }),
-               let level = headingLevelByOffset[matched] {
-                out.append(ContentUnit(
-                    id: unit.id,
-                    documentID: unit.documentID,
-                    sequence: unit.sequence,
-                    kind: .heading,
-                    text: unit.text,
-                    metadata: ContentUnitMetadata(headingLevel: level),
-                    revision: unit.revision,
-                    sourceTier: unit.sourceTier
-                ))
-            } else {
+            guard let matched = (start...end).first(where: { headingMarkersByOffset[$0] != nil }),
+                  let marker = headingMarkersByOffset[matched] else {
                 out.append(unit)
+                continue
             }
+            let titleLength = computeTitleLength(in: unit.text, title: marker.title)
+            out.append(ContentUnit(
+                id: unit.id,
+                documentID: unit.documentID,
+                sequence: unit.sequence,
+                kind: .heading,
+                text: unit.text,
+                metadata: ContentUnitMetadata(
+                    headingLevel: marker.level,
+                    titleLength: titleLength
+                ),
+                revision: unit.revision,
+                sourceTier: unit.sourceTier
+            ))
         }
         return out
+    }
+
+    /// If `title` is a prefix of `unitText` (after trimming leading
+    /// whitespace on the unit) AND the unit contains body text past
+    /// the title, return the character count in `unitText` that
+    /// covers the title plus any separator (newline / space). Return
+    /// nil otherwise — meaning the whole unit IS the title and should
+    /// render as a pure heading.
+    private static func computeTitleLength(in unitText: String, title: String?) -> Int? {
+        guard let title, !title.isEmpty else { return nil }
+        let leadingWhitespace = unitText.prefix(while: { $0.isWhitespace }).count
+        let afterLeading = unitText.dropFirst(leadingWhitespace)
+        // Compare case-sensitively; importers preserve case. We don't
+        // try to be clever about whitespace inside the title — the
+        // TOC detector's title strings match the source text exactly
+        // for the formats that hit this path.
+        guard afterLeading.hasPrefix(title) else { return nil }
+        let titleEnd = leadingWhitespace + title.count
+        // No body after the title (modulo trailing whitespace) — let
+        // the whole unit be the heading.
+        let tail = unitText.dropFirst(titleEnd)
+        let nonWhitespaceTail = tail.contains(where: { !$0.isWhitespace })
+        guard nonWhitespaceTail else { return nil }
+        // Consume one separator character (the typical "\n" or " ")
+        // so the body remainder starts cleanly. The renderer will
+        // still see the rest of the whitespace and lay it out.
+        var consumeSeparator = 0
+        if let first = tail.first, first.isWhitespace {
+            consumeSeparator = 1
+        }
+        return titleEnd + consumeSeparator
     }
 
     /// Map a plainText character offset (the coordinate space the

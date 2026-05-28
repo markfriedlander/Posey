@@ -152,12 +152,14 @@ struct PDFLibraryImporter {
         // ── skips non-prose units (pageBreak / image) and only
         // ── advances the offset cursor on prose-bearing kinds —
         // ── matches the persister's plain_text join scheme.
-        let headingLevelByOffset: [Int: Int] = Dictionary(
-            uniqueKeysWithValues: parsed.tocEntries.map { ($0.plainTextOffset, $0.level) }
+        let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
+            uniqueKeysWithValues: parsed.tocEntries.map {
+                ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
+            }
         )
         let units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,
-            headingLevelByOffset: headingLevelByOffset
+            headingMarkersByOffset: headingMarkersByOffset
         )
 
         // ── Sentences from prose-bearing units.

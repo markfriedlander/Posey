@@ -91,12 +91,14 @@ struct DOCXLibraryImporter {
         // ── Step 9 prerequisite — promote prose paragraphs whose
         // ── offsets match heading entries into `.heading` units, so
         // ── the unified UnitRowView renderer styles them by kind.
-        let headingLevelByOffset: [Int: Int] = Dictionary(
-            uniqueKeysWithValues: headings.map { ($0.plainTextOffset, $0.level) }
+        let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
+            uniqueKeysWithValues: headings.map {
+                ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
+            }
         )
         let units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,
-            headingLevelByOffset: headingLevelByOffset
+            headingMarkersByOffset: headingMarkersByOffset
         )
 
         // ── Smart-skip: heading-based TOCSkipDetector.

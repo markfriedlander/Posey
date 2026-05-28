@@ -106,12 +106,14 @@ struct HTMLLibraryImporter {
         // ── `.heading` units. Reuse the TOC resolution that already
         // ── searches plainText for each heading's title.
         let resolvedHeadings = resolveHeadingOffsets(headings, in: plainText)
-        let headingLevelByOffset: [Int: Int] = Dictionary(
-            uniqueKeysWithValues: resolvedHeadings.map { ($0.plainTextOffset, $0.level) }
+        let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
+            uniqueKeysWithValues: resolvedHeadings.map {
+                ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
+            }
         )
         let units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,
-            headingLevelByOffset: headingLevelByOffset
+            headingMarkersByOffset: headingMarkersByOffset
         )
 
         // ── Smart-skip: same layered detection.

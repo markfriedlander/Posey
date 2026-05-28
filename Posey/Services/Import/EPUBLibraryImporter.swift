@@ -98,12 +98,14 @@ struct EPUBLibraryImporter {
         // ── Step 9 prerequisite — promote heading paragraphs into
         // ── `.heading` units. EPUB's parsed.tocEntries already
         // ── carry (title, plainTextOffset, level) tuples.
-        let headingLevelByOffset: [Int: Int] = Dictionary(
-            uniqueKeysWithValues: parsed.tocEntries.map { ($0.plainTextOffset, $0.level) }
+        let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
+            uniqueKeysWithValues: parsed.tocEntries.map {
+                ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
+            }
         )
         let units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,
-            headingLevelByOffset: headingLevelByOffset
+            headingMarkersByOffset: headingMarkersByOffset
         )
 
         // ── Map smart-skip offset to a unit reference.

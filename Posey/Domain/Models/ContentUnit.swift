@@ -98,18 +98,30 @@ struct ContentUnitMetadata: Codable, Equatable, Hashable, Sendable {
     /// pageBreak units, one before each page's content.
     var pageNumber: Int?
 
+    /// For `.heading`: when the importer's heading detector lands an
+    /// anchor inside a paragraph that contains BOTH the title and the
+    /// opening body text (common in PDF / EPUB / DOCX / HTML imports
+    /// where the title isn't a separate `<h1>` block), this records
+    /// how many characters of `unit.text` belong to the title proper.
+    /// The renderer styles `[0..<titleLength]` with the heading font
+    /// and `[titleLength..<end]` as body prose. Nil means the entire
+    /// unit is the heading (the simple case).
+    var titleLength: Int?
+
     init(
         headingLevel: Int? = nil,
         listMarker: String? = nil,
         imageID: String? = nil,
         caption: String? = nil,
-        pageNumber: Int? = nil
+        pageNumber: Int? = nil,
+        titleLength: Int? = nil
     ) {
         self.headingLevel = headingLevel
         self.listMarker = listMarker
         self.imageID = imageID
         self.caption = caption
         self.pageNumber = pageNumber
+        self.titleLength = titleLength
     }
 
     /// Empty metadata. Convenience for kinds that carry no

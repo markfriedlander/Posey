@@ -29,6 +29,14 @@ struct ReaderView: View {
     /// chrome fade and scroll animations skip their easing — visible state
     /// changes still happen but without the easing curve.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 2026-05-28 — Chrome lives over `.ultraThinMaterial`, which adapts
+    /// to system color scheme (light-translucent in Light, dark-
+    /// translucent in Dark). The prior hard-coded
+    /// `Color.white.opacity(0.9)` chromeTint was white-on-light-
+    /// translucent in Light mode — effectively invisible on a white
+    /// page background. Mark caught it. Drive the tint off
+    /// `colorScheme` so chrome inverts cleanly with the user's mode.
+    @Environment(\.colorScheme) private var colorScheme
     private let isTestMode: Bool
     @State private var isShowingNotesSheet = false
     @State private var isShowingPreferencesSheet = false
@@ -63,8 +71,17 @@ struct ReaderView: View {
     @State private var lastProgrammaticScrollAt: Date = .distantPast
     private let programmaticScrollSuppressionWindow: TimeInterval = 0.7
     @State private var expandedImageItem: ExpandedImageItem? = nil
-    private let chromeTint = Color.white.opacity(0.9)
-    private let chromeSecondaryTint = Color.white.opacity(0.62)
+    /// Glyph color for chrome buttons. Inverts with colorScheme so
+    /// the ultraThinMaterial capsule reads cleanly in both modes.
+    /// Light: dark text on light translucent background.
+    /// Dark: light text on dark translucent background.
+    private var chromeTint: Color {
+        colorScheme == .dark ? Color.white.opacity(0.9) : Color.black.opacity(0.85)
+    }
+    /// Lower-weight chrome tint for inactive / secondary glyphs.
+    private var chromeSecondaryTint: Color {
+        colorScheme == .dark ? Color.white.opacity(0.62) : Color.black.opacity(0.55)
+    }
 
     init(
         document: Document,

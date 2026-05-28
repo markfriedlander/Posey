@@ -4176,7 +4176,20 @@ final class ReaderViewModel: ObservableObject {
                 if i == currentSentenceIndex { positionInUnit = unitTotal }
                 unitTotal += 1
             }
-            if unitTotal > 1 {
+            // Apply fractional anchor whenever the unit has more than
+            // one sentence — places the ACTIVE sentence at viewport
+            // center rather than the unit's center. Without this, a
+            // 4-sentence paragraph with the 2nd sentence active
+            // would center the paragraph and leave sentence 2 in the
+            // upper portion of the viewport. UnitPoint(x:0.5, y:k/N)
+            // aligns the unit's k/N point with the viewport's center
+            // — sentence k of N is exactly at center. Single-sentence
+            // units (unitTotal=1) fall through to plain .center.
+            // First version of this fix used threshold ≥6 (only Moby
+            // Ch 1's giant paragraph triggered); raised to ≥2 after
+            // Mark's continuous-playback screenshots showed shorter
+            // multi-sentence paragraphs also drift.
+            if unitTotal >= 2 {
                 let y = (Double(positionInUnit) + 0.5) / Double(unitTotal)
                 anchor = UnitPoint(x: 0.5, y: y)
             }

@@ -96,6 +96,22 @@ struct ModelConfiguration: Sendable, Equatable, Identifiable {
     /// window numbers alone. Not user-editable; ships with the catalog.
     let personality: String
 
+    /// 2-3 short strengths surfaced as bullet points in the richer
+    /// model card (P.S.3 from Mark, 2026-05-28). Each item is a noun
+    /// phrase or short clause — e.g. "Quick fact lookups," "Long-
+    /// document recall (128K)," "Critique and pushback." Calibrated
+    /// from the per-model tuning + conversational testing sessions —
+    /// honest about what each model actually does well.
+    let goodAt: [String]
+
+    /// 1-2 short honest disclosures of where this model is weaker,
+    /// surfaced as bullet points in the richer model card. Mark's
+    /// directive: "If a model can't do it convincingly, document
+    /// that honestly in its personality card rather than forcing it."
+    /// Empty array is allowed (no glaring weakness) but rarely the
+    /// honest answer — every model has trade-offs.
+    let strugglesWith: [String]
+
     init(
         id: String,
         displayName: String,
@@ -106,7 +122,9 @@ struct ModelConfiguration: Sendable, Equatable, Identifiable {
         layerOnePrompt: String?,
         repetitionPenalty: Float? = nil,
         repetitionContextSize: Int? = nil,
-        personality: String
+        personality: String,
+        goodAt: [String] = [],
+        strugglesWith: [String] = []
     ) {
         self.id = id
         self.displayName = displayName
@@ -118,6 +136,8 @@ struct ModelConfiguration: Sendable, Equatable, Identifiable {
         self.repetitionPenalty = repetitionPenalty
         self.repetitionContextSize = repetitionContextSize
         self.personality = personality
+        self.goodAt = goodAt
+        self.strugglesWith = strugglesWith
     }
 }
 

@@ -2208,9 +2208,15 @@ private struct ReaderPreferencesSheet: View {
             }
             .onReceive(
                 NotificationCenter.default.publisher(for: .remoteScrollPrefsToLLM)
-            ) { _ in
+            ) { note in
+                // Antenna-provided target id (per-model anchor when the
+                // verb is called with an argument; section anchor when
+                // not). Falls back to the section anchor if userInfo is
+                // missing or malformed.
+                let target = (note.userInfo?["target"] as? String)
+                    ?? "preferences.askPosey.section"
                 withAnimation {
-                    proxy.scrollTo("preferences.askPosey.section", anchor: .top)
+                    proxy.scrollTo(target, anchor: .top)
                 }
             }
             } // ScrollViewReader

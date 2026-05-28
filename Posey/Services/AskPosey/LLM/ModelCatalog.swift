@@ -52,7 +52,16 @@ enum ModelCatalog {
 
         When the user shares their own reading experience — "I find this tedious," "this confused me," "I'm not sure I'm getting it" — acknowledge that part of their message before pivoting to the document. A reader who feels unheard won't trust the answer that follows. The "never recommend" rule still holds for "should I read X" questions, but the acknowledgment of how the user is feeling is a separate move and it comes first.
         """,
-        personality: "Careful and even-keeled — fastest for short passage questions and quick lookups, hedges more on big-picture synthesis."
+        personality: "Careful and even-keeled — fastest for short passage questions and quick lookups, hedges more on big-picture synthesis.",
+        goodAt: [
+            "Quick fact lookups inside a passage",
+            "Short, accurate summaries grounded in the text",
+            "Acknowledging when the document doesn't say"
+        ],
+        strugglesWith: [
+            "Big-picture interpretation or synthesis across long passages",
+            "Strong opinions or argued positions — tends to hedge"
+        ]
     )
 
     // MARK: - MLX models (8g brings these live)
@@ -84,7 +93,16 @@ enum ModelCatalog {
         // cap rather than a context-window overflow.
         repetitionPenalty: 1.1,
         repetitionContextSize: 64,
-        personality: "Engaged and thoughtful — takes positions on interpretive questions, willing to argue a reading."
+        personality: "Engaged and thoughtful — takes positions on interpretive questions, willing to argue a reading.",
+        goodAt: [
+            "Interpretive questions (\"what's the effect of\", \"what stands out\")",
+            "Taking a position and defending it with text",
+            "Conversational engagement on a passage"
+        ],
+        strugglesWith: [
+            "Long-document recall (8K context — shorter than Llama/Qwen)",
+            "Occasionally truncates very long answers"
+        ]
     )
 
     /// Qwen 3.5 2B Instruct (4-bit, MLX).
@@ -102,7 +120,16 @@ enum ModelCatalog {
         """,
         repetitionPenalty: 1.1,
         repetitionContextSize: 64,
-        personality: "Quick and concise — handles long documents well; can read terse on short questions."
+        personality: "Quick and concise — handles long documents well; can read terse on short questions.",
+        goodAt: [
+            "Long documents (32K context)",
+            "Quick, structured answers and clean summaries",
+            "Multi-step factual extraction"
+        ],
+        strugglesWith: [
+            "Warmth — can read terse on conversational questions",
+            "Cross-turn coherence — sometimes contradicts itself across turns"
+        ]
     )
 
     /// Llama 3.2 3B Instruct (4-bit, MLX).
@@ -116,7 +143,15 @@ enum ModelCatalog {
         layerOnePrompt: nil,  // Llama is well-behaved in this role without per-model correction
         repetitionPenalty: 1.1,
         repetitionContextSize: 64,
-        personality: "Balanced and conversational — the most well-rounded MLX model; a good first try."
+        personality: "Balanced and conversational — the most well-rounded MLX model; a good first try.",
+        goodAt: [
+            "Long documents — full novels fit (128K context)",
+            "Multi-fact synthesis across passages",
+            "Balanced voice — neither terse nor over-asserting"
+        ],
+        strugglesWith: [
+            "No glaring weakness — solid baseline; pick a sharper model for very specific needs"
+        ]
     )
 
     /// Dolphin 3.0 (4-bit, MLX). Less restricted; Layer-1 keeps it
@@ -137,7 +172,16 @@ enum ModelCatalog {
         """,
         repetitionPenalty: 1.1,
         repetitionContextSize: 64,
-        personality: "Less restricted — engages directly with critique and pushback; willing to share a reaction."
+        personality: "Less restricted — engages directly with critique and pushback; willing to share a reaction.",
+        goodAt: [
+            "Engaging directly with critique (\"that's the generic take\")",
+            "Sharing a reader's reaction to a passage",
+            "Less-restricted dialogue on difficult material"
+        ],
+        strugglesWith: [
+            "Can over-assert opinions the document doesn't actually support",
+            "Less reserved than the other models — sometimes too direct"
+        ]
     )
 
     /// All known models, in display order. The picker shows them

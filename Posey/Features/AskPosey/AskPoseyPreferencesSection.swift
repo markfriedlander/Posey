@@ -261,6 +261,34 @@ struct AskPoseyPreferencesSection: View {
                     Text(modelDetailLine(model))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+
+                    // P.S.3 (2026-05-28) — richer card per Mark.
+                    // Surface honest "good at / struggles with" so the
+                    // user can pick a model on what it does in practice
+                    // rather than spec numbers. Only render the
+                    // sections when the catalog actually has content
+                    // (defensive — Equatable + diffability stay safe).
+                    if !model.goodAt.isEmpty || !model.strugglesWith.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if !model.goodAt.isEmpty {
+                                bulletSection(
+                                    title: "Good at",
+                                    icon: "checkmark",
+                                    tint: .green,
+                                    items: model.goodAt
+                                )
+                            }
+                            if !model.strugglesWith.isEmpty {
+                                bulletSection(
+                                    title: "Struggles with",
+                                    icon: "exclamationmark",
+                                    tint: .orange,
+                                    items: model.strugglesWith
+                                )
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
                     // Progress bar while downloading — non-zero only
                     // when MLXModelDownloader publishes
                     // isDownloading=true for this id.
@@ -285,6 +313,12 @@ struct AskPoseyPreferencesSection: View {
         }
         .buttonStyle(.plain)
         .disabled(!ModelCatalog.isAvailable(model))
+        // 2026-05-28 (P.S.3 verification) — per-model scroll anchor
+        // so the antenna can land on a specific card via
+        // SCROLL_PREFS_TO_LLM:<model-id>. Without this, the section-
+        // level anchor only reveals the first model and there's no
+        // way to drive the picker below the fold on physical hardware.
+        .id("preferences.askPosey.model.\(model.id)")
         // Swipe-to-delete only enabled for downloaded MLX models.
         // AFM has no on-disk footprint to free; never-downloaded
         // MLX models have nothing to delete.
@@ -341,6 +375,44 @@ struct AskPoseyPreferencesSection: View {
             return "Apple Foundation Models · on-device · \(model.contextWindow / 1024)K context"
         case .mlx:
             return "MLX · on-device · \(model.contextWindow / 1024)K context"
+        }
+    }
+
+    /// One section of the richer model card — a labeled title +
+    /// tinted icon followed by a small bullet list. Used for both
+    /// "Good at" (green check) and "Struggles with" (orange bang).
+    /// Caption-sized typography to stay deferential to the
+    /// displayName + personality line above.
+    @ViewBuilder
+    private func bulletSection(
+        title: String,
+        icon: String,
+        tint: Color,
+        items: [String]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 12, alignment: .center)
+                Text(title)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+            }
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .top, spacing: 6) {
+                    Text("•")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 12, alignment: .center)
+                    Text(item)
+                        .font(.caption2)
+                        .foregroundStyle(.primary.opacity(0.8))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 }

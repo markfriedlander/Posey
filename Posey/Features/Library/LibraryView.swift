@@ -2050,10 +2050,29 @@ extension LibraryViewModel {
                 // the AskPosey LLM picker section. Used for phone
                 // verification of personality-card rendering since
                 // physical devices don't expose a UI swipe primitive.
-                await MainActor.run {
-                    NotificationCenter.default.post(name: .remoteScrollPrefsToLLM, object: nil)
+                //
+                // Optional arg: a model id to scroll to a specific
+                // card below the section header. Without an arg, the
+                // section-top anchor is used (backward compatible).
+                // Examples:
+                //   SCROLL_PREFS_TO_LLM
+                //   SCROLL_PREFS_TO_LLM:mlx-community/gemma-4-e2b-it-4bit
+                //   SCROLL_PREFS_TO_LLM:mlx-community/dolphin3.0-llama3.2-3B-4Bit
+                let modelArg = arg?.trimmingCharacters(in: .whitespaces)
+                let targetID: String
+                if let m = modelArg, !m.isEmpty {
+                    targetID = "preferences.askPosey.model.\(m)"
+                } else {
+                    targetID = "preferences.askPosey.section"
                 }
-                return json(["status": "posted"])
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteScrollPrefsToLLM,
+                        object: nil,
+                        userInfo: ["target": targetID]
+                    )
+                }
+                return json(["status": "posted", "target": targetID])
 
             case "OPEN_TOC_SHEET":
                 await MainActor.run {

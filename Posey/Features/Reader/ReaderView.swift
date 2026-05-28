@@ -4163,104 +4163,61 @@ final class ReaderViewModel: ObservableObject {
     /// re-centers normally.
     private var nextScrollAnchor: UnitPoint = .center
 
-    /// **N3 (2026-05-28): Apple-Music-style fixed sentence anchor.**
-    /// Where the active sentence lands in the viewport during normal
-    /// TTS playback. y=0.35 puts it ~upper-third — the standard
-    /// lyrics-style position so the reader's eyes don't chase a
-    /// moving highlight, and there's room beneath to anticipate
-    /// what's coming next. Apple Music uses ~0.30; 0.35 leaves a
-    /// touch more upper context for prose, which generally benefits
-    /// from a visible lead-in line.
-    private static let activeSentenceViewportAnchorY: Double = 0.35
-
     func scrollToCurrentSentence(with proxy: ScrollViewProxy, animated: Bool) {
         // Visual-pause `focusedUnitID` wins when set so the user
         // lands on the image row that just paused playback.
+        let scrollTargetID: UUID
         if let focusedUnitID {
-            let anchor = nextScrollAnchor
-            nextScrollAnchor = .center
-            let action = { proxy.scrollTo(focusedUnitID, anchor: anchor) }
-            if animated && !Self.reduceMotionEnabled {
-                withAnimation(.easeInOut(duration: 0.25), action)
-            } else {
-                action()
-            }
+            scrollTargetID = focusedUnitID
+        } else if let activeUnitID {
+            scrollTargetID = activeUnitID
+        } else {
             return
         }
 
-        // N3 path — prefer scrolling to the active sentence's own id
-        // when the renderer split this unit into per-sentence rows
-        // (UnitRowView does this when sentencesInUnit.count >= 2).
-        // `ScrollViewProxy.scrollTo(sentenceID, anchor: UnitPoint(0.5,
-        // 0.35))` aligns the sentence's 35% point with the viewport's
-        // 35% point — i.e. the active sentence sits at upper-third
-        // viewport position regardless of where in the parent unit it
-        // falls. Apple Music lyrics shape; the active line stays
-        // pinned while the surrounding text scrolls underneath.
-        if let activeSentence = activeSentenceForScroll() {
-            // Count sentences in this unit. Iterating once is cheaper
-            // than building a dictionary on every call.
-            let activeUnit = activeSentence.unitID
-            var unitTotal = 0
-            for s in sentences where s.unitID == activeUnit {
-                unitTotal += 1
-                if unitTotal >= 2 { break }
-            }
+        var anchor = nextScrollAnchor
+        nextScrollAnchor = .center
 
-            // Multi-sentence unit → renderer split → target sentence
-            // directly at fixed viewport y.
-            if unitTotal >= 2 {
-                // TOC nav still wants .top behavior; honor a non-
-                // center nextScrollAnchor by passing it through to
-                // the unit-level scroll path instead.
-                if nextScrollAnchor != .center {
-                    let anchor = nextScrollAnchor
-                    nextScrollAnchor = .center
-                    let action = { proxy.scrollTo(activeUnit, anchor: anchor) }
-                    if animated && !Self.reduceMotionEnabled {
-                        withAnimation(.easeInOut(duration: 0.25), action)
-                    } else {
-                        action()
-                    }
-                    return
-                }
-                nextScrollAnchor = .center
-                let yAnchor = UnitPoint(x: 0.5, y: Self.activeSentenceViewportAnchorY)
-                let action = { proxy.scrollTo(activeSentence.id, anchor: yAnchor) }
-                if animated && !Self.reduceMotionEnabled {
-                    withAnimation(.easeInOut(duration: 0.25), action)
-                } else {
-                    action()
-                }
-                return
+        // 2026-05-28 (post-cross-sentence-selection-fix) — units are
+        // now single UITextView rows again (one render surface per
+        // unit so native selection spans all sentences in the unit).
+        // Sentence-level scrollTo by id is no longer possible because
+        // sentences don't have their own SwiftUI views; sentence
+        // anchoring works approximately via `UnitPoint(x:0.5, y:k/N)`
+        // on the parent unit, placing the unit's k/N point at viewport
+        // center. The active sentence drifts slightly within the unit
+        // as TTS advances (sentence heights aren't uniform) but stays
+        // in roughly the upper-third viewport zone. A future iteration
+        // can publish per-sentence rects from `ProseUnitTextView` for
+        // pixel-precise targeting via `ScrollPosition` (iOS 17+);
+        // that polish is independent of the selection-correctness fix
+        // that motivated reverting to a single render surface.
+        if focusedUnitID == nil,
+           anchor == .center,
+           sentences.indices.contains(currentSentenceIndex) {
+            let activeSentence = sentences[currentSentenceIndex]
+            let activeUnit = activeSentence.unitID
+            var positionInUnit = 0
+            var unitTotal = 0
+            for (i, s) in sentences.enumerated() where s.unitID == activeUnit {
+                if i == currentSentenceIndex { positionInUnit = unitTotal }
+                unitTotal += 1
             }
-            // Single-sentence unit → fall through to the unit-level
-            // scroll path; .center is correct because the unit IS the
-            // sentence.
+            if unitTotal >= 2 {
+                let y = (Double(positionInUnit) + 0.5) / Double(unitTotal)
+                anchor = UnitPoint(x: 0.5, y: y)
+            }
         }
 
-        // Fallback: scroll to the active unit. Used for single-
-        // sentence units (heading rows, short paragraphs) and when
-        // no sentence is active.
-        guard let activeUnitID else { return }
-        let anchor = nextScrollAnchor
-        nextScrollAnchor = .center
-        let action = { proxy.scrollTo(activeUnitID, anchor: anchor) }
+        let action = {
+            proxy.scrollTo(scrollTargetID, anchor: anchor)
+        }
+
         if animated && !Self.reduceMotionEnabled {
             withAnimation(.easeInOut(duration: 0.25), action)
         } else {
             action()
         }
-    }
-
-    /// Returns the current active sentence if `currentSentenceIndex`
-    /// is in range, else nil. Pulled out so scrollToCurrentSentence
-    /// can early-return when there's nothing to anchor on.
-    private func activeSentenceForScroll() -> Sentence? {
-        guard sentences.indices.contains(currentSentenceIndex) else {
-            return nil
-        }
-        return sentences[currentSentenceIndex]
     }
 
     private var currentSegment: TextSegment? {

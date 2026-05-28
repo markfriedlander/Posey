@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // ========== BLOCK 01: UNIT ROW VIEW - START ==========
 
@@ -107,6 +108,14 @@ struct UnitRowView: View {
     /// Format: `posey-sentence://<sentence-uuid>`.
     static let sentenceURLScheme = "posey-sentence"
 
+    /// Bound to the openURL action ReaderView installs via
+    /// `.environment(\.openURL, ...)`. Captured here so the UITextView
+    /// wrapper's sentence-tap callback can dispatch a posey-sentence://
+    /// URL through the same handler the SwiftUI Text link-tap path
+    /// uses. Without this, the URL would try to open externally and
+    /// fail (the scheme isn't registered with the system).
+    @Environment(\.openURL) private var openURL
+
     // MARK: - Dimming curves (M8 reading-style)
 
     /// Per-sentence opacity. Active sentence at 1.0; non-active at
@@ -157,113 +166,126 @@ struct UnitRowView: View {
 
     // MARK: - Prose
 
-    /// Body paragraph. Sentence ranges are tagged with
-    /// `posey-sentence://` URLs so tap-to-jump is sentence-precise;
-    /// the active sentence range gets a subtle background tint.
+    /// Body paragraph rendered through `ProseUnitTextView` — a
+    /// UIKit-backed UITextView wrapper. This is a deliberate
+    /// architectural choice and worth explaining.
     ///
-    /// **N2/N3 2026-05-28 — Per-sentence sub-rows for multi-sentence
-    /// units.** When the unit has ≥ 2 sentences we render each
-    /// sentence as its own Text view inside a tight VStack, each
-    /// `.id(sentence.id)`. Two reasons:
+    /// **2026-05-28 (post-N2/N3 reconsideration).** The N2/N3 commit
+    /// (`2891340`) split multi-sentence prose units into a VStack of
+    /// per-sentence SwiftUI Text views to win sentence-precise scroll
+    /// anchoring. The trade-off it accepted was loss of multi-sentence
+    /// text selection (SwiftUI's `.textSelection(.enabled)` is per-Text;
+    /// selection can't span sibling Text views in a stack). Mark called
+    /// that trade-off out as false: scroll anchoring and cross-sentence
+    /// selection are independent problems and both should be solved.
+    /// He's right.
     ///
-    /// 1. ScrollViewProxy.scrollTo() can only target an .id'd view,
-    ///    so the only way to land the active sentence at a fixed
-    ///    viewport position (N3, Apple Music lyrics style) is to give
-    ///    each sentence its own scrollable identity. The prior
-    ///    fractional-`UnitPoint` workaround approximated this but the
-    ///    sentence still drifted with the scroll instead of staying
-    ///    pinned at upper-third.
-    /// 2. Big units (Moby Ch 1's opening paragraph is ~12 sentences,
-    ///    often filling a whole screen) need a smaller visual
-    ///    "active band" than the whole paragraph to follow during
-    ///    TTS. Per-sentence rows give each sentence its own y-extent,
-    ///    so the active highlight is naturally one sentence tall.
+    /// The right architecture is one rendering surface per unit that
+    /// supports both intra-text geometry queries (for scroll precision)
+    /// AND native selection (for cross-sentence copy/quote). SwiftUI's
+    /// `Text` exposes neither intra-text geometry nor cross-Text
+    /// selection. UITextView does both — natively, with the
+    /// platform-standard selection UX (handles, magnifier, callout
+    /// menu) the reader expects from every other iOS app.
     ///
-    /// Trade-off: within a multi-sentence unit, multi-sentence text
-    /// selection is lost (SwiftUI selection is per-Text). Selection
-    /// within a sentence still works. Mark cited Apple Music as the
-    /// model for both reading modes — Apple Music lyrics is line-per-
-    /// line by construction. Single-sentence units (short dialogue
-    /// paragraphs, most headings) keep the single-Text path, which
-    /// preserves prose flow + intra-unit text selection for the
-    /// common case.
+    /// `ProseUnitTextView` wraps a single UITextView per prose unit:
+    ///   - Holds the full unit's NSAttributedString (one render surface)
+    ///   - Native selection spans the entire unit's text
+    ///   - Sentence-link taps still dispatch via posey-sentence:// URLs
+    ///     (intercepted in `shouldInteractWith:`)
+    ///   - M8 dimming opacity per sentence applied as
+    ///     `.foregroundColor` NSAttributedString attributes
+    ///   - Active-sentence highlight applied as `.backgroundColor`
+    ///   - Native iOS callout menu (Copy / Define / Translate / Share)
+    ///     works for free without us re-implementing any of it
+    ///
+    /// Scroll anchoring (the N3 problem) goes back to unit-level
+    /// `scrollTo(unit.id, anchor: UnitPoint(0.5, k/N))` for now — the
+    /// fractional UnitPoint approximates upper-third positioning. A
+    /// future iteration can expose `boundingRect(forCharacterRange:)`
+    /// from this view + a SwiftUI `ScrollPosition` (iOS 17+) for
+    /// pixel-precise sentence-y anchoring; that polish lives separately
+    /// from the selection fix that motivated this commit.
     private var proseRow: some View {
-        if shouldSplitIntoSentenceRows {
-            return AnyView(perSentenceStack(
-                font: .system(size: bodyFontSize),
-                lineSpacing: bodyFontSize * 0.35,
-                italic: false
-            ))
-        } else {
-            return AnyView(
-                Text(attributedProse)
-                    .font(.system(size: bodyFontSize))
-                    .lineSpacing(bodyFontSize * 0.35)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 4)
-                    .textSelection(.enabled)
-            )
-        }
-    }
-
-    /// True when this prose-bearing unit should split into per-
-    /// sentence Text sub-rows for sentence-precise scroll anchoring
-    /// and a narrower active-highlight band. Threshold = 2 sentences:
-    /// the smallest unit that has more than one scroll target.
-    private var shouldSplitIntoSentenceRows: Bool {
-        sentencesInUnit.count >= 2
-    }
-
-    /// VStack of per-sentence Text views, tight spacing so the unit
-    /// still reads as a paragraph block (just with each sentence
-    /// starting on a new line — Apple Music lyrics shape). Each
-    /// sentence carries `.id(sentence.id)` so ScrollViewProxy can
-    /// target it directly, and inherits the same sentence-link tap
-    /// path the single-Text variant uses (posey-sentence:// URL on
-    /// the whole sentence's AttributedString range).
-    private func perSentenceStack(
-        font: Font,
-        lineSpacing: CGFloat,
-        italic: Bool
-    ) -> some View {
-        VStack(alignment: .leading, spacing: lineSpacing) {
-            let active = (activeSentence?.unitID == unit.id) ? activeSentence : nil
-            ForEach(Array(sentencesInUnit.enumerated()), id: \.element.id) { positionInUnit, sentence in
-                let flatIdx = sentenceIndexBase + positionInUnit
-                let opacity = opacityForSentence(at: flatIdx)
-                let isActive = (active?.id == sentence.id)
-                let attributed = attributedSingleSentence(sentence, opacity: opacity)
-                Text(attributed)
-                    .font(italic ? font.italic() : font)
-                    .lineSpacing(lineSpacing)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        isActive
-                            ? Color.accentColor.opacity(0.30)
-                            : Color.clear
-                    )
-                    .textSelection(.enabled)
-                    .id(sentence.id)
-                    .accessibilityIdentifier("reader.sentence.\(sentence.id.uuidString)")
+        ProseUnitTextView(
+            attributedText: nsAttributedProse,
+            onSentenceTap: { sentenceID in
+                // Dispatch through SwiftUI's openURL environment action
+                // (set up by ReaderView's `.environment(\.openURL, ...)`)
+                // so the existing sentence-link routing handles it.
+                guard let url = URL(string: "\(Self.sentenceURLScheme)://\(sentenceID.uuidString)") else { return }
+                openURL(url)
             }
-        }
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 4)
     }
 
-    /// Build a one-sentence AttributedString with the same sentence-
-    /// link tagging + opacity treatment the multi-sentence builder
-    /// uses, so per-sentence rows still dispatch via the openURL
-    /// action and respect the reading-style dimming curve.
-    private func attributedSingleSentence(
-        _ sentence: Sentence,
-        opacity: Double
-    ) -> AttributedString {
-        var attributed = AttributedString(sentence.text)
-        if let url = URL(string: "\(Self.sentenceURLScheme)://\(sentence.id.uuidString)") {
-            let full = attributed.startIndex..<attributed.endIndex
-            attributed[full].link = url
-            attributed[full].foregroundColor = Color.primary.opacity(opacity)
-            attributed[full].underlineStyle = nil
+    /// NSAttributedString version of the prose, with sentence-link
+    /// URLs, per-sentence opacity, and active-sentence background —
+    /// the same shape `attributedProse` produces, but in the AppKit/
+    /// UIKit attribute namespace that UITextView consumes natively.
+    /// Pulled out so `ProseUnitTextView` can stay a thin wrapper and
+    /// all the per-sentence logic stays in one place.
+    private var nsAttributedProse: NSAttributedString {
+        let plain = unit.text
+        let attributed = NSMutableAttributedString(string: plain)
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        // Body font for the whole string — sentence-specific attributes
+        // override locally.
+        attributed.addAttribute(.font, value: UIFont.systemFont(ofSize: bodyFontSize), range: fullRange)
+        attributed.addAttribute(
+            .foregroundColor,
+            value: UIColor.label,
+            range: fullRange
+        )
+        // Match SwiftUI line spacing: bodyFontSize * 0.35.
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = bodyFontSize * 0.35
+        attributed.addAttribute(.paragraphStyle, value: paragraphStyle, range: fullRange)
+
+        let active = (activeSentence?.unitID == unit.id) ? activeSentence : nil
+        let utf16 = plain.utf16
+
+        for (positionInUnit, sentence) in sentencesInUnit.enumerated() {
+            guard sentence.intraStart >= 0,
+                  sentence.intraEnd <= plain.count,
+                  sentence.intraStart < sentence.intraEnd else { continue }
+            // Convert character offsets to UTF-16 offsets for NSRange.
+            // For ASCII / Latin text these match; for emoji or
+            // surrogate-pair content the conversion matters.
+            guard let lower = plain.index(plain.startIndex, offsetBy: sentence.intraStart, limitedBy: plain.endIndex),
+                  let upper = plain.index(plain.startIndex, offsetBy: sentence.intraEnd, limitedBy: plain.endIndex) else {
+                continue
+            }
+            let nsLower = lower.utf16Offset(in: plain)
+            let nsUpper = upper.utf16Offset(in: plain)
+            guard nsLower >= 0, nsUpper <= utf16.count, nsLower < nsUpper else { continue }
+            let range = NSRange(location: nsLower, length: nsUpper - nsLower)
+
+            // Sentence-link URL for tap-to-jump dispatch.
+            if let url = URL(string: "\(Self.sentenceURLScheme)://\(sentence.id.uuidString)") {
+                attributed.addAttribute(.link, value: url, range: range)
+            }
+
+            // M8 dimming opacity for non-active sentences.
+            let flatIdx = sentenceIndexBase + positionInUnit
+            let opacity = opacityForSentence(at: flatIdx)
+            attributed.addAttribute(
+                .foregroundColor,
+                value: UIColor.label.withAlphaComponent(opacity),
+                range: range
+            )
+
+            // Active-sentence accent background.
+            if let active, sentence.id == active.id {
+                attributed.addAttribute(
+                    .backgroundColor,
+                    value: UIColor(named: "AccentColor")?.withAlphaComponent(0.30)
+                        ?? UIColor.systemBlue.withAlphaComponent(0.30),
+                    range: range
+                )
+            }
         }
         return attributed
     }
@@ -547,3 +569,161 @@ struct UnitRowView: View {
 }
 
 // ========== BLOCK 01: UNIT ROW VIEW - END ==========
+
+
+// ========== BLOCK 02: PROSE UNIT TEXT VIEW (UITextView wrapper) - START ==========
+
+/// UITextView-backed prose renderer per ContentUnit, used by
+/// `UnitRowView.proseRow`.
+///
+/// **Why UITextView, not SwiftUI Text.** SwiftUI's Text is wonderful
+/// but limited in two ways that matter here: text selection is
+/// per-Text view (selections can't span sibling Texts in a VStack),
+/// and there's no intra-text geometry query (you can't ask where
+/// inside a Text a given character offset lives). Prose-reading
+/// requires both: a reader needs to be able to select a multi-
+/// sentence quote, and the reader needs to land the active TTS
+/// sentence at a fixed viewport position regardless of where it
+/// falls within its paragraph.
+///
+/// UITextView does both natively. Selection works across the whole
+/// `attributedText` with the familiar iOS handles, magnifier, and
+/// callout menu (Copy / Look Up / Translate / Share). Intra-text
+/// geometry is `layoutManager.boundingRect(forGlyphRange:in:)`. A
+/// future iteration can publish per-sentence rects from this view
+/// up to `ReaderView` so `scrollToCurrentSentence` can land
+/// sentence-y-pixel-precise. For now, scrollTo still targets the
+/// unit and uses a fractional `UnitPoint` anchor — the active
+/// sentence drifts slightly within the unit but stays in roughly
+/// the upper-third viewport zone.
+///
+/// **Behaviors preserved from the prior SwiftUI Text implementation:**
+///   - Sentence-link tap dispatch (intercepted in
+///     `shouldInteractWith:` and routed via `onSentenceTap`).
+///   - Body font + line spacing match `Text(attributedProse)`.
+///   - Per-sentence M8 opacity dimming (applied as
+///     `.foregroundColor` attributes on each sentence range).
+///   - Active-sentence accent-color background (applied as
+///     `.backgroundColor` on the active sentence's range).
+///
+/// **Behaviors gained:**
+///   - Multi-sentence text selection (native, with handles).
+///   - Native callout menu (Copy works without us re-implementing it).
+///
+/// 2026-05-28 — introduced to fix the N2/N3 cross-sentence-selection
+/// trade-off Mark flagged as a false dichotomy.
+struct ProseUnitTextView: UIViewRepresentable {
+
+    let attributedText: NSAttributedString
+
+    /// Sentence-link tap callback. Posey's prose attributes each
+    /// sentence range with a `posey-sentence://<uuid>` URL; the
+    /// UITextView delegate intercepts those and dispatches to this
+    /// closure with the parsed UUID. Returning false from the
+    /// delegate prevents UITextView from trying to open the URL in
+    /// Safari.
+    let onSentenceTap: (UUID) -> Void
+
+    /// Make the UITextView. Configuration mirrors what a SwiftUI
+    /// Text would render — no editable text, no internal scrolling
+    /// (the outer ScrollView handles that), transparent background,
+    /// zero padding around glyphs.
+    func makeUIView(context: Context) -> UITextView {
+        let tv = UITextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.isScrollEnabled = false
+        tv.backgroundColor = .clear
+        tv.textContainerInset = .zero
+        tv.textContainer.lineFragmentPadding = 0
+        // Word-level link interaction (single-tap on a sentence
+        // dispatches; long-press still triggers selection).
+        tv.linkTextAttributes = [
+            .foregroundColor: UIColor.label,
+            .underlineStyle: 0
+        ]
+        // Disable data detectors (UITextView would otherwise underline
+        // URLs in the prose text itself, which we don't want).
+        tv.dataDetectorTypes = []
+        tv.delegate = context.coordinator
+        // Let SwiftUI's parent (`.frame(maxWidth: .infinity)`) decide
+        // the width; we'll size height to fit the wrapped text via
+        // `sizeThatFits` below. Horizontal compression resistance low
+        // so SwiftUI can size the width freely.
+        tv.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        tv.setContentHuggingPriority(.required, for: .vertical)
+        tv.setContentCompressionResistancePriority(.required, for: .vertical)
+        return tv
+    }
+
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        uiView.attributedText = attributedText
+        // Force the layout manager to re-flow against the current
+        // bounds. Without this, font/opacity/highlight changes can
+        // leave the cached glyph layout stale and clip text.
+        uiView.invalidateIntrinsicContentSize()
+    }
+
+    /// SwiftUI sizing hook (iOS 16+). Called by the SwiftUI layout
+    /// system with the proposed width; we return the text's natural
+    /// height for that width. This is the missing piece that made
+    /// the initial integration clip text on the right edge — without
+    /// it, UITextView reported its default-empty intrinsic size and
+    /// the textContainer stayed at the wrong width forever.
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: UITextView,
+        context: Context
+    ) -> CGSize? {
+        guard let width = proposal.width, width > 0, width.isFinite else {
+            return nil
+        }
+        // Set the textContainer's width explicitly so the layout
+        // manager wraps glyphs against the SwiftUI-proposed width.
+        // (`widthTracksTextView` would normally do this, but only
+        // when the textView is auto-resizing via constraints; under
+        // UIViewRepresentable the SwiftUI layout drives the frame
+        // and the container width has to be set in lockstep here.)
+        uiView.textContainer.size = CGSize(width: width, height: .greatestFiniteMagnitude)
+        let fitted = uiView.sizeThatFits(
+            CGSize(width: width, height: .greatestFiniteMagnitude)
+        )
+        return CGSize(width: width, height: fitted.height)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSentenceTap: onSentenceTap)
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        let onSentenceTap: (UUID) -> Void
+        init(onSentenceTap: @escaping (UUID) -> Void) {
+            self.onSentenceTap = onSentenceTap
+        }
+
+        /// iOS 17+ replacement for the deprecated
+        /// `shouldInteractWith:` delegate. Returning a custom
+        /// `UIAction` here overrides the default open-the-URL
+        /// behavior. Posey sentence URLs use the
+        /// `posey-sentence://` scheme; parse the host as a UUID and
+        /// dispatch to the closure. For any other URL we let the
+        /// default action run (no opinion).
+        func textView(
+            _ textView: UITextView,
+            primaryActionFor textItem: UITextItem,
+            defaultAction: UIAction
+        ) -> UIAction? {
+            guard case let .link(url) = textItem.content,
+                  url.scheme == UnitRowView.sentenceURLScheme,
+                  let host = url.host(),
+                  let id = UUID(uuidString: host) else {
+                return defaultAction
+            }
+            return UIAction { [weak self] _ in
+                self?.onSentenceTap(id)
+            }
+        }
+    }
+}
+
+// ========== BLOCK 02: PROSE UNIT TEXT VIEW - END ==========

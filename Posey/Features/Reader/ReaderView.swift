@@ -1977,6 +1977,12 @@ private struct ReaderPreferencesSheet: View {
 
     var body: some View {
         NavigationStack {
+            // 2026-05-28 — ScrollViewReader wraps Form so the antenna's
+            // SCROLL_PREFS_TO_LLM verb can jump to the LLM picker
+            // without the user (or test driver) having to swipe.
+            // Listens for `.remoteScrollPrefsToLLM` notification and
+            // scrolls to the AskPoseyPreferencesSection anchor.
+            ScrollViewReader { proxy in
             Form {
                 // Reading section
                 Section("Reading") {
@@ -2155,6 +2161,10 @@ private struct ReaderPreferencesSheet: View {
                     migrationCoordinator: EmbedderMigrationCoordinator.shared,
                     databaseManager: viewModel.databaseManager
                 )
+                // 2026-05-28 — anchor target for the SCROLL_PREFS_TO_LLM
+                // antenna verb. Lets phone verification jump straight to
+                // the LLM picker (which lives off-screen on first open).
+                .id("preferences.askPosey.section")
             }
             .navigationTitle("Reader Preferences")
             .navigationBarTitleDisplayMode(.inline)
@@ -2186,6 +2196,14 @@ private struct ReaderPreferencesSheet: View {
             .sheet(isPresented: $viewModel.showAudioExport) {
                 AudioExportSheet(viewModel: viewModel)
             }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteScrollPrefsToLLM)
+            ) { _ in
+                withAnimation {
+                    proxy.scrollTo("preferences.askPosey.section", anchor: .top)
+                }
+            }
+            } // ScrollViewReader
         }
     }
 }

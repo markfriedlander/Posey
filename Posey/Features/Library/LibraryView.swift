@@ -1946,6 +1946,16 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "SCROLL_PREFS_TO_LLM":
+                // 2026-05-28 — scroll an already-open prefs sheet to
+                // the AskPosey LLM picker section. Used for phone
+                // verification of personality-card rendering since
+                // physical devices don't expose a UI swipe primitive.
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteScrollPrefsToLLM, object: nil)
+                }
+                return json(["status": "posted"])
+
             case "OPEN_TOC_SHEET":
                 await MainActor.run {
                     NotificationCenter.default.post(name: .remoteOpenTOCSheet, object: nil)

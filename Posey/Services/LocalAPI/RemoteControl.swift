@@ -130,6 +130,12 @@ extension Notification.Name {
     // ===== Sheet opens ==============================================
     /// No userInfo. ReaderView observes; sets `isShowingPreferencesSheet`.
     static let remoteOpenPreferencesSheet = Notification.Name("PoseyRemoteOpenPreferencesSheet")
+    /// No userInfo. ReaderPreferencesSheet observes; scrolls the Form's
+    /// ScrollViewReader proxy to the AskPoseyPreferencesSection anchor.
+    /// 2026-05-28 — added so phone verification of the LLM picker
+    /// (personality cards) doesn't require a UI swipe primitive that
+    /// physical devices don't expose.
+    static let remoteScrollPrefsToLLM = Notification.Name("PoseyRemoteScrollPrefsToLLM")
     /// No userInfo. ReaderView observes; sets `isShowingTOCSheet`.
     static let remoteOpenTOCSheet = Notification.Name("PoseyRemoteOpenTOCSheet")
     /// No userInfo. ReaderView observes; presents `VoicePickerView` as a

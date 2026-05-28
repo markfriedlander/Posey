@@ -160,6 +160,41 @@ enum TextNormalizer {
         return t
     }
 
+    /// **2026-05-27** — reflow hard-wrapped paragraphs (Gutenberg-TXT
+    /// shape). Lines inside a paragraph block (block = consecutive
+    /// non-empty lines separated only by single `\n`) are joined with
+    /// a single space; leading/trailing whitespace per line is
+    /// dropped first so the indent that Gutenberg leaves on every
+    /// line doesn't survive into the joined paragraph. Empty lines
+    /// (paragraph separators) are preserved as `\n\n`.
+    ///
+    /// Why this is TXT-specific: HTML / EPUB / DOCX / MD / PDF
+    /// importers all produce paragraphs as discrete units (or as
+    /// already-reflowed strings) — they don't carry the ~72-char
+    /// hard-wrap convention. TXT is the only format where in-paragraph
+    /// `\n` breaks ARE artifacts of the source file's display-width
+    /// wrap rather than authorial intent. The TXT importer calls this
+    /// explicitly; nothing else does.
+    ///
+    /// Risk: poems and other line-meaningful TXT content get joined
+    /// into single lines. This is an accepted tradeoff — the
+    /// dominant TXT corpus is Project Gutenberg prose, and the
+    /// readability gain on novels is huge. If we ship enough poetry-
+    /// heavy TXTs to surface complaints, the pass can be made
+    /// poem-aware later (line-length variance + capitalized line
+    /// starts).
+    static func unwrapHardLineBreaks(_ text: String) -> String {
+        let paragraphs = text.components(separatedBy: "\n\n")
+        let unwrapped: [String] = paragraphs.map { para in
+            let lines = para.components(separatedBy: "\n")
+            let cleaned = lines
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            return cleaned.joined(separator: " ")
+        }
+        return unwrapped.joined(separator: "\n\n")
+    }
+
     /// Collapse runs of 3+ newlines to a single paragraph break (\n\n).
     /// Documents pasted from various sources accumulate these.
     static func collapseExcessiveBlankLines(_ text: String) -> String {

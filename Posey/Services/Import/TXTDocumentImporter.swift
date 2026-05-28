@@ -76,6 +76,13 @@ struct TXTDocumentImporter {
         // verifier (line-break hyphens, ZWSP, tabs, multi-blank collapse,
         // per-line trailing whitespace, spaced letters/digits, ¬ as wrap
         // marker) are handled consistently.
-        TextNormalizer.normalize(text)
+        //
+        // 2026-05-27 — then unwrap Gutenberg-style hard line wraps
+        // (~72-char display-width breaks) within each paragraph block.
+        // Without this, prose paragraphs render with the source file's
+        // line breaks preserved, so every paragraph ladders down the
+        // screen instead of reflowing to the device width. See
+        // TextNormalizer.unwrapHardLineBreaks for the tradeoffs.
+        TextNormalizer.unwrapHardLineBreaks(TextNormalizer.normalize(text))
     }
 }

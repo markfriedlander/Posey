@@ -48,6 +48,39 @@ enum FirstChapterAdvance {
         guard startOffset >= 0, startOffset <= totalCount else { return nil }
         let upperBound = min(totalCount, startOffset + maxDistance)
 
+        // 2026-05-28 — Don't advance if `startOffset` is already just
+        // past a recent CHAPTER heading. Caught on phone: Alice EPUB.
+        // The TOC walker correctly landed at "Alice was beginning…"
+        // (Ch I body, offset ~1483). Without this guard, the forward
+        // scan from 1483 skipped past Ch I (already consumed) and
+        // matched "CHAPTER II.\n" at 12626 — landing the reader at
+        // "Curiouser and curiouser!" (Ch II opening) instead of Ch I.
+        //
+        // Lookback window of 400 chars covers the typical case where
+        // the walker landed at a paragraph 50–200 chars past the
+        // chapter heading. Same patterns as the forward scan; just
+        // checking if a chapter heading exists in the immediate
+        // upstream context.
+        let lookbackStart = max(0, startOffset - 400)
+        let lookbackStartIdx = plainText.index(plainText.startIndex, offsetBy: lookbackStart)
+        let lookbackEndIdx = plainText.index(plainText.startIndex, offsetBy: startOffset)
+        let lookback = plainText[lookbackStartIdx..<lookbackEndIdx]
+        let lookbackPatterns: [String] = [
+            #"(?im)^\s*CHAPTER\s+\d{1,3}[.\s:—-]"#,
+            #"(?im)^\s*CHAPTER\s+[IVXL]{1,5}[.\s:—-]"#,
+            #"(?im)^\s*CHAPTER\s+(ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN)[.\s:—-]"#,
+            // Letter/Book/Part headings — same self-guard for the
+            // EPUB importer's broader use of FirstChapterAdvance.
+            #"(?im)^\s*LETTER\s+[IVXL]{1,5}[.\s:—-]"#,
+            #"(?im)^\s*(BOOK|PART|VOLUME)\s+[IVXL]{1,5}[.\s:—-]"#,
+        ]
+        for pattern in lookbackPatterns {
+            if lookback.range(of: pattern, options: .regularExpression) != nil {
+                // We're already inside a chapter body — don't advance.
+                return nil
+            }
+        }
+
         // Slice the search region as a substring; do the regex against it.
         let startIdx = plainText.index(plainText.startIndex, offsetBy: startOffset)
         let endIdx = plainText.index(plainText.startIndex, offsetBy: upperBound)

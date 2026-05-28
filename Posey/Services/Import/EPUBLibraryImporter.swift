@@ -234,6 +234,12 @@ struct EPUBLibraryImporter {
         // that offset on hit. Returns nil for non-chapter-structured
         // EPUBs (encyclopedia entries, single-essay collections),
         // where the prior offset stays.
+        //
+        // 2026-05-28 — FirstChapterAdvance.detect now self-guards: if
+        // startOffset is already just past a recent CHAPTER heading
+        // (lookback ~400 chars), returns nil so we don't over-advance
+        // past Ch I to Ch II. Pride still works because Saintsbury
+        // Preface has no preceding CHAPTER heading.
         let finalSkip = FirstChapterAdvance.detect(in: plainText, after: postWalker) ?? postWalker
 
         let source: String

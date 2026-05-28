@@ -2775,7 +2775,17 @@ final class ReaderViewModel: ObservableObject {
     /// so playback starts at the very first sentence.
     func revealFromBeginning() {
         isPresentingSkipPrompt = false
-        guard document.skipSource == "heuristic" else { return }
+        // 2026-05-28 (defect #6 extension) — also honor `gutenberg`
+        // skip-source. Pride / Sherlock / Frankenstein EPUBs set
+        // skipSource="gutenberg" (from `GutenbergBoundaryDetector`),
+        // not "heuristic" (which only the PDF importer / TXT heuristic
+        // path uses). Without this, `:beginning` was a no-op for every
+        // Gutenberg EPUB — the user couldn't reach the cover or the
+        // legal preamble even via the explicit "Beginning" choice.
+        // Empty source means the doc has no auto-skip, so there's
+        // nothing to reveal — keep that as the early-return condition.
+        guard document.skipSource == "heuristic"
+                || document.skipSource == "gutenberg" else { return }
         var updated = document
         updated.playbackSkipUntilOffset = 0
         updated.skipSource = "user_dismiss"

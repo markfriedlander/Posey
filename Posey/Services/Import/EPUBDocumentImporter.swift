@@ -736,6 +736,18 @@ extension EPUBDocumentImporter {
     /// - `<span class="…initial…">X</span>` — alternate convention
     /// - `<span class="…firstcharacter…">X</span>` / `first-letter`
     ///   — TPG ebookmaker variant
+    /// - `<span class="…letra…">X</span>` — Project Gutenberg's
+    ///   Spanish-class convention (used by the standard Gutenberg
+    ///   illustrated Pride and Prejudice EPUB #01342, and others)
+    /// - `<span class="…letra…"><img alt="X" …/></span>` — same
+    ///   PG illustrated convention but the dropcap is a tiny PNG of
+    ///   the styled letter rather than an actual character. The alt
+    ///   attribute carries the real letter, so we substitute that.
+    ///   2026-05-28 — Mark caught this on Pride EPUB Ch VII: every
+    ///   chapter opened with the first letter MISSING ("R. BENNET'S"
+    ///   instead of "MR. BENNET'S") because the prior regex only
+    ///   matched plain-text inner content and silently dropped the
+    ///   `<img>` substring under `[^<]{1,3}`.
     ///
     /// Inner content limited to 1–3 characters so the strip can't
     /// accidentally swallow non-dropcap spans that wrap larger
@@ -745,15 +757,31 @@ extension EPUBDocumentImporter {
                 ?? String(data: data, encoding: .isoLatin1) else {
             return data
         }
-        let patterns: [String] = [
+        let textPatterns: [String] = [
             // Inline-CSS float — `style="…float:…"`. Either quote style.
             #"(?si)<span\s+[^>]*\bstyle\s*=\s*"[^"]*\bfloat\s*:[^"]*"[^>]*>([^<]{1,3})</span\s*>"#,
             #"(?si)<span\s+[^>]*\bstyle\s*=\s*'[^']*\bfloat\s*:[^']*'[^>]*>([^<]{1,3})</span\s*>"#,
-            // Semantic class — dropcap / initial / first-character / first-letter.
-            #"(?si)<span\s+[^>]*\bclass\s*=\s*"[^"]*\b(?:dropcap|initial|first[\s-]?character|first[\s-]?letter)\b[^"]*"[^>]*>([^<]{1,3})</span\s*>"#,
-            #"(?si)<span\s+[^>]*\bclass\s*=\s*'[^']*\b(?:dropcap|initial|first[\s-]?character|first[\s-]?letter)\b[^']*'[^>]*>([^<]{1,3})</span\s*>"#,
+            // Semantic class — dropcap / initial / first-character / first-letter / letra.
+            #"(?si)<span\s+[^>]*\bclass\s*=\s*"[^"]*\b(?:dropcap|initial|first[\s-]?character|first[\s-]?letter|letra)\b[^"]*"[^>]*>([^<]{1,3})</span\s*>"#,
+            #"(?si)<span\s+[^>]*\bclass\s*=\s*'[^']*\b(?:dropcap|initial|first[\s-]?character|first[\s-]?letter|letra)\b[^']*'[^>]*>([^<]{1,3})</span\s*>"#,
         ]
-        for pattern in patterns {
+        for pattern in textPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            html = regex.stringByReplacingMatches(
+                in: html,
+                range: NSRange(html.startIndex..., in: html),
+                withTemplate: "$1"
+            )
+        }
+        // Image-based dropcap: `<span class="letra|…"><img alt="M" …/></span>`.
+        // Substitute the alt attribute's letter for the entire span+img.
+        // `(?s)` lets `\s*` cross the newline that Project Gutenberg
+        // typically places between the `<span>` and `<img>` tags.
+        let imagePatterns: [String] = [
+            #"(?si)<span\s+[^>]*\bclass\s*=\s*"[^"]*\b(?:dropcap|initial|first[\s-]?character|first[\s-]?letter|letra|cap|raise)\b[^"]*"[^>]*>\s*<img\s+[^>]*\balt\s*=\s*"([^"]{1,3})"[^>]*/?>\s*</span\s*>"#,
+            #"(?si)<span\s+[^>]*\bclass\s*=\s*'[^']*\b(?:dropcap|initial|first[\s-]?character|first[\s-]?letter|letra|cap|raise)\b[^']*'[^>]*>\s*<img\s+[^>]*\balt\s*=\s*'([^']{1,3})'[^>]*/?>\s*</span\s*>"#,
+        ]
+        for pattern in imagePatterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             html = regex.stringByReplacingMatches(
                 in: html,

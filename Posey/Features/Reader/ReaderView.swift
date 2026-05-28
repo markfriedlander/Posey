@@ -4132,78 +4132,104 @@ final class ReaderViewModel: ObservableObject {
     /// re-centers normally.
     private var nextScrollAnchor: UnitPoint = .center
 
+    /// **N3 (2026-05-28): Apple-Music-style fixed sentence anchor.**
+    /// Where the active sentence lands in the viewport during normal
+    /// TTS playback. y=0.35 puts it ~upper-third — the standard
+    /// lyrics-style position so the reader's eyes don't chase a
+    /// moving highlight, and there's room beneath to anticipate
+    /// what's coming next. Apple Music uses ~0.30; 0.35 leaves a
+    /// touch more upper context for prose, which generally benefits
+    /// from a visible lead-in line.
+    private static let activeSentenceViewportAnchorY: Double = 0.35
+
     func scrollToCurrentSentence(with proxy: ScrollViewProxy, animated: Bool) {
-        // Step 9 — units-based renderer. Scroll target is the active
-        // unit's id (matching the `.id(unit.id)` on each row).
         // Visual-pause `focusedUnitID` wins when set so the user
         // lands on the image row that just paused playback.
-        let scrollTargetID: UUID
         if let focusedUnitID {
-            scrollTargetID = focusedUnitID
-        } else if let activeUnitID {
-            scrollTargetID = activeUnitID
-        } else {
+            let anchor = nextScrollAnchor
+            nextScrollAnchor = .center
+            let action = { proxy.scrollTo(focusedUnitID, anchor: anchor) }
+            if animated && !Self.reduceMotionEnabled {
+                withAnimation(.easeInOut(duration: 0.25), action)
+            } else {
+                action()
+            }
             return
         }
 
-        var anchor = nextScrollAnchor
-        nextScrollAnchor = .center
-
-        // 2026-05-28 — Mark caught: active sentence renders BEHIND the
-        // navigation chrome during TTS playback. Root cause: Step 9
-        // collapsed all sentences of a unit into one AttributedString;
-        // `scrollTo(unitID, anchor: .center)` centers the whole unit,
-        // and for tall multi-sentence units (Moby's Ch 1 opening is
-        // one giant paragraph of ~12 sentences) the active sentence
-        // drifts off-screen as it advances within the unit. Compute
-        // the active sentence's fractional position within its unit
-        // and override the anchor so the target lands sentence-aligned
-        // instead of unit-center-aligned. `UnitPoint(x:0.5, y:k/N)`
-        // places the unit's y=k/N point at viewport center — exactly
-        // the active sentence's vertical position.
-        if focusedUnitID == nil,
-           anchor == .center,
-           sentences.indices.contains(currentSentenceIndex) {
-            let activeSentence = sentences[currentSentenceIndex]
-            // Find the active sentence's index within its unit's
-            // sentences. Avoid the `.filter { … }` closure form because
-            // in Swift 6 it's ambiguous with a Predicate-taking
-            // overload — count + compare by hand.
+        // N3 path — prefer scrolling to the active sentence's own id
+        // when the renderer split this unit into per-sentence rows
+        // (UnitRowView does this when sentencesInUnit.count >= 2).
+        // `ScrollViewProxy.scrollTo(sentenceID, anchor: UnitPoint(0.5,
+        // 0.35))` aligns the sentence's 35% point with the viewport's
+        // 35% point — i.e. the active sentence sits at upper-third
+        // viewport position regardless of where in the parent unit it
+        // falls. Apple Music lyrics shape; the active line stays
+        // pinned while the surrounding text scrolls underneath.
+        if let activeSentence = activeSentenceForScroll() {
+            // Count sentences in this unit. Iterating once is cheaper
+            // than building a dictionary on every call.
             let activeUnit = activeSentence.unitID
-            var positionInUnit = 0
             var unitTotal = 0
-            for (i, s) in sentences.enumerated() where s.unitID == activeUnit {
-                if i == currentSentenceIndex { positionInUnit = unitTotal }
+            for s in sentences where s.unitID == activeUnit {
                 unitTotal += 1
+                if unitTotal >= 2 { break }
             }
-            // Apply fractional anchor whenever the unit has more than
-            // one sentence — places the ACTIVE sentence at viewport
-            // center rather than the unit's center. Without this, a
-            // 4-sentence paragraph with the 2nd sentence active
-            // would center the paragraph and leave sentence 2 in the
-            // upper portion of the viewport. UnitPoint(x:0.5, y:k/N)
-            // aligns the unit's k/N point with the viewport's center
-            // — sentence k of N is exactly at center. Single-sentence
-            // units (unitTotal=1) fall through to plain .center.
-            // First version of this fix used threshold ≥6 (only Moby
-            // Ch 1's giant paragraph triggered); raised to ≥2 after
-            // Mark's continuous-playback screenshots showed shorter
-            // multi-sentence paragraphs also drift.
+
+            // Multi-sentence unit → renderer split → target sentence
+            // directly at fixed viewport y.
             if unitTotal >= 2 {
-                let y = (Double(positionInUnit) + 0.5) / Double(unitTotal)
-                anchor = UnitPoint(x: 0.5, y: y)
+                // TOC nav still wants .top behavior; honor a non-
+                // center nextScrollAnchor by passing it through to
+                // the unit-level scroll path instead.
+                if nextScrollAnchor != .center {
+                    let anchor = nextScrollAnchor
+                    nextScrollAnchor = .center
+                    let action = { proxy.scrollTo(activeUnit, anchor: anchor) }
+                    if animated && !Self.reduceMotionEnabled {
+                        withAnimation(.easeInOut(duration: 0.25), action)
+                    } else {
+                        action()
+                    }
+                    return
+                }
+                nextScrollAnchor = .center
+                let yAnchor = UnitPoint(x: 0.5, y: Self.activeSentenceViewportAnchorY)
+                let action = { proxy.scrollTo(activeSentence.id, anchor: yAnchor) }
+                if animated && !Self.reduceMotionEnabled {
+                    withAnimation(.easeInOut(duration: 0.25), action)
+                } else {
+                    action()
+                }
+                return
             }
+            // Single-sentence unit → fall through to the unit-level
+            // scroll path; .center is correct because the unit IS the
+            // sentence.
         }
 
-        let action = {
-            proxy.scrollTo(scrollTargetID, anchor: anchor)
-        }
-
+        // Fallback: scroll to the active unit. Used for single-
+        // sentence units (heading rows, short paragraphs) and when
+        // no sentence is active.
+        guard let activeUnitID else { return }
+        let anchor = nextScrollAnchor
+        nextScrollAnchor = .center
+        let action = { proxy.scrollTo(activeUnitID, anchor: anchor) }
         if animated && !Self.reduceMotionEnabled {
             withAnimation(.easeInOut(duration: 0.25), action)
         } else {
             action()
         }
+    }
+
+    /// Returns the current active sentence if `currentSentenceIndex`
+    /// is in range, else nil. Pulled out so scrollToCurrentSentence
+    /// can early-return when there's nothing to anchor on.
+    private func activeSentenceForScroll() -> Sentence? {
+        guard sentences.indices.contains(currentSentenceIndex) else {
+            return nil
+        }
+        return sentences[currentSentenceIndex]
     }
 
     private var currentSegment: TextSegment? {

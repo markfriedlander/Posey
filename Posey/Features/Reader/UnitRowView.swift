@@ -160,13 +160,112 @@ struct UnitRowView: View {
     /// Body paragraph. Sentence ranges are tagged with
     /// `posey-sentence://` URLs so tap-to-jump is sentence-precise;
     /// the active sentence range gets a subtle background tint.
+    ///
+    /// **N2/N3 2026-05-28 — Per-sentence sub-rows for multi-sentence
+    /// units.** When the unit has ≥ 2 sentences we render each
+    /// sentence as its own Text view inside a tight VStack, each
+    /// `.id(sentence.id)`. Two reasons:
+    ///
+    /// 1. ScrollViewProxy.scrollTo() can only target an .id'd view,
+    ///    so the only way to land the active sentence at a fixed
+    ///    viewport position (N3, Apple Music lyrics style) is to give
+    ///    each sentence its own scrollable identity. The prior
+    ///    fractional-`UnitPoint` workaround approximated this but the
+    ///    sentence still drifted with the scroll instead of staying
+    ///    pinned at upper-third.
+    /// 2. Big units (Moby Ch 1's opening paragraph is ~12 sentences,
+    ///    often filling a whole screen) need a smaller visual
+    ///    "active band" than the whole paragraph to follow during
+    ///    TTS. Per-sentence rows give each sentence its own y-extent,
+    ///    so the active highlight is naturally one sentence tall.
+    ///
+    /// Trade-off: within a multi-sentence unit, multi-sentence text
+    /// selection is lost (SwiftUI selection is per-Text). Selection
+    /// within a sentence still works. Mark cited Apple Music as the
+    /// model for both reading modes — Apple Music lyrics is line-per-
+    /// line by construction. Single-sentence units (short dialogue
+    /// paragraphs, most headings) keep the single-Text path, which
+    /// preserves prose flow + intra-unit text selection for the
+    /// common case.
     private var proseRow: some View {
-        Text(attributedProse)
-            .font(.system(size: bodyFontSize))
-            .lineSpacing(bodyFontSize * 0.35)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 4)
-            .textSelection(.enabled)
+        if shouldSplitIntoSentenceRows {
+            return AnyView(perSentenceStack(
+                font: .system(size: bodyFontSize),
+                lineSpacing: bodyFontSize * 0.35,
+                italic: false
+            ))
+        } else {
+            return AnyView(
+                Text(attributedProse)
+                    .font(.system(size: bodyFontSize))
+                    .lineSpacing(bodyFontSize * 0.35)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+                    .textSelection(.enabled)
+            )
+        }
+    }
+
+    /// True when this prose-bearing unit should split into per-
+    /// sentence Text sub-rows for sentence-precise scroll anchoring
+    /// and a narrower active-highlight band. Threshold = 2 sentences:
+    /// the smallest unit that has more than one scroll target.
+    private var shouldSplitIntoSentenceRows: Bool {
+        sentencesInUnit.count >= 2
+    }
+
+    /// VStack of per-sentence Text views, tight spacing so the unit
+    /// still reads as a paragraph block (just with each sentence
+    /// starting on a new line — Apple Music lyrics shape). Each
+    /// sentence carries `.id(sentence.id)` so ScrollViewProxy can
+    /// target it directly, and inherits the same sentence-link tap
+    /// path the single-Text variant uses (posey-sentence:// URL on
+    /// the whole sentence's AttributedString range).
+    private func perSentenceStack(
+        font: Font,
+        lineSpacing: CGFloat,
+        italic: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: lineSpacing) {
+            let active = (activeSentence?.unitID == unit.id) ? activeSentence : nil
+            ForEach(Array(sentencesInUnit.enumerated()), id: \.element.id) { positionInUnit, sentence in
+                let flatIdx = sentenceIndexBase + positionInUnit
+                let opacity = opacityForSentence(at: flatIdx)
+                let isActive = (active?.id == sentence.id)
+                let attributed = attributedSingleSentence(sentence, opacity: opacity)
+                Text(attributed)
+                    .font(italic ? font.italic() : font)
+                    .lineSpacing(lineSpacing)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        isActive
+                            ? Color.accentColor.opacity(0.30)
+                            : Color.clear
+                    )
+                    .textSelection(.enabled)
+                    .id(sentence.id)
+                    .accessibilityIdentifier("reader.sentence.\(sentence.id.uuidString)")
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// Build a one-sentence AttributedString with the same sentence-
+    /// link tagging + opacity treatment the multi-sentence builder
+    /// uses, so per-sentence rows still dispatch via the openURL
+    /// action and respect the reading-style dimming curve.
+    private func attributedSingleSentence(
+        _ sentence: Sentence,
+        opacity: Double
+    ) -> AttributedString {
+        var attributed = AttributedString(sentence.text)
+        if let url = URL(string: "\(Self.sentenceURLScheme)://\(sentence.id.uuidString)") {
+            let full = attributed.startIndex..<attributed.endIndex
+            attributed[full].link = url
+            attributed[full].foregroundColor = Color.primary.opacity(opacity)
+            attributed[full].underlineStyle = nil
+        }
+        return attributed
     }
 
     // MARK: - AttributedString builder (shared by prose / quote / list)

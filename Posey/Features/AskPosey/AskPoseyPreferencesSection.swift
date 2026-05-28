@@ -102,11 +102,21 @@ struct AskPoseyPreferencesSection: View {
         case .idle:
             EmptyView()
         case .downloading(let modelID, let progress):
+            // 2026-05-28 — Stop button surfaces the cancel that the
+            // EmbedderMigrationCoordinator already exposes. Without
+            // this, a user who switched and changed their mind had
+            // to wait the full migration time (10+ min on a real
+            // library) before they could switch back. Matches the
+            // CANCEL_EMBEDDING_MIGRATION antenna verb.
             HStack {
                 ProgressView(value: progress)
                 Text("Downloading \(modelID)…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Spacer()
+                Button("Stop", role: .destructive) { migrationCoordinator.cancel() }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
             }
         case .switching:
             HStack {
@@ -114,14 +124,24 @@ struct AskPoseyPreferencesSection: View {
                 Text("Switching backend…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Spacer()
+                Button("Stop", role: .destructive) { migrationCoordinator.cancel() }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
             }
         case .migrating(let processed, let total):
             VStack(alignment: .leading, spacing: 4) {
                 ProgressView(value: Double(processed),
                              total: max(Double(total), 1))
-                Text("Re-embedding chunks: \(processed) / \(total)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("Re-embedding chunks: \(processed) / \(total)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Stop", role: .destructive) { migrationCoordinator.cancel() }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                }
             }
         case .done(let reEmbedded):
             HStack(spacing: 8) {

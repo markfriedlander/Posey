@@ -193,39 +193,41 @@ final class EmbedderMigrationCoordinator: ObservableObject {
             }
             if batch.isEmpty { break }
 
+            // 2026-05-28 — Mark caught: this loop was blocking UI on
+            // phone. Per-row main-actor DB writes hammered the queue
+            // with 11K hops, queuing antenna requests behind every
+            // chunk write. Two-part fix:
+            //   (1) Embed off-main, COLLECT (id, vector) pairs, then
+            //       run ONE DB-write loop per batch. SQLite writes
+            //       are fast in-process; the batch is bounded at 64
+            //       rows so each chunk of work is small.
+            //   (2) `await Task.yield()` between batches gives the
+            //       main actor a chance to drain UI work before the
+            //       next batch claims it.
             var batchSuccesses = 0
-            // Embedding is CPU-bound; do it off the main actor
-            // even though we report progress back on main. Each
-            // row's UPDATE is on the DB's single-thread, which
-            // we currently treat as main-actor-bound elsewhere
-            // — so we hop back for each write.
+            var batchVectors: [(id: UUID, vector: [Double])] = []
+            batchVectors.reserveCapacity(batch.count)
             for row in batch {
                 if cancelRequested { currentPhase = .cancelled; return }
                 let vector = await Task.detached(priority: .userInitiated) {
                     EmbeddingProvider.shared.embed(row.text, as: .document)
                 }.value
-
                 processed += 1
-
-                if let vector = vector {
-                    do {
-                        try database.updateUnitEmbeddingChunkEmbedding(
-                            id: row.id, embedding: vector
-                        )
-                        successfullyEmbedded += 1
-                        batchSuccesses += 1
-                    } catch {
-                        // Skip + continue; row stays NULL.
-                    }
-                }
-
-                // Coalesce progress updates so the SwiftUI
-                // pipeline doesn't see one publish per row on
-                // very large libraries.
+                if let vector { batchVectors.append((row.id, vector)) }
                 if processed % 8 == 0 || processed == total {
                     currentPhase = .migrating(processed: processed, total: total)
                 }
             }
+            for (id, vec) in batchVectors {
+                do {
+                    try database.updateUnitEmbeddingChunkEmbedding(id: id, embedding: vec)
+                    successfullyEmbedded += 1
+                    batchSuccesses += 1
+                } catch {
+                    // Skip + continue; row stays NULL.
+                }
+            }
+            await Task.yield()
 
             if batchSuccesses == 0 {
                 consecutiveZeroSuccessBatches += 1

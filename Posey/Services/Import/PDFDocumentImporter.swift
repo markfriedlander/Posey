@@ -209,7 +209,27 @@ extension PDFDocumentImporter {
                 readableTextPages.append(pdfText)
                 // If the page also contains PDF image XObjects (figures, photos, charts),
                 // preserve them as a visual stop immediately after the text. Neither is dropped.
-                if pageHasImageXObjects(page) {
+                //
+                // 2026-05-27 — suppress the full-page render when the
+                // page already has substantial text. The previous
+                // behavior rendered the entire page bitmap (text +
+                // XObjects + any embedded watermark) and stored it as
+                // the image side-store entry. For converter-watermarked
+                // PDFs (Cryptography for Dummies has a CHM-to-PDF
+                // watermark on every page), the renderer faithfully
+                // captures the watermark — even though
+                // PDFWatermarkStripper successfully scrubbed it from
+                // the text path. Result: the user sees the watermark
+                // bitmap inline despite the text being clean.
+                //
+                // Threshold: a page with > 200 chars of extracted text
+                // is "primarily a text page." Its XObjects are
+                // typically small (nav buttons, line decorations,
+                // watermarks) — not informative figures the reader
+                // would want preserved as a visual stop. Pages BELOW
+                // the threshold (cover, figure-only pages) still get
+                // the full-page render.
+                if pageHasImageXObjects(page) && pdfText.count < 200 {
                     let imageID = UUID().uuidString
                     if let pngData = renderPageToPNG(page) {
                         imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))

@@ -72,18 +72,38 @@ enum FusionCorrectionAFM {
         each input word, decide:
 
         - If the word is a single legitimate word, name, place, \
-          acronym, brand name, or technical term, return it unchanged.
+          acronym, brand name, technical term, or programming \
+          identifier, return it UNCHANGED.
         - If the word is two or more words incorrectly joined, return \
           the corrected form with proper spaces.
 
+        **CamelCase tokens (a lowercase letter followed by an \
+        uppercase letter within a single token, e.g. PowerPoint, \
+        iPhone, DataVault, JavaScript) are almost always intentional \
+        brand names or programming identifiers and should be returned \
+        UNCHANGED.** Splitting a CamelCase brand into two words \
+        damages the document. Only split a CamelCase token when you \
+        are very confident it's a real fusion error (e.g. an all-caps \
+        token that happens to contain a lowercase letter from an OCR \
+        glitch).
+
+        All-uppercase fused tokens (ANETERNAL, INTHESPIRIT) are the \
+        common real fusion errors — those typically should be split. \
+        A single uppercase word (HOFSTADTER, DIFFERENT) is a regular \
+        word or proper noun and stays unchanged.
+
         Examples:
-          ANETERNAL    → AN ETERNAL
-          INTHESPIRIT  → IN THE SPIRIT
-          HOFSTADTER   → HOFSTADTER     (legitimate surname)
-          DIFFERENT    → DIFFERENT      (legitimate word)
-          ChmMagic     → Chm Magic
-          PowerPoint   → PowerPoint     (legitimate product name)
-          iPhone       → iPhone         (legitimate brand)
+          ANETERNAL          → AN ETERNAL          (all-caps fusion, split)
+          INTHESPIRIT        → IN THE SPIRIT       (all-caps fusion, split)
+          HOFSTADTER         → HOFSTADTER          (legitimate surname)
+          DIFFERENT          → DIFFERENT           (legitimate word)
+          PowerPoint         → PowerPoint          (CamelCase brand — KEEP)
+          iPhone             → iPhone              (CamelCase brand — KEEP)
+          DataVault          → DataVault           (CamelCase brand — KEEP)
+          KeyInfrastructure  → KeyInfrastructure   (CamelCase technical name — KEEP)
+          JavaScript         → JavaScript          (CamelCase technical name — KEEP)
+          cATclaW            → cATclaW             (stylized typography — KEEP)
+          NSDictionary       → NSDictionary        (programming identifier — KEEP)
 
         Output only the corrected (or unchanged) word.
         """

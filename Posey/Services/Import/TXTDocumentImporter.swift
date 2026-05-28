@@ -83,6 +83,10 @@ struct TXTDocumentImporter {
         // line breaks preserved, so every paragraph ladders down the
         // screen instead of reflowing to the device width. See
         // TextNormalizer.unwrapHardLineBreaks for the tradeoffs.
-        TextNormalizer.unwrapHardLineBreaks(TextNormalizer.normalize(text))
+        TextNormalizer.stripGutenbergItalics(
+            TextNormalizer.unwrapHardLineBreaks(
+                TextNormalizer.normalize(text)
+            )
+        )
     }
 }

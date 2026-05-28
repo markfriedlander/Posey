@@ -160,6 +160,39 @@ enum TextNormalizer {
         return t
     }
 
+    /// **2026-05-27** — strip Gutenberg's `_underscored_` italic
+    /// markers from prose. Gutenberg's plain-TXT convention wraps
+    /// italicized words in underscores: `_hval_`, `_Wallen_`,
+    /// `_Webster's Dictionary._`. The reader doesn't currently render
+    /// these as italic typography; without stripping them the
+    /// underscores show up as literal punctuation and disrupt
+    /// reading. Stripping preserves the word content (better than
+    /// leaving `_hval_` visible), at the cost of losing the
+    /// emphasis signal. Actual italic rendering can be wired later.
+    ///
+    /// Only matches `_word_` and `_multi word phrase_` where the
+    /// content between underscores is non-empty and the closing
+    /// underscore is followed by a non-letter (so legitimate
+    /// snake_case identifiers in code-bearing docs don't get torn
+    /// apart). Conservative — same `_word_` pattern that real
+    /// Gutenberg TXTs use, narrowed to the contexts where it's
+    /// signal not noise.
+    static func stripGutenbergItalics(_ text: String) -> String {
+        // _content_ where content has no underscore + is bounded by
+        // word/punctuation boundaries on both sides. Greedy enough
+        // to catch multi-word phrases, narrow enough not to chain
+        // across multiple paragraphs.
+        let pattern = #"(?<![A-Za-z0-9_])_([^_\n]{1,80}?)_(?![A-Za-z0-9_])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let ns = text as NSString
+        return regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: NSRange(location: 0, length: ns.length),
+            withTemplate: "$1"
+        )
+    }
+
     /// **2026-05-27** — reflow hard-wrapped paragraphs (Gutenberg-TXT
     /// shape). Lines inside a paragraph block (block = consecutive
     /// non-empty lines separated only by single `\n`) are joined with

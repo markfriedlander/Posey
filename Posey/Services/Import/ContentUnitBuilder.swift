@@ -363,16 +363,24 @@ enum ContentUnitBuilder {
     ) -> ContentUnit? {
         guard offset > 0 else { return units.first }
         var cumulative = 0
-        for (i, unit) in units.enumerated() {
+        for unit in units {
             if cumulative >= offset { return unit }
             if unit.kind.carriesProseText {
                 cumulative += unit.text.count + 2
             }
+            // 2026-05-28 — Mark caught: Pride EPUB opens past the
+            // famous "IT is a truth universally acknowledged…" first
+            // line into "However little known…" (second sentence).
+            // Root cause was here: when the skip offset falls INSIDE
+            // a unit's range (cumulative_before ≤ offset <
+            // cumulative_after), the prior code returned the NEXT
+            // unit — skipping past the unit that ACTUALLY contains
+            // the offset. The user-visible expectation for smart-skip
+            // is "start reading here, at the beginning of the
+            // paragraph that includes this offset." Return the
+            // current unit when the offset falls inside its range
+            // rather than jumping past it.
             if cumulative > offset {
-                let nextIndex = i + 1
-                if units.indices.contains(nextIndex) {
-                    return units[nextIndex]
-                }
                 return unit
             }
         }

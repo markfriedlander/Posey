@@ -1592,6 +1592,36 @@ extension LibraryViewModel {
                 let current = UserDefaults.standard.string(forKey: "debug.appearanceOverride") ?? "system"
                 return json(["appearance": current])
 
+            case "DEBUG_SKIP":
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: DEBUG_SKIP:<docID>"}"#
+                }
+                let snap = await MainActor.run { () -> [String: Any] in
+                    var result: [String: Any] = ["documentID": docID.uuidString]
+                    let refs = (try? databaseManager.unitSkipReferences(for: docID))
+                    if let skipID = refs?.skipUnitID {
+                        result["skipUnitID"] = skipID.uuidString
+                        let units = (try? databaseManager.units(for: docID)) ?? []
+                        var cum = 0
+                        for u in units {
+                            if u.id == skipID {
+                                result["skipUnitOffset"] = cum
+                                result["skipUnitSeq"] = u.sequence
+                                result["skipUnitKind"] = String(describing: u.kind)
+                                result["skipUnitTextPreview"] = String(u.text.prefix(120))
+                                break
+                            }
+                            if u.kind.carriesProseText { cum += u.text.count + 2 }
+                        }
+                    } else {
+                        result["skipUnitID"] = NSNull()
+                    }
+                    return result
+                }
+                if let data = try? JSONSerialization.data(withJSONObject: snap),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return json(["error": "snap failed"])
+
             case "DEBUG_ANNOTATIONS":
                 // 2026-05-28 — diagnostic for the missing-glyph defect.
                 // Dumps the live ReaderViewModel's annotation state so

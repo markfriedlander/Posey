@@ -85,7 +85,16 @@ struct TXTLibraryImporter {
         let postTOC = InProseTOCDetector.endOfTOCRegion(
             in: plainText, after: postCatalog
         ) ?? postCatalog
-        let skipOffset = max(postCatalog, postTOC)
+        let postFrontMatter = max(postCatalog, postTOC)
+        // 2026-05-27 — refine the smart-skip target by advancing past
+        // any in-work front matter (Moby's ETYMOLOGY + EXTRACTS;
+        // Frankenstein's Letters; etc.) to the first chapter heading.
+        // Mark's directive: a reader opening Moby Dick wants to start
+        // at "Call me Ishmael." not at the etymology. If no chapter
+        // heading is found within 80 KB of postFrontMatter, the
+        // detector returns nil and we keep the previous offset
+        // (handles books that don't use CHAPTER-numbered structure).
+        let skipOffset = FirstChapterAdvance.detect(in: plainText, after: postFrontMatter) ?? postFrontMatter
         let contentEndOffset = boundaries.contentEndOffset ?? 0
         let skipSource: String = {
             if gutenbergStart > 0 { return "gutenberg" }

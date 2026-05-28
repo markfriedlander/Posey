@@ -128,6 +128,26 @@ struct ReaderProgressMeter: View {
                     // gives a clearly readable label without changing
                     // the meter's quiet typography or layout.
                     .foregroundStyle(.primary.opacity(0.85))
+                    // 2026-05-28 (N4) — Mark: add an opaque pill
+                    // background behind the remaining-time label so it
+                    // reads clearly regardless of what document text
+                    // is scrolling past underneath. Was a bare Text on
+                    // top of body prose; legibility depended on the
+                    // chars that happened to be behind it. Capsule
+                    // with `Color(.systemBackground)` is truly opaque
+                    // (not Material) and adapts to light/dark via the
+                    // system colorScheme. Subtle border keeps the pill
+                    // distinct from the page edge in either mode.
+                    .padding(.vertical, 3)
+                    .padding(.horizontal, 8)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color(.systemBackground))
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                            )
+                    )
                     .accessibilityIdentifier("reader.progressMeter.label")
             }
         }

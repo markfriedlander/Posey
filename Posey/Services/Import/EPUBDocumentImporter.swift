@@ -309,7 +309,42 @@ extension EPUBDocumentImporter {
         // blocks at render time (the user sees the image, not the
         // marker text). plainText is the marker-stripped form used for
         // TTS / search / RAG / character count.
-        let displayText = normalizeDisplay(chapterTexts.joined(separator: "\n\n"))
+        var displayText = normalizeDisplay(chapterTexts.joined(separator: "\n\n"))
+
+        // 2026-05-28 — EPUB cover image preservation (#72). When the
+        // OPF declares a cover image (via EPUB 3 `properties="cover-image"`
+        // or EPUB 2 `<meta name="cover">`), load its bytes and inject
+        // a POSEY_VISUAL_PAGE marker at the very start of displayText
+        // so the renderer emits an image unit at sequence 0 — the cover
+        // appears above all spine content when the reader scrolls to
+        // the top of the document. The cover is excluded from the spine
+        // walker because EPUB 3 covers are typically referenced only via
+        // OPF properties, not by an `<item>` in the spine, so the existing
+        // inline-`<img>` extraction never sees them.
+        //
+        // No effect on plainText (markers strip on the way to plainText
+        // via buildPlainText below) → TOC offsets, smart-skip, note
+        // anchors, RAG chunks all unchanged. The cover image bytes ride
+        // alongside inline images in the same `imageRecords` array.
+        // ContentUnitBuilder maps the resulting visualPlaceholder block
+        // to a `.image` ContentUnit at sequence 0.
+        var imageRecordsWithCover = imageRecords
+        if let coverItemID = packageDoc.coverItemID,
+           let coverItem = packageDoc.manifestItems[coverItemID],
+           coverItem.mediaType.lowercased().hasPrefix("image/") {
+            let archivePath = resolveArchivePath(
+                baseDirectory: baseDirectory,
+                relativePath: coverItem.href
+            )
+            if let coverData = entryLoader(archivePath), !coverData.isEmpty {
+                let coverImageID = UUID().uuidString
+                let coverRecord = PageImageRecord(imageID: coverImageID, data: coverData)
+                imageRecordsWithCover = [coverRecord] + imageRecordsWithCover
+                let coverMarker = "\u{000C}[[POSEY_VISUAL_PAGE:0:\(coverImageID)]]\u{000C}\n\n"
+                displayText = coverMarker + displayText
+            }
+        }
+
         let plainText   = buildPlainText(from: displayText)
 
         // Build TOC entries from nav (EPUB 3) or skip if neither is available.
@@ -368,7 +403,7 @@ extension EPUBDocumentImporter {
             illustrator: packageDoc.illustrator,
             displayText: displayText,
             plainText: plainText,
-            images: imageRecords,
+            images: imageRecordsWithCover,
             tocEntries: tocEntries,
             playbackSkipUntilOffset: frontMatterResult.skipUntilOffset
         )
@@ -868,6 +903,16 @@ private struct EPUBPackageDocument {
     let navItemID: String?
     let ncxItemID: String?
     let allItemHrefs: [String: String]
+    /// Manifest id of the cover image, when present. EPUB 3 publishes
+    /// this via `<item properties="cover-image">`; EPUB 2 via a
+    /// `<meta name="cover" content="<itemID>"/>` element in the
+    /// `<metadata>` block. Either form resolves to the manifest item
+    /// holding the cover image bytes (jpg / png / etc.). Nil when the
+    /// package declares no cover (and on packages where the cover is
+    /// embedded inside a cover.xhtml spine item rather than as a
+    /// standalone image manifest entry — those covers already render
+    /// via the normal inline-`<img>` extraction path).
+    let coverItemID: String?
 }
 
 private struct EPUBManifestItem {
@@ -913,6 +958,14 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
     private var navItemID: String?
     private var ncxItemID: String?
     private var spineItemReferences: [String] = []
+    /// EPUB 3 cover: set when a manifest item carries
+    /// `properties="cover-image"`. The item is the image itself.
+    private var coverItemIDFromProperties: String?
+    /// EPUB 2 legacy cover: set when the `<metadata>` block contains
+    /// `<meta name="cover" content="<itemID>"/>`. The value points
+    /// into the manifest. Resolved against `manifestItems` in `parse()`
+    /// and used only when no EPUB 3 cover-image manifest item exists.
+    private var coverItemIDFromMeta: String?
     private var collectingTitle = false
     private var currentTitle    = ""
     // Bundle 2 follow-up — capture first `<dc:creator>` and the
@@ -941,6 +994,20 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
         guard parser.parse() else {
             throw EPUBDocumentImporter.ImportError.unreadableDocument
         }
+        // Cover resolution: EPUB 3 properties wins; EPUB 2 meta-fallback
+        // only counts when the referenced manifest item is actually an
+        // image (some packages name an xhtml cover-page via the meta
+        // form — those covers already render via the inline-img path
+        // and shouldn't be double-injected here).
+        let coverFromMetaIfImage: String? = {
+            guard let metaID = delegate.coverItemIDFromMeta,
+                  let item = delegate.manifestItems[metaID],
+                  item.mediaType.lowercased().hasPrefix("image/") else {
+                return nil
+            }
+            return metaID
+        }()
+        let coverItemID = delegate.coverItemIDFromProperties ?? coverFromMetaIfImage
         return EPUBPackageDocument(
             title: delegate.title?.trimmingCharacters(in: .whitespacesAndNewlines),
             creator: delegate.creator?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -949,7 +1016,8 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
             spineItemReferences: delegate.spineItemReferences,
             navItemID: delegate.navItemID,
             ncxItemID: delegate.ncxItemID,
-            allItemHrefs: delegate.allItemHrefs
+            allItemHrefs: delegate.allItemHrefs,
+            coverItemID: coverItemID
         )
     }
 
@@ -981,6 +1049,17 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
             }
             return
         }
+        // EPUB 2 cover-meta detection (in `<metadata>` block). Must come
+        // before the `item` branch because `<meta>` and `<item>` are
+        // different elements but both can have name/content attributes
+        // in some XML serializations.
+        if matches(elementName, suffix: "meta") {
+            let name = (attributeDict["name"] ?? "").lowercased()
+            if name == "cover", let content = attributeDict["content"], coverItemIDFromMeta == nil {
+                coverItemIDFromMeta = content
+            }
+            return
+        }
         if matches(elementName, suffix: "item"),
            let id   = attributeDict["id"],
            let href = attributeDict["href"] {
@@ -988,6 +1067,13 @@ private final class EPUBPackageParser: NSObject, XMLParserDelegate {
             let properties = attributeDict["properties"] ?? ""
             // Always record href for all items so TOC parsers can find NCX/nav paths.
             allItemHrefs[id] = href
+            // EPUB 3 cover-image detection. The first item carrying
+            // `cover-image` in its space-separated properties wins.
+            if coverItemIDFromProperties == nil,
+               properties.lowercased().split(separator: " ").contains("cover-image"),
+               mediaType.lowercased().hasPrefix("image/") {
+                coverItemIDFromProperties = id
+            }
             // NCX files are sometimes mislabelled as "text/xml" — also detect by extension.
             let hrefLower = href.lowercased()
             let isNCX = Self.nonReadableMediaTypes.contains(mediaType.lowercased())

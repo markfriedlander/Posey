@@ -1592,6 +1592,61 @@ extension LibraryViewModel {
                 let current = UserDefaults.standard.string(forKey: "debug.appearanceOverride") ?? "system"
                 return json(["appearance": current])
 
+            case "DEBUG_ANNOTATIONS":
+                // 2026-05-28 — diagnostic for the missing-glyph defect.
+                // Dumps the live ReaderViewModel's annotation state so
+                // we can see whether notes match unit ranges via the
+                // fullPlainTextOffsetByUnitID map.
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: DEBUG_ANNOTATIONS:<docID>"}"#
+                }
+                let snapshot = await MainActor.run { () -> [String: Any] in
+                    var result: [String: Any] = ["documentID": docID.uuidString]
+                    let notes = (try? databaseManager.notes(for: docID)) ?? []
+                    result["noteCount"] = notes.count
+                    var noteOffsets: [[String: Any]] = []
+                    for n in notes {
+                        noteOffsets.append([
+                            "kind": String(describing: n.kind),
+                            "start": n.startOffset,
+                            "end": n.endOffset,
+                        ])
+                    }
+                    result["notes"] = noteOffsets
+                    let units = (try? databaseManager.units(for: docID)) ?? []
+                    result["unitCount"] = units.count
+                    var cum = 0
+                    var unitRanges: [[String: Any]] = []
+                    for u in units {
+                        if u.kind.carriesProseText {
+                            let start = cum
+                            let end = cum + u.text.count
+                            // Check if any note intersects this range.
+                            var hits: [String] = []
+                            for n in notes where n.startOffset >= start && n.startOffset < end {
+                                hits.append(String(describing: n.kind))
+                            }
+                            if !hits.isEmpty {
+                                unitRanges.append([
+                                    "unitID": u.id.uuidString,
+                                    "seq": u.sequence,
+                                    "start": start,
+                                    "end": end,
+                                    "hits": hits,
+                                ])
+                            }
+                            cum += u.text.count + 2
+                        }
+                    }
+                    result["unitsWithAnnotations"] = unitRanges
+                    return result
+                }
+                if let data = try? JSONSerialization.data(withJSONObject: snapshot),
+                   let str = String(data: data, encoding: .utf8) {
+                    return str
+                }
+                return json(["error": "snapshot serialization failed"])
+
             case "READER_CHROME_STATE":
                 let visible = await MainActor.run { ReaderChromeState.shared.isVisible }
                 return json(["isChromeVisible": visible])

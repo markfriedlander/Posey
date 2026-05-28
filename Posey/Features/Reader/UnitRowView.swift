@@ -73,6 +73,16 @@ struct UnitRowView: View {
     let hasNote: Bool
     let hasBookmark: Bool
 
+    /// 2026-05-28 — Identity-bump for the annotation cache. The VM
+    /// bumps `unitAnnotationVersion` whenever it invalidates the
+    /// cache (note insert / delete via UI or antenna). Threading it
+    /// here makes SwiftUI re-evaluate the row body when version
+    /// changes — `hasNote` / `hasBookmark` change ARE tracked, but
+    /// the FIRST render after a create might have stale `false`
+    /// flags because annotationFlags(for:) is a method, not a
+    /// Published computed. This forces a re-pass.
+    let annotationVersion: Int
+
     /// **Reader UI bundle #3 — tap to navigate.** Fired when the
     /// user taps the bookmark / note glyph in the annotation
     /// overlay. ReaderView wires these to open the Notes sheet and
@@ -223,6 +233,13 @@ struct UnitRowView: View {
     /// sentence. Tap targets remain padded for thumb-friendliness.
     @ViewBuilder
     private var annotationFooter: some View {
+        // 2026-05-28 sentinel — REMOVED after diagnosis confirmed
+        // hasNote / hasBookmark do reach UnitRowView correctly. The
+        // glyphs were rendering but at low opacity at the right edge
+        // and being overlapped by the always-on reading-time chrome
+        // strip. Real fix: bump opacity + use accent color (matches
+        // the highlight band Mark just approved) + nudge inward so
+        // the chrome strip doesn't sit on top of them.
         if hasNote || hasBookmark {
             // 2026-05-27 — glyphs were rendering at bodyFontSize*0.6/0.65 with
             // .secondary tint, which on the device made them visible but
@@ -231,17 +248,26 @@ struct UnitRowView: View {
             // bookmark, square.and.pencil = pencil-on-paper for notes —
             // more recognizable as "I wrote something" than note.text's
             // lines-on-paper which reads as "stationery").
-            HStack(spacing: 10) {
+            // 2026-05-28 — Mark caught: annotation glyphs were
+            // effectively invisible (Color.primary.opacity(0.7) icons
+            // at the right edge being overlapped by the always-on
+            // reading-time chrome strip "Nh Nm left"). Fix: use the
+            // accent color (matches the new TTS highlight band), bump
+            // opacity to 0.85, slightly larger size, and inset the
+            // HStack from the trailing edge by enough that the
+            // reading-time pill doesn't sit on top of it. Padded tap
+            // target unchanged.
+            HStack(spacing: 12) {
                 Spacer(minLength: 0)
                 if hasBookmark {
                     Button {
                         onTapBookmark?()
                     } label: {
                         Image(systemName: "bookmark.fill")
-                            .font(.system(size: bodyFontSize * 0.85))
-                            .foregroundStyle(Color.primary.opacity(0.7))
-                            .padding(.vertical, 2)
-                            .padding(.horizontal, 4)
+                            .font(.system(size: bodyFontSize * 0.95))
+                            .foregroundStyle(Color.accentColor.opacity(0.85))
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 6)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -252,17 +278,22 @@ struct UnitRowView: View {
                         onTapNote?()
                     } label: {
                         Image(systemName: "square.and.pencil")
-                            .font(.system(size: bodyFontSize * 0.85))
-                            .foregroundStyle(Color.primary.opacity(0.7))
-                            .padding(.vertical, 2)
-                            .padding(.horizontal, 4)
+                            .font(.system(size: bodyFontSize * 0.95))
+                            .foregroundStyle(Color.accentColor.opacity(0.85))
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 6)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open note")
                 }
             }
-            .padding(.top, 4)
+            .padding(.top, 6)
+            // Inset from the trailing edge so the always-on
+            // reading-time chrome pill (which floats at screen
+            // bottom-right) doesn't cover the glyphs as the user
+            // scrolls.
+            .padding(.trailing, 90)
             .accessibilityIdentifier("reader.unit.annotationIndicator")
         }
     }

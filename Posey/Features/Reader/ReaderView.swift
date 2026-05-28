@@ -123,6 +123,15 @@ struct ReaderView: View {
                     // inside the row's `AttributedString`; the openURL
                     // action below dispatches to `jumpToSentenceID`.
                     ForEach(viewModel.units) { unit in
+                        // 2026-05-28 — incorporate unitAnnotationVersion
+                        // into the row's id() so SwiftUI re-runs the
+                        // body when the version changes. `let _ = …`
+                        // gets optimized away; embedding it in the id
+                        // does not. Without this, annotationFlags is a
+                        // method call SwiftUI doesn't observe, and
+                        // antenna-created notes don't refresh the
+                        // unit-row glyphs.
+                        let annotationVersion = viewModel.unitAnnotationVersion
                         let annotations = viewModel.annotationFlags(for: unit)
                         UnitRowView(
                             unit: unit,
@@ -133,6 +142,7 @@ struct ReaderView: View {
                             readingStyle: viewModel.readingStyle,
                             hasNote: annotations.hasNote,
                             hasBookmark: annotations.hasBookmark,
+                            annotationVersion: annotationVersion,
                             onTapBookmark: {
                                 openAnnotationFromGlyph(unit: unit, kind: .bookmark)
                             },
@@ -3059,6 +3069,16 @@ final class ReaderViewModel: ObservableObject {
     @Published var errorMessage = ""
     @Published var noteDraft = ""
     @Published private(set) var notes: [Note] = []
+    /// 2026-05-28 — Bumped whenever the per-unit annotation cache is
+    /// invalidated (after note insert / delete via UI or antenna).
+    /// `annotationFlags(for:)` is a method, not a Published computed,
+    /// so SwiftUI doesn't track it as a dependency of the unit row
+    /// body. Without this version counter, antenna-created notes don't
+    /// trigger a re-render of the row's annotation footer — glyphs
+    /// silently stay absent until something else forces a redraw.
+    /// The ForEach body reads `unitAnnotationVersion` so SwiftUI sees
+    /// the dependency.
+    @Published private(set) var unitAnnotationVersion: Int = 0
     /// Unified Saved Annotations list for the Notes sheet — combines
     /// notes, bookmarks, and Ask Posey conversation anchors into one
     /// chronologically-sorted feed. Recomputed every time `notes` is
@@ -4605,6 +4625,9 @@ final class ReaderViewModel: ObservableObject {
     /// insert / delete so the next row redraw sees fresh flags.
     func invalidateUnitAnnotationCache() {
         unitAnnotationCache.removeAll(keepingCapacity: true)
+        // Bump the Published version so the SwiftUI ForEach body
+        // re-runs annotationFlags(for:) on every visible unit.
+        unitAnnotationVersion &+= 1
     }
 
     /// **Reader UI bundle #3.** Return the half-open plainText offset

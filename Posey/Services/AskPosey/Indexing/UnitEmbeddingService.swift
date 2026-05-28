@@ -191,45 +191,38 @@ actor UnitEmbeddingService {
             if batch.isEmpty { return }
 
             // 2026-05-28 — Mark caught: indexing was blocking UI on
-            // phone. Per-row `try await MainActor.run { … update DB }`
+            // phone. Per-row `try await MainActor.run { db.update }`
             // hammered the main actor with 11K+ hops, queuing antenna
-            // requests behind every chunk write. Two-part fix:
-            //   (1) Embed N rows off-main first, collect (id, vector)
-            //       pairs, then do ONE MainActor.run that writes them
-            //       all. Reduces main-actor pressure from per-row to
-            //       per-batch (64x less).
-            //   (2) `await Task.yield()` between batches gives the
-            //       main actor a chance to drain UI / antenna work
-            //       before the next batch's DB write claims it.
+            // requests behind every chunk write.
+            //
+            // Real fix: DatabaseManager is `@unchecked Sendable`
+            // (claims its own thread-safety; SQLite is configured
+            // SQLITE_THREADSAFE=1 = serialized internally), and
+            // UnitEmbeddingService is already an actor. There is
+            // NO reason to hop to MainActor for the DB write — call
+            // it directly from this actor's isolation. Main thread
+            // stays completely free of indexer pressure, no batching
+            // tricks needed.
+            //
+            // Embedding still runs off-actor (CPU-bound; Task.detached
+            // priority utility), then the result is written from the
+            // actor's context directly. SQLite serializes internally.
             var successesThisBatch = 0
-            var batchVectors: [(id: UUID, vector: [Double])] = []
-            batchVectors.reserveCapacity(batch.count)
             for row in batch {
                 let vector = await Task.detached(priority: .utility) {
                     EmbeddingProvider.shared.embed(row.text, as: .document)
                 }.value
-                if let vector { batchVectors.append((row.id, vector)) }
+                guard let vector else { continue }
+                do {
+                    try databaseManager.updateUnitEmbeddingChunkEmbedding(
+                        id: row.id, embedding: vector
+                    )
+                    successesThisBatch += 1
+                    processedSoFar += 1
+                } catch {
+                    // Row stays NULL; continue.
+                }
             }
-            if !batchVectors.isEmpty {
-                let toWrite = batchVectors
-                let writtenCount = (try? await MainActor.run {
-                    var written = 0
-                    for (id, vec) in toWrite {
-                        do {
-                            try databaseManager.updateUnitEmbeddingChunkEmbedding(
-                                id: id, embedding: vec
-                            )
-                            written += 1
-                        } catch {
-                            // Row stays NULL; continue.
-                        }
-                    }
-                    return written
-                }) ?? 0
-                successesThisBatch = writtenCount
-                processedSoFar += writtenCount
-            }
-            await Task.yield()
 
             // Post .didProgress per batch (not per row — would
             // flood the main queue on long docs).

@@ -3429,9 +3429,30 @@ final class ReaderViewModel: ObservableObject {
         }
         // Filter the unit list by the same skip / content-end window
         // so the renderer doesn't render pre-skip / post-end units.
+        //
+        // 2026-05-28 (#73) — Exception: `.image` units below the skip
+        // threshold survive the filter. EPUB cover preservation (#72)
+        // emits a `.image` unit at sequence 10 for every Gutenberg-
+        // declared cover, but the post-skip filter was dropping it
+        // because the skip floor (gutenberg-source) lands far past
+        // sequence 10. Image units don't have sentences, never enter
+        // the segments array, and never play TTS — so leaving them in
+        // the visual stream doesn't affect playback, just lets the
+        // user scroll UP from the smart-skip opening position to
+        // discover the cover. Post-end image units (after the EOF
+        // marker) stay filtered — those are typically appendix images
+        // the reader shouldn't see beyond the content-end boundary.
+        // PageBreaks + horizontalRules stay filtered both ways because
+        // they're structural dividers for prose flow, not standalone
+        // content worth wading through pre-skip.
         let filteredUnits: [ContentUnit] = units.filter { unit in
-            if let s = skipUnitSequence, unit.sequence < s { return false }
             if let e = contentEndUnitSequence, unit.sequence >= e { return false }
+            if let s = skipUnitSequence, unit.sequence < s {
+                // Keep image units (e.g. EPUB covers) visible pre-skip
+                // so the user can scroll up to see them. Drop everything
+                // else.
+                return unit.kind == .image
+            }
             return true
         }
 

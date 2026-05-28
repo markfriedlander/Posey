@@ -37,6 +37,8 @@
 	<dict/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Posey uses the local network to accept connections from developer tools for testing and diagnostics.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

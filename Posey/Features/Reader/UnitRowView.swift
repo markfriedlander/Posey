@@ -196,10 +196,17 @@ struct UnitRowView: View {
             let opacity = opacityForSentence(at: flatIdx)
             attributed[range].foregroundColor = Color.primary.opacity(opacity)
             attributed[range].underlineStyle = nil
-            // Active highlight on top of the link range — same
-            // subtle background as the prior segment-row treatment.
+            // Active highlight on top of the link range.
+            // 2026-05-28 — Mark caught: the 0.12 opacity was so subtle
+            // that at standard reading distance the active sentence
+            // was effectively unmarked, even though `currentSentenceIndex`
+            // was advancing correctly. The read-along feature requires
+            // the user to actually SEE which sentence is being spoken.
+            // Bumped to Color.accentColor at 0.30 — accents to brand
+            // color (not gray-on-gray), opacity readable in both Light
+            // and Dark mode without overpowering the prose.
             if let active, sentence.id == active.id {
-                attributed[range].backgroundColor = Color.primary.opacity(0.12)
+                attributed[range].backgroundColor = Color.accentColor.opacity(0.30)
             }
         }
         return attributed

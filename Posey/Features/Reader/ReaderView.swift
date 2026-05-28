@@ -4126,8 +4126,41 @@ final class ReaderViewModel: ObservableObject {
             return
         }
 
-        let anchor = nextScrollAnchor
+        var anchor = nextScrollAnchor
         nextScrollAnchor = .center
+
+        // 2026-05-28 — Mark caught: active sentence renders BEHIND the
+        // navigation chrome during TTS playback. Root cause: Step 9
+        // collapsed all sentences of a unit into one AttributedString;
+        // `scrollTo(unitID, anchor: .center)` centers the whole unit,
+        // and for tall multi-sentence units (Moby's Ch 1 opening is
+        // one giant paragraph of ~12 sentences) the active sentence
+        // drifts off-screen as it advances within the unit. Compute
+        // the active sentence's fractional position within its unit
+        // and override the anchor so the target lands sentence-aligned
+        // instead of unit-center-aligned. `UnitPoint(x:0.5, y:k/N)`
+        // places the unit's y=k/N point at viewport center — exactly
+        // the active sentence's vertical position.
+        if focusedUnitID == nil,
+           anchor == .center,
+           sentences.indices.contains(currentSentenceIndex) {
+            let activeSentence = sentences[currentSentenceIndex]
+            // Find the active sentence's index within its unit's
+            // sentences. Avoid the `.filter { … }` closure form because
+            // in Swift 6 it's ambiguous with a Predicate-taking
+            // overload — count + compare by hand.
+            let activeUnit = activeSentence.unitID
+            var positionInUnit = 0
+            var unitTotal = 0
+            for (i, s) in sentences.enumerated() where s.unitID == activeUnit {
+                if i == currentSentenceIndex { positionInUnit = unitTotal }
+                unitTotal += 1
+            }
+            if unitTotal > 1 {
+                let y = (Double(positionInUnit) + 0.5) / Double(unitTotal)
+                anchor = UnitPoint(x: 0.5, y: y)
+            }
+        }
 
         let action = {
             proxy.scrollTo(scrollTargetID, anchor: anchor)

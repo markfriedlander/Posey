@@ -39,16 +39,41 @@ enum ContentUnitBuilder {
         for rawParagraph in paragraphs {
             let trimmed = rawParagraph.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
+            // 2026-05-27 — TXT chapter detection. A paragraph that
+            // consists of a single line matching the CHAPTER pattern
+            // becomes a `.heading` unit with level 1. This drives
+            // both heading-styled rendering in the reader and TOC
+            // population in TXTLibraryImporter. Patterns mirror
+            // FirstChapterAdvance — keep them aligned. Other heading
+            // styles (Epilogue, Prologue, Preface, Foreword) included
+            // since they're common Gutenberg structure.
+            let isHeading = Self.txtHeadingRegex.firstMatch(
+                in: trimmed,
+                options: [],
+                range: NSRange(location: 0, length: (trimmed as NSString).length)
+            ) != nil
             units.append(ContentUnit(
                 documentID: documentID,
                 sequence: sequence,
-                kind: .prose,
-                text: trimmed
+                kind: isHeading ? .heading : .prose,
+                text: trimmed,
+                metadata: isHeading ? ContentUnitMetadata(headingLevel: 1) : ContentUnitMetadata()
             ))
             sequence += 10
         }
         return units
     }
+
+    /// Matches a single-line paragraph that's structurally a chapter
+    /// or top-level book heading. Anchors on the whole paragraph
+    /// (^…$ without anchorsMatchLines because we've already trimmed
+    /// and the paragraph is supposed to be one line).
+    fileprivate static let txtHeadingRegex: NSRegularExpression = {
+        let pattern = #"^\s*(CHAPTER\s+\d{1,3}[.\s:—-].*|Chapter\s+\d{1,3}[.\s:—-].*|CHAPTER\s+[IVXL]{1,5}[.\s:—-].*|Chapter\s+[IVXL]{1,5}[.\s:—-].*|CHAPTER\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN)[.\s:—-].*|Epilogue\.?|Prologue\.?|Preface\.?|Foreword\.?|Introduction\.?)\s*$"#
+        // Returning a force-tried regex; the pattern is a compile-time
+        // constant so the try cannot fail at runtime.
+        return try! NSRegularExpression(pattern: pattern)
+    }()
 
     /// Convenience for importers that have both: try the display
     /// parser's blocks first, fall back to plainText paragraph

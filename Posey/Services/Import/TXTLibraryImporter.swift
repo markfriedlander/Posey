@@ -118,6 +118,37 @@ struct TXTLibraryImporter {
         // ── Pre-compute sentences per unit.
         let sentences = SentenceIndexer.sentences(for: units)
 
+        // ── Build TOC from heading units. Each .heading unit emitted
+        // by ContentUnitBuilder.proseUnits (Gutenberg-style CHAPTER
+        // pattern) becomes a navigable TOC entry. Offsets must match
+        // the persister's plainText join scheme (prose units joined
+        // with `\n\n`), so we walk the units array maintaining the
+        // running plainText offset.
+        var tocEntries: [StoredTOCEntry] = []
+        var runningOffset = 0
+        var firstProseSeen = false
+        for unit in units {
+            guard unit.kind.carriesProseText else { continue }
+            if firstProseSeen { runningOffset += 2 /* "\n\n" */ }
+            firstProseSeen = true
+            if unit.kind == .heading && runningOffset >= skipOffset {
+                // Skip catalog-list entries that live BEFORE the
+                // smart-skip target. Gutenberg books surface "CHAPTER
+                // N. Title." both in the CONTENTS catalog at the top
+                // (133+ entries for Moby) AND at each actual chapter
+                // start in the body. Without this filter the TOC
+                // doubles up — the catalog version comes first and
+                // jumps the reader to the catalog, not the chapter.
+                tocEntries.append(StoredTOCEntry(
+                    title: unit.text,
+                    plainTextOffset: runningOffset,
+                    playOrder: tocEntries.count + 1,
+                    level: unit.metadata.headingLevel ?? 1
+                ))
+            }
+            runningOffset += unit.text.count
+        }
+
         // ── Persist atomically.
         let parsed = ParsedDocument(
             id: documentID,
@@ -126,7 +157,7 @@ struct TXTLibraryImporter {
             fileType: fileType,
             units: units,
             sentences: sentences,
-            toc: [],
+            toc: tocEntries,
             skipUnitID: skipUnitID,
             skipSource: skipSource,
             playbackSkipUntilOffset: skipOffset,

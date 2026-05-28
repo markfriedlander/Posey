@@ -36,6 +36,25 @@ struct PoseyApp: App {
         return EmbeddingBackend.applyCrashGuardAtLaunch()
     }()
 
+    // 2026-05-28 — DEBUG-only appearance override so the antenna's
+    // `SET_APPEARANCE:light|dark|system` verb can flip Posey's
+    // colorScheme without touching the user's system Settings. This
+    // unlocks Light-mode verification on a physical device where
+    // simctl ui appearance isn't available, without affecting any
+    // other app on the device. UserDefaults-backed so an override
+    // persists across launches if needed. Reads only one key; default
+    // "system" returns nil (use the system colorScheme).
+    #if DEBUG
+    @AppStorage("debug.appearanceOverride") private var appearanceOverrideRaw: String = "system"
+    private var debugAppearanceOverride: ColorScheme? {
+        switch appearanceOverrideRaw {
+        case "light": return .light
+        case "dark":  return .dark
+        default:      return nil
+        }
+    }
+    #endif
+
     var body: some Scene {
         WindowGroup {
             // Task 10 (2026-05-03 — Mac Catalyst): on macOS, the
@@ -111,6 +130,11 @@ struct PoseyApp: App {
             }
             #if targetEnvironment(macCatalyst)
             .frame(minWidth: 480, minHeight: 600)
+            #endif
+            #if DEBUG
+            // Honored only when the DEBUG-only `SET_APPEARANCE`
+            // antenna verb has flipped this. nil = follow system.
+            .preferredColorScheme(debugAppearanceOverride)
             #endif
         }
         #if targetEnvironment(macCatalyst)

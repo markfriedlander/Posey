@@ -1552,6 +1552,32 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "SET_APPEARANCE":
+                // 2026-05-28 — DEBUG-only verification primitive.
+                // Lets CC verify chrome contrast and other
+                // colorScheme-dependent rendering in BOTH Light
+                // and Dark mode on a physical device without
+                // touching the user's iOS Settings (which would
+                // affect every other app on the device). Posey
+                // reads this @AppStorage key in PoseyApp.body and
+                // applies `.preferredColorScheme(...)` to the
+                // WindowGroup. Argument: light | dark | system.
+                let raw = (arg ?? "system").lowercased()
+                let normalized: String
+                switch raw {
+                case "light", "dark", "system": normalized = raw
+                default:
+                    return json(["error": "SET_APPEARANCE expects light|dark|system; got \(raw)"])
+                }
+                await MainActor.run {
+                    UserDefaults.standard.set(normalized, forKey: "debug.appearanceOverride")
+                }
+                return json(["status": "set", "appearance": normalized])
+
+            case "GET_APPEARANCE":
+                let current = UserDefaults.standard.string(forKey: "debug.appearanceOverride") ?? "system"
+                return json(["appearance": current])
+
             case "READER_CHROME_STATE":
                 let visible = await MainActor.run { ReaderChromeState.shared.isVisible }
                 return json(["isChromeVisible": visible])

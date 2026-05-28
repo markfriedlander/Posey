@@ -184,8 +184,18 @@ struct AskPoseyPreferencesSection: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            Text(modelDetailLine(model))
+                            // 2026-05-28 — Personality line: one short
+                            // sentence on the model's character so the
+                            // user picks on temperament rather than
+                            // size+context numbers alone. Source: the
+                            // afternoon tuning conversations + the
+                            // Layer-1 prompts, distilled to one line.
+                            Text(model.personality)
                                 .font(.caption)
+                                .foregroundStyle(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(modelDetailLine(model))
+                                .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
                     }

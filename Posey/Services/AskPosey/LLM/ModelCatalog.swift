@@ -51,7 +51,8 @@ enum ModelCatalog {
         When the user asks an interpretive or evaluative question ("what do you make of X", "what's the effect of Y", "what stands out about Z"), engage as a thoughtful reader. The hard rules about grounding still apply — every name, quote, or specific claim must come from the excerpts. But you can react to what's in the text: notice which passages feel vivid, point out patterns, name effects the text creates, share what struck you about a phrase. A blank "the document doesn't say" answer to "what do you make of this?" is a failure of the reading-companion role, not a success of grounding.
 
         When the user shares their own reading experience — "I find this tedious," "this confused me," "I'm not sure I'm getting it" — acknowledge that part of their message before pivoting to the document. A reader who feels unheard won't trust the answer that follows. The "never recommend" rule still holds for "should I read X" questions, but the acknowledgment of how the user is feeling is a separate move and it comes first.
-        """
+        """,
+        personality: "Careful and even-keeled — fastest for short passage questions and quick lookups, hedges more on big-picture synthesis."
     )
 
     // MARK: - MLX models (8g brings these live)
@@ -82,7 +83,8 @@ enum ModelCatalog {
         // truncation symptom was a runaway loop hitting the 4096 max-token
         // cap rather than a context-window overflow.
         repetitionPenalty: 1.1,
-        repetitionContextSize: 64
+        repetitionContextSize: 64,
+        personality: "Engaged and thoughtful — takes positions on interpretive questions, willing to argue a reading."
     )
 
     /// Qwen 3.5 2B Instruct (4-bit, MLX).
@@ -99,7 +101,8 @@ enum ModelCatalog {
         Be consistent across turns. If you committed to a framing in an earlier turn ("the core challenge is X"), don't deny it in a later turn unless you're explicitly correcting yourself. If you need to refine a framing under pressure, say so directly: "I overstated earlier; what the document actually says is..." Don't quietly contradict your own earlier claim in the same sentence as you describe it — that reads as confused and the user loses trust. If you're not sure, it's better to say "I'm not certain — the document mentions both X and Y" than to assert and then deny.
         """,
         repetitionPenalty: 1.1,
-        repetitionContextSize: 64
+        repetitionContextSize: 64,
+        personality: "Quick and concise — handles long documents well; can read terse on short questions."
     )
 
     /// Llama 3.2 3B Instruct (4-bit, MLX).
@@ -112,7 +115,8 @@ enum ModelCatalog {
         contextWindow: 131072,
         layerOnePrompt: nil,  // Llama is well-behaved in this role without per-model correction
         repetitionPenalty: 1.1,
-        repetitionContextSize: 64
+        repetitionContextSize: 64,
+        personality: "Balanced and conversational — the most well-rounded MLX model; a good first try."
     )
 
     /// Dolphin 3.0 (4-bit, MLX). Less restricted; Layer-1 keeps it
@@ -132,7 +136,8 @@ enum ModelCatalog {
         When the user characterizes a previous answer of yours ("that sounds bland", "that's the generic take"), engage with their critique. Either agree honestly ("you're right, it does cover familiar territory — the distinctive parts are X and Y") or push back with specific text ("actually, the document does go further — here's where"). Don't deflect or repeat the previous answer.
         """,
         repetitionPenalty: 1.1,
-        repetitionContextSize: 64
+        repetitionContextSize: 64,
+        personality: "Less restricted — engages directly with critique and pushback; willing to share a reaction."
     )
 
     /// All known models, in display order. The picker shows them

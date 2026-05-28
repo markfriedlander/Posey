@@ -88,6 +88,14 @@ struct ModelConfiguration: Sendable, Equatable, Identifiable {
     /// that gets `repetitionPenalty: 1.1` with a 64-token context.
     let repetitionContextSize: Int?
 
+    /// One short user-facing sentence describing the model's character
+    /// and best-fit usage, shown in the model picker beneath the
+    /// display name. Drawn from the per-model tuning experience and
+    /// the Layer-1 prompts — distilled to a single line so the user
+    /// can pick a model on character rather than on size + context-
+    /// window numbers alone. Not user-editable; ships with the catalog.
+    let personality: String
+
     init(
         id: String,
         displayName: String,
@@ -97,7 +105,8 @@ struct ModelConfiguration: Sendable, Equatable, Identifiable {
         contextWindow: Int,
         layerOnePrompt: String?,
         repetitionPenalty: Float? = nil,
-        repetitionContextSize: Int? = nil
+        repetitionContextSize: Int? = nil,
+        personality: String
     ) {
         self.id = id
         self.displayName = displayName
@@ -108,6 +117,7 @@ struct ModelConfiguration: Sendable, Equatable, Identifiable {
         self.layerOnePrompt = layerOnePrompt
         self.repetitionPenalty = repetitionPenalty
         self.repetitionContextSize = repetitionContextSize
+        self.personality = personality
     }
 }
 

@@ -25,17 +25,29 @@ import Combine
 ///      backend, write the vector back.
 ///
 /// Cancellation is supported between phases — the worker checks
-/// `isCancelled` at every checkpoint and bails to `.cancelled`.
+/// `Task.isCancelled` at every checkpoint and bails to `.cancelled`.
 /// Mid-row failures land in `.error(String)` for the user to
 /// dismiss; the coordinator leaves rows partially migrated
 /// (some NULL, some embedded in the new space) and a subsequent
 /// `retry` re-runs the re-embed phase from where it left off.
 ///
+/// **N1 architecture note (2026-05-28).** The class is `@MainActor`
+/// so SwiftUI can observe `@Published currentPhase` directly, but
+/// the worker (`runSwitch` + `reEmbedAllNullRows`) is `nonisolated`
+/// and runs in a `Task.detached`. All embed calls + DB writes
+/// execute off-main — `EmbeddingProvider` is NSLock-serialized,
+/// `DatabaseManager` is `@unchecked Sendable` (SQLite configured
+/// with `SQLITE_THREADSAFE=1`, serializes internally). Phase
+/// updates marshal back to main via `await MainActor.run`.
+/// Eliminates the per-batch UI stutter that the prior `@MainActor`-
+/// bound worker introduced even with `Task.yield()` between
+/// batches: the main thread is genuinely free of migration work
+/// for the entire duration, not just between yields.
+///
 /// 2026-05-23 — introduced as part of the Hal-based Ask Posey
-/// rebuild (Step 8a). Live behavior arrives once the chunker
-/// (8b) populates `unit_embedding_chunks` with rows worth
-/// migrating; until then the coordinator is wired but the
-/// re-embed phase has zero work to do.
+/// rebuild (Step 8a).
+/// 2026-05-28 (N1) — worker moved off-main per architectural
+/// follow-up filed in `d159909`'s commit message.
 @MainActor
 final class EmbedderMigrationCoordinator: ObservableObject {
 
@@ -58,7 +70,6 @@ final class EmbedderMigrationCoordinator: ObservableObject {
 
     @Published private(set) var currentPhase: Phase = .idle
 
-    private var cancelRequested: Bool = false
     private var activeWorker: Task<Void, Never>?
 
     private init() {}
@@ -70,18 +81,24 @@ final class EmbedderMigrationCoordinator: ObservableObject {
     /// see phase changes as the worker progresses.
     func beginSwitch(to target: EmbeddingBackend, database: DatabaseManager) {
         guard activeWorker == nil else { return }
-        cancelRequested = false
-        let worker = Task { [weak self] in
-            await self?.runSwitch(to: target, database: database)
-            await MainActor.run { self?.activeWorker = nil }
+        // Detached so the worker runs OFF-main. `runSwitch` is
+        // nonisolated; calling it from a detached Task keeps the
+        // whole embed-+-DB-write loop off the main actor. Phase
+        // updates marshal back via `await MainActor.run`.
+        let worker = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await self.runSwitch(to: target, database: database)
+            await MainActor.run { self.activeWorker = nil }
         }
         activeWorker = worker
     }
 
-    /// Cancel the in-flight swap (if any). Safe to call at any
-    /// time; transitions to `.cancelled` at the next checkpoint.
+    /// Cancel the in-flight swap (if any). Uses Swift's standard
+    /// Task cancellation — the worker's checkpoints poll
+    /// `Task.isCancelled` and bail to `.cancelled`. Safe to call
+    /// at any time.
     func cancel() {
-        cancelRequested = true
+        activeWorker?.cancel()
     }
 
     /// Reset the coordinator to `.idle` after the user dismisses
@@ -96,9 +113,24 @@ final class EmbedderMigrationCoordinator: ObservableObject {
         }
     }
 
-    // MARK: - Worker
+    // MARK: - Phase publisher
 
-    private func runSwitch(to target: EmbeddingBackend, database: DatabaseManager) async {
+    /// Hop back to MainActor to set the published phase. Called
+    /// from the nonisolated worker. The closure pattern keeps the
+    /// hop a single round-trip per call.
+    private func publish(_ phase: Phase) {
+        currentPhase = phase
+    }
+
+    // MARK: - Worker (nonisolated — runs off-main)
+
+    /// Runs the full three-phase swap. Nonisolated so the embed
+    /// loop + DB writes execute off the main actor. Phase updates
+    /// publish back via `MainActor.run`.
+    nonisolated private func runSwitch(
+        to target: EmbeddingBackend,
+        database: DatabaseManager
+    ) async {
         // Phase 1 — Download.
         //
         // NLContextual: OS-built-in; the embedder framework
@@ -113,11 +145,14 @@ final class EmbedderMigrationCoordinator: ObservableObject {
         // pass can wire HuggingFace's progress reporter into a
         // `.downloading` phase later.
 
-        if cancelRequested { currentPhase = .cancelled; return }
+        if Task.isCancelled {
+            await MainActor.run { self.publish(.cancelled) }
+            return
+        }
 
         // Phase 2 — Switch + wipe. Atomic from the app's POV:
         // flip UserDefaults, NULL every row in one statement.
-        currentPhase = .switching
+        await MainActor.run { self.publish(.switching) }
         UserDefaults.standard.set(target.rawValue, forKey: EmbeddingBackend.defaultsKey)
 
         // Warm the new backend before we start the re-embed loop
@@ -128,11 +163,17 @@ final class EmbedderMigrationCoordinator: ObservableObject {
         do {
             try database.nullAllUnitEmbeddingChunkEmbeddings()
         } catch {
-            currentPhase = .error("Failed to clear stale embeddings: \(error.localizedDescription)")
+            let msg = error.localizedDescription
+            await MainActor.run {
+                self.publish(.error("Failed to clear stale embeddings: \(msg)"))
+            }
             return
         }
 
-        if cancelRequested { currentPhase = .cancelled; return }
+        if Task.isCancelled {
+            await MainActor.run { self.publish(.cancelled) }
+            return
+        }
 
         // Phase 3 — Re-embed every NULL row under the new backend.
         await reEmbedAllNullRows(database: database)
@@ -145,21 +186,24 @@ final class EmbedderMigrationCoordinator: ObservableObject {
     /// and the migration continues — the next swap or re-run can
     /// pick it up. The final phase reflects only the count
     /// successfully re-embedded.
-    private func reEmbedAllNullRows(database: DatabaseManager) async {
+    nonisolated private func reEmbedAllNullRows(database: DatabaseManager) async {
         let total: Int
         do {
             total = try database.unitEmbeddingChunkNullCount()
         } catch {
-            currentPhase = .error("Failed to count chunks: \(error.localizedDescription)")
+            let msg = error.localizedDescription
+            await MainActor.run {
+                self.publish(.error("Failed to count chunks: \(msg)"))
+            }
             return
         }
 
         guard total > 0 else {
-            currentPhase = .done(reEmbedded: 0)
+            await MainActor.run { self.publish(.done(reEmbedded: 0)) }
             return
         }
 
-        currentPhase = .migrating(processed: 0, total: total)
+        await MainActor.run { self.publish(.migrating(processed: 0, total: total)) }
 
         // Process in batches to keep memory bounded and to give
         // the cancel checkpoint a chance to fire on every batch.
@@ -173,68 +217,75 @@ final class EmbedderMigrationCoordinator: ObservableObject {
         // nil" failure mode), the migration loops forever —
         // every batch refetches the same NULL chunks, processed
         // counter grows past total, no progress is ever made.
-        // The architecture doc has always claimed this guard
-        // existed; it didn't until now. After 2 consecutive
-        // batches with zero successful embeds, abort with .error
-        // so the user sees an honest failure rather than a stuck
-        // progress bar.
+        // After 2 consecutive batches with zero successful embeds,
+        // abort with .error so the user sees an honest failure
+        // rather than a stuck progress bar.
         var consecutiveZeroSuccessBatches = 0
         let maxZeroSuccessBatches = 2
 
         while true {
-            if cancelRequested { currentPhase = .cancelled; return }
+            if Task.isCancelled {
+                await MainActor.run { self.publish(.cancelled) }
+                return
+            }
 
             let batch: [DatabaseManager.UnitEmbeddingChunkNeedingEmbedding]
             do {
                 batch = try database.unitEmbeddingChunksNeedingEmbedding(limit: batchSize)
             } catch {
-                currentPhase = .error("Failed to fetch chunk batch: \(error.localizedDescription)")
+                let msg = error.localizedDescription
+                await MainActor.run {
+                    self.publish(.error("Failed to fetch chunk batch: \(msg)"))
+                }
                 return
             }
             if batch.isEmpty { break }
 
-            // 2026-05-28 — Mark caught: this loop was blocking UI on
-            // phone. Per-row main-actor DB writes hammered the queue
-            // with 11K hops, queuing antenna requests behind every
-            // chunk write. Two-part fix:
-            //   (1) Embed off-main, COLLECT (id, vector) pairs, then
-            //       run ONE DB-write loop per batch. SQLite writes
-            //       are fast in-process; the batch is bounded at 64
-            //       rows so each chunk of work is small.
-            //   (2) `await Task.yield()` between batches gives the
-            //       main actor a chance to drain UI work before the
-            //       next batch claims it.
+            // N1 (2026-05-28): the loop runs on a detached Task, so
+            // both the embed call and the DB write execute off-main
+            // directly — no `Task.detached` wrapper per row, no
+            // `MainActor.run` per row, no `Task.yield()` between
+            // batches. Main thread stays completely free of migration
+            // work; UI + antenna requests run at full responsiveness.
+            // EmbeddingProvider is NSLock-serialized (safe from any
+            // thread), DatabaseManager is @unchecked Sendable (SQLite
+            // serializes internally via SQLITE_THREADSAFE=1).
             var batchSuccesses = 0
-            var batchVectors: [(id: UUID, vector: [Double])] = []
-            batchVectors.reserveCapacity(batch.count)
             for row in batch {
-                if cancelRequested { currentPhase = .cancelled; return }
-                let vector = await Task.detached(priority: .userInitiated) {
-                    EmbeddingProvider.shared.embed(row.text, as: .document)
-                }.value
+                if Task.isCancelled {
+                    await MainActor.run { self.publish(.cancelled) }
+                    return
+                }
+                let vector = EmbeddingProvider.shared.embed(row.text, as: .document)
                 processed += 1
-                if let vector { batchVectors.append((row.id, vector)) }
+                if let vector {
+                    do {
+                        try database.updateUnitEmbeddingChunkEmbedding(id: row.id, embedding: vector)
+                        successfullyEmbedded += 1
+                        batchSuccesses += 1
+                    } catch {
+                        // Row stays NULL; continue.
+                    }
+                }
+                // Publish progress every 8 rows OR on the last row of
+                // the document so the UI's progress meter advances
+                // smoothly without flooding MainActor.
                 if processed % 8 == 0 || processed == total {
-                    currentPhase = .migrating(processed: processed, total: total)
+                    let snapshot = processed
+                    await MainActor.run {
+                        self.publish(.migrating(processed: snapshot, total: total))
+                    }
                 }
             }
-            for (id, vec) in batchVectors {
-                do {
-                    try database.updateUnitEmbeddingChunkEmbedding(id: id, embedding: vec)
-                    successfullyEmbedded += 1
-                    batchSuccesses += 1
-                } catch {
-                    // Skip + continue; row stays NULL.
-                }
-            }
-            await Task.yield()
 
             if batchSuccesses == 0 {
                 consecutiveZeroSuccessBatches += 1
                 if consecutiveZeroSuccessBatches >= maxZeroSuccessBatches {
-                    currentPhase = .error(
-                        "Embedder returned nil for \(maxZeroSuccessBatches * batchSize) consecutive chunks. The model may still be downloading. Try again in a moment."
-                    )
+                    await MainActor.run {
+                        self.publish(.error(
+                            "Embedder returned nil for \(maxZeroSuccessBatches * batchSize) consecutive chunks. The model may still be downloading. Try again in a moment."
+                        ))
+                    }
                     return
                 }
             } else {
@@ -242,7 +293,8 @@ final class EmbedderMigrationCoordinator: ObservableObject {
             }
         }
 
-        currentPhase = .done(reEmbedded: successfullyEmbedded)
+        let finalCount = successfullyEmbedded
+        await MainActor.run { self.publish(.done(reEmbedded: finalCount)) }
     }
 }
 

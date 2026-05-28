@@ -42,7 +42,21 @@ struct AskPoseyView: View {
     /// before they form expectations on a novel. Stored in UserDefaults
     /// so the dismissal persists across launches and devices.
     @AppStorage("Posey.AskPosey.firstUseNoticeDismissed") private var firstUseDismissed: Bool = false
+    /// 2026-05-28 — Separate dismissal key for the MLX-family banner.
+    /// The two model families pitch different capabilities (AFM ⇒
+    /// templated passage work; MLX ⇒ free-form document-level
+    /// conversation), so dismissing one should not suppress the other.
+    @AppStorage("Posey.AskPosey.firstUseNoticeDismissed.mlx") private var firstUseDismissedMLX: Bool = false
     @AppStorage("Posey.AskPosey.nonEnglishNoticeDismissed") private var nonEnglishDismissed: Bool = false
+
+    /// Current model's source family. Used to branch UI affordances
+    /// (quick-actions menu, composer placeholder, first-use banner)
+    /// between AFM's templated-passage strengths and MLX's free-form
+    /// document-level conversation. Read at body-time so a model
+    /// switch via Settings re-renders correctly on next sheet open.
+    private var isMLXModel: Bool {
+        ModelCatalog.current().source == .mlx
+    }
     @State private var showFirstUseSheet: Bool = false
     /// Live viewport height of the conversation ScrollView, used to
     /// size the trailing spacer so scrollTo(.top) on the user message
@@ -206,7 +220,9 @@ struct AskPoseyView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            if !firstUseDismissed {
+                            // 2026-05-28 — dismissal is per-family
+                            // (AFM vs MLX). See firstUseDismissedMLX.
+                            if (isMLXModel ? !firstUseDismissedMLX : !firstUseDismissed) {
                                 firstUseBanner
                                     .id("askPosey.firstUseBanner")
                             }
@@ -827,9 +843,18 @@ private extension AskPoseyView {
         //   1. Mid-conversation (any prior user message): "Ask a follow-up…"
         //   2. Passage anchor present: "Ask about this passage…"
         //   3. No passage anchor (document-scope entry): "Ask about this document…"
+        //
+        // 2026-05-28 — MLX models get a longer free-form placeholder
+        // (no template menu, so the placeholder carries more of the
+        // "what can I do here?" signal). Follow-up state collapses
+        // back to the same short prompt for both families since the
+        // user has already started a real conversation by then.
         let hasUserMessage = viewModel.messages.contains { $0.role == .user }
         if hasUserMessage {
             return "Ask a follow-up…"
+        }
+        if isMLXModel {
+            return "Ask anything about this document — what it argues, what it means, what you should think about it."
         }
         if viewModel.anchor != nil {
             return "Ask about this passage…"
@@ -846,6 +871,22 @@ private extension AskPoseyView {
     /// button (sparkle icon).
     @ViewBuilder
     var quickActionsMenu: some View {
+        // 2026-05-28 — AFM/MLX interface split. AFM keeps the four
+        // structured templates (its passage-scope strengths); MLX
+        // models get a free-form composer with no template menu, so
+        // the model's natural temperament drives the conversation
+        // rather than the templates filtering it through AFM's
+        // shape. EmptyView preserves the leading slot's layout so
+        // the TextField alignment doesn't shift between families.
+        if isMLXModel {
+            EmptyView()
+        } else {
+            afmQuickActionsMenu
+        }
+    }
+
+    @ViewBuilder
+    private var afmQuickActionsMenu: some View {
         Menu {
             Button {
                 sendTemplated("Explain this passage in context — what's it saying?")
@@ -923,6 +964,11 @@ private extension AskPoseyView {
     /// to dismiss; persists via @AppStorage so it never shows again.
     @ViewBuilder
     var firstUseBanner: some View {
+        // 2026-05-28 — Per-family banner copy. AFM pitches passage-
+        // scoped work with the four templates; MLX pitches free-form
+        // document-level conversation. Dismissal keys are separate
+        // so a user who dismisses one family still sees the intro
+        // for the other when they switch.
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "sparkle.magnifyingglass")
@@ -932,7 +978,11 @@ private extension AskPoseyView {
                     .font(.headline)
                 Spacer()
                 Button {
-                    firstUseDismissed = true
+                    if isMLXModel {
+                        firstUseDismissedMLX = true
+                    } else {
+                        firstUseDismissed = true
+                    }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3)
@@ -945,17 +995,28 @@ private extension AskPoseyView {
                 .accessibilityHint("Dismisses this introductory message.")
                 .accessibilityIdentifier("askPosey.firstUseDismiss")
                 .remoteRegister("askPosey.firstUseDismiss") {
-                    firstUseDismissed = true
+                    if isMLXModel {
+                        firstUseDismissedMLX = true
+                    } else {
+                        firstUseDismissed = true
+                    }
                 }
             }
-            Text("I help with passages you're reading — explaining what they mean, defining a term in context, finding related parts of the document. Tap the ✨ button to see quick actions, or just type your question.")
-                .font(.subheadline)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("Big-picture synthesis isn't my strength yet. Non-fiction reading material works best.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if isMLXModel {
+                Text("I can talk about what the document means as a whole — argue with you about it, summarize across sections, follow a thread you're chasing. Just type.")
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("I help with passages you're reading — explaining what they mean, defining a term in context, finding related parts of the document. Tap the ✨ button to see quick actions, or just type your question.")
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Big-picture synthesis isn't my strength yet. Non-fiction reading material works best.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(14)
         .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))

@@ -1132,7 +1132,32 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         } catch {
             throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
         }
-        return accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let rawSummary = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawSummary.isEmpty else { return rawSummary }
+
+        // 2026-05-29 — DECISION 2 ("Memory architecture: Posey is not
+        // Hal"). Verify the summary against its verbatim source BEFORE
+        // it enters the rolling memory. Each summary sentence is
+        // embedded and scored by max cosine vs the turns being
+        // summarized; sentences below threshold are DROPPED (keep-all
+        // conservative when no embedder, or when filtering would empty
+        // the summary). Binding the check here means EVERY generated
+        // summary — initial OR a later re-compression — is fact-checked
+        // at the point it is produced, so a hallucinated fact can't
+        // silently take up residence in the conversation's long-term
+        // memory and then be cited as if it were grounded.
+        let verifier = AskPoseySummaryVerifier()
+        let sources = turns.map { $0.content }
+        let verified = verifier.filteredSummary(rawSummary, sources: sources)
+        dbgLog("AskPosey summary verify: total=%d kept=%d dropped=%d canVerify=%@",
+               verified.total, verified.kept, verified.dropped,
+               (verifier.canVerify ? "yes" : "no") as NSString)
+        for s in verified.droppedSentences {
+            dbgLog("AskPosey summary DROPPED (cos=%.2f): %@",
+                   s.maxCosine, s.text as NSString)
+        }
+        return verified.text
     }
 
     // ========== BLOCK 09B: PAIRWISE SUMMARIZATION (Task 4 #9) - START ==========

@@ -245,17 +245,40 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// new boundary.
     private var summaryCoveredThrough: Int = 0
 
-    /// Threshold past which auto-summarization triggers. When the
-    /// non-summary turn count exceeds the recent-verbatim window plus
-    /// this margin, we summarize the older half. Sized so a typical
-    /// ~3-4-turn STM stays untouched and summarization only fires
-    /// when conversations grow long.
-    private let summarizeWhenTurnsExceed: Int = 8
+    /// Active model's verbatim memory depth in EXCHANGES (Q+A pairs):
+    /// AFM 3 / 128K-window MLX 6 / 256K-window MLX 8. Seeded in the
+    /// catalog's `defaultSettings.effectiveMemoryDepth`; this is the
+    /// lever the larger context windows buy — deeper *conversation*
+    /// memory, NOT more RAG (RAG budget is unchanged by decree). Falls
+    /// back to 3 (AFM-equivalent) when a model leaves it unset, so an
+    /// unconfigured model degrades safely rather than to zero.
+    private var activeMemoryDepthExchanges: Int {
+        let depth = ModelSettingsStore.shared
+            .effectiveSettings(for: ModelCatalog.current())
+            .effectiveMemoryDepth ?? 3
+        return max(1, depth)
+    }
 
-    /// How many of the most recent turns to keep verbatim (i.e. NOT
-    /// fold into the summary). The rest get summarized whenever the
-    /// trigger fires above.
-    private let keepVerbatimRecent: Int = 6
+    /// How many of the most recent verbatim MESSAGES to keep un-folded
+    /// (i.e. NOT compressed into the rolling summary). The rest get
+    /// summarized whenever the trigger below fires.
+    ///
+    /// `historyForPromptBuilder` holds individual user/assistant
+    /// messages, so one exchange = 2 entries → `depth × 2`. AFM depth 3
+    /// → 6 (exactly the prior hard-coded value, so AFM behavior is
+    /// unchanged); 128K → 12; 256K → 16. Derived per-access from the
+    /// active model so a mid-conversation model switch takes effect on
+    /// the next turn — same per-access pattern as the adaptive budget
+    /// (#3a). Wires DECISION 3's `effectiveMemoryDepth` lever to the
+    /// verbatim window.
+    private var keepVerbatimRecent: Int { activeMemoryDepthExchanges * 2 }
+
+    /// Auto-summarization fires once the non-summary message count
+    /// exceeds the verbatim window plus this fixed margin. Margin held
+    /// at +2 (the prior 6→8 relationship) so summarization only kicks
+    /// in once there is genuinely older history to fold, regardless of
+    /// window size.
+    private var summarizeWhenTurnsExceed: Int { keepVerbatimRecent + 2 }
 
     /// Task 4 #9 — when true, the prompt builder receives per-pair
     /// summaries (tiered + embedding-verified) instead of the
@@ -881,6 +904,12 @@ private extension AskPoseyChatViewModel {
         guard summarizationTask == nil else { return }
 
         let total = historyForPromptBuilder.count
+        // Diagnostic — makes DECISION 3's effectiveMemoryDepth wiring
+        // observable on-device: the depth, the derived verbatim window,
+        // and the trigger threshold for the active model. Greppable via
+        // the LOGS antenna verb.
+        dbgLog("AskPosey memory: total=%d depth=%d keepVerbatim=%d trigger=%d",
+               total, activeMemoryDepthExchanges, keepVerbatimRecent, summarizeWhenTurnsExceed)
         guard total > summarizeWhenTurnsExceed else { return }
 
         // Identify the older slice that needs summarizing — everything

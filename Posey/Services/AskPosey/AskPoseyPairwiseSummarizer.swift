@@ -74,7 +74,7 @@ final class AskPoseyPairwiseSummarizer {
     /// because pair summaries paraphrase more than answer text
     /// quotes do; tightening this triggers excessive rewrites
     /// without buying real fidelity.
-    static let verificationThreshold: Double = 0.45
+    static let verificationThreshold: Double = AskPoseySummaryVerifier.defaultThreshold
 
     /// Per-tier summary length targets (sentences). Index 0 = most
     /// recent pair gets the fullest summary; later indices clamp to
@@ -82,7 +82,10 @@ final class AskPoseyPairwiseSummarizer {
     static let tierSentenceTargets: [Int] = [4, 2, 1]
 
     private let summarizer: AskPoseySummarizing
-    private let embedder: NLEmbedding?
+    /// Shared embedding-cosine verifier — the single verification
+    /// implementation used by both this pairwise path and the live
+    /// rolling-summary path (`AskPoseyService.summarizeConversation`).
+    private let verifier: AskPoseySummaryVerifier
 
     /// Cache keyed by `AskPoseyConversationPair.key`. Stable pairs
     /// (older history that won't change) hit the cache; only the
@@ -92,7 +95,7 @@ final class AskPoseyPairwiseSummarizer {
 
     init(summarizer: AskPoseySummarizing, language: NLLanguage = .english) {
         self.summarizer = summarizer
-        self.embedder = NLEmbedding.sentenceEmbedding(for: language)
+        self.verifier = AskPoseySummaryVerifier(language: language)
     }
 
     /// Summarize an ordered list of pairs into per-pair text suitable
@@ -154,7 +157,7 @@ final class AskPoseyPairwiseSummarizer {
         targetSentences: Int,
         stats: inout AskPoseyPairwiseStats
     ) async -> String {
-        let referenceVectors = computeReferenceVectors(question: pair.question, answer: pair.answer)
+        let referenceVectors = verifier.referenceVectors(question: pair.question, answer: pair.answer)
 
         let firstAttempt: String
         do {
@@ -173,18 +176,18 @@ final class AskPoseyPairwiseSummarizer {
             return Self.fallbackSummary(question: pair.question, answer: pair.answer)
         }
 
-        let firstResult = verify(summary: firstAttempt, against: referenceVectors)
-        stats.sentencesProduced += firstResult.sentences.count
-        stats.sentencesFlagged += firstResult.failingSentences.count
+        let firstResult = verifier.verify(summary: firstAttempt, againstReferenceVectors: referenceVectors)
+        stats.sentencesProduced += firstResult.scored.count
+        stats.sentencesFlagged += firstResult.failing.count
 
-        if firstResult.failingSentences.isEmpty {
+        if firstResult.failing.isEmpty {
             return firstResult.kept.joined(separator: " ")
         }
 
         // Rewrite attempt — quote the worst-failing sentence back to
         // the model so it knows what shape of claim to avoid.
         stats.pairsRewritten += 1
-        let worstFailing = firstResult.failingSentences.first?.text
+        let worstFailing = firstResult.failing.first?.text
         let secondAttempt: String
         do {
             secondAttempt = try await summarizer.summarizePair(
@@ -196,129 +199,34 @@ final class AskPoseyPairwiseSummarizer {
         } catch {
             // Rewrite errored — keep the first attempt's verified
             // sentences (drop the failing ones).
-            stats.sentencesDropped += firstResult.failingSentences.count
+            stats.sentencesDropped += firstResult.failing.count
             if firstResult.kept.isEmpty {
                 return Self.fallbackSummary(question: pair.question, answer: pair.answer)
             }
             return firstResult.kept.joined(separator: " ")
         }
 
-        let secondResult = verify(summary: secondAttempt, against: referenceVectors)
-        if secondResult.failingSentences.isEmpty {
+        let secondResult = verifier.verify(summary: secondAttempt, againstReferenceVectors: referenceVectors)
+        if secondResult.failing.isEmpty {
             return secondResult.kept.joined(separator: " ")
         }
 
         // Second attempt still has failures. Drop the failing
         // sentences and ship the verified remainder (or the
         // fallback when nothing survives).
-        stats.sentencesDropped += secondResult.failingSentences.count
+        stats.sentencesDropped += secondResult.failing.count
         if secondResult.kept.isEmpty {
             return Self.fallbackSummary(question: pair.question, answer: pair.answer)
         }
         return secondResult.kept.joined(separator: " ")
     }
 
-    // MARK: - Verification
+    // MARK: - Sentence count
 
-    private struct VerificationResult {
-        let sentences: [SummarySentence]
-        let kept: [String]
-        let failingSentences: [SummarySentence]
-    }
-
-    private struct SummarySentence {
-        let text: String
-        let maxCosine: Double
-    }
-
-    /// Build embeddings of the verbatim question + answer split into
-    /// sentences. These are the "reference" set each summary
-    /// sentence is verified against.
-    private func computeReferenceVectors(question: String, answer: String) -> [[Double]] {
-        let combined = (question + "\n" + answer)
-        let sentences = Self.splitSentences(combined)
-        // Also embed the full Q and full A as fallback — short answers
-        // that fit on one sentence still need a reference.
-        let extras: [String] = [question, answer]
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        let all = sentences + extras
-        return all.compactMap { self.vector(for: $0) }
-    }
-
-    private func verify(summary: String, against references: [[Double]]) -> VerificationResult {
-        let sentences = Self.splitSentences(summary)
-        guard !sentences.isEmpty else {
-            return VerificationResult(sentences: [], kept: [], failingSentences: [])
-        }
-        // No embedder OR no reference vectors → can't verify.
-        // Conservative: keep all (the rule is "rewrite if we know
-        // it's bad", not "drop if we can't tell"). Stats logging
-        // will show this case.
-        guard !references.isEmpty else {
-            let all = sentences.map { SummarySentence(text: $0, maxCosine: 1.0) }
-            return VerificationResult(sentences: all, kept: sentences, failingSentences: [])
-        }
-
-        var scored: [SummarySentence] = []
-        var kept: [String] = []
-        var failing: [SummarySentence] = []
-        for sentence in sentences {
-            guard let v = vector(for: sentence) else {
-                // Embedding lookup failed (rare; usually empty/all
-                // punctuation). Treat as kept — better to retain a
-                // sentence we can't score than drop one we couldn't
-                // measure.
-                let score = SummarySentence(text: sentence, maxCosine: 1.0)
-                scored.append(score)
-                kept.append(sentence)
-                continue
-            }
-            var maxCos = 0.0
-            for ref in references {
-                let c = EmbeddingProvider.cosine(v, ref)
-                if c > maxCos { maxCos = c }
-            }
-            let s = SummarySentence(text: sentence, maxCosine: maxCos)
-            scored.append(s)
-            if maxCos < Self.verificationThreshold {
-                failing.append(s)
-            } else {
-                kept.append(sentence)
-            }
-        }
-        // Order failing by ascending cosine so the worst one is
-        // first — used for the rewrite hint.
-        let failingSorted = failing.sorted { $0.maxCosine < $1.maxCosine }
-        return VerificationResult(sentences: scored, kept: kept, failingSentences: failingSorted)
-    }
-
-    private func vector(for text: String) -> [Double]? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let embedder else { return nil }
-        return embedder.vector(for: trimmed)
-    }
-
-    // MARK: - Sentence split
-
-    /// Split text into sentences using NLTokenizer. Filters empty
-    /// fragments and trims surrounding whitespace.
-    static func splitSentences(_ text: String) -> [String] {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
-        let tokenizer = NLTokenizer(unit: .sentence)
-        tokenizer.string = trimmed
-        var out: [String] = []
-        tokenizer.enumerateTokens(in: trimmed.startIndex..<trimmed.endIndex) { range, _ in
-            let s = String(trimmed[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !s.isEmpty { out.append(s) }
-            return true
-        }
-        return out
-    }
-
+    /// Sentence count via the shared verifier's tokenizer split, so
+    /// tier-target accounting matches the verification split exactly.
     static func sentenceCount(in text: String) -> Int {
-        splitSentences(text).count
+        AskPoseySummaryVerifier.splitSentences(text).count
     }
 
     /// Deterministic, content-derived fallback used when AFM

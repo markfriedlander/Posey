@@ -1971,9 +1971,16 @@ private struct ReaderPreferencesSheet: View {
     /// Committed to the viewModel only on drag end to avoid rapid re-enqueue.
     @State private var draftRatePercentage: Float = 100.0
 
-    /// 2026-05-14 (B3) — Draft retrieval-strictness selection.
-    /// Mirrored to `PlaybackPreferences.shared` on change.
-    @State private var draftStrictness: PlaybackPreferences.RetrievalStrictness = .balanced
+    // 2026-05-29 — `draftStrictness` moved to AskPoseyModelLibraryView with
+    // the preferences reorganization (the retrieval-strictness picker now
+    // lives on the Model Library screen alongside the model + embedder).
+
+    /// Push state for the Model Library screen. Owned here (the
+    /// always-rendered sheet host) rather than in the below-the-fold
+    /// `AskPoseyPreferencesSection`, so the user tap, the
+    /// `OPEN_MODEL_LIBRARY` verb, and the `.navigationDestination` are all
+    /// robust regardless of scroll position / lazy row instantiation.
+    @State private var showModelLibrary = false
 
     private var isCustomMode: Bool {
         if case .custom = viewModel.voiceMode { return true }
@@ -1994,63 +2001,12 @@ private struct ReaderPreferencesSheet: View {
             // scrolls to the AskPoseyPreferencesSection anchor.
             ScrollViewReader { proxy in
             Form {
-                // Reading section
-                Section("Reading") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Font Size")
-                            Spacer()
-                            Text("\(Int(viewModel.fontSize))")
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(value: $viewModel.fontSize, in: 14...44, step: 1)
-                            .accessibilityIdentifier("preferences.fontSize")
-                    }
-                }
-
-                // 2026-05-16 — Reading Style picker + Motion Auto toggle
-                // removed (Mark spec). Posey now has one reading style:
-                // the default clean reader. Image handling is now an
-                // explicit user preference (replaces the implicit
-                // pause-when-Motion-on rule).
+                // ===== SOUND — everything that affects how Posey speaks =====
+                // Voice selection + speed + audio export. 2026-05-29
+                // preferences reorganization (Hal visual language): one
+                // icon-headed section per Mark's Sound/Reading/Ask Posey
+                // structure.
                 Section {
-                    Picker("Images during playback",
-                           selection: $viewModel.imageHandling) {
-                        ForEach(PlaybackPreferences.ImageHandling.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityIdentifier("preferences.imageHandling")
-
-                    Text(viewModel.imageHandling.description)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } header: {
-                    Text("Images")
-                }
-
-                // 2026-05-06 — Audio export section hidden from UI for
-                // 1.0 submission. The backend (AudioExporter,
-                // RemoteAudioExportRegistry, EXPORT_AUDIO API verb) is
-                // intact and continues to work; only the user-facing
-                // entry point in Preferences is removed. Reasons: no
-                // visible progress indicator on long renders (RTF /
-                // EPUB exports take minutes) and the rate observed in
-                // testing didn't match live playback. Documented in
-                // NEXT.md as "coming soon."
-
-                // 2026-05-04 — Old standalone "Motion Mode" Section
-                // removed. Replaced by the inline Auto toggle in the
-                // Reading Style section above (visually grouped with
-                // the picker per Mark's "consolidate so it's visually
-                // connected" directive). The Off/On/Auto trichotomy
-                // collapsed: "On" is implicit when Motion is the
-                // selected style; "Off" is implicit when something
-                // else is selected; "Auto" is the toggle.
-
-                // Playback section
-                Section("Playback") {
                     Picker("Voice Mode", selection: Binding(
                         get: { isCustomMode },
                         set: { viewModel.setVoiceMode(isCustom: $0) }
@@ -2101,42 +2057,8 @@ private struct ReaderPreferencesSheet: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                }
 
-                // 2026-05-14 (B3) — Ask Posey search-breadth picker.
-                // Relabeled 2026-05-14 per Mark: the picker describes
-                // **how widely Posey searches**, not how willing she is
-                // to answer. Broad → 0.35, Balanced → 0.45 (default),
-                // Precise → 0.55.
-                #if POSEY_ENABLE_ASK_POSEY
-                if AskPoseyAvailability.isAvailable {
-                    Section {
-                        Picker("How Posey Searches", selection: $draftStrictness) {
-                            ForEach(PlaybackPreferences.RetrievalStrictness.allCases, id: \.self) { s in
-                                Text(s.displayName).tag(s)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .accessibilityIdentifier("preferences.retrievalStrictness")
-                        .onChange(of: draftStrictness) { _, newValue in
-                            PlaybackPreferences.shared.retrievalStrictness = newValue
-                        }
-                        Text(draftStrictness.description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } header: {
-                        Text("Ask Posey")
-                    }
-                }
-                #endif
-
-                // 2026-05-08 — Audio Export re-enabled with the
-                // notification-based UX. Tap kicks off the render
-                // under a UIApplication background task; the export
-                // continues across lock-screen / app-switch and a
-                // local notification fires on completion. Tapping
-                // the notification reopens the share sheet path.
-                Section("Audio Export") {
+                    // Audio export (notification-based background render).
                     Button {
                         viewModel.beginAudioExport()
                     } label: {
@@ -2151,33 +2073,68 @@ private struct ReaderPreferencesSheet: View {
                     Text("Renders this document as an M4A file. Continues in the background if you lock your phone or switch apps; you'll get a notification when it's ready.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } header: {
+                    Label("Sound", systemImage: "speaker.wave.2")
                 }
 
-                // 2026-05-13 — A4: Cached Audio Files section.
-                // Lists every M4A currently in the persistent cache
-                // (one entry per document that's been exported).
-                // Files live under Library/Caches/Posey/AudioExports,
-                // so iOS may purge them under storage pressure; a
-                // re-export will regenerate them. Each row has its
-                // own Delete; the section footer shows total used
-                // and offers Delete All when non-empty.
+                // Cached Audio Files — lists M4As in the persistent cache
+                // (its own component Section; sits with audio export under
+                // the Sound grouping). iOS may purge under storage
+                // pressure; re-export regenerates.
                 CachedAudioFilesSection(databaseManager: viewModel.databaseManager)
 
-                // 2026-05-23 — Step 8e: Ask Posey settings sections
-                // (embedding backend picker + LLM picker). Driven off
-                // the shared EmbedderMigrationCoordinator so the
-                // migration phase enum animates inline progress.
+                // ===== READING — everything that affects how the page looks =====
+                // Font size + image handling today. Presentation mode
+                // (standard / lyrics), light/dark, and serif/sans-serif
+                // are planned additions to this section when those
+                // features land (see NEXT.md "Reading appearance").
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Font Size")
+                            Spacer()
+                            Text("\(Int(viewModel.fontSize))")
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: $viewModel.fontSize, in: 14...44, step: 1)
+                            .accessibilityIdentifier("preferences.fontSize")
+                    }
+
+                    Picker("Images during playback",
+                           selection: $viewModel.imageHandling) {
+                        ForEach(PlaybackPreferences.ImageHandling.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("preferences.imageHandling")
+
+                    Text(viewModel.imageHandling.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Label("Reading", systemImage: "book")
+                }
+
+                // ===== ASK POSEY — links to the Model Library screen =====
+                // The model catalog, search-breadth, and embedder picker
+                // moved to AskPoseyModelLibraryView (a pushed screen) so
+                // the gated-download disclosure/license sheets present
+                // correctly. This section is the active-model row + the
+                // "Browse Model Library" link (Hal's settings convention).
                 AskPoseyPreferencesSection(
-                    migrationCoordinator: EmbedderMigrationCoordinator.shared,
-                    databaseManager: viewModel.databaseManager
+                    onBrowseModelLibrary: { showModelLibrary = true }
                 )
-                // 2026-05-28 — anchor target for the SCROLL_PREFS_TO_LLM
-                // antenna verb. Lets phone verification jump straight to
-                // the LLM picker (which lives off-screen on first open).
                 .id("preferences.askPosey.section")
             }
             .navigationTitle("Reader Preferences")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: $showModelLibrary) {
+                AskPoseyModelLibraryView(
+                    migrationCoordinator: EmbedderMigrationCoordinator.shared,
+                    databaseManager: viewModel.databaseManager
+                )
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
@@ -2188,9 +2145,13 @@ private struct ReaderPreferencesSheet: View {
             ) { _ in
                 dismiss()
             }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteOpenModelLibrary)
+            ) { _ in
+                showModelLibrary = true
+            }
             .onAppear {
                 draftRatePercentage = viewModel.customRatePercentage
-                draftStrictness = PlaybackPreferences.shared.retrievalStrictness
                 RemoteControlState.shared.presentedSheet = "preferences"
             }
             .onDisappear {

@@ -144,6 +144,13 @@ extension Notification.Name {
     /// 2026-05-28 — added with the faithful Hal model-management port so
     /// the rebuilt detail card is verifiable on real hardware.
     static let remoteExpandAskPoseyModel = Notification.Name("PoseyRemoteExpandAskPoseyModel")
+    /// No userInfo. AskPoseyPreferencesSection observes; pushes the
+    /// `AskPoseyModelLibraryView` navigation destination. Posted by the
+    /// `OPEN_MODEL_LIBRARY` verb (and by `SCROLL_PREFS_TO_LLM`, which also
+    /// expands a model) so phone/sim verification can reach the catalog —
+    /// now a pushed screen rather than inline in the preferences sheet.
+    /// 2026-05-29 — added with the preferences reorganization.
+    static let remoteOpenModelLibrary = Notification.Name("PoseyRemoteOpenModelLibrary")
     /// No userInfo. ReaderView observes; sets `isShowingTOCSheet`.
     static let remoteOpenTOCSheet = Notification.Name("PoseyRemoteOpenTOCSheet")
     /// No userInfo. ReaderView observes; presents `VoicePickerView` as a

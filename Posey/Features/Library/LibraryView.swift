@@ -2066,15 +2066,20 @@ extension LibraryViewModel {
                     targetID = "preferences.askPosey.section"
                 }
                 await MainActor.run {
+                    // The catalog now lives on the pushed Model Library
+                    // screen (prefs reorg 2026-05-29), so push it first…
+                    NotificationCenter.default.post(
+                        name: .remoteOpenModelLibrary, object: nil
+                    )
                     NotificationCenter.default.post(
                         name: .remoteScrollPrefsToLLM,
                         object: nil,
                         userInfo: ["target": targetID]
                     )
-                    // If a specific model was named, also expand its
+                    // …then, if a specific model was named, expand its
                     // accordion card so the detail card is visible for
-                    // phone verification (the header Button can't be
-                    // reached by the TAP verb).
+                    // verification (the header Button can't be reached by
+                    // the TAP verb).
                     if let m = modelArg, !m.isEmpty {
                         NotificationCenter.default.post(
                             name: .remoteExpandAskPoseyModel,
@@ -2084,6 +2089,17 @@ extension LibraryViewModel {
                     }
                 }
                 return json(["status": "posted", "target": targetID])
+
+            case "OPEN_MODEL_LIBRARY":
+                // Push the AskPoseyModelLibraryView from an open prefs
+                // sheet (prefs reorg 2026-05-29). Use after
+                // OPEN_PREFERENCES_SHEET to reach the model catalog.
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteOpenModelLibrary, object: nil
+                    )
+                }
+                return json(["status": "posted"])
 
             case "OPEN_TOC_SHEET":
                 await MainActor.run {

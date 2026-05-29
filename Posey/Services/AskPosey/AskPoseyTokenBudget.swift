@@ -159,6 +159,51 @@ nonisolated struct AskPoseyTokenBudget: Sendable, Equatable {
         return b
     }
 
+    // MARK: - Per-model adaptive budget (#3)
+
+    /// Memory-based hard cap on the prompt ceiling for MLX models, in
+    /// tokens. **The cap is about DEVICE memory, not the model's spec**
+    /// (per Mark 2026-05-29): a 128K/256K model on a memory-pressured
+    /// phone must never build a 200K-token prompt — that's a jetsam kill.
+    /// 8,192 is ~2× AFM's effective window — meaningfully deeper
+    /// conversation memory — while keeping the transient KV bounded
+    /// (~8K tokens × ~60KB ≈ 0.5 GB worst case, within the increased-
+    /// memory entitlement). The per-turn `os_proc_available_memory`
+    /// pre-flight in `MLXService` is the runtime backstop beneath this
+    /// static ceiling: capability sets ambition, device memory sets the
+    /// hard limit. All current MLX models exceed this cap, so they all
+    /// receive it — correct, because the limit is the phone, not the
+    /// model. Tune via the unscripted model-conversation testing.
+    static let mlxHardCapTokens: Int = 8192
+
+    /// Build the budget for a specific model. AFM is returned UNCHANGED
+    /// (the 4,096-sized `afmDefault` / `forLongDocument`, both verified
+    /// working) — only MLX models, whose 128K–256K windows sat almost
+    /// entirely unused under the AFM-pinned budget, get the larger
+    /// ceiling. The extra room goes to **conversation continuity** (STM +
+    /// summary); **RAG stays modest and unchanged** (per the memory-arch
+    /// decisions — see HISTORY 2026-05-29). Bounded so a typical prompt
+    /// lands well under the cap; the summary tier (not a huge verbatim
+    /// window) carries older context compactly so prompts — and thus
+    /// per-turn re-prefill latency under KV purity — stay reasonable.
+    static func forModel(_ model: ModelConfiguration, longDocument: Bool) -> AskPoseyTokenBudget {
+        switch model.source {
+        case .appleFoundation:
+            return longDocument ? .forLongDocument() : .afmDefault
+        case .mlx:
+            var b = AskPoseyTokenBudget()
+            b.contextWindowTokens = min(model.contextWindow, mlxHardCapTokens)
+            // MLX answers can run longer than AFM's; reserve more.
+            b.responseReserveTokens = 1024
+            b.systemBudgetTokens = 180          // fixed-size rules prose
+            b.anchorBudgetTokens = 400          // a little more passage room
+            b.stmBudgetTokens = 1400            // ~9 recent turns (was ~4) — continuity
+            b.summaryBudgetTokens = 600         // older context, compacted
+            b.ragBudgetTokens = longDocument ? 2800 : 1400   // UNCHANGED per decision
+            return b
+        }
+    }
+
     // MARK: - Derived
 
     /// Total tokens available for prompt content. Anything above this

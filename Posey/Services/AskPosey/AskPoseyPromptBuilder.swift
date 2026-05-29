@@ -504,6 +504,17 @@ nonisolated enum AskPoseyPromptBuilder {
         var breakdown = AskPoseyPromptTokenBreakdown()
         var dropped: [AskPoseyPromptDroppedSection] = []
 
+        // #3 (2026-05-29) — observable proof the per-model adaptive budget
+        // is live: AFM stays at the 4,096 ceiling; MLX models get the
+        // memory-capped (8,192) ceiling with deeper STM. Greppable via
+        // LOGS as `AskPosey budget`.
+        dbgLog("AskPosey budget: model=%@ ceiling=%d stm=%d summary=%d rag=%d",
+               ModelCatalog.current().id as NSString,
+               budget.promptCeilingTokens,
+               budget.stmBudgetTokens,
+               budget.summaryBudgetTokens,
+               budget.ragBudgetTokens)
+
         // === Task 4 #2 — user question is never truncated ===
         // Restructured 2026-05-03 (was: question got whatever budget
         // was left after every other section claimed its share, which

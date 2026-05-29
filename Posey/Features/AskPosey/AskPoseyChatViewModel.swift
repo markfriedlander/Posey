@@ -144,8 +144,23 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     // exclusively through HybridRetriever now (built per-call in
     // retrieveRAGChunks).
 
+    /// Explicit budget injected by a caller (tests). nil in production —
+    /// the `budget` computed property then derives the per-model adaptive
+    /// budget from the *active* model at access time, so a mid-conversation
+    /// model switch takes effect on the next turn (#3).
+    private let injectedBudget: AskPoseyTokenBudget?
+
     /// Token budget passed to the prompt builder. Single tuning point.
-    private let budget: AskPoseyTokenBudget
+    /// Production: derived per-access from `ModelCatalog.current()` +
+    /// document length so it scales with the active model's window
+    /// (AFM 4K unchanged; MLX gets the memory-capped, continuity-favoring
+    /// budget — see `AskPoseyTokenBudget.forModel`). Tests inject a fixed
+    /// budget via init, which wins.
+    private var budget: AskPoseyTokenBudget {
+        if let injectedBudget { return injectedBudget }
+        let isLong = documentPlainText.count >= UnitEmbeddingChunker.Configuration.longDocumentThresholdChars
+        return AskPoseyTokenBudget.forModel(ModelCatalog.current(), longDocument: isLong)
+    }
 
     /// Used to cancel the in-flight response if the user dismisses
     /// the sheet mid-generation.
@@ -330,19 +345,13 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         self.summarizer = summarizer
         self.navigator = navigator
         self.databaseManager = databaseManager
-        // Task 4 #6 — pick the long-document budget when the
-        // document is over the long-doc threshold. The chunks
-        // were indexed at 2000 chars apiece, so the RAG budget
-        // needs to be doubled (2800 vs 1400) to fit 3-4 chunks
-        // per turn instead of just 1. Caller-supplied budget
-        // wins (tests pass explicit budgets); only the default
-        // gets the adaptive swap.
-        if budget == .afmDefault,
-           documentPlainText.count >= UnitEmbeddingChunker.Configuration.longDocumentThresholdChars {
-            self.budget = .forLongDocument()
-        } else {
-            self.budget = budget
-        }
+        // #3 (2026-05-29) — the budget is now derived per-access from the
+        // ACTIVE model (see the `budget` computed property), so it scales
+        // with the model's window and the long-document threshold without
+        // being frozen at init. A caller that passed an explicit budget
+        // (tests) injects it; production passes the `.afmDefault` default,
+        // which means "derive adaptively" → injectedBudget stays nil.
+        self.injectedBudget = (budget == .afmDefault) ? nil : budget
 
         // Read non-English flag from extracted metadata so the UI
         // can surface a "still studying [language]" notice. Silent

@@ -42,6 +42,19 @@ final class DatabaseManager: @unchecked Sendable {
     private let databaseURL: URL
     private var database: OpaquePointer?
 
+    /// Serializes ALL access to the single SQLite connection. The class
+    /// header used to claim access was "serialized by the call sites" —
+    /// it was not: `UnitEmbeddingService.fillEmbeddings` (background) and
+    /// the import/persist path touched the one connection concurrently,
+    /// which libsqlite3 traps as "illegal multi-threaded access to
+    /// database connection" (caught on the Mac, 2026-05-29). Every public
+    /// method now takes this lock for its whole body, so a multi-statement
+    /// transaction can't interleave with another thread's access.
+    /// **Recursive** because composite public methods call other public
+    /// methods on the same thread (e.g. persistParsedDocument); a plain
+    /// lock or serial-queue `.sync` would deadlock on that reentrancy.
+    private let dbLock = NSRecursiveLock()
+
     convenience init(fileManager: FileManager = .default, resetIfExists: Bool = false) throws {
         let appSupport = try fileManager.url(
             for: .applicationSupportDirectory,
@@ -76,6 +89,7 @@ final class DatabaseManager: @unchecked Sendable {
 
 extension DatabaseManager {
     func documents() throws -> [Document] {
+        dbLock.lock(); defer { dbLock.unlock() }
         // **Step 10 — derived plainText / displayText.** The columns
         // `display_text` and `plain_text` no longer exist; both fields
         // on Document are populated by joining prose-bearing units
@@ -142,6 +156,7 @@ extension DatabaseManager {
     }
 
     func upsertDocument(_ document: Document) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         // **Step 10 — plain_text / display_text columns dropped.**
         // INSERT omits them; the doc's plainText/displayText fields
         // are derived from units at row-read time. Persistence of the
@@ -191,6 +206,7 @@ extension DatabaseManager {
     }
 
     func deleteDocument(_ document: Document) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "DELETE FROM documents WHERE id = ?;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -203,6 +219,7 @@ extension DatabaseManager {
     /// violation if the document was concurrently deleted (RESET_ALL,
     /// DELETE_DOCUMENT antenna verb, swipe-to-delete).
     func documentExists(_ id: UUID) throws -> Bool {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "SELECT 1 FROM documents WHERE id = ? LIMIT 1;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -211,6 +228,7 @@ extension DatabaseManager {
     }
 
     func existingDocument(matchingFileName fileName: String, fileType: String, plainText: String, displayText: String? = nil, contentHash: String? = nil) throws -> Document? {
+        dbLock.lock(); defer { dbLock.unlock() }
         // **Bundle 2b (2026-05-26)** — content-hash-based dedup.
         // When the caller supplied a hash, prefer it: SHA-256 of raw
         // source bytes is the only signal that survives Tier 2 / Tier
@@ -349,6 +367,7 @@ extension DatabaseManager {
     /// Empty strings come back as nil so callers don't have to
     /// distinguish "" from missing.
     func documentMetadata(for documentID: UUID) throws -> StoredDocumentMetadata? {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT
             metadata_title,
@@ -401,6 +420,7 @@ extension DatabaseManager {
     /// caller wants to skip when already present.
     func saveDocumentMetadata(_ metadata: StoredDocumentMetadata,
                               for documentID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         UPDATE documents
         SET metadata_title = ?,
@@ -475,6 +495,7 @@ private extension String {
 
 extension DatabaseManager {
     func readingPosition(for documentID: UUID) throws -> ReadingPosition? {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT document_id, updated_at, character_offset, sentence_index
         FROM reading_positions
@@ -497,6 +518,7 @@ extension DatabaseManager {
     }
 
     func upsertReadingPosition(_ position: ReadingPosition) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         INSERT INTO reading_positions (document_id, updated_at, character_offset, sentence_index)
         VALUES (?, ?, ?, ?)
@@ -523,6 +545,7 @@ extension DatabaseManager {
 
 extension DatabaseManager {
     func notes(for documentID: UUID) throws -> [Note] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT id, document_id, created_at, updated_at, kind, start_offset, end_offset, body
         FROM notes
@@ -560,6 +583,7 @@ extension DatabaseManager {
     }
 
     func insertNote(_ note: Note) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         INSERT INTO notes (id, document_id, created_at, updated_at, kind, start_offset, end_offset, body)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?);
@@ -593,6 +617,7 @@ extension DatabaseManager {
     /// Insert one image record. The image ID is embedded in the document's
     /// displayText visual-page markers and used to load the image at read time.
     func insertImage(id: String, documentID: UUID, data: Data) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         INSERT OR REPLACE INTO document_images (id, document_id, image_data)
         VALUES (?, ?, ?);
@@ -613,6 +638,7 @@ extension DatabaseManager {
 
     /// Load image data by image ID. Returns nil if the record does not exist.
     func imageData(for imageID: String) throws -> Data? {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "SELECT image_data FROM document_images WHERE id = ? LIMIT 1;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -627,6 +653,7 @@ extension DatabaseManager {
     /// Delete all images for a document. Called before re-inserting on reimport
     /// so stale image IDs (embedded in the old displayText) don't linger.
     func deleteImages(for documentID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "DELETE FROM document_images WHERE document_id = ?;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -636,6 +663,7 @@ extension DatabaseManager {
 
     /// Returns all image IDs stored for a document, in insertion order.
     func imageIDs(for documentID: UUID) throws -> [String] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "SELECT id FROM document_images WHERE document_id = ? ORDER BY rowid;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -681,6 +709,7 @@ struct StoredTOCEntry {
 
 extension DatabaseManager {
     func insertTOCEntries(_ entries: [StoredTOCEntry], for documentID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         try execute("DELETE FROM document_toc WHERE document_id = '\(documentID.uuidString)';")
         let sql = """
         INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level)
@@ -704,6 +733,7 @@ extension DatabaseManager {
     }
 
     func tocEntries(for documentID: UUID) throws -> [StoredTOCEntry] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT title, plain_text_offset, play_order, level
         FROM document_toc
@@ -795,6 +825,7 @@ extension DatabaseManager {
     /// model honest about partial responses — if AFM crashes mid-
     /// stream, the user turn is still on disk and can be retried.
     func appendAskPoseyTurn(_ turn: StoredAskPoseyTurn) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         INSERT INTO ask_posey_conversations (
             id, document_id, timestamp, role, content, invocation,
@@ -840,6 +871,7 @@ extension DatabaseManager {
     /// `conversationSummary` slot of the prompt, not the verbatim STM
     /// slot. Use `askPoseyLatestSummary(for:)` for those.
     func askPoseyTurns(for documentID: UUID, limit: Int? = nil) throws -> [StoredAskPoseyTurn] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let baseSQL = """
         SELECT id, document_id, timestamp, role, content, invocation,
                anchor_offset, summary_of_turns_through, is_summary,
@@ -878,6 +910,7 @@ extension DatabaseManager {
     /// or `nil` if no summary exists yet. M6 writes these; M5 always
     /// returns nil.
     func askPoseyLatestSummary(for documentID: UUID) throws -> StoredAskPoseyTurn? {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT id, document_id, timestamp, role, content, invocation,
                anchor_offset, summary_of_turns_through, is_summary,
@@ -900,6 +933,7 @@ extension DatabaseManager {
     /// model's "should we fetch history at all" early exit so a
     /// fresh-document open doesn't hit SELECT before any turns exist.
     func askPoseyTurnCount(for documentID: UUID) throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT COUNT(*) FROM ask_posey_conversations
         WHERE document_id = ? AND is_summary = 0;
@@ -918,6 +952,7 @@ extension DatabaseManager {
     /// previous wrong answers biasing the model. Returns the row
     /// count that was deleted.
     func clearAskPoseyConversation(for documentID: UUID) throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
         // First, count what's there so we can return a useful response.
         var count = 0
         let countSQL = "SELECT COUNT(*) FROM ask_posey_conversations WHERE document_id = ?;"
@@ -942,6 +977,7 @@ extension DatabaseManager {
     /// don't pollute the verbatim STM budget — the anchor passage
     /// already lives in its own ANCHOR PASSAGE prompt section.
     func askPoseyConversationTurns(for documentID: UUID, limit: Int? = nil) throws -> [StoredAskPoseyTurn] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let baseSQL = """
         SELECT id, document_id, timestamp, role, content, invocation,
                anchor_offset, summary_of_turns_through, is_summary,
@@ -980,6 +1016,7 @@ extension DatabaseManager {
     /// each anchor row becomes a "conversation" entry, tappable to
     /// re-open Ask Posey scrolled to that point in the thread.
     func askPoseyAnchorRows(for documentID: UUID) throws -> [StoredAskPoseyTurn] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT id, document_id, timestamp, role, content, invocation,
                anchor_offset, summary_of_turns_through, is_summary,
@@ -1044,7 +1081,14 @@ extension DatabaseManager {
 
 extension DatabaseManager {
     private func open() throws {
-        if sqlite3_open(databaseURL.path, &database) != SQLITE_OK {
+        // Serialized threading mode (SQLITE_OPEN_FULLMUTEX): SQLite's own
+        // per-connection mutex permits this single connection to be used
+        // from different threads. Belt-and-suspenders with `dbLock` (which
+        // guarantees no *overlapping* access and keeps transactions
+        // atomic); together they fix the "illegal multi-threaded access"
+        // trap the Mac surfaced 2026-05-29.
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(databaseURL.path, &database, flags, nil) != SQLITE_OK {
             throw DatabaseError.openFailed
         }
         // Enable foreign key enforcement so ON DELETE CASCADE on document_images
@@ -1623,6 +1667,7 @@ extension DatabaseManager {
     /// Returns nil when the document doesn't exist (caller should
     /// treat as 'na' and skip).
     func enhancementStatus(for documentID: UUID) throws -> EnhancementStatusRow? {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT enhancement_status, tier2_pages_done, tier3_tokens_done, enhancement_error
         FROM documents
@@ -1648,6 +1693,7 @@ extension DatabaseManager {
     /// Documents currently in any enhancement state matching one of
     /// `statuses`. Used by bootstrap to find orphaned jobs.
     func documentsByEnhancementStatus(_ statuses: [String]) throws -> [EnhancementStatusRow] {
+        dbLock.lock(); defer { dbLock.unlock() }
         guard !statuses.isEmpty else { return [] }
         let placeholders = Array(repeating: "?", count: statuses.count).joined(separator: ", ")
         let sql = """
@@ -1688,6 +1734,7 @@ extension DatabaseManager {
         tier3TokensDone: Int? = nil,
         error: String? = nil
     ) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         var sets: [String] = ["enhancement_status = ?"]
         if tier2PagesDoneJSON != nil { sets.append("tier2_pages_done = ?") }
         if tier3TokensDone != nil { sets.append("tier3_tokens_done = ?") }
@@ -1744,6 +1791,7 @@ extension DatabaseManager {
     /// pages. That latent issue predates this change; preserving the
     /// exact contract avoids regression while the column is removed.
     func contentBoundaries(for documentID: UUID) throws -> [Int] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let units = try self.units(for: documentID)
         guard !units.isEmpty else { return [] }
         var boundaries: [Int] = []
@@ -1789,6 +1837,7 @@ extension DatabaseManager {
     /// Returns `nil` only when the document has no rows (caller's
     /// distinct from empty-doc case where the result is `""`).
     func plainText(for documentID: UUID) throws -> String? {
+        dbLock.lock(); defer { dbLock.unlock() }
         // Confirm document exists first so a nil return means "doc
         // gone" rather than "doc with zero units" (which is a valid
         // empty state).
@@ -1806,7 +1855,8 @@ extension DatabaseManager {
     /// separators — that semantic moved to `pageBreak` units, so the
     /// derived form just joins prose units like plainText.
     func displayText(for documentID: UUID) throws -> String? {
-        try plainText(for: documentID)
+        dbLock.lock(); defer { dbLock.unlock() }
+        return try plainText(for: documentID)
     }
 
 }
@@ -1821,6 +1871,7 @@ extension DatabaseManager {
     /// kept-unchanged) for a document. Tier 3 startup queries this to
     /// skip tokens it's already processed.
     func existingAFMCorrections(for documentID: UUID) throws -> Set<String> {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "SELECT original FROM document_afm_corrections WHERE document_id = ?;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -1842,6 +1893,7 @@ extension DatabaseManager {
         original: String,
         corrected: String
     ) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         INSERT INTO document_afm_corrections (document_id, original, corrected, applied_at)
         VALUES (?, ?, ?, ?)
@@ -1878,6 +1930,7 @@ extension DatabaseManager {
     /// One indexed SELECT; sub-second even on Moby-sized documents
     /// because there's no per-row computation.
     func units(for documentID: UUID) throws -> [ContentUnit] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT id, sequence, kind, text, metadata_json, revision, source_tier
         FROM document_units
@@ -1936,6 +1989,7 @@ extension DatabaseManager {
     /// from under the user's eyes.
     func unitIDsForPage(documentID: UUID,
                         pageNumber: Int) throws -> Set<UUID> {
+        dbLock.lock(); defer { dbLock.unlock() }
         let allUnits = try units(for: documentID)
         guard let breakIdx = allUnits.firstIndex(where: {
             $0.kind == .pageBreak && $0.metadata.pageNumber == pageNumber
@@ -1973,6 +2027,7 @@ extension DatabaseManager {
     /// for the call frequency (once per active-sentence change).
     func unitID(documentID: UUID,
                 plainTextOffset offset: Int) throws -> UUID? {
+        dbLock.lock(); defer { dbLock.unlock() }
         guard offset >= 0 else { return nil }
         let allUnits = try units(for: documentID)
         var cursor = 0
@@ -2003,6 +2058,7 @@ extension DatabaseManager {
     /// Fetch a single unit by id. Returns nil if not found (or
     /// document was deleted out from under it).
     func unit(withID id: UUID) throws -> ContentUnit? {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT id, document_id, sequence, kind, text, metadata_json, revision, source_tier
         FROM document_units
@@ -2048,6 +2104,7 @@ extension DatabaseManager {
     /// swap, Tier 3 token correction) see `replaceUnits(in:with:for:)`
     /// and `updateUnitText(...)` below.
     func replaceAllUnits(_ units: [ContentUnit], for documentID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN TRANSACTION;")
         do {
             try execute("DELETE FROM document_units WHERE document_id = '\(documentID.uuidString)';")
@@ -2101,6 +2158,7 @@ extension DatabaseManager {
         with newUnits: [ContentUnit],
         for documentID: UUID
     ) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN TRANSACTION;")
         do {
             let deleteSQL = """
@@ -2132,6 +2190,7 @@ extension DatabaseManager {
         newText: String,
         sourceTier: String
     ) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         UPDATE document_units
         SET text = ?, revision = revision + 1, source_tier = ?
@@ -2148,6 +2207,7 @@ extension DatabaseManager {
     /// Count of units for a document. Cheap; uses the
     /// `(document_id, sequence)` index.
     func unitCount(for documentID: UUID) throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "SELECT COUNT(*) FROM document_units WHERE document_id = ?;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -2163,6 +2223,7 @@ extension DatabaseManager {
     /// This is what `SpeechPlaybackService` consumes at open time.
     /// One indexed SELECT; no NLTokenizer pass.
     func sentences(for documentID: UUID) throws -> [Sentence] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT id, unit_id, unit_sequence, sentence_index, intra_start, intra_end, text
         FROM document_sentences
@@ -2199,6 +2260,7 @@ extension DatabaseManager {
     /// Used by the reader when only one unit's sentences are needed
     /// (e.g., on a single-unit replacement during Tier 3).
     func sentences(forUnitID unitID: UUID) throws -> [Sentence] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         SELECT id, document_id, unit_sequence, sentence_index, intra_start, intra_end, text
         FROM document_sentences
@@ -2237,6 +2299,7 @@ extension DatabaseManager {
     /// transaction. Used by `SentenceIndexer` at import time (initial
     /// indexing) and after every Tier 2 / Tier 3 unit edit.
     func replaceSentences(_ sentences: [Sentence], forUnitID unitID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN TRANSACTION;")
         do {
             try execute("DELETE FROM document_sentences WHERE unit_id = '\(unitID.uuidString)';")
@@ -2253,6 +2316,7 @@ extension DatabaseManager {
     /// Bulk-replace every sentence for an entire document. Used by
     /// the initial indexing pass after `replaceAllUnits` at import.
     func replaceAllSentences(_ sentences: [Sentence], for documentID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN TRANSACTION;")
         do {
             try execute("DELETE FROM document_sentences WHERE document_id = '\(documentID.uuidString)';")
@@ -2287,6 +2351,7 @@ extension DatabaseManager {
 
     /// Sentence count for a document — diagnostic / library badge.
     func sentenceCount(for documentID: UUID) throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "SELECT COUNT(*) FROM document_sentences WHERE document_id = ?;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -2307,6 +2372,7 @@ extension DatabaseManager {
     /// joining unit text — so any consumer that hasn't switched to
     /// units yet still sees a coherent document.
     func persistParsedDocument(_ parsed: ParsedDocument) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN TRANSACTION;")
         do {
             // **Step 10 — derived plainText / displayText.** The
@@ -2432,6 +2498,7 @@ extension DatabaseManager {
     /// During the per-format rollout, these may be nil for documents
     /// imported through the legacy plainText path.
     func unitSkipReferences(for documentID: UUID) throws -> (skipUnitID: UUID?, contentEndUnitID: UUID?) {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "SELECT skip_unit_id, content_end_unit_id FROM documents WHERE id = ?;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -2452,6 +2519,7 @@ extension DatabaseManager {
         contentEndUnitID: UUID?,
         for documentID: UUID
     ) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         UPDATE documents
         SET skip_unit_id = ?, content_end_unit_id = ?
@@ -2489,6 +2557,7 @@ extension DatabaseManager {
         newPageText: String,
         sourceTier: String
     ) throws -> ReplacePageUnitsResult {
+        dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN TRANSACTION;")
         do {
             // Find the page_break unit for this page, and the
@@ -2601,6 +2670,7 @@ extension DatabaseManager {
         corrected: String,
         sourceTier: String
     ) throws -> ReplaceTokenInUnitsResult {
+        dbLock.lock(); defer { dbLock.unlock() }
         let escapedOriginal = NSRegularExpression.escapedPattern(for: original)
         let pattern = "\\b" + escapedOriginal + "\\b"
         let regex = try NSRegularExpression(pattern: pattern)
@@ -2716,6 +2786,7 @@ extension DatabaseManager {
     /// callers should explicitly delete first or use
     /// `replaceAllUnitEmbeddingChunks`.
     func upsertUnitEmbeddingChunks(_ chunks: [StoredUnitEmbeddingChunk]) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         guard !chunks.isEmpty else { return }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
@@ -2769,6 +2840,7 @@ extension DatabaseManager {
     /// any stragglers via cascade, so the table is in the right state.
     func replaceAllUnitEmbeddingChunks(_ chunks: [StoredUnitEmbeddingChunk],
                                        for documentID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             if try !documentExists(documentID) {
@@ -2825,6 +2897,7 @@ extension DatabaseManager {
     /// migration coordinator's re-embed loop. Passing nil for
     /// `embedding` clears the vector (e.g. on switch + wipe).
     func updateUnitEmbeddingChunkEmbedding(id: UUID, embedding: [Double]?) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = "UPDATE unit_embedding_chunks SET embedding = ? WHERE id = ?;"
         let stmt = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(stmt) }
@@ -2843,6 +2916,7 @@ extension DatabaseManager {
     /// `EmbedderMigrationCoordinator` at swap time; the re-embed
     /// loop walks NULL rows back to filled-in.
     func nullAllUnitEmbeddingChunkEmbeddings() throws {
+        dbLock.lock(); defer { dbLock.unlock() }
         try execute("UPDATE unit_embedding_chunks SET embedding = NULL;")
     }
 
@@ -2858,6 +2932,7 @@ extension DatabaseManager {
         for documentID: UUID? = nil,
         limit: Int? = nil
     ) throws -> [UnitEmbeddingChunkNeedingEmbedding] {
+        dbLock.lock(); defer { dbLock.unlock() }
         var sql = "SELECT id, text FROM unit_embedding_chunks WHERE embedding IS NULL"
         if documentID != nil { sql += " AND document_id = ?" }
         sql += " ORDER BY document_id, chunk_index"
@@ -2883,6 +2958,7 @@ extension DatabaseManager {
     /// Total count of unit_embedding_chunks rows (both NULL and
     /// filled). Used by the migration UI to report progress.
     func unitEmbeddingChunkTotalCount() throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
         let stmt = try prepareStatement(sql: "SELECT COUNT(*) FROM unit_embedding_chunks;")
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
@@ -2893,6 +2969,7 @@ extension DatabaseManager {
     /// embedding. Used by the migration UI to report progress as
     /// `(total - needing) / total`.
     func unitEmbeddingChunkNullCount() throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
         let stmt = try prepareStatement(
             sql: "SELECT COUNT(*) FROM unit_embedding_chunks WHERE embedding IS NULL;"
         )
@@ -2905,6 +2982,7 @@ extension DatabaseManager {
     /// possibly nil). Used by the semantic-pass side of the RRF
     /// hybrid retriever — Swift-side cosine over every row's vector.
     func unitEmbeddingChunks(for documentID: UUID) throws -> [StoredUnitEmbeddingChunk] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
             SELECT id, chunk_index,
                    start_unit_id, start_intra_offset,
@@ -2975,6 +3053,7 @@ extension DatabaseManager {
         matchExpression: String,
         limit: Int
     ) throws -> [UnitEmbeddingChunkBM25Hit] {
+        dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
             SELECT c.id, c.chunk_index, bm25(unit_embedding_chunks_fts) AS score
             FROM unit_embedding_chunks_fts

@@ -959,7 +959,7 @@ extension LibraryViewModel {
                     "id": model.id,
                     "displayName": model.displayName,
                     "source": "\(model.source)",
-                    "sizeGB": model.sizeGB,
+                    "sizeGB": model.sizeGB ?? 0,
                     "contextWindow": model.contextWindow
                 ])
 
@@ -2071,6 +2071,17 @@ extension LibraryViewModel {
                         object: nil,
                         userInfo: ["target": targetID]
                     )
+                    // If a specific model was named, also expand its
+                    // accordion card so the detail card is visible for
+                    // phone verification (the header Button can't be
+                    // reached by the TAP verb).
+                    if let m = modelArg, !m.isEmpty {
+                        NotificationCenter.default.post(
+                            name: .remoteExpandAskPoseyModel,
+                            object: nil,
+                            userInfo: ["modelID": m]
+                        )
+                    }
                 }
                 return json(["status": "posted", "target": targetID])
 

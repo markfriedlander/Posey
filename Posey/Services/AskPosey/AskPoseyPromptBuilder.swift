@@ -381,13 +381,6 @@ nonisolated enum AskPoseyPromptBuilder {
     a question opens onto something unexpected, follow it. You're \
     not here to close questions down. You're here to open them up.
 
-    If the reader shares a feeling — frustration, confusion, \
-    delight, boredom — acknowledge it before you answer the \
-    question. They're a person, not a query. A blank "the document \
-    says X" answer to "I'm finding this tedious, what do you make of \
-    it?" treats the reader as a query interface, not a person trying \
-    to read a hard book.
-
     The goal is not to make reading easier. It's to make it richer.
 
     **HARD RULES — non-negotiable. Violations are FAILED replies.**
@@ -546,7 +539,12 @@ nonisolated enum AskPoseyPromptBuilder {
         // prepend cleanly.
         let activeModel = ModelCatalog.current()
         let instructions: String = {
-            if let layer1 = activeModel.layerOnePrompt, !layer1.isEmpty {
+            // Layer-1 is gated by the per-model toggle in the settings
+            // infrastructure (Hal's `layerOnePromptEnabled`, default true).
+            // CC-tuning can disable a model's Layer-1 without editing the
+            // catalog text; users never see this control.
+            let layer1Enabled = ModelSettingsStore.shared.isLayerOnePromptEnabled(for: activeModel)
+            if layer1Enabled, let layer1 = activeModel.layerOnePrompt, !layer1.isEmpty {
                 return layer1 + "\n\n" + proseInstructions
             }
             return proseInstructions

@@ -76,7 +76,7 @@ actor MLXService {
         options: LLMGenerationOptions,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
-        guard model.source == .mlx, let repoID = model.hfRepoID else {
+        guard model.source == .mlx, let repoID = model.repoID else {
             dbgLog("MLX: rejecting %@ — wrong source or missing repoID", model.id)
             throw LLMService.LLMError.modelUnavailable(modelID: model.id)
         }
@@ -135,15 +135,19 @@ actor MLXService {
         // enough — Hal documented that well-behaved MLX models still
         // occasionally drift into a degenerate repetition loop deep
         // into a long generation. The in-stream `MLXRepetitionGuard`
-        // brake below catches the residual case. See
-        // ModelConfiguration's docstring for the per-model values
-        // and the KV-quantization gotcha that's deliberately not
-        // ported.
+        // brake below catches the residual case.
+        //
+        // 2026-05-28 — the per-model penalty + context now live in
+        // `ModelSettings.defaultSettings` (Hal's per-model settings
+        // infrastructure), read here via `ModelSettingsStore`. This is
+        // the CC-tuned, not-user-exposed surface; the effective value is
+        // catalog default overlaid with any tuning override.
+        let tunedSettings = ModelSettingsStore.shared.effectiveSettings(for: model)
         let parameters = GenerateParameters(
             maxTokens: 4096,
             temperature: Float(options.temperature),
-            repetitionPenalty: model.repetitionPenalty,
-            repetitionContextSize: model.repetitionContextSize ?? 64  // matches Hal's pairing
+            repetitionPenalty: tunedSettings.repetitionPenalty,
+            repetitionContextSize: tunedSettings.repetitionContextSize ?? 64  // matches Hal's pairing
         )
 
         dbgLog("MLX: generate begin promptTokens=%d", promptTokenCount)
@@ -177,6 +181,17 @@ actor MLXService {
                             break streamLoop
                         }
                     }
+                case .info(let info):
+                    // Measured throughput for catalog calibration (task #11).
+                    // Greppable via LOGS:<n>:0 — `MLX-PERF: <model> gen=… ttft=…`.
+                    // Real numbers measured on Posey's reference phone; never
+                    // copied from Hal. `promptTime` is the prefill duration =
+                    // time-to-first-token (the reader-felt latency), warm.
+                    dbgLog("MLX-PERF: %@ gen=%.1f tok/s ttft=%.2f s promptTokens=%d",
+                           model.id,
+                           info.tokensPerSecond,
+                           info.promptTime,
+                           info.promptTokenCount)
                 default:
                     continue
                 }

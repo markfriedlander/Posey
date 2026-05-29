@@ -136,6 +136,14 @@ extension Notification.Name {
     /// (personality cards) doesn't require a UI swipe primitive that
     /// physical devices don't expose.
     static let remoteScrollPrefsToLLM = Notification.Name("PoseyRemoteScrollPrefsToLLM")
+    /// `userInfo["modelID"]: String`. AskPoseyPreferencesSection observes;
+    /// expands that model's accordion card (single-open). Posted alongside
+    /// remoteScrollPrefsToLLM by SCROLL_PREFS_TO_LLM:<id> so phone
+    /// verification can open a specific model's detail card — the accordion
+    /// header is a plain SwiftUI Button the antenna's TAP verb can't reach.
+    /// 2026-05-28 — added with the faithful Hal model-management port so
+    /// the rebuilt detail card is verifiable on real hardware.
+    static let remoteExpandAskPoseyModel = Notification.Name("PoseyRemoteExpandAskPoseyModel")
     /// No userInfo. ReaderView observes; sets `isShowingTOCSheet`.
     static let remoteOpenTOCSheet = Notification.Name("PoseyRemoteOpenTOCSheet")
     /// No userInfo. ReaderView observes; presents `VoicePickerView` as a

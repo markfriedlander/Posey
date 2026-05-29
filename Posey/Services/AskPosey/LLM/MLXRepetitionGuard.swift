@@ -4,7 +4,7 @@ import Foundation
 
 /// In-stream runaway-loop brake for MLX text generation. Even with
 /// `GenerateParameters.repetitionPenalty: 1.1` configured per-model
-/// (see `ModelConfiguration.repetitionPenalty`), an MLX model
+/// (see `ModelSettings.repetitionPenalty`), an MLX model
 /// occasionally still drifts into a degenerate repetition loop deep
 /// into a long generation — Gemma is the most prone in our catalog.
 /// Without an in-stream check, the loop continues to the 4096-token

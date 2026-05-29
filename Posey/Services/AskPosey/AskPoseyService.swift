@@ -1071,9 +1071,6 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
     /// Temperature held at 0.2 — summarization wants determinism, not
     /// creative reinterpretation.
     func summarizeConversation(turns: [AskPoseyMessage]) async throws -> String {
-        guard model.availability == .available else {
-            throw AskPoseyServiceError.afmUnavailable
-        }
         guard !turns.isEmpty else { return "" }
 
         let summaryInstructions = """
@@ -1098,20 +1095,38 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         \(transcriptLines.joined(separator: "\n\n"))
         """
 
-        let session = LanguageModelSession(
-            model: model,
-            instructions: summaryInstructions
-        )
+        // 2026-05-29 — PRIVACY FIX (#4). Route the summary through the
+        // ACTIVE model via the unified LLMService dispatch, NOT a
+        // hardcoded AFM `LanguageModelSession`. If a user downloaded an
+        // on-device MLX model specifically for privacy, silently
+        // summarizing via AFM in the background could reach Apple's
+        // Private Cloud Compute (off-device) — quietly violating the
+        // exact thing they chose MLX to get. The summarizer must respect
+        // the model choice the same way the main answer does. (Also fixes
+        // a voice inconsistency where an MLX user's answers were MLX but
+        // their summaries were AFM.) Mirrors `streamProseResponseMLX`'s
+        // dispatch; `ModelCatalog.current()` is the user's selection.
+        let messages: [ChatMessage] = [
+            ChatMessage(role: .system, content: summaryInstructions),
+            ChatMessage(role: .user, content: body)
+        ]
+        let summarizerModel = ModelCatalog.current()
+        // Audit line — records which model generated the summary so the
+        // privacy-respecting routing (#4) is observable in LOGS, not just
+        // assumed. An MLX-for-privacy user should never see AFM here.
+        dbgLog("AskPosey summary via model %@ (source=%@)",
+               summarizerModel.id as NSString,
+               summarizerModel.source.rawValue as NSString)
         var accumulated = ""
         do {
-            let stream = session.streamResponse(
-                options: GenerationOptions(temperature: 0.2)
-            ) { Prompt(body) }
+            let stream = LLMService.shared.streamChat(
+                messages: messages,
+                model: summarizerModel,
+                options: LLMGenerationOptions(temperature: 0.2)
+            )
             for try await snapshot in stream {
-                accumulated = snapshot.content
+                accumulated = snapshot
             }
-        } catch let g as LanguageModelSession.GenerationError {
-            throw Self.translate(g)
         } catch is CancellationError {
             throw CancellationError()
         } catch {

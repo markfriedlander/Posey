@@ -1330,6 +1330,49 @@ extension LibraryViewModel {
                 _ = arg
                 return #"{\"error\":\"LIST_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
+            case "EXPORT_EMBEDDINGS":
+                // EXPORT_EMBEDDINGS:<doc-id>[:<maxCount>]
+                //
+                // 2026-05-30 — exports real chunk embeddings (+ short text)
+                // for the off-device k-means cluster-coherence measurement
+                // (RAPTOR tier gate: do Posey's embeddings cluster
+                // coherently enough to summarize?). Strided even sample to
+                // keep the payload small; embeddings rounded to 4 decimals
+                // (plenty for cosine/k-means).
+                let parts = (arg ?? "").split(separator: ":", maxSplits: 1).map(String.init)
+                guard let first = parts.first,
+                      let id = UUID(uuidString: first.trimmingCharacters(in: .whitespaces)) else {
+                    return #"{"error":"Usage: EXPORT_EMBEDDINGS:<doc-id>[:<maxCount>]"}"#
+                }
+                let maxCount = parts.count > 1 ? (Int(parts[1].trimmingCharacters(in: .whitespaces)) ?? 600) : 600
+                let all = ((try? databaseManager.unitEmbeddingChunks(for: id)) ?? [])
+                    .filter { $0.embedding != nil }
+                let stride = max(1, all.count / max(1, maxCount))
+                var sampled: [[String: Any]] = []
+                var i = 0
+                while i < all.count {
+                    let c = all[i]
+                    if let emb = c.embedding {
+                        sampled.append([
+                            "idx": c.chunkIndex,
+                            "text": String(c.text.prefix(160)).replacingOccurrences(of: "\n", with: " "),
+                            "emb": emb.map { ($0 * 10000).rounded() / 10000 }
+                        ])
+                    }
+                    i += stride
+                }
+                let payloadX: [String: Any] = [
+                    "documentID": id.uuidString,
+                    "total": all.count,
+                    "sampled": sampled.count,
+                    "stride": stride,
+                    "dim": all.first?.embedding?.count ?? 0,
+                    "chunks": sampled
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: payloadX),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"EXPORT_EMBEDDINGS serialization failed"}"#
+
             case "LIST_HEADINGS":
                 // LIST_HEADINGS:<doc-id>
                 //

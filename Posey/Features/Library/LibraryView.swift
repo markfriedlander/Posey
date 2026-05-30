@@ -1340,6 +1340,56 @@ extension LibraryViewModel {
                 _ = arg
                 return #"{\"error\":\"RAG_FIND removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
+            case "RAG_DEBUG":
+                // RAG_DEBUG:<doc-id>:<query>
+                //
+                // 2026-05-30 — Hal-style retrieval observability (ported
+                // from Hal's MEMORY_SEARCH_DEBUG). Runs the REAL
+                // HybridRetriever.retrieve() but with a GENEROUS limit
+                // (25) so the full candidate ranking is visible — not just
+                // the ~2 chunks that survive AFM's tiny prompt budget in a
+                // live /ask. For every candidate it returns the fused RRF
+                // relevance AND the separate semantic-cosine + semantic-rank
+                // + BM25-rank, so the tuning loop can SEE why a chunk did or
+                // didn't rank, instead of inferring it from the 2 injected
+                // chunks. Plus outcome-level gate state (bm25Excluded,
+                // topRelevance) and the fixed RRF constants in effect.
+                guard let parts = arg?.split(separator: ":", maxSplits: 1).map(String.init),
+                      parts.count == 2,
+                      let docID = UUID(uuidString: parts[0].trimmingCharacters(in: .whitespaces)) else {
+                    return #"{"error":"RAG_DEBUG requires <doc-id>:<query>"}"#
+                }
+                let query = parts[1]
+                let retriever = HybridRetriever(database: databaseManager)
+                let outcome = retriever.retrieve(documentID: docID, query: query, limit: 25)
+                let candidates: [[String: Any]] = outcome.results.enumerated().map { (i, c) in
+                    var row: [String: Any] = [
+                        "rank": i + 1,
+                        "chunkID": c.chunkID,
+                        "rrf": (c.relevance * 100000).rounded() / 100000,
+                        "semanticScore": c.semanticScore.map { ($0 * 1000).rounded() / 1000 as Any } ?? NSNull(),
+                        "semanticRank": c.semanticRank.map { $0 as Any } ?? NSNull(),
+                        "bm25Rank": c.bm25Rank.map { $0 as Any } ?? NSNull(),
+                        "textPreview": String(c.text.prefix(160)).replacingOccurrences(of: "\n", with: " ")
+                    ]
+                    // Flag the BM25-only signal explicitly (semantic dark on
+                    // this chunk) — the case that fabricates answers.
+                    row["bm25Only"] = (c.semanticScore == nil)
+                    return row
+                }
+                let payload: [String: Any] = [
+                    "documentID": docID.uuidString,
+                    "query": query,
+                    "candidateCount": outcome.results.count,
+                    "topRelevance": (outcome.topRelevance * 100000).rounded() / 100000,
+                    "bm25Excluded": outcome.bm25Excluded,
+                    "confidenceFloor": (HybridRetriever.confidenceFloor * 100000).rounded() / 100000,
+                    "candidates": candidates
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: payload),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"RAG_DEBUG serialization failed"}"#
+
             case "GET_ASK_POSEY_HISTORY":
                 // 2026-05-05 — RAG diagnostic helper. Args:
                 //   <doc-id>[:<limit>]

@@ -40,6 +40,18 @@ nonisolated struct RetrievedChunk: Sendable, Equatable, Codable {
     /// includes it with a default — a `let` with a default value is
     /// excluded from the memberwise init.
     var semanticScore: Double? = nil
+    /// 1-indexed rank of this chunk in the SEMANTIC (cosine) pass, or
+    /// `nil` if it did not appear in the semantic candidate list.
+    /// Diagnostic — surfaced by the `RAG_DEBUG` verb so the tuning loop
+    /// can see the separate semantic vs BM25 contributions to the fused
+    /// RRF score, rather than only the fused `relevance`. Optional +
+    /// defaulted so persisted rows from before this field decode cleanly.
+    var semanticRank: Int? = nil
+    /// 1-indexed rank of this chunk in the BM25 (lexical/FTS5) pass, or
+    /// `nil` if it did not appear in the BM25 candidate list (or BM25 was
+    /// gate-excluded from fusion). Same diagnostic purpose + decode-clean
+    /// contract as `semanticRank`.
+    var bm25Rank: Int? = nil
 }
 
 /// Per-section token cost of a built prompt. Sum equals the total

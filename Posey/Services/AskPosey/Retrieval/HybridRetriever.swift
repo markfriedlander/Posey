@@ -251,7 +251,12 @@ struct HybridRetriever {
                     // rank). The weak-retrieval gate reads this rather
                     // than the RRF `relevance`, because the strictness
                     // band is calibrated on the cosine scale.
-                    semanticScore: semanticScores[id]
+                    semanticScore: semanticScores[id],
+                    // Per-pass ranks for RAG_DEBUG observability. `bm25Rank`
+                    // is nil when BM25 was gate-excluded (the chunk's BM25
+                    // rank, if any, did not contribute to fusion).
+                    semanticRank: semanticRanks[id],
+                    bm25Rank: bm25Excluded ? nil : bm25Ranks[id]
                 )
             }
 

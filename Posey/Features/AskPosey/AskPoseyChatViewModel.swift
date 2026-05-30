@@ -110,6 +110,14 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     private var documentAuthors: [String]?
     private var documentYear: String?
 
+    /// 2026-05-30 — STRUCTURED KNOWLEDGE injection (mechanism proof). When
+    /// set (currently only via the /ask `structuredKnowledge` field), a
+    /// hand-written source-verified chapter summary is passed into the
+    /// prompt builder as a labeled, non-droppable, supplement-not-replace
+    /// block alongside the raw RAG chunks. Proves whether a perfect
+    /// summary improves answers before any generation pipeline is built.
+    var injectedStructuredKnowledge: String?
+
     /// Document the conversation is anchored to. Used for both
     /// SQLite reads (prior history) and writes (every turn appends).
     let documentID: UUID
@@ -1808,7 +1816,8 @@ extension AskPoseyChatViewModel {
                     documentTitle: self.documentTitle,
                     documentPlainText: self.documentPlainText,
                     documentAuthors: self.documentAuthors,
-                    documentYear: self.documentYear
+                    documentYear: self.documentYear,
+                    structuredKnowledge: self.injectedStructuredKnowledge
                 )
 
                 do {

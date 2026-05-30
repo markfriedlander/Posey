@@ -166,6 +166,18 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
     let documentAuthors: [String]?
     let documentYear: String?
 
+    /// 2026-05-30 — STRUCTURED KNOWLEDGE (mechanism proof). When non-nil,
+    /// a synthesized, source-verified high-level summary (e.g. a chapter
+    /// summary) is rendered as a non-droppable, clearly-labeled context
+    /// block ALONGSIDE the raw RAG chunks — never replacing them. Frames
+    /// the summary as orientation and the excerpts as the authoritative
+    /// actual text, so the model uses the summary to bridge the
+    /// natural-question-vs-passage vocabulary gap while the raw text
+    /// remains the truth. In the proof experiment this is hand-written and
+    /// injected via the /ask `structuredKnowledge` field; the future tier
+    /// would retrieve the relevant generated+verified summary here.
+    let structuredKnowledge: String?
+
     init(
         intent: AskPoseyIntent,
         anchor: AskPoseyAnchor?,
@@ -179,7 +191,8 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         documentTitle: String? = nil,
         documentPlainText: String? = nil,
         documentAuthors: [String]? = nil,
-        documentYear: String? = nil
+        documentYear: String? = nil,
+        structuredKnowledge: String? = nil
     ) {
         self.intent = intent
         self.anchor = anchor
@@ -194,6 +207,7 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         self.documentPlainText = documentPlainText
         self.documentAuthors = documentAuthors
         self.documentYear = documentYear
+        self.structuredKnowledge = structuredKnowledge
     }
 }
 
@@ -620,6 +634,13 @@ nonisolated enum AskPoseyPromptBuilder {
             year: inputs.documentYear)
         let metadataTokens = metadataBlock.map { AskPoseyTokenEstimator.tokens(in: $0) } ?? 0
 
+        // -------- STRUCTURED KNOWLEDGE (non-droppable; supplement, never
+        //   replace). High-level source-verified orientation rendered
+        //   alongside — and explicitly subordinate to — the raw excerpts.
+        let structuredKnowledgeBlock = renderStructuredKnowledgeBlock(inputs.structuredKnowledge)
+        let structuredKnowledgeTokens = structuredKnowledgeBlock
+            .map { AskPoseyTokenEstimator.tokens(in: $0) } ?? 0
+
         // -------- ANCHOR (non-droppable when present) --------
         var anchorBlock: String? = nil
         if let anchor = inputs.anchor,
@@ -664,6 +685,7 @@ nonisolated enum AskPoseyPromptBuilder {
         // -------- Compute droppable budget --------
         let nonDroppable = breakdown.system
             + metadataTokens
+            + structuredKnowledgeTokens
             + breakdown.anchor
             + breakdown.surrounding
             + breakdown.userQuestion
@@ -754,6 +776,7 @@ nonisolated enum AskPoseyPromptBuilder {
         // sentence over chunks pulled from elsewhere.
         var sections: [String] = []
         if let metadataBlock { sections.append(metadataBlock) }
+        if let structuredKnowledgeBlock { sections.append(structuredKnowledgeBlock) }
         if let anchorBlock { sections.append(anchorBlock) }
         if let summaryBlock { sections.append(summaryBlock) }
         if !stmRendered.isEmpty { sections.append(stmRendered) }
@@ -1275,6 +1298,15 @@ private extension AskPoseyPromptBuilder {
         return """
         DOCUMENT METADATA (authoritative facts about THIS document — use these to answer questions about the work's title, author, or publication year; trust them over anything in the excerpts below, which may quote an editor's preface discussing other authors or dates):
         \(lines.joined(separator: "\n"))
+        """
+    }
+
+    static func renderStructuredKnowledgeBlock(_ summary: String?) -> String? {
+        guard let s = summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !s.isEmpty else { return nil }
+        return """
+        CHAPTER SUMMARY (a high-level, source-verified orientation for the part of THIS document the question is about — use it to understand what the relevant passage discusses and to connect the reader's plain question to the text. It is a summary, not the source: the EXCERPTS below are the actual words of the document and are authoritative for exact wording, quotations, and specific detail. If the summary and an excerpt disagree, trust the excerpt.):
+        \(s)
         """
     }
 

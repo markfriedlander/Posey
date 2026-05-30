@@ -2992,6 +2992,15 @@ extension LibraryViewModel {
         )
         await viewModel.awaitHistoryLoaded()
 
+        // 2026-05-30 — structured-knowledge mechanism proof. Optional
+        // `structuredKnowledge` body field injects a hand-written,
+        // source-verified chapter summary as a labeled supplement-not-
+        // replace block alongside the raw RAG chunks. Absent → baseline.
+        if let sk = body["structuredKnowledge"] as? String,
+           !sk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            viewModel.injectedStructuredKnowledge = sk
+        }
+
         viewModel.inputText = question
         if classifier != nil, streamer != nil {
             #if canImport(FoundationModels)

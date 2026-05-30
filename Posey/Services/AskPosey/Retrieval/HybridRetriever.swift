@@ -118,7 +118,8 @@ struct HybridRetriever {
     /// by RRF score. Empty if the document has no chunks at all.
     func retrieve(documentID: UUID,
                   query: String,
-                  limit: Int) -> RetrievalOutcome {
+                  limit: Int,
+                  expansionTerms: [String] = []) -> RetrievalOutcome {
         let cleanedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanedQuery.isEmpty else {
             return RetrievalOutcome(results: [], topRelevance: 0, bm25Excluded: false)
@@ -157,8 +158,12 @@ struct HybridRetriever {
         }
 
         // ── 2. BM25 PASS. Sanitize the user's natural-language
-        //   question into an FTS5 MATCH expression.
-        let matchExpr = Self.makeBM25MatchExpression(cleanedQuery)
+        //   question into an FTS5 MATCH expression. `expansionTerms`
+        //   (LLM-supplied bridging vocabulary, empty on the normal path)
+        //   are OR'd in so a paraphrased question can reach a passage
+        //   that uses different words than the reader did. The semantic
+        //   pass above is intentionally NOT expanded.
+        let matchExpr = Self.makeBM25MatchExpression(cleanedQuery, extraTerms: expansionTerms)
         var bm25Ranks: [UUID: Int] = [:]         // 1-indexed
         var bm25TopAbs: Double = 0
         if let matchExpr = matchExpr {
@@ -276,13 +281,24 @@ struct HybridRetriever {
     ///   2. Drop stopwords + tokens shorter than 2 characters.
     ///   3. OR the remaining tokens.
     /// Returns nil when no usable content tokens remain.
-    static func makeBM25MatchExpression(_ query: String) -> String? {
-        let lowered = query.lowercased()
-        let tokens = lowered
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { token in
-                token.count >= 2 && !lexicalStopwords.contains(token)
+    static func makeBM25MatchExpression(_ query: String,
+                                        extraTerms: [String] = []) -> String? {
+        // Tokenize the question + any LLM expansion terms with the same
+        // rules, then dedupe and OR. Expansion terms may be multi-word
+        // phrases ("drizzly november"); we split them into their content
+        // tokens too so FTS5 matches each word.
+        let sources = [query] + extraTerms
+        var seen = Set<String>()
+        var tokens: [String] = []
+        for source in sources {
+            let lowered = source.lowercased()
+            for token in lowered.components(separatedBy: CharacterSet.alphanumerics.inverted) {
+                guard token.count >= 2, !lexicalStopwords.contains(token) else { continue }
+                guard !seen.contains(token) else { continue }
+                seen.insert(token)
+                tokens.append(token)
             }
+        }
         guard !tokens.isEmpty else { return nil }
         return tokens.joined(separator: " OR ")
     }

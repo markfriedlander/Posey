@@ -853,7 +853,7 @@ private extension AskPoseyChatViewModel {
     /// 1.0 — the budget enforcer keeps them by virtue of being
     /// top-of-list, and meta-questions get reliable grounding
     /// regardless of scope. Cost is small (~1800 chars).
-    func retrieveRAGChunks(for question: String) -> [RetrievedChunk] {
+    func retrieveRAGChunks(for question: String) async -> [RetrievedChunk] {
         // 2026-05-23 — Step 8f: retrieval flows exclusively through
         // HybridRetriever (semantic via the active EmbeddingProvider
         // backend over unit_embedding_chunks + BM25 via FTS5 mirror,
@@ -865,9 +865,41 @@ private extension AskPoseyChatViewModel {
             return []
         }
         let retriever = HybridRetriever(database: db)
-        let outcome = retriever.retrieve(
+        let base = retriever.retrieve(
             documentID: documentID, query: question, limit: ragTopK
         )
+
+        // 2026-05-30 — QUERY EXPANSION (Hal QueryExpansion port). When the
+        // base retrieval is weak (low fused top-1) OR lexically-
+        // unsupported (top results all BM25-only — the natural-question-
+        // vs-passage vocabulary gap measured via RAG_DEBUG on P&P), ask
+        // the active LLM for bridging terms, OR them into the BM25 pass,
+        // and re-retrieve. Keep-if-better: adopt the expanded result only
+        // when it improves the fused top-1 (Hal's `>=`), so expansion can
+        // only help. Semantic pass is NOT expanded. Cost: one LLM call on
+        // weak turns only (Rule 6 — local inference is effectively free).
+        var outcome = base
+        if AskPoseyQueryExpansion.isEnabled,
+           let reason = AskPoseyQueryExpansion.triggerReason(
+            topRelevance: base.topRelevance, topChunks: base.results
+        ) {
+            let terms = await AskPoseyQueryExpansion.expand(query: question)
+            if terms.isEmpty {
+                dbgLog("AskPosey expansion: trigger=%@ but LLM returned no terms", reason)
+            } else {
+                let expanded = retriever.retrieve(
+                    documentID: documentID, query: question,
+                    limit: ragTopK, expansionTerms: terms
+                )
+                let kept = expanded.topRelevance >= base.topRelevance
+                dbgLog("AskPosey expansion: trigger=%@ terms=[%@] baseTop=%.4f expandedTop=%.4f kept=%@",
+                       reason, terms.joined(separator: ","),
+                       base.topRelevance, expanded.topRelevance,
+                       kept ? "expanded" : "base")
+                if kept { outcome = expanded }
+            }
+        }
+
         self.lastRetrievalTopRelevance = outcome.topRelevance
         self.lastRetrievalBM25Excluded = outcome.bm25Excluded
         let translated: [RetrievedChunk] = outcome.results.map { rc in
@@ -1674,7 +1706,7 @@ extension AskPoseyChatViewModel {
                 // picks the best 3-6 from the list.
                 let chunks: [RetrievedChunk]
                 if intent == .search {
-                    chunks = self.retrieveRAGChunks(for: trimmedInput)
+                    chunks = await self.retrieveRAGChunks(for: trimmedInput)
                     if let navigator = self.navigator, !chunks.isEmpty {
                         await self.runSearchPipeline(
                             question: trimmedInput,
@@ -1690,7 +1722,7 @@ extension AskPoseyChatViewModel {
                     // anchor + STM only, which is honest about
                     // not-grounded.
                 } else {
-                    chunks = self.retrieveRAGChunks(for: trimmedInput)
+                    chunks = await self.retrieveRAGChunks(for: trimmedInput)
                 }
 
                 // 2026-05-04 — Confidence signal for weak retrieval.

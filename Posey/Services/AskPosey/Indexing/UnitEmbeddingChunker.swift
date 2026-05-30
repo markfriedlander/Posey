@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 // ========== BLOCK 01: UNIT EMBEDDING CHUNKER - START ==========
 
@@ -41,16 +42,24 @@ struct UnitEmbeddingChunker {
         let chunkSize: Int
         let chunkOverlap: Int
 
-        static let `default` = Configuration(chunkSize: 500, chunkOverlap: 50)
-        static let longDocument = Configuration(chunkSize: 1000, chunkOverlap: 100)
+        // 2026-05-30 — sentence-aware sizing. Hal's proven `createMentat
+        // Chunks` value is 400 chars / 50 overlap for ALL document sizes.
+        // The prior adaptive 1000-char window for long docs was MEASURED
+        // (RAG_DEBUG + FIND_CHUNK on Pride & Prejudice) to dilute key
+        // passages — the famous Darcy "tolerable" line was buried, intact,
+        // inside a 1000-char chunk and never ranked for the natural
+        // question. Sentence-aware chunking makes size far less
+        // length-dependent (a chunk is a small group of whole sentences
+        // regardless of doc length), so a single tight size is correct.
+        static let `default` = Configuration(chunkSize: 400, chunkOverlap: 50)
+        static let longDocument = Configuration(chunkSize: 400, chunkOverlap: 50)
         static let longDocumentThresholdChars: Int = 200_000
 
-        /// Pick the right config for a document by total prose
-        /// length. Mirrors `DocumentEmbeddingIndexConfiguration
-        /// .adaptive(forCharacterCount:)` exactly so users see the
-        /// same chunk granularity they're used to.
+        /// All document sizes use the same sentence-aware 400/50 config now.
+        /// `adaptive` is retained for call-site compatibility.
         static func adaptive(forCharacterCount count: Int) -> Configuration {
-            count >= longDocumentThresholdChars ? .longDocument : .default
+            _ = count
+            return .default
         }
     }
 
@@ -148,42 +157,103 @@ struct UnitEmbeddingChunker {
 
         guard !flatText.isEmpty else { return [] }
 
-        // ── 2. Slide a window of `chunkSize` chars with
-        //   `chunkOverlap` overlap and emit chunks. Step =
-        //   chunkSize - chunkOverlap; defensive minimum of 1 so we
-        //   always make progress.
-        let step = max(config.chunkSize - config.chunkOverlap, 1)
+        // ── 2. SENTENCE-AWARE windowing (2026-05-30).
+        //
+        // Previously a pure character-offset sliding window cut chunks at
+        // exact `chunkSize` positions — mid-sentence, even mid-word — and
+        // long docs used a 1000-char window. RAG_DEBUG + FIND_CHUNK on
+        // Pride & Prejudice showed the cost: the famous "She is tolerable,
+        // but not handsome enough to tempt me" line lived INTACT inside a
+        // 1000-char chunk alongside the Bingley/Darcy lead-in, an embedded
+        // "[Copyright 1894...]" artifact, and the aftermath — so the
+        // chunk's averaged embedding washed the key sentence's signal out;
+        // it ranked #1 only when queried with its own words, and vanished
+        // for the reader's natural question. Hal's proven strategy
+        // (`createMentatChunks`: ~400 chars, sentence-aware, whole-sentence
+        // overlap) isolates a passage into a tighter, less-diluted unit.
+        // Ported here onto Posey's unit-anchored ribbon: cut at sentence
+        // boundaries; map each chunk's char span to (unit, intra-offset)
+        // via the same per-char arrays, so jump-back / enhancement scope
+        // are unchanged. Smaller chunks also help BM25 precision and let
+        // AFM's scarce ~2-chunk budget hold tighter passages.
         let totalChars = flatText.count
+
+        // Sentence boundaries in flat-ribbon char-offset space. Offsets
+        // accumulate between consecutive token ranges so the whole pass is
+        // O(n), not O(n²) on distance(from:).
+        var sentenceBounds: [(start: Int, end: Int)] = []
+        do {
+            let tokenizer = NLTokenizer(unit: .sentence)
+            tokenizer.string = flatText
+            var prevIndex = flatText.startIndex
+            var prevOffset = 0
+            tokenizer.enumerateTokens(in: flatText.startIndex..<flatText.endIndex) { range, _ in
+                let startOff = prevOffset + flatText.distance(from: prevIndex, to: range.lowerBound)
+                let endOff = startOff + flatText.distance(from: range.lowerBound, to: range.upperBound)
+                if endOff > startOff { sentenceBounds.append((startOff, endOff)) }
+                prevIndex = range.upperBound
+                prevOffset = endOff
+                return true
+            }
+        }
+        // Degenerate fallback: no sentence structure → one chunk for the
+        // whole ribbon (rare; e.g. a single token-less unit).
+        if sentenceBounds.isEmpty {
+            sentenceBounds = [(0, totalChars)]
+        }
+
+        let target = config.chunkSize
+        let overlap = config.chunkOverlap
         var chunks: [StoredUnitEmbeddingChunk] = []
         var chunkIndex = 0
-        var cursor = 0
+        var i = 0
 
-        while cursor < totalChars {
-            let endExclusive = min(cursor + config.chunkSize, totalChars)
-            let startCharIdx = flatText.index(flatText.startIndex, offsetBy: cursor)
-            let endCharIdx = flatText.index(flatText.startIndex, offsetBy: endExclusive)
+        func emit(_ startOff: Int, _ endOff: Int) {
+            let s = max(0, startOff)
+            let e = min(endOff, totalChars)
+            guard e > s else { return }
+            let startCharIdx = flatText.index(flatText.startIndex, offsetBy: s)
+            let endCharIdx = flatText.index(flatText.startIndex, offsetBy: e)
             let slice = String(flatText[startCharIdx..<endCharIdx])
-
-            let startUnitID = unitIDPerChar[cursor]
-            let startIntra = intraOffsetPerChar[cursor]
-            let endUnitID = unitIDPerChar[endExclusive - 1]
-            let endIntra = intraOffsetPerChar[endExclusive - 1]
-
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !slice.isEmpty else { return }
             chunks.append(StoredUnitEmbeddingChunk(
                 id: UUID(),
                 documentID: documentID,
                 chunkIndex: chunkIndex,
-                startUnitID: startUnitID,
-                startIntraOffset: startIntra,
-                endUnitID: endUnitID,
-                endIntraOffset: endIntra,
+                startUnitID: unitIDPerChar[s],
+                startIntraOffset: intraOffsetPerChar[s],
+                endUnitID: unitIDPerChar[e - 1],
+                endIntraOffset: intraOffsetPerChar[e - 1],
                 text: slice,
                 embedding: nil
             ))
             chunkIndex += 1
+        }
 
-            if endExclusive >= totalChars { break }
-            cursor += step
+        while i < sentenceBounds.count {
+            let chunkStart = sentenceBounds[i].start
+            // Grow the chunk one whole sentence at a time up to `target`.
+            // Always include at least the first sentence (a single
+            // over-long sentence becomes its own chunk).
+            var j = i
+            while j + 1 < sentenceBounds.count,
+                  sentenceBounds[j + 1].end - chunkStart <= target {
+                j += 1
+            }
+            let chunkEnd = sentenceBounds[j].end
+            emit(chunkStart, chunkEnd)
+
+            if j + 1 >= sentenceBounds.count { break }
+
+            // Overlap: next chunk begins with the trailing whole sentences
+            // of this one that fit within `overlap` chars. Bounded below by
+            // i+1 so we always advance.
+            var k = j + 1
+            while k - 1 > i, chunkEnd - sentenceBounds[k - 1].start <= overlap {
+                k -= 1
+            }
+            i = k
         }
 
         return chunks

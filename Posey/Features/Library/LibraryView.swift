@@ -977,6 +977,16 @@ extension LibraryViewModel {
                     "contextWindow": model.contextWindow
                 ])
 
+            case "SET_QUERY_EXPANSION":
+                // SET_QUERY_EXPANSION:on|off — production gate for the
+                // LLM query-expansion lever (default OFF; value unproven on
+                // P&P — ties only). RAG_DEBUG_EXPANDED measures it
+                // regardless of this flag.
+                let raw = (arg ?? "").lowercased().trimmingCharacters(in: .whitespaces)
+                let on = (raw == "on" || raw == "true" || raw == "1" || raw == "yes")
+                UserDefaults.standard.set(on, forKey: "askPoseyQueryExpansionEnabled")
+                return json(["status": "ok", "queryExpansionEnabled": on])
+
             case "SET_EMBEDDING_PROVIDER":
                 // 2026-05-27 — rewired to the post-8f EmbedderMigrationCoordinator.
                 // Args: "nlcontextual" | "nomic". Triggers download (if needed) +
@@ -1320,6 +1330,45 @@ extension LibraryViewModel {
                 _ = arg
                 return #"{\"error\":\"LIST_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
+            case "FIND_CHUNK":
+                // FIND_CHUNK:<doc-id>:<substring>
+                //
+                // 2026-05-30 — chunking diagnostic (Rule 5 render-and-look).
+                // Returns the FULL text of every retrieval chunk whose text
+                // contains <substring> (case-insensitive), with its index,
+                // char length, and start/end unit. Tells us definitively
+                // whether a passage lives as one clean chunk, is split across
+                // a boundary, or is buried inside a larger window.
+                guard let parts = arg?.split(separator: ":", maxSplits: 1).map(String.init),
+                      parts.count == 2,
+                      let docID = UUID(uuidString: parts[0].trimmingCharacters(in: .whitespaces)) else {
+                    return #"{"error":"FIND_CHUNK requires <doc-id>:<substring>"}"#
+                }
+                let needle = parts[1].lowercased()
+                let allChunks = (try? databaseManager.unitEmbeddingChunks(for: docID)) ?? []
+                let matches = allChunks
+                    .filter { $0.text.lowercased().contains(needle) }
+                    .map { c -> [String: Any] in
+                        [
+                            "chunkIndex": c.chunkIndex,
+                            "length": c.text.count,
+                            "startUnit": c.startUnitID.uuidString,
+                            "endUnit": c.endUnitID.uuidString,
+                            "spansUnits": c.startUnitID != c.endUnitID,
+                            "text": c.text
+                        ]
+                    }
+                let payloadF: [String: Any] = [
+                    "documentID": docID.uuidString,
+                    "needle": parts[1],
+                    "totalChunks": allChunks.count,
+                    "matchCount": matches.count,
+                    "matches": matches
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: payloadF),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"FIND_CHUNK serialization failed"}"#
+
             case "EMBED_QUERY_CONTEXTUAL":
                 // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
                 _ = arg
@@ -1389,6 +1438,79 @@ extension LibraryViewModel {
                 if let data = try? JSONSerialization.data(withJSONObject: payload),
                    let s = String(data: data, encoding: .utf8) { return s }
                 return #"{"error":"RAG_DEBUG serialization failed"}"#
+
+            case "RAG_DEBUG_EXPANDED":
+                // RAG_DEBUG_EXPANDED:<doc-id>:<query>
+                //
+                // 2026-05-30 — measurement tool for the query-expansion
+                // lever (Hal MEMORY_SEARCH_EXPANDED parallel). Runs the
+                // SAME two-pass flow the chat path uses: base retrieve →
+                // trigger check → LLM expand (active model) → re-retrieve
+                // with terms OR'd into BM25 → keep-if-better. Returns the
+                // trigger reason, the LLM terms, base-vs-expanded top
+                // relevance, whether it was kept, and the top candidates
+                // of BOTH passes so the recall lift is visible. Generous
+                // limit (25). Idempotent / read-only (no cache write).
+                guard let parts = arg?.split(separator: ":", maxSplits: 1).map(String.init),
+                      parts.count == 2,
+                      let docID = UUID(uuidString: parts[0].trimmingCharacters(in: .whitespaces)) else {
+                    return #"{"error":"RAG_DEBUG_EXPANDED requires <doc-id>:<query>"}"#
+                }
+                let query = parts[1]
+                let retriever = HybridRetriever(database: databaseManager)
+                let base = retriever.retrieve(documentID: docID, query: query, limit: 25)
+                let reason = AskPoseyQueryExpansion.triggerReason(
+                    topRelevance: base.topRelevance, topChunks: base.results
+                )
+                var terms: [String] = []
+                var expandedTop: Double? = nil
+                var expandedCandidates: [[String: Any]] = []
+                var kept = false
+                if reason != nil {
+                    terms = await AskPoseyQueryExpansion.expand(query: query)
+                    if !terms.isEmpty {
+                        let expanded = retriever.retrieve(
+                            documentID: docID, query: query, limit: 25, expansionTerms: terms
+                        )
+                        expandedTop = (expanded.topRelevance * 100000).rounded() / 100000
+                        kept = expanded.topRelevance >= base.topRelevance
+                        expandedCandidates = expanded.results.prefix(8).enumerated().map { (i, c) in
+                            [
+                                "rank": i + 1,
+                                "rrf": (c.relevance * 100000).rounded() / 100000,
+                                "semanticScore": c.semanticScore.map { ($0 * 1000).rounded() / 1000 as Any } ?? NSNull(),
+                                "bm25Rank": c.bm25Rank.map { $0 as Any } ?? NSNull(),
+                                "bm25Only": (c.semanticScore == nil),
+                                "textPreview": String(c.text.prefix(140)).replacingOccurrences(of: "\n", with: " ")
+                            ]
+                        }
+                    }
+                }
+                let baseCandidates: [[String: Any]] = base.results.prefix(8).enumerated().map { (i, c) in
+                    [
+                        "rank": i + 1,
+                        "rrf": (c.relevance * 100000).rounded() / 100000,
+                        "semanticScore": c.semanticScore.map { ($0 * 1000).rounded() / 1000 as Any } ?? NSNull(),
+                        "bm25Rank": c.bm25Rank.map { $0 as Any } ?? NSNull(),
+                        "bm25Only": (c.semanticScore == nil),
+                        "textPreview": String(c.text.prefix(140)).replacingOccurrences(of: "\n", with: " ")
+                    ]
+                }
+                let payloadE: [String: Any] = [
+                    "documentID": docID.uuidString,
+                    "query": query,
+                    "triggered": reason != nil,
+                    "triggerReason": reason ?? NSNull(),
+                    "expansionTerms": terms,
+                    "baseTopRelevance": (base.topRelevance * 100000).rounded() / 100000,
+                    "expandedTopRelevance": expandedTop.map { $0 as Any } ?? NSNull(),
+                    "kept": kept ? "expanded" : "base",
+                    "baseCandidates": baseCandidates,
+                    "expandedCandidates": expandedCandidates
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: payloadE),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"RAG_DEBUG_EXPANDED serialization failed"}"#
 
             case "GET_ASK_POSEY_HISTORY":
                 // 2026-05-05 — RAG diagnostic helper. Args:

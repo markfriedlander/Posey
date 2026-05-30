@@ -419,7 +419,20 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             // unreliable on AFM's macro-generated enum case in this
             // Swift toolchain). Either path leads to the retry; the
             // string check is the safety net.
-            let isRefusal: Bool
+            //
+            // Extended 2026-05-30: `.guardrailViolation` is routed into
+            // the SAME neutral-rephrasing retry as `.refusal`. AFM's
+            // safety guardrail false-positives on ordinary literary
+            // questions (e.g. "what did he say about her that was so
+            // insulting?" on Pride & Prejudice trips it as "sensitive
+            // or unsafe content"). `translate()` already groups
+            // guardrailViolation WITH refusal as the same "safety
+            // declined — user can rephrase" family; the auto-retry gate
+            // should agree, so the app neutral-rephrases automatically
+            // (verified on-device to clear the guardrail) instead of
+            // punting the rephrase to the reader. Same belt-and-
+            // suspenders typed+stringified detection as refusal.
+            let shouldRetryNeutrally: Bool
             if let g = originalError as? LanguageModelSession.GenerationError {
                 // Multiple defenses against pattern-matching quirks
                 // on AFM's macro-generated enum: (1) full pattern
@@ -430,25 +443,28 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                 // refusal at runtime.
                 let switched: Bool = {
                     switch g {
-                    case .refusal:
+                    case .refusal, .guardrailViolation:
                         return true
                     default:
                         return false
                     }
                 }()
                 let stringified = "\(g)"
+                let lowered = stringified.lowercased()
                 let stringContains = stringified.contains("refusal(")
-                    || stringified.lowercased().contains("refusal")
-                isRefusal = switched || stringContains
-                dbgLog("AskPosey: refusal-detection switched=%@ stringContains=%@ stringified=%@",
+                    || lowered.contains("refusal")
+                    || lowered.contains("guardrail")
+                shouldRetryNeutrally = switched || stringContains
+                dbgLog("AskPosey: neutral-retry-detection switched=%@ stringContains=%@ stringified=%@",
                       String(describing: switched),
                       String(describing: stringContains),
                       stringified.prefix(120) as CVarArg)
             } else {
-                isRefusal = "\(originalError)".contains("refusal(")
+                let lowered = "\(originalError)".lowercased()
+                shouldRetryNeutrally = lowered.contains("refusal(") || lowered.contains("guardrail")
             }
 
-            if isRefusal {
+            if shouldRetryNeutrally {
                 dbgLog("AskPosey: grounded call refused; retrying with neutral rephrasing")
                 let rephrased = AskPoseyPromptBuilder.neutralRephrasingPromptBody(
                     originalUserQuestion: inputs.currentQuestion,
@@ -467,19 +483,23 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                     if let r = retryError as? LanguageModelSession.GenerationError {
                         let switched: Bool = {
                             switch r {
-                            case .refusal: return true
+                            case .refusal, .guardrailViolation: return true
                             default: return false
                             }
                         }()
                         let s = "\(r)"
-                        let stringContains = s.contains("refusal(") || s.lowercased().contains("refusal")
+                        let lowered = s.lowercased()
+                        let stringContains = s.contains("refusal(")
+                            || lowered.contains("refusal")
+                            || lowered.contains("guardrail")
                         isRetryRefusal = switched || stringContains
-                        dbgLog("AskPosey: retry refusal-detection switched=%@ stringContains=%@ s=%@",
+                        dbgLog("AskPosey: retry neutral-retry-detection switched=%@ stringContains=%@ s=%@",
                               String(describing: switched),
                               String(describing: stringContains),
                               s.prefix(120) as CVarArg)
                     } else {
-                        isRetryRefusal = "\(retryError)".lowercased().contains("refusal")
+                        let lowered = "\(retryError)".lowercased()
+                        isRetryRefusal = lowered.contains("refusal") || lowered.contains("guardrail")
                     }
                     if isRetryRefusal {
                         dbgLog("AskPosey: retry also refused; surfacing informative failure")

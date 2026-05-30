@@ -1330,6 +1330,58 @@ extension LibraryViewModel {
                 _ = arg
                 return #"{\"error\":\"LIST_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
+            case "RAPTOR_SUMMARIZE_TEST":
+                // RAPTOR_SUMMARIZE_TEST:<doc-id>:<k>:<maxChunks>
+                //
+                // 2026-05-30 — first end-to-end slice of the RAPTOR tier:
+                // cluster the first <maxChunks> leaf chunks (cosine k-means,
+                // NLContextual embeddings) into <k> groups, summarize each
+                // with the ACTIVE model (AFM @Generable, paced), VERIFY each
+                // against its source, and return the summaries + member
+                // samples so generation quality can be read directly before
+                // any storage/retrieval wiring. Defaults (AFM+NLContextual)
+                // must produce coherent, faithful summaries here.
+                let p = (arg ?? "").split(separator: ":", maxSplits: 2).map(String.init)
+                guard p.count >= 1, let id = UUID(uuidString: p[0].trimmingCharacters(in: .whitespaces)) else {
+                    return #"{"error":"Usage: RAPTOR_SUMMARIZE_TEST:<doc-id>:<k>:<maxChunks>"}"#
+                }
+                let kReq = p.count > 1 ? (Int(p[1]) ?? 12) : 12
+                let maxChunks = p.count > 2 ? (Int(p[2]) ?? 300) : 300
+                let leaves = ((try? databaseManager.unitEmbeddingChunks(for: id)) ?? [])
+                    .filter { $0.embedding != nil && $0.chunkIndex < 1_000_000 }
+                    .sorted { $0.chunkIndex < $1.chunkIndex }
+                let slice = Array(leaves.prefix(maxChunks))
+                guard slice.count >= 2 else { return #"{"error":"not enough embedded leaf chunks"}"# }
+                let textByIdx = Dictionary(uniqueKeysWithValues: slice.map { ($0.chunkIndex, $0.text) })
+                let inputNodes = slice.map {
+                    RaptorTreeBuilder.InputNode(
+                        chunkIndex: $0.chunkIndex, text: $0.text, embedding: $0.embedding!,
+                        startUnitID: $0.startUnitID, endUnitID: $0.endUnitID)
+                }
+                let builder = RaptorTreeBuilder()
+                let cfg = RaptorTreeBuilder.Config(clusterCount: kReq)
+                let nodes = await builder.buildLayer(layer: 1, nodes: inputNodes, config: cfg)
+                let nodeRows: [[String: Any]] = nodes.map { n in
+                    let samples = n.memberChunkIndices.prefix(3).compactMap { textByIdx[$0].map { String($0.prefix(70)).replacingOccurrences(of: "\n", with: " ") } }
+                    return [
+                        "members": n.memberChunkIndices.count,
+                        "verifyKept": n.verifyKept,
+                        "verifyDropped": n.verifyDropped,
+                        "memberSamples": samples,
+                        "summary": n.text
+                    ]
+                }
+                let payloadR: [String: Any] = [
+                    "documentID": id.uuidString,
+                    "leafChunksUsed": slice.count,
+                    "requestedK": kReq,
+                    "summaryNodes": nodes.count,
+                    "nodes": nodeRows
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: payloadR),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"RAPTOR_SUMMARIZE_TEST serialization failed"}"#
+
             case "EXPORT_EMBEDDINGS":
                 // EXPORT_EMBEDDINGS:<doc-id>[:<maxCount>]
                 //

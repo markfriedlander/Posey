@@ -1358,9 +1358,10 @@ extension LibraryViewModel {
                         chunkIndex: $0.chunkIndex, text: $0.text, embedding: $0.embedding!,
                         startUnitID: $0.startUnitID, endUnitID: $0.endUnitID)
                 }
+                let docText = (try? databaseManager.documents())?.first(where: { $0.id == id })?.plainText ?? ""
                 let builder = RaptorTreeBuilder()
                 let cfg = RaptorTreeBuilder.Config(clusterCount: kReq)
-                let nodes = await builder.buildLayer(layer: 1, nodes: inputNodes, config: cfg)
+                let nodes = await builder.buildLayer(layer: 1, nodes: inputNodes, documentText: docText, config: cfg)
                 let nodeRows: [[String: Any]] = nodes.map { n in
                     let samples = n.memberChunkIndices.prefix(3).compactMap { textByIdx[$0].map { String($0.prefix(70)).replacingOccurrences(of: "\n", with: " ") } }
                     return [

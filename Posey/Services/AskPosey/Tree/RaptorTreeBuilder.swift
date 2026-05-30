@@ -56,15 +56,21 @@ public actor RaptorTreeBuilder {
         public var afmCooldownSeconds: Double
         /// Extra backoff applied after a rate-limit/transient AFM error.
         public var afmBackoffSeconds: Double
+        /// Clusters with fewer members than this are skipped — too small to
+        /// need an abstraction (the member leaves are already in the pool),
+        /// and tiny clusters produce weak, fragmentary summaries.
+        public var minClusterSize: Int
 
         public init(clusterCount: Int,
-                    maxCharsPerSummaryInput: Int = 8_000,
+                    maxCharsPerSummaryInput: Int = 5_000,
                     afmCooldownSeconds: Double = 1.5,
-                    afmBackoffSeconds: Double = 6.0) {
+                    afmBackoffSeconds: Double = 6.0,
+                    minClusterSize: Int = 3) {
             self.clusterCount = clusterCount
             self.maxCharsPerSummaryInput = maxCharsPerSummaryInput
             self.afmCooldownSeconds = afmCooldownSeconds
             self.afmBackoffSeconds = afmBackoffSeconds
+            self.minClusterSize = minClusterSize
         }
     }
 
@@ -87,8 +93,16 @@ public actor RaptorTreeBuilder {
     /// Build one summary layer from `nodes`. Returns the verified summary
     /// nodes (without embeddings — the caller fills those exactly like leaf
     /// chunks). `progress` is called after each cluster for observability.
+    /// - Parameter documentText: the full document plainText, used as the
+    ///   entity-grounding haystack. Entity-grounding checks fabricated names
+    ///   against the WHOLE document (not just the cluster source): a name in
+    ///   the book elsewhere — "Moby-Dick", "Massachusetts" — is legitimate
+    ///   document-wide reference; a name found NOWHERE in the book — "Sethe",
+    ///   "Toni Morrison" — is cross-work fabrication and gets the summary
+    ///   rejected. Topical (cluster-level) grounding is the cosine gate's job.
     public func buildLayer(layer: Int,
                            nodes: [InputNode],
+                           documentText: String,
                            config: Config,
                            progress: (@Sendable (Int, Int) -> Void)? = nil) async -> [RaptorSummaryNode] {
         guard nodes.count >= 2 else { return [] }
@@ -106,7 +120,9 @@ public actor RaptorTreeBuilder {
         var done = 0
         for memberIdxs in orderedClusters {
             defer { done += 1; progress?(done, orderedClusters.count) }
-            guard memberIdxs.count >= 1 else { continue }
+            // Skip tiny clusters — their leaves are already retrievable, and
+            // a 1–2 chunk "summary" is fragmentary noise.
+            guard memberIdxs.count >= config.minClusterSize else { continue }
             let members = memberIdxs.map { nodes[$0] }
             let memberTexts = members.map { $0.text }
 
@@ -126,10 +142,22 @@ public actor RaptorTreeBuilder {
                 continue
             }
 
-            // VERIFY against the cluster's own source (drop ungrounded sentences).
+            // VERIFY — two complementary gates.
+            // (1) Embedding-cosine: drop topically-ungrounded sentences.
             let v = verifier.filteredSummary(raw, sources: memberTexts)
             let verified = v.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if verified.isEmpty { continue }
+            // (2) Entity-grounding: reject a summary that NAMES a person/
+            // place/org absent from its source — catches confident on-topic
+            // fabrication (the "Beloved by Toni Morrison" failure the cosine
+            // gate passed). Load-bearing; reject wholesale on any fabrication.
+            let grounding = SummaryEntityGrounding.check(summary: verified, source: documentText)
+            if !grounding.grounded {
+                dbgLog("RaptorTreeBuilder: rejected summary — fabricated entities [%@]",
+                       grounding.fabricatedEntities.joined(separator: ", ") as NSString)
+                try? await Task.sleep(nanoseconds: UInt64(config.afmCooldownSeconds * 1_000_000_000))
+                continue
+            }
 
             out.append(RaptorSummaryNode(
                 layer: layer,

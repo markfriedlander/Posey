@@ -85,9 +85,14 @@ actor UnitEmbeddingService {
         // DatabaseManager is currently main-actor-bound but the
         // actor hop is implicit at the call site.
         let units: [ContentUnit]
+        let skipOffset: Int
+        let skipSource: String
         do {
-            units = try await MainActor.run {
-                try databaseManager.units(for: documentID)
+            (units, skipOffset, skipSource) = try await MainActor.run {
+                let u = try databaseManager.units(for: documentID)
+                let doc = (try? databaseManager.documents())?
+                    .first(where: { $0.id == documentID })
+                return (u, doc?.playbackSkipUntilOffset ?? 0, doc?.skipSource ?? "")
             }
         } catch {
             return
@@ -108,8 +113,18 @@ actor UnitEmbeddingService {
                 documentID: documentID, databaseManager: databaseManager)
         }
 
+        // 2026-05-29 — Front-matter exclusion (RAG). Drop editorial front
+        // matter (prefaces, title pages) that falls before the confident
+        // content-start so it can't be retrieved and served as if it were
+        // the work — the Saintsbury-preface contamination caught by real
+        // reading (#2 Finding 3). Safe NOW because author/year answer from
+        // structured metadata (8015eb4), not front-matter prose. Only fires
+        // on a positive content-start detection (gutenberg/heuristic).
+        let chunkUnits = UnitEmbeddingChunker.excludingFrontMatter(
+            units, skipOffset: skipOffset, skipSource: skipSource)
+
         // Build chunks (CPU-bound, but small).
-        let chunks = UnitEmbeddingChunker.chunks(for: documentID, units: units)
+        let chunks = UnitEmbeddingChunker.chunks(for: documentID, units: chunkUnits)
 
         // Persist atomically. The FTS5 triggers fire as part of
         // the same transaction so the mirror is consistent.

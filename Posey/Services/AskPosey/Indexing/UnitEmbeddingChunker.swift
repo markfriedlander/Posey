@@ -60,6 +60,39 @@ struct UnitEmbeddingChunker {
     /// list. Returns chunks with `embedding = nil`. Callers persist
     /// via `DatabaseManager.replaceAllUnitEmbeddingChunks` then
     /// fill in embeddings asynchronously.
+    /// 2026-05-29 — Exclude editorial front matter from the RAG chunk pool
+    /// by dropping prose units that fall entirely before a confident
+    /// content-start boundary (`playbackSkipUntilOffset`), mirroring the
+    /// reader's smart-skip. Prevents an editorial preface / title page (e.g.
+    /// Saintsbury's preface in Gutenberg's Pride & Prejudice) from being
+    /// retrieved and served as if it were the work (#2 Finding 3).
+    ///
+    /// Fires ONLY on a positively-detected content-start (`skipSource`
+    /// "gutenberg"/"heuristic"); read-from-beginning docs (`skipSource` "")
+    /// are returned unchanged. Offset accounting mirrors the persister's
+    /// plainText join exactly (prose units joined with "\n\n"), so the
+    /// importer-computed `skipOffset` aligns. The unit that CONTAINS the
+    /// boundary is kept (content starts mid-unit). Non-prose units pass
+    /// through untouched (they add no plainText and produce no chunks).
+    nonisolated static func excludingFrontMatter(
+        _ units: [ContentUnit],
+        skipOffset: Int,
+        skipSource: String
+    ) -> [ContentUnit] {
+        let confident = (skipSource == "gutenberg" || skipSource == "heuristic")
+        guard confident, skipOffset > 0 else { return units }
+        var offset = 0
+        var kept: [ContentUnit] = []
+        kept.reserveCapacity(units.count)
+        for unit in units {
+            guard unit.kind.carriesProseText else { kept.append(unit); continue }
+            let unitEnd = offset + unit.text.count
+            if unitEnd > skipOffset { kept.append(unit) }
+            offset = unitEnd + 2  // matches the persister's "\n\n" join
+        }
+        return kept
+    }
+
     static func chunks(
         for documentID: UUID,
         units: [ContentUnit],

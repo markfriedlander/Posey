@@ -865,7 +865,11 @@ private extension AskPoseyChatViewModel {
                 chunkID: rc.chunkID,
                 startOffset: rc.startOffset,
                 text: TextNormalizer.stripWaybackPrintHeaders(rc.text),
-                relevance: rc.relevance
+                relevance: rc.relevance,
+                // Thread the semantic cosine through — `isWeakRetrieval`
+                // gates on it. Dropping it here (the prior behavior)
+                // would silently nil it out and defeat the gate.
+                semanticScore: rc.semanticScore
             )
         }
         // Filter + sort (matches the legacy tail logic). Chunks with
@@ -1269,44 +1273,46 @@ extension AskPoseyChatViewModel {
     /// derived from the 2026-05-04 conversational sweep (see commit
     /// 68ad883).
     ///
-    /// 2026-05-14 (B3) — Threshold is now read from
-    /// `PlaybackPreferences.shared.retrievalStrictness`
-    /// (Broad 0.35 / Balanced 0.45 / Precise 0.55). Default
-    /// `.balanced` preserves the prior 0.45 behavior for users who
-    /// don't visit Preferences. Raw-value strings remain
-    /// `permissive`/`balanced`/`strict` for backward-compat with
-    /// already-persisted UserDefaults.
+    /// RRF top-1 floor below which retrieval reads as "weak" (nothing
+    /// with cross-retriever support came back). Aligned with Hal's
+    /// `QueryExpansion` weak-retrieval trigger (0.020): a single-list
+    /// RRF contribution is ~1/(60+1) ≈ 0.0164 (ONE retriever, no
+    /// corroboration); both retrievers agreeing yields ~0.033+. 0.020
+    /// sits just above the single-list value, so "weak" means "no
+    /// cross-retriever agreement and a low rank."
+    static let weakRetrievalRRFFloor: Double = 0.020
+
     static func isWeakRetrieval(chunks: [RetrievedChunk]) -> Bool {
-        // Empirical band per 2026-05-04 sweep:
-        // 0.50+ chunks consistently produce real answers; 0.40 chunks
-        // can produce confident fabrication when the chunk is
-        // semantically near the question but doesn't actually answer
-        // it. The user-tunable strictness lets them slide that floor
-        // up (more honest refusals) or down (more attempts).
-        let strongThreshold = PlaybackPreferences.shared
-            .retrievalStrictness.weakRetrievalThreshold
-        // Front-matter prepend is the first 4 chunks (or 1 for long
-        // docs); always relevance 1.0; injected regardless of the
-        // question. Conservatively skip the first 4 chunkIDs.
-        // Lexical-full-match chunks may also have relevance 1.0; if
-        // they're outside the front-matter band, they count as a
-        // strong signal.
-        let frontMatterUpperBound = 4
-        for chunk in chunks {
-            // 2026-05-05 — Synthetic metadata chunks (startOffset = -1
-            // sentinel) are clean distillations of title/author/year/
-            // summary. Their cosine is artificially low because the
-            // text is short and doesn't share lots of vocabulary with
-            // typical questions, but their MERE PRESENCE in the
-            // top-K means the question matched the doc's metadata
-            // beacon — that's exactly the case we WANT to answer
-            // rather than refuse. Treat synthetic chunks as strong
-            // evidence regardless of their cosine score.
-            if chunk.startOffset < 0 { return false }
-            if chunk.chunkID < frontMatterUpperBound { continue }
-            if chunk.relevance >= strongThreshold { return false }
-        }
-        return true
+        // 2026-05-29 — gate on the RRF AGREEMENT signal, not an absolute
+        // cosine. Two things were learned the hard way (#2, with Hal
+        // CC's RAG history):
+        //   • An absolute cosine floor is meaningless here. NLContextual
+        //     cosines run 0.85–0.95 for relevant AND tangential chunks
+        //     (measured: Frankenstein's WRONG "narrator" chunk scored
+        //     0.89, Moby's RIGHT Ahab chunk scored 0.92). So no single
+        //     cosine number separates strong from weak — Hal moved off
+        //     absolute floors to relative-spread / two-retriever
+        //     agreement for exactly this reason.
+        //   • The RRF fused score already encodes agreement: it only
+        //     climbs above the single-list ~0.0164 when both retrievers
+        //     corroborate, and it rides on the BM25 quality gate (which
+        //     now drops lexical-only matches semantic disagrees with —
+        //     the zero-overlap branch ported from Hal). So a low RRF top
+        //     genuinely means "nothing both retrievers back."
+        // This is therefore a TWO-signal notion by construction, not the
+        // brittle single-cosine threshold that the old code (mis)used.
+        //
+        // Diagnostic kept (greppable "AskPosey weak-gate") — logs the
+        // semantic cosines + RRF top so the gate stays observable.
+        let semScores = chunks.prefix(8).map { c -> String in
+            if let s = c.semanticScore { return String(format: "%.2f", s) }
+            return "nil"
+        }.joined(separator: ",")
+        let rrfTop = chunks.first?.relevance ?? 0
+        dbgLog("AskPosey weak-gate: rrfTop=%.3f floor=%.3f sem=[%@] weak=%@",
+               rrfTop, Self.weakRetrievalRRFFloor, semScores as NSString,
+               (rrfTop < Self.weakRetrievalRRFFloor ? "yes" : "no") as NSString)
+        return rrfTop < Self.weakRetrievalRRFFloor
     }
 
     /// 2026-05-04 — Short-circuit response when retrieval was weak
@@ -1327,9 +1333,9 @@ extension AskPoseyChatViewModel {
         let stillIndexing = isStillIndexingChecker?(documentID) ?? false
         let answer: String
         if stillIndexing {
-            answer = "I'm still learning this document — chunks are being indexed. Give me a moment and try the same question again. If you have something specific in mind, you can also tap a passage in the reader and ask from there; passage-anchored questions work even before indexing finishes."
+            answer = "I'm still getting to know this document — give me a moment to finish reading it through, then ask me that again. If you'd rather not wait, tap a passage in the reader and ask me from there; that works even while I'm still settling in."
         } else {
-            answer = "I'm not finding a strong answer to that in the document. I do best when you select a sentence or passage you're curious about and ask me from there — try tapping a line in the reader, then asking again."
+            answer = "I went looking and couldn't find where this document really speaks to that — and I'd rather tell you straight than make something up. If there's a particular passage you're curious about, tap a line in the reader and ask me from there. I'm at my best when we're looking at the same spot on the page."
         }
         // Replace the streaming placeholder with the honest message.
         if let index = messages.firstIndex(where: { $0.id == placeholderID }) {
@@ -1437,7 +1443,7 @@ extension AskPoseyChatViewModel {
         // Pick "a" or "an" based on the role term's first sound.
         let firstChar = role.first.map(String.init)?.lowercased() ?? ""
         let article = ["a","e","i","o","u"].contains(firstChar) ? "an" : "a"
-        let answer = "The document doesn't identify \(article) \(role). If you're looking for a specific name, try asking about the role the document does mention (author, contributor, moderator, etc.)."
+        let answer = "I looked, and this document doesn't actually name \(article) \(role) — and I won't invent one for you. If there's someone specific you're trying to place, point me at a passage that mentions them and we'll work it out together."
         let assistantMessage = AskPoseyMessage(
             role: .assistant,
             content: answer,

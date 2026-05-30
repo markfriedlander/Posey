@@ -194,7 +194,25 @@ struct HybridRetriever {
                     .sorted { $0.value < $1.value }
                     .prefix(Self.bm25GateMedianRankCheckK)
                 let semRanksOfBM25Top = bm25Top.compactMap { semanticRanks[$0.key] }
-                if !semRanksOfBM25Top.isEmpty {
+                if semRanksOfBM25Top.isEmpty {
+                    // 2026-05-29 — ZERO-OVERLAP branch, ported from Hal
+                    // (Hal.swift ~2806). NONE of BM25's top-K appear in
+                    // semantic's top-50: the two retrievers are working
+                    // on different universes, so BM25's hit is lexical
+                    // noise with no semantic corroboration → exclude it.
+                    //
+                    // Posey previously OMITTED this branch (the original
+                    // `if !semRanksOfBM25Top.isEmpty { median }` ran the
+                    // median check only when overlap existed and did
+                    // nothing on zero overlap), so a common-word lexical
+                    // match with zero semantic agreement carried the
+                    // answer — exactly the "who is telling this story"
+                    // → chunk-that-merely-contains-'story' failure that
+                    // produced a fabricated narrator on Frankenstein.
+                    // Hal's "agreement between two independent retrievers"
+                    // is the only constant; this restores it.
+                    bm25Excluded = true
+                } else {
                     let sorted = semRanksOfBM25Top.sorted()
                     let median = sorted[sorted.count / 2]
                     if median > Self.bm25GateMedianRankCheckK {
@@ -228,7 +246,12 @@ struct HybridRetriever {
                     chunkID: chunk.chunkIndex,
                     startOffset: kUnitAnchoredStartOffsetSentinel,
                     text: chunk.text,
-                    relevance: score
+                    relevance: score,
+                    // Raw semantic cosine (nil ⇒ BM25-only, no semantic
+                    // rank). The weak-retrieval gate reads this rather
+                    // than the RRF `relevance`, because the strictness
+                    // band is calibrated on the cosine scale.
+                    semanticScore: semanticScores[id]
                 )
             }
 

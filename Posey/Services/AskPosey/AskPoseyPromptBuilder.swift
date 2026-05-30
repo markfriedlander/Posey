@@ -17,10 +17,29 @@ nonisolated struct RetrievedChunk: Sendable, Equatable, Codable {
     /// The chunk text actually rendered into the prompt. Persisted so
     /// the user can see exactly which passage informed the answer.
     let text: String
-    /// Cosine relevance score of this chunk against the user
-    /// question. Recorded for the M7 sources strip ranking and for
-    /// the local-API tuning loop.
+    /// RRF (Reciprocal Rank Fusion) score of this chunk against the
+    /// user question — a RANK-fusion value (~0.016–0.11), NOT a cosine.
+    /// Embedder-INDEPENDENT (RRF uses rank, not raw similarity).
+    /// Recorded for the M7 sources strip ranking and the tuning loop.
     let relevance: Double
+    /// Raw semantic-pass cosine of this chunk against the query
+    /// (embedder-DEPENDENT). `nil` when the chunk was surfaced by BM25
+    /// only — no semantic rank — which is itself a weak-grounding
+    /// signal (a lexical word-match with no semantic support).
+    ///
+    /// The weak-retrieval gate (`isWeakRetrieval`) thresholds on THIS,
+    /// not on `relevance`: the strictness band (0.35/0.45/0.55) was
+    /// calibrated against the semantic *cosine* in the 2026-05-04 sweep,
+    /// and RRF's tiny rank-fusion range can't carry those values. When
+    /// the retriever switched to RRF this field didn't exist, so the
+    /// gate was comparing cosine thresholds to RRF scores — masked by a
+    /// stale `startOffset < 0` exemption that disabled the gate entirely
+    /// (see `isWeakRetrieval`). Optional + defaulted so persisted rows
+    /// from before this field decode cleanly (missing key → nil).
+    /// `var` (not `let`) so the synthesized memberwise initializer
+    /// includes it with a default — a `let` with a default value is
+    /// excluded from the memberwise init.
+    var semanticScore: Double? = nil
 }
 
 /// Per-section token cost of a built prompt. Sum equals the total

@@ -2888,7 +2888,14 @@ extension LibraryViewModel {
                 [
                     "chunkID": chunk.chunkID,
                     "startOffset": chunk.startOffset,
-                    "relevance": chunk.relevance
+                    "relevance": chunk.relevance,
+                    // 2026-05-30 — expose the chunk TEXT + semantic cosine
+                    // (Hal-style RAG observability) so conversational
+                    // evaluation can see exactly what retrieval handed the
+                    // model, rather than inferring it. `semanticScore` nil
+                    // (BM25-only chunk) surfaces as -1.
+                    "text": chunk.text,
+                    "semanticScore": chunk.semanticScore ?? -1
                 ]
             }
         } else if viewModel.lastError != nil {

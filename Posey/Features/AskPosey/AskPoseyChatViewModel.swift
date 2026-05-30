@@ -102,6 +102,14 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// extracted yet (no notice shown until we know).
     @Published var documentDetectedNonEnglish: Bool = false
 
+    /// Structured bibliographic metadata loaded from the `metadata_*`
+    /// columns (populated by `DocumentMetadataExtractor` at import). Passed
+    /// into the prompt builder so "who wrote this / when" answer from clean
+    /// structured fields rather than retrieved front matter. nil when not
+    /// yet extracted.
+    private var documentAuthors: [String]?
+    private var documentYear: String?
+
     /// Document the conversation is anchored to. Used for both
     /// SQLite reads (prior history) and writes (every turn appends).
     let documentID: UUID
@@ -384,6 +392,8 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         if let db = databaseManager,
            let meta = try? db.documentMetadata(for: documentID) {
             self.documentDetectedNonEnglish = meta.detectedNonEnglish
+            self.documentAuthors = meta.authors.isEmpty ? nil : meta.authors
+            self.documentYear = (meta.year?.isEmpty == false) ? meta.year : nil
         }
 
         // Kick off history load. UI shows isLoadingHistory until
@@ -1764,7 +1774,9 @@ extension AskPoseyChatViewModel {
                     pairwiseSummaries: pairwiseSummaries,
                     lowConfidenceRetrieval: lowConfidence,
                     documentTitle: self.documentTitle,
-                    documentPlainText: self.documentPlainText
+                    documentPlainText: self.documentPlainText,
+                    documentAuthors: self.documentAuthors,
+                    documentYear: self.documentYear
                 )
 
                 do {

@@ -144,6 +144,15 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
     /// check falls back to the chunks-only haystack (legacy behavior).
     let documentTitle: String?
     let documentPlainText: String?
+    /// Structured bibliographic metadata (author + publication/copyright
+    /// year), populated from the `metadata_*` columns. Unlike
+    /// `documentTitle` (which only feeds the anti-fab haystack), these are
+    /// RENDERED into the prompt as an authoritative DOCUMENT METADATA block
+    /// so the model answers "who wrote this / when" from a clean structured
+    /// source instead of retrieving editorial front matter. nil/empty →
+    /// block omitted.
+    let documentAuthors: [String]?
+    let documentYear: String?
 
     init(
         intent: AskPoseyIntent,
@@ -156,7 +165,9 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         pairwiseSummaries: [String]? = nil,
         lowConfidenceRetrieval: Bool = false,
         documentTitle: String? = nil,
-        documentPlainText: String? = nil
+        documentPlainText: String? = nil,
+        documentAuthors: [String]? = nil,
+        documentYear: String? = nil
     ) {
         self.intent = intent
         self.anchor = anchor
@@ -169,6 +180,8 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         self.lowConfidenceRetrieval = lowConfidenceRetrieval
         self.documentTitle = documentTitle
         self.documentPlainText = documentPlainText
+        self.documentAuthors = documentAuthors
+        self.documentYear = documentYear
     }
 }
 
@@ -581,6 +594,20 @@ nonisolated enum AskPoseyPromptBuilder {
         }()
         breakdown.system = AskPoseyTokenEstimator.tokens(in: instructions)
 
+        // -------- DOCUMENT METADATA (non-droppable, authoritative) --------
+        // 2026-05-29 — a small block of structured bibliographic facts
+        // (title + author + publication/copyright year) from the
+        // `metadata_*` columns. Tiny + non-droppable. Authoritative source
+        // for "who wrote this / when was it published" so the model answers
+        // from clean structured data instead of retrieving editorial front
+        // matter (the Saintsbury-preface contamination). Omitted entirely
+        // when no structured fields are present.
+        let metadataBlock = renderDocumentMetadataBlock(
+            title: inputs.documentTitle,
+            authors: inputs.documentAuthors,
+            year: inputs.documentYear)
+        let metadataTokens = metadataBlock.map { AskPoseyTokenEstimator.tokens(in: $0) } ?? 0
+
         // -------- ANCHOR (non-droppable when present) --------
         var anchorBlock: String? = nil
         if let anchor = inputs.anchor,
@@ -624,6 +651,7 @@ nonisolated enum AskPoseyPromptBuilder {
 
         // -------- Compute droppable budget --------
         let nonDroppable = breakdown.system
+            + metadataTokens
             + breakdown.anchor
             + breakdown.surrounding
             + breakdown.userQuestion
@@ -713,6 +741,7 @@ nonisolated enum AskPoseyPromptBuilder {
         // so AFM weights what's immediately around the tapped
         // sentence over chunks pulled from elsewhere.
         var sections: [String] = []
+        if let metadataBlock { sections.append(metadataBlock) }
         if let anchorBlock { sections.append(anchorBlock) }
         if let summaryBlock { sections.append(summaryBlock) }
         if !stmRendered.isEmpty { sections.append(stmRendered) }
@@ -1205,6 +1234,35 @@ private extension AskPoseyPromptBuilder {
         """
         ANCHOR PASSAGE the user is asking about:
         > \(anchor.trimmedDisplayText)
+        """
+    }
+
+    /// 2026-05-29 — authoritative bibliographic facts from the structured
+    /// `metadata_*` columns. Returns nil when nothing is known. Only the
+    /// fields that are present are listed. The "(authoritative …)" framing
+    /// tells the model to trust these over anything in the retrieved
+    /// excerpts (which may include an editorial preface that discusses
+    /// OTHER authors/dates).
+    static func renderDocumentMetadataBlock(title: String?,
+                                            authors: [String]?,
+                                            year: String?) -> String? {
+        var lines: [String] = []
+        if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            lines.append("Title: \(title)")
+        }
+        let cleanAuthors = (authors ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !cleanAuthors.isEmpty {
+            lines.append("Author(s): \(cleanAuthors.joined(separator: ", "))")
+        }
+        if let year = year?.trimmingCharacters(in: .whitespacesAndNewlines), !year.isEmpty {
+            lines.append("Publication/copyright year: \(year)")
+        }
+        guard !lines.isEmpty else { return nil }
+        return """
+        DOCUMENT METADATA (authoritative facts about THIS document — use these to answer questions about the work's title, author, or publication year; trust them over anything in the excerpts below, which may quote an editor's preface discussing other authors or dates):
+        \(lines.joined(separator: "\n"))
         """
     }
 

@@ -796,6 +796,20 @@ extension LibraryViewModel {
                 return json(["id": doc.id.uuidString, "title": doc.title,
                              "fileType": doc.fileType, "plainText": doc.plainText])
 
+            case "EXTRACT_METADATA":
+                // Force bibliographic extraction (author + year) + store to
+                // structured columns. Backfill for existing docs + test hook.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Missing or invalid document ID"}"#
+                }
+                await DocumentMetadataExtractor.extractAndStoreIfNeeded(
+                    documentID: id, databaseManager: databaseManager, force: true)
+                let meta = try? databaseManager.documentMetadata(for: id)
+                return json(["id": id.uuidString,
+                             "authors": (meta?.authors ?? []).joined(separator: ", "),
+                             "year": meta?.year ?? "",
+                             "lastFailure": DocumentMetadataExtractor.lastFailureReason])
+
             case "DELETE_DOCUMENT":
                 guard let idStr = arg, let id = UUID(uuidString: idStr) else {
                     return #"{"error":"Missing or invalid document ID"}"#
@@ -1252,9 +1266,17 @@ extension LibraryViewModel {
                 ])
 
             case "GET_DOCUMENT_METADATA":
-                // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
-                _ = arg
-                return #"{\"error\":\"GET_DOCUMENT_METADATA removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
+                // 2026-05-29 — restored: reads the structured bibliographic
+                // fields (author + year) populated by DocumentMetadataExtractor.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Missing or invalid document ID"}"#
+                }
+                let meta = try databaseManager.documentMetadata(for: id)
+                return json(["id": id.uuidString,
+                             "title": meta?.title ?? "",
+                             "authors": (meta?.authors ?? []).joined(separator: ", "),
+                             "year": meta?.year ?? "",
+                             "extractedAt": "\(meta?.extractedAt.timeIntervalSince1970 ?? 0)"])
 
             case "LIST_SYNTHETIC_CHUNKS":
                 // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).

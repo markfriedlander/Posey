@@ -95,6 +95,19 @@ actor UnitEmbeddingService {
 
         guard !units.isEmpty else { return }
 
+        // 2026-05-29 — Bibliographic metadata (author + publication year)
+        // → structured `metadata_*` columns. Central import hook (every
+        // format reaches here). Non-blocking + independent of embedding;
+        // idempotent (skips already-extracted docs). Revives the
+        // bibliographic half of the 8f-removed DocumentMetadataService so
+        // metadata questions answer from structured fields rather than
+        // front-matter retrieval (the prerequisite for excluding front
+        // matter from RAG).
+        Task { @MainActor in
+            await DocumentMetadataExtractor.extractAndStoreIfNeeded(
+                documentID: documentID, databaseManager: databaseManager)
+        }
+
         // Build chunks (CPU-bound, but small).
         let chunks = UnitEmbeddingChunker.chunks(for: documentID, units: units)
 

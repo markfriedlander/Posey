@@ -1330,6 +1330,64 @@ extension LibraryViewModel {
                 _ = arg
                 return #"{\"error\":\"LIST_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
+            case "BUILD_RAPTOR_TREE":
+                // BUILD_RAPTOR_TREE:<doc-id>:<k>:<maxChunks>
+                //
+                // 2026-05-30 — end-to-end RAPTOR tier slice: cluster +
+                // AFM-summarize + verify (cosine + entity-grounding), then
+                // EMBED each verified summary (NLContextual) and STORE it in
+                // the collapsed pool (unit_embedding_chunks, chunk_index >=
+                // raptorSummaryIndexBase). Leaves untouched. After this, the
+                // existing HybridRetriever fuses leaves + summaries with no
+                // retriever change. Returns counts + the stored summaries.
+                let pr = (arg ?? "").split(separator: ":", maxSplits: 2).map(String.init)
+                guard pr.count >= 1, let id = UUID(uuidString: pr[0].trimmingCharacters(in: .whitespaces)) else {
+                    return #"{"error":"Usage: BUILD_RAPTOR_TREE:<doc-id>:<k>:<maxChunks>"}"#
+                }
+                let kReq2 = pr.count > 1 ? (Int(pr[1]) ?? 16) : 16
+                let maxChunks2 = pr.count > 2 ? (Int(pr[2]) ?? 400) : 400
+                let leaves2 = ((try? databaseManager.unitEmbeddingChunks(for: id)) ?? [])
+                    .filter { $0.embedding != nil && $0.chunkIndex < DatabaseManager.raptorSummaryIndexBase }
+                    .sorted { $0.chunkIndex < $1.chunkIndex }
+                let slice2 = Array(leaves2.prefix(maxChunks2))
+                guard slice2.count >= 2 else { return #"{"error":"not enough embedded leaf chunks"}"# }
+                let inputNodes2 = slice2.map {
+                    RaptorTreeBuilder.InputNode(
+                        chunkIndex: $0.chunkIndex, text: $0.text, embedding: $0.embedding!,
+                        startUnitID: $0.startUnitID, endUnitID: $0.endUnitID)
+                }
+                let docText2 = (try? databaseManager.documents())?.first(where: { $0.id == id })?.plainText ?? ""
+                let builder2 = RaptorTreeBuilder()
+                let cfg2 = RaptorTreeBuilder.Config(clusterCount: kReq2)
+                let summaryNodes2 = await builder2.buildLayer(layer: 1, nodes: inputNodes2, documentText: docText2, config: cfg2)
+                // Embed each verified summary (NLContextual .document) + store.
+                var toStore: [StoredUnitEmbeddingChunk] = []
+                for (i, node) in summaryNodes2.enumerated() {
+                    let emb = EmbeddingProvider.shared.embed(node.text, as: .document)
+                    toStore.append(StoredUnitEmbeddingChunk(
+                        id: UUID(),
+                        documentID: id,
+                        chunkIndex: DatabaseManager.raptorSummaryIndexBase + i,
+                        startUnitID: node.startUnitID,
+                        startIntraOffset: 0,
+                        endUnitID: node.endUnitID,
+                        endIntraOffset: 0,
+                        text: node.text,
+                        embedding: emb))
+                }
+                do { try databaseManager.replaceSummaryNodes(toStore, for: id) }
+                catch { return "{\"error\":\"store failed: \(error)\"}" }
+                let stored = toStore.map { ["chunkIndex": $0.chunkIndex, "embedded": $0.embedding != nil, "text": String($0.text.prefix(140))] as [String: Any] }
+                let payloadB: [String: Any] = [
+                    "documentID": id.uuidString,
+                    "leafChunksUsed": slice2.count,
+                    "summaryNodesStored": toStore.count,
+                    "summaries": stored
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: payloadB),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"BUILD_RAPTOR_TREE serialization failed"}"#
+
             case "RAPTOR_SUMMARIZE_TEST":
                 // RAPTOR_SUMMARIZE_TEST:<doc-id>:<k>:<maxChunks>
                 //

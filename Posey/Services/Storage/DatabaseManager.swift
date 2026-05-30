@@ -2838,6 +2838,66 @@ extension DatabaseManager {
     /// insert. We re-check document existence inside the transaction
     /// and return silently if the doc is gone — DELETE already swept
     /// any stragglers via cascade, so the table is in the right state.
+    /// `chunk_index` at or above this value marks a RAPTOR summary node
+    /// (a verified abstractive summary) rather than a leaf chunk. Summary
+    /// nodes live in the same `unit_embedding_chunks` pool as leaves so the
+    /// hybrid retriever fuses across abstraction levels (RAPTOR's "collapsed
+    /// tree"); the sentinel range distinguishes them without a schema change.
+    static let raptorSummaryIndexBase = 1_000_000
+
+    /// Atomically replace a document's RAPTOR summary nodes (leaf chunks —
+    /// `chunk_index < raptorSummaryIndexBase` — are left untouched). Delete
+    /// the old summary rows, insert the new. FTS5 triggers keep the BM25
+    /// mirror in sync, so summaries are immediately retrievable by both
+    /// semantic and lexical passes.
+    func replaceSummaryNodes(_ chunks: [StoredUnitEmbeddingChunk],
+                             for documentID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let del = try prepareStatement(
+                sql: "DELETE FROM unit_embedding_chunks WHERE document_id = ? AND chunk_index >= ?;"
+            )
+            defer { sqlite3_finalize(del) }
+            sqlite3_bind_text(del, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(del, 2, Int32(Self.raptorSummaryIndexBase))
+            try step(del)
+
+            if !chunks.isEmpty {
+                let sql = """
+                    INSERT OR REPLACE INTO unit_embedding_chunks
+                        (id, document_id, chunk_index, start_unit_id, start_intra_offset,
+                         end_unit_id, end_intra_offset, text, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """
+                let ins = try prepareStatement(sql: sql)
+                defer { sqlite3_finalize(ins) }
+                for chunk in chunks {
+                    sqlite3_reset(ins); sqlite3_clear_bindings(ins)
+                    sqlite3_bind_text(ins, 1, chunk.id.uuidString, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(ins, 2, chunk.documentID.uuidString, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_int(ins, 3, Int32(chunk.chunkIndex))
+                    sqlite3_bind_text(ins, 4, chunk.startUnitID.uuidString, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_int(ins, 5, Int32(chunk.startIntraOffset))
+                    sqlite3_bind_text(ins, 6, chunk.endUnitID.uuidString, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_int(ins, 7, Int32(chunk.endIntraOffset))
+                    sqlite3_bind_text(ins, 8, chunk.text, -1, SQLITE_TRANSIENT)
+                    if let emb = chunk.embedding {
+                        var bytes = emb
+                        sqlite3_bind_blob(ins, 9, &bytes, Int32(bytes.count * MemoryLayout<Double>.size), SQLITE_TRANSIENT)
+                    } else {
+                        sqlite3_bind_null(ins, 9)
+                    }
+                    try step(ins)
+                }
+            }
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
     func replaceAllUnitEmbeddingChunks(_ chunks: [StoredUnitEmbeddingChunk],
                                        for documentID: UUID) throws {
         dbLock.lock(); defer { dbLock.unlock() }

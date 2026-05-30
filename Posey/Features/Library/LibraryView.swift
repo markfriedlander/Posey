@@ -1330,6 +1330,42 @@ extension LibraryViewModel {
                 _ = arg
                 return #"{\"error\":\"LIST_CHUNKS removed in Step 8f (legacy retrieval / chunk-enhancer surface area torn out).\"}"#
 
+            case "LIST_HEADINGS":
+                // LIST_HEADINGS:<doc-id>
+                //
+                // 2026-05-30 — structured-knowledge sectioning diagnostic.
+                // Dumps every heading unit (kind=.heading) with sequence,
+                // level, and text, plus total-unit + prose-char counts, so
+                // we can judge whether a format's importer produces clean
+                // chapter boundaries to anchor section-level summaries — or
+                // ragged detection that needs a size-window fallback.
+                guard let raw = arg, let id = UUID(uuidString: raw.trimmingCharacters(in: .whitespaces)) else {
+                    return #"{"error":"Usage: LIST_HEADINGS:<doc-id>"}"#
+                }
+                let units = (try? databaseManager.units(for: id)) ?? []
+                let headings = units.filter { $0.kind == .heading }
+                var proseChars = 0
+                for u in units where u.kind.carriesProseText { proseChars += u.text.count }
+                let headingRows: [[String: Any]] = headings.map { h in
+                    [
+                        "seq": h.sequence,
+                        "level": h.metadata.headingLevel as Any? ?? NSNull(),
+                        "len": h.text.count,
+                        "text": String(h.text.prefix(80)).replacingOccurrences(of: "\n", with: " ")
+                    ]
+                }
+                let payloadH: [String: Any] = [
+                    "documentID": id.uuidString,
+                    "totalUnits": units.count,
+                    "headingCount": headings.count,
+                    "proseChars": proseChars,
+                    "avgCharsPerHeading": headings.isEmpty ? proseChars : proseChars / max(1, headings.count),
+                    "headings": headingRows
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: payloadH),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"LIST_HEADINGS serialization failed"}"#
+
             case "FIND_CHUNK":
                 // FIND_CHUNK:<doc-id>:<substring>
                 //

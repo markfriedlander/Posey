@@ -72,9 +72,31 @@ struct HTMLDocumentImporter {
         // instead of "Pride and Prejudice / Title page / Author /
         // Jane Austen / Working title / First Impressions / …".
         let preCleanedHTML = Self.stripWikipediaChrome(rawHTML: rawHTML)
-        let cleanedHTML = await ReadabilityExtractor.extractArticleHTML(
-            rawHTML: preCleanedHTML, baseURL: url
-        )
+        // 2026-05-31 (ingestion audit, Bug D) — BYPASS Readability for Project
+        // Gutenberg HTML books. Readability is for web articles (it strips
+        // nav/sidebar/infobox chrome — essential for Wikipedia). But it treats
+        // Gutenberg's `<section class="pg-boilerplate pgheader">` as chrome and
+        // strips it, taking the `*** START OF THE PROJECT GUTENBERG EBOOK ***`
+        // marker with it. GutenbergBoundaryDetector (run later) then finds no
+        // marker -> no gutenberg skip -> the reader opens Moby HTML in the
+        // transcriber's notes instead of Chapter 1. A Gutenberg HTML file is
+        // already a single clean article (no chrome to strip), so bypassing
+        // Readability is safe and makes it flow like the EPUB/TXT path (keep
+        // the boilerplate in plainText; the gutenberg skip chain hides it).
+        // Detect on the STRUCTURAL class `pg-boilerplate` ONLY — it appears
+        // exclusively in real Project Gutenberg book HTML. NOT the text
+        // "PROJECT GUTENBERG": any page that merely links to or mentions
+        // Gutenberg (e.g. the Wikipedia "Pride and Prejudice" article, which
+        // cites the Gutenberg etext) contains that string, and matching it
+        // wrongly bypassed Readability for Wikipedia -> nav/sidebar chrome
+        // leaked into the reader. (Caught in verification — `pg-boilerplate`
+        // is in Moby's HTML, absent from Wikipedia's.)
+        let isGutenbergHTML = rawHTML.range(of: "pg-boilerplate") != nil
+        let cleanedHTML: String? = isGutenbergHTML
+            ? nil
+            : await ReadabilityExtractor.extractArticleHTML(
+                rawHTML: preCleanedHTML, baseURL: url
+            )
         let workingData: Data
         if let cleanedHTML, let cleanedData = cleanedHTML.data(using: .utf8) {
             workingData = cleanedData

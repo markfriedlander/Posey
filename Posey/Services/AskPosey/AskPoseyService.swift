@@ -1128,13 +1128,16 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         // exact thing they chose MLX to get. The summarizer must respect
         // the model choice the same way the main answer does. (Also fixes
         // a voice inconsistency where an MLX user's answers were MLX but
-        // their summaries were AFM.) Mirrors `streamProseResponseMLX`'s
-        // dispatch; `ModelCatalog.current()` is the user's selection.
+        // their summaries were AFM.) 2026-05-31 — routes through
+        // `answerModel()` (the MLX answer engine), NOT the `@Generable` aux
+        // engine: summarization is free-text (AFM offers no guided-generation
+        // advantage) and the summary holds the user's full conversation, so
+        // keeping it on-device on MLX preserves the privacy guarantee.
         let messages: [ChatMessage] = [
             ChatMessage(role: .system, content: summaryInstructions),
             ChatMessage(role: .user, content: body)
         ]
-        let summarizerModel = ModelCatalog.current()
+        let summarizerModel = ModelCatalog.answerModel()
         // Audit line — records which model generated the summary so the
         // privacy-respecting routing (#4) is observable in LOGS, not just
         // assumed. An MLX-for-privacy user should never see AFM here.

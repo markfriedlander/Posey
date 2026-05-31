@@ -567,7 +567,7 @@ nonisolated enum AskPoseyPromptBuilder {
         // memory-capped (8,192) ceiling with deeper STM. Greppable via
         // LOGS as `AskPosey budget`.
         dbgLog("AskPosey budget: model=%@ ceiling=%d stm=%d summary=%d rag=%d",
-               ModelCatalog.current().id as NSString,
+               ModelCatalog.answerModel().id as NSString,
                budget.promptCeilingTokens,
                budget.stmBudgetTokens,
                budget.summaryBudgetTokens,
@@ -606,7 +606,10 @@ nonisolated enum AskPoseyPromptBuilder {
         // universal Layer-2 hard rules. Models without a Layer-1
         // (e.g. Llama 3.2 — well-behaved in this role) skip the
         // prepend cleanly.
-        let activeModel = ModelCatalog.current()
+        // 2026-05-31 — keyed off `answerModel()` (the MLX answer engine), so
+        // AFM's Layer-1 is never applied (AFM no longer answers) — the
+        // "remove AFM Layer-1 workaround" half of item 4.
+        let activeModel = ModelCatalog.answerModel()
         let instructions: String = {
             // Layer-1 is gated by the per-model toggle in the settings
             // infrastructure (Hal's `layerOnePromptEnabled`, default true).

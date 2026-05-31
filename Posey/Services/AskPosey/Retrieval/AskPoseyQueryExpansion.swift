@@ -134,7 +134,7 @@ enum AskPoseyQueryExpansion {
     /// keeps the original retrieval. Awaits one stream-accumulated LLM
     /// round-trip (~0.5–2s on AFM for a sub-100-token prompt).
     static func expand(query: String,
-                       model: ModelConfiguration = ModelCatalog.current()) async -> [String] {
+                       model: ModelConfiguration = ModelCatalog.auxModel()) async -> [String] {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return [] }
         // AFM: guided generation (forces the format — the free-text path

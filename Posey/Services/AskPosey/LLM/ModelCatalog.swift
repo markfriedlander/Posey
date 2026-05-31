@@ -76,6 +76,29 @@ enum ModelCatalog {
             ?? selected
     }
 
+    /// The model that runs background **`@Generable` tasks** — intent
+    /// classification and query expansion (RAPTOR summaries + metadata call
+    /// AFM directly). 2026-05-31: prefer AFM, whose guided generation forces
+    /// reliable structured output MLX lacks. Falls back to the MLX answer
+    /// model when AFM isn't available (a no-Apple-Intelligence device that
+    /// unlocked with Nomic + MLX) — those tasks degrade to free-text rather
+    /// than break.
+    ///
+    /// NOTE: conversation **summarization** deliberately does NOT use this —
+    /// it routes through `answerModel()` (MLX) instead. It's free-text (not
+    /// `@Generable`, so AFM gives it nothing) and it carries the user's full
+    /// conversation, so keeping it on the on-device MLX model preserves the
+    /// privacy guarantee a privacy-motivated MLX user chose (the #4 decision,
+    /// `dadefb2`). AFM's only exposure here is the short intent query.
+    ///
+    /// Decoupled from `answerModel()` so the answer engine and the background
+    /// engine are independent — the background engine is itself swappable the
+    /// day we want a privacy-guaranteed alternative to AFM/`@Generable`.
+    static func auxModel() -> ModelConfiguration {
+        if AskPoseyAvailability.current.isAvailable { return appleFoundation }
+        return answerModel()
+    }
+
     /// True when the model is selectable in this build. Every approved
     /// model is available; MLX models download on first use (or via the
     /// explicit gated Download button in the picker).

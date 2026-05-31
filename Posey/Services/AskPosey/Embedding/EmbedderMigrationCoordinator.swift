@@ -177,6 +177,15 @@ final class EmbedderMigrationCoordinator: ObservableObject {
 
         // Phase 3 — Re-embed every NULL row under the new backend.
         await reEmbedAllNullRows(database: database)
+
+        // 2026-05-31 — Ask Posey unlock signal. A successful switch to Nomic
+        // (the bundle actually loaded — `isLoaded` guards against a failed
+        // download falsely unlocking) marks Nomic provisioned. Sticky: drives
+        // `AskPoseyAvailability.isUnlocked` and persists even if the user later
+        // switches the active embedder back to NLContextual.
+        if target == .nomic, EmbeddingProvider.shared.isLoaded {
+            AskPoseyAvailability.markNomicProvisioned()
+        }
     }
 
     /// Walk every chunk with `embedding IS NULL` and fill it in

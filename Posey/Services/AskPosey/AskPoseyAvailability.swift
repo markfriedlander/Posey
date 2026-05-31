@@ -63,21 +63,58 @@ public struct AskPoseyAvailability {
         #endif
     }
 
-    /// Convenience boolean. Equivalent to `current.isAvailable`.
+    /// Whether the reader-facing Ask Posey surfaces (sparkle glyph, contextual
+    /// "Ask Posey" item, chat sheet) should be visible on this device.
     ///
-    /// 2026-05-16 — Posey 1.0 ships as a pure reading app with Ask
-    /// Posey hidden from the UI but not deleted from the codebase.
-    /// `POSEY_ENABLE_ASK_POSEY` is set in the Debug configuration's
-    /// `SWIFT_ACTIVE_COMPILATION_CONDITIONS`; Release builds compile
-    /// the flag off and this getter returns false unconditionally,
-    /// so every UI surface gated on `isAvailable` disappears. The
-    /// flag returns when v1.1 ships with the upgraded RAG infra.
+    /// 2026-05-31 — Ask Posey is a **post-download unlock feature**. It is
+    /// invisible in the reader until the user has downloaded the models it
+    /// needs — **Nomic** (retrieval ranking) AND **at least one MLX model**
+    /// (answer generation). AFM is NOT part of this gate: AFM is used only for
+    /// background auxiliary tasks (intent classification, summarization, etc.)
+    /// when present, and a device may unlock Ask Posey with no AFM at all.
+    /// The preferences "Ask Posey" on-ramp stays visible regardless (it's how
+    /// the user discovers + downloads what's needed) — only the *reader*
+    /// surfaces are gated on this.
+    ///
+    /// `POSEY_ENABLE_ASK_POSEY` remains the build-level master switch (set in
+    /// Debug today; flipped on for Release at submission). When compiled in,
+    /// visibility is purely the runtime unlock below.
     public static var isAvailable: Bool {
         #if POSEY_ENABLE_ASK_POSEY
-        return current.isAvailable
+        return isUnlocked
         #else
         return false
         #endif
+    }
+
+    /// The runtime unlock condition: Nomic provisioned AND ≥1 MLX model
+    /// downloaded. Cheap, synchronous, isolation-free (UserDefaults + the
+    /// non-isolated downloader + the static catalog), so SwiftUI can read it
+    /// directly when deciding reader-chrome visibility.
+    public static var isUnlocked: Bool {
+        nomicProvisioned && hasDownloadedMLXModel
+    }
+
+    /// Persisted once the user has successfully provisioned the Nomic
+    /// embedder (set by `EmbedderMigrationCoordinator` on a completed switch
+    /// to `.nomic`). Sticky: it stays true even if the user later switches the
+    /// active embedder back to NLContextual — the asset remains downloaded, so
+    /// the unlock persists.
+    public static let nomicProvisionedDefaultsKey = "posey.askPosey.nomicProvisioned"
+    public static var nomicProvisioned: Bool {
+        UserDefaults.standard.bool(forKey: nomicProvisionedDefaultsKey)
+    }
+    public static func markNomicProvisioned() {
+        UserDefaults.standard.set(true, forKey: nomicProvisionedDefaultsKey)
+    }
+
+    /// True when at least one curated MLX model is present on disk. Mirrors
+    /// `ModelCatalogService.downloadedModels`' MLX reconcile (`MLXModelDownloader
+    /// .isModelDownloaded(id)`) but without the `@MainActor` hop.
+    public static var hasDownloadedMLXModel: Bool {
+        ModelCatalog.all.contains { model in
+            model.source == .mlx && MLXModelDownloader.shared.isModelDownloaded(model.id)
+        }
     }
 
     /// Human-readable explanation suitable for diagnostic logging. Not for

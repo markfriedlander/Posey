@@ -2371,7 +2371,57 @@ extension DatabaseManager {
     /// `plain_text` / `display_text` / `character_count` columns by
     /// joining unit text — so any consumer that hasn't switched to
     /// units yet still sees a coherent document.
+
+    /// Diagnostic only (logs, never throws or mutates): warn when a document
+    /// advertises a table of contents in its opening yet produced no navigable
+    /// structure — the silent-detector-failure class that hid the GEB run-on-TOC
+    /// bug. Surfaces in LOGS so the next such failure is visible immediately
+    /// instead of waiting for a reader to notice missing chapter navigation.
+    ///
+    /// STEP 3 — category + edge cases. Category: ANY document whose opening
+    /// advertises a TOC (a standalone "Contents"/"Table of Contents" line) but
+    /// whose detectors produced zero TOC entries AND zero heading units.
+    ///   • Inline "the contents of this book…" must NOT trip it: the regex
+    ///     anchors to a standalone line (`^\s*contents\s*$`). Verified — inline
+    ///     mentions don't match.
+    ///   • Partial structure (headings but no TOC, or TOC but no headings) is a
+    ///     working detector, not a silent failure: the guard requires BOTH zero.
+    ///   • Diagnostic only — a false positive costs one log line, never behavior,
+    ///     so the bar to warn is deliberately low. Verified: 0 false fires across
+    ///     the 8-doc real corpus (all of which DO have structure).
+    ///   • KNOWN LIMITATION: English anchors only. A non-English book ("Inhalt",
+    ///     "Sommaire", "Índice", "目次") won't be caught. Extend the alternation
+    ///     if the corpus grows non-English — but keep the standalone-line anchor.
+    private static func warnIfStructureSilentlyFailed(_ parsed: ParsedDocument) {
+        let headingCount = parsed.units.filter { $0.kind == .heading }.count
+        guard parsed.toc.isEmpty, headingCount == 0 else { return }
+        // Scan the opening (first ~8000 chars of prose-bearing text) for a
+        // standalone "Contents" / "Table of Contents" line.
+        var opening = ""
+        for unit in parsed.units where unit.kind.carriesProseText {
+            opening += unit.text
+            opening += "\n"
+            if opening.count > 8000 { break }
+        }
+        let hasTOCAnchor: Bool = {
+            guard let re = try? NSRegularExpression(
+                pattern: #"(?im)^\s*(table of contents|contents)\s*$"#) else { return false }
+            return re.firstMatch(in: opening, range: NSRange(opening.startIndex..., in: opening)) != nil
+        }()
+        guard hasTOCAnchor else { return }
+        dbgLog("SILENT-STRUCTURE-FAILURE: '%@' (%@) advertises a Contents page but produced 0 TOC entries and 0 heading units — a structure detector likely failed silently.",
+               parsed.title as NSString, parsed.fileType as NSString)
+    }
+
     func persistParsedDocument(_ parsed: ParsedDocument) throws {
+        // 2026-05-31 (ingestion audit) — silent-failure signaling. The GEB TOC
+        // bug hid for a long time because a detector returned nothing and the
+        // import moved on with no signal. Surface that whole class at the one
+        // shared persist path: a document whose opening clearly advertises a
+        // table of contents but that produced ZERO toc entries AND zero heading
+        // units almost certainly had a detector fail silently. Log it so it's
+        // visible in LOGS instead of hiding until a reader notices.
+        Self.warnIfStructureSilentlyFailed(parsed)
         dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN TRANSACTION;")
         do {

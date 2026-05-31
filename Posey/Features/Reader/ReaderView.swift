@@ -1981,6 +1981,10 @@ private struct ReaderPreferencesSheet: View {
     /// `OPEN_MODEL_LIBRARY` verb, and the `.navigationDestination` are all
     /// robust regardless of scroll position / lazy row instantiation.
     @State private var showModelLibrary = false
+    /// 2026-05-31 — Ask Posey unlock onboarding (shown from the locked
+    /// preferences invitation; flows into the Model Library). Repeats on each
+    /// entry until Nomic + ≥1 MLX model are present.
+    @State private var showAskPoseyOnboarding = false
 
     private var isCustomMode: Bool {
         if case .custom = viewModel.voiceMode { return true }
@@ -2123,7 +2127,8 @@ private struct ReaderPreferencesSheet: View {
                 // correctly. This section is the active-model row + the
                 // "Browse Model Library" link (Hal's settings convention).
                 AskPoseyPreferencesSection(
-                    onBrowseModelLibrary: { showModelLibrary = true }
+                    onBrowseModelLibrary: { showModelLibrary = true },
+                    onGetStarted: { showAskPoseyOnboarding = true }
                 )
                 .id("preferences.askPosey.section")
             }
@@ -2133,6 +2138,15 @@ private struct ReaderPreferencesSheet: View {
                 AskPoseyModelLibraryView(
                     migrationCoordinator: EmbedderMigrationCoordinator.shared,
                     databaseManager: viewModel.databaseManager
+                )
+            }
+            .sheet(isPresented: $showAskPoseyOnboarding) {
+                AskPoseyOnboardingView(
+                    onContinue: {
+                        showAskPoseyOnboarding = false
+                        showModelLibrary = true
+                    },
+                    onNotNow: { showAskPoseyOnboarding = false }
                 )
             }
             .toolbar {

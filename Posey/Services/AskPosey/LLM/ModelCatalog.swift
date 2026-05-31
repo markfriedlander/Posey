@@ -57,6 +57,25 @@ enum ModelCatalog {
         return model(id: raw) ?? appleFoundation
     }
 
+    /// The model that writes reader-facing Ask Posey **answers**. 2026-05-31:
+    /// AFM is no longer an answer engine (it's hidden from the picker and used
+    /// only for background `@Generable` tasks). This always resolves to a
+    /// downloaded MLX model and never AFM — the user's selection when that's a
+    /// downloaded MLX model, otherwise the first downloaded MLX model. The
+    /// Ask Posey unlock gate guarantees ≥1 MLX model is present, so this
+    /// resolves to a real model whenever Ask Posey is reachable. Answer
+    /// generation and its token budget route through here; the AFM answer path
+    /// in `AskPoseyService.streamProseResponse` becomes unreachable as a
+    /// result (kept as inert, reversible code).
+    static func answerModel() -> ModelConfiguration {
+        let selected = current()
+        if selected.source == .mlx, MLXModelDownloader.shared.isModelDownloaded(selected.id) {
+            return selected
+        }
+        return all.first { $0.source == .mlx && MLXModelDownloader.shared.isModelDownloaded($0.id) }
+            ?? selected
+    }
+
     /// True when the model is selectable in this build. Every approved
     /// model is available; MLX models download on first use (or via the
     /// explicit gated Download button in the picker).

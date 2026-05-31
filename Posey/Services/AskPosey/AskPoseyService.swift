@@ -374,7 +374,11 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         // (no grounded+polish two-call structure); the chunker /
         // retriever / Layer-1 framing all already work through
         // the shared prompt builder.
-        let activeModel = ModelCatalog.current()
+        // 2026-05-31 — answers route through `answerModel()`, which never
+        // resolves to AFM (AFM is background-only now). The `if .mlx` branch
+        // below therefore always wins; the AFM path that follows is inert,
+        // reversible code kept for the day AFM returns as an answer engine.
+        let activeModel = ModelCatalog.answerModel()
         if activeModel.source == .mlx {
             return try await streamProseResponseMLX(
                 inputs: inputs,

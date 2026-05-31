@@ -175,7 +175,8 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     private var budget: AskPoseyTokenBudget {
         if let injectedBudget { return injectedBudget }
         let isLong = documentPlainText.count >= UnitEmbeddingChunker.Configuration.longDocumentThresholdChars
-        return AskPoseyTokenBudget.forModel(ModelCatalog.current(), longDocument: isLong)
+        // Answers run on the MLX answer model (never AFM) — budget matches it.
+        return AskPoseyTokenBudget.forModel(ModelCatalog.answerModel(), longDocument: isLong)
     }
 
     /// Used to cancel the in-flight response if the user dismisses
@@ -270,7 +271,7 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// unconfigured model degrades safely rather than to zero.
     private var activeMemoryDepthExchanges: Int {
         let depth = ModelSettingsStore.shared
-            .effectiveSettings(for: ModelCatalog.current())
+            .effectiveSettings(for: ModelCatalog.answerModel())
             .effectiveMemoryDepth ?? 3
         return max(1, depth)
     }

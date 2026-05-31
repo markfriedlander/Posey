@@ -127,7 +127,11 @@ struct AskPoseyModelLibraryView: View {
 
     private var llmSection: some View {
         Section {
-            ForEach(ModelCatalog.all) { model in
+            // 2026-05-31 — AFM is hidden as an answer engine: it's no longer
+            // selectable to write Ask Posey answers (only downloaded MLX
+            // models answer; AFM stays for background @Generable tasks).
+            // Show only the MLX catalog here.
+            ForEach(ModelCatalog.all.filter { $0.source == .mlx }) { model in
                 AskPoseyModelRow(
                     model: model,
                     isActive: model.id == selectedModelID,
@@ -343,10 +347,16 @@ struct AskPoseyModelLibraryView: View {
             ModelCatalogService.shared.revokeLicense(for: model.id)
             await MainActor.run {
                 ModelCatalogService.shared.refreshDownloadStates()
-                // If the deleted model was active, fall back to AFM so the
-                // next /ask doesn't try to re-download mid-conversation.
+                // If the deleted model was active, fall back to another
+                // downloaded MLX model (AFM is not an answer engine). If none
+                // remain, the unlock gate re-locks Ask Posey; `answerModel()`
+                // coerces safely in the meantime.
                 if selectedModelID == model.id {
-                    selectedModelID = ModelCatalog.appleFoundation.id
+                    if let next = ModelCatalog.all.first(where: {
+                        $0.source == .mlx && $0.id != model.id && mlxDownloader.isModelDownloaded($0.id)
+                    }) {
+                        selectedModelID = next.id
+                    }
                 }
             }
         }

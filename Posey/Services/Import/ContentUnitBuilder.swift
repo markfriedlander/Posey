@@ -284,6 +284,50 @@ enum ContentUnitBuilder {
         // e.g. a chapter name in both the front-matter Contents listing and the
         // body). If no unit heads with the title, the marker is dropped — a
         // non-matching (often long) paragraph is NEVER turned into a heading.
+        //
+        // STEP 3 — the CATEGORY this generalizes to, and its edge cases (so a
+        // future session doesn't have to rediscover them). Category: ANY format
+        // whose headings arrive as (offset, title) markers from a separate
+        // detection pass, where the offset can be imprecise. That's PDF, EPUB,
+        // HTML, RTF — every caller of this function.
+        //   • Offset slightly late (EPUB) or early (DOCX): nearest title-match
+        //     across all units corrects BOTH directions — this is why it isn't
+        //     a one-directional look-back.
+        //   • Offset WILDLY wrong (not just off-by-one): still resolves, because
+        //     the title is matched anywhere and `nearest` only breaks ties.
+        //     Title-anchoring is STRICTLY more robust than offset-anchoring here.
+        //   • Title repeats (Contents listing + body; or genuinely repeated
+        //     sections like Frankenstein's two "To Mrs. Saville, England."
+        //     letters, which carry one marker each): nearest-offset assigns each
+        //     marker to its own occurrence.
+        //   • Title heads a unit FUSED with body (PDF dialogues: "Three-Part
+        //     Invention Achilles (a Greek warrior…)"): promoted, and
+        //     computeTitleLength styles only the title prefix — not the
+        //     paragraph. Verified on GEB.
+        //   • Title found in NO unit (e.g. a normalized title that no longer
+        //     prefix-matches the raw unit text): marker dropped. We accept a
+        //     MISSING heading over a WRONG one. This is the one residual
+        //     limitation — a whitespace/normalization drift between a detector's
+        //     title and the unit text silently loses that heading. Tolerable
+        //     today because the TOC detectors emit titles that match the source
+        //     exactly for these formats; if a format ever normalizes titles,
+        //     make the prefix compare whitespace-insensitive HERE and in
+        //     computeTitleLength together (they must agree).
+        //   • Generic/short title ("I.", "II.") that also prefixes a LONGER
+        //     title's unit (Sherlock: "I." vs "I. A Scandal in Bohemia"):
+        //     HANDLED by ranking EXACT title==unit matches ahead of prefix-only
+        //     matches (see the loop), so each marker takes the unit that equals
+        //     its own title. Residual risk only if a generic title has no exact
+        //     unit anywhere AND the offset is wildly wrong — a narrow edge.
+        //   • DOCX with no heading styles: the importer's inference fallback
+        //     still supplies (offset, title) markers; they flow through here
+        //     unchanged.
+        //   • Page-number edge cases (appendices that reset numbering, roman vs
+        //     arabic) do NOT reach here — those are the TOC *parser's* concern
+        //     (PDFGeneralizedTOCDetector); this function only sees title+offset.
+        // Verified across the category, not one document: EPUB (Moby chapters
+        // headed, body prose), DOCX (7 legit headings, 0 false), PDF (GEB 21
+        // dialogues), TXT, HTML — multiple real corpus docs per format.
 
         // Phase 1 — start offset of each prose-bearing unit, in the persister's
         // "\n\n"-joined coordinate space (the space the marker offsets use).
@@ -306,12 +350,34 @@ enum ContentUnitBuilder {
         }
         for (offset, marker) in headingMarkersByOffset {
             if let title = marker.title, !title.isEmpty {
+                // Rank candidates EXACT-match-first (the unit IS the title), then
+                // nearest offset.
+                //   • STEP-3 (Sherlock): a bare-numeral title "I." prefix-matches
+                //     BOTH the "I." sub-section unit AND the "I. A Scandal in
+                //     Bohemia" story unit — exact-first sends each marker to the
+                //     unit that equals its own title.
+                //   • STEP-3 (Sherlock, deeper): matching is WHITESPACE-TOLERANT.
+                //     The TOC title "I. A Scandal in Bohemia" (flattened to one
+                //     line) must match the unit "I.\nA Scandal in Bohemia" whose
+                //     heading is split across lines in the EPUB source. Any
+                //     whitespace run matches any whitespace run; without this,
+                //     every line-split EPUB chapter/story title silently loses
+                //     its heading (Sherlock's 12 stories did).
+                let titleFirst = title.first(where: { !$0.isWhitespace })
                 var best: Int? = nil
+                var bestExact = 1          // 0 = exact, 1 = prefix-only (lower wins)
                 var bestDist = Int.max
                 for i in units.indices where units[i].kind == .prose && startOffsets[i] >= 0 {
-                    guard units[i].text.drop(while: { $0.isWhitespace }).hasPrefix(title) else { continue }
+                    // Cheap pre-filter before the char-walk: first non-whitespace
+                    // char must match.
+                    guard units[i].text.first(where: { !$0.isWhitespace }) == titleFirst else { continue }
+                    guard let m = Self.titleMatch(in: units[i].text, title: title) else { continue }
+                    let exactRank = m.isExact ? 0 : 1
                     let dist = abs(startOffsets[i] - offset)
-                    if dist < bestDist { bestDist = dist; best = i }
+                    if best == nil || exactRank < bestExact
+                        || (exactRank == bestExact && dist < bestDist) {
+                        best = i; bestExact = exactRank; bestDist = dist
+                    }
                 }
                 if let b = best { consider(b, marker) }
                 // else: title not found in any unit — drop the marker.
@@ -360,35 +426,47 @@ enum ContentUnitBuilder {
         )
     }
 
-    /// If `title` is a prefix of `unitText` (after trimming leading
-    /// whitespace on the unit) AND the unit contains body text past
-    /// the title, return the character count in `unitText` that
-    /// covers the title plus any separator (newline / space). Return
-    /// nil otherwise — meaning the whole unit IS the title and should
-    /// render as a pure heading.
+    /// Whitespace-tolerant title match. Returns nil if `title` does not head
+    /// `unitText` (after leading whitespace). Any run of whitespace in EITHER
+    /// string matches any run in the other — so a TOC title "I. A Scandal in
+    /// Bohemia" matches a unit "I.\nA Scandal in Bohemia" whose heading was
+    /// split across lines in the EPUB source. On a match returns:
+    ///   • `titleLength`: character count from `unitText`'s start through the end
+    ///     of the matched title PLUS one trailing separator char — the renderer
+    ///     styles `[0, titleLength)` as the heading and the remainder as body.
+    ///     nil when the unit IS the title (no body after), i.e. style it whole.
+    ///   • `isExact`: true when the unit holds nothing but the title.
+    /// Case-sensitive on non-whitespace (importers preserve case).
+    private static func titleMatch(in unitText: String, title: String) -> (titleLength: Int?, isExact: Bool)? {
+        let u = Array(unitText)
+        let t = Array(title)
+        var ui = 0, ti = 0
+        while ui < u.count, u[ui].isWhitespace { ui += 1 }
+        while ti < t.count {
+            if t[ti].isWhitespace {
+                guard ui < u.count, u[ui].isWhitespace else { return nil }
+                while ui < u.count, u[ui].isWhitespace { ui += 1 }
+                while ti < t.count, t[ti].isWhitespace { ti += 1 }
+            } else {
+                guard ui < u.count, u[ui] == t[ti] else { return nil }
+                ui += 1; ti += 1
+            }
+        }
+        let titleEnd = ui   // char index in unitText just past the matched title
+        var hasBody = false
+        var j = ui
+        while j < u.count { if !u[j].isWhitespace { hasBody = true; break }; j += 1 }
+        guard hasBody else { return (titleLength: nil, isExact: true) }
+        let consumeSeparator = (titleEnd < u.count && u[titleEnd].isWhitespace) ? 1 : 0
+        return (titleLength: titleEnd + consumeSeparator, isExact: false)
+    }
+
+    /// Title-prefix length for the heading renderer (styles only the title, not
+    /// trailing body). Delegates to the whitespace-tolerant `titleMatch` so it
+    /// stays consistent with the promotion decision in `applyHeadingMarkers`.
     private static func computeTitleLength(in unitText: String, title: String?) -> Int? {
         guard let title, !title.isEmpty else { return nil }
-        let leadingWhitespace = unitText.prefix(while: { $0.isWhitespace }).count
-        let afterLeading = unitText.dropFirst(leadingWhitespace)
-        // Compare case-sensitively; importers preserve case. We don't
-        // try to be clever about whitespace inside the title — the
-        // TOC detector's title strings match the source text exactly
-        // for the formats that hit this path.
-        guard afterLeading.hasPrefix(title) else { return nil }
-        let titleEnd = leadingWhitespace + title.count
-        // No body after the title (modulo trailing whitespace) — let
-        // the whole unit be the heading.
-        let tail = unitText.dropFirst(titleEnd)
-        let nonWhitespaceTail = tail.contains(where: { !$0.isWhitespace })
-        guard nonWhitespaceTail else { return nil }
-        // Consume one separator character (the typical "\n" or " ")
-        // so the body remainder starts cleanly. The renderer will
-        // still see the rest of the whitespace and lay it out.
-        var consumeSeparator = 0
-        if let first = tail.first, first.isWhitespace {
-            consumeSeparator = 1
-        }
-        return titleEnd + consumeSeparator
+        return titleMatch(in: unitText, title: title)?.titleLength
     }
 
     /// Map a plainText character offset (the coordinate space the

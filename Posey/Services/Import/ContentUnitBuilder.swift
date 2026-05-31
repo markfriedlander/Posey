@@ -266,54 +266,98 @@ enum ContentUnitBuilder {
         headingMarkersByOffset: [Int: HeadingMarker]
     ) -> [ContentUnit] {
         guard !headingMarkersByOffset.isEmpty else { return units }
-        var out: [ContentUnit] = []
-        out.reserveCapacity(units.count)
+
+        // 2026-05-31 (ingestion audit, Bug B) — promote by TITLE, with the
+        // offset only DISAMBIGUATING. The previous code turned whatever unit a
+        // marker's offset landed in into a heading, WITHOUT checking the title
+        // actually heads that unit. Importer offsets are imprecise in BOTH
+        // directions: EPUB TOC offsets land one unit LATE (the offset for
+        // "CHAPTER 1. Loomings." resolves into the next paragraph "Call me
+        // Ishmael…" → every chapter's first body paragraph became a level-1
+        // heading: 136 of 142 "headings" in Moby EPUB were full prose
+        // paragraphs), and DOCX offsets can land EARLY. So neither "the unit at
+        // the offset" nor a one-directional look-back is correct.
+        //
+        // The title is the identity. For each marker we promote the `.prose`
+        // unit whose text HEADS WITH the title that sits NEAREST the marker's
+        // offset (nearest disambiguates a title that appears more than once —
+        // e.g. a chapter name in both the front-matter Contents listing and the
+        // body). If no unit heads with the title, the marker is dropped — a
+        // non-matching (often long) paragraph is NEVER turned into a heading.
+
+        // Phase 1 — start offset of each prose-bearing unit, in the persister's
+        // "\n\n"-joined coordinate space (the space the marker offsets use).
+        var startOffsets = [Int](repeating: -1, count: units.count)
         var cursor = 0
         var firstProseSeen = false
-        for unit in units {
-            if !unit.kind.carriesProseText {
-                out.append(unit)
-                continue
-            }
-            // "\n\n" separator before this prose-bearing unit, except
-            // the very first one — matches the persister's
-            // `joined(separator: "\n\n")` over prose-bearing units.
+        for i in units.indices where units[i].kind.carriesProseText {
             if firstProseSeen { cursor += 2 }
             firstProseSeen = true
-            let start = cursor
-            let end = cursor + unit.text.count
-            cursor = end
+            startOffsets[i] = cursor
+            cursor += units[i].text.count
+        }
 
-            // Only plain `.prose` gets rewritten. Pre-existing heading /
-            // list / quote kinds are preserved.
-            guard unit.kind == .prose else {
-                out.append(unit)
-                continue
+        // Phase 2 — resolve each marker to the nearest title-matching prose unit.
+        var promotions: [Int: HeadingMarker] = [:]
+        func consider(_ idx: Int, _ marker: HeadingMarker) {
+            // If two markers target the same unit, keep the shallower (lower) level.
+            if let existing = promotions[idx], existing.level <= marker.level { return }
+            promotions[idx] = marker
+        }
+        for (offset, marker) in headingMarkersByOffset {
+            if let title = marker.title, !title.isEmpty {
+                var best: Int? = nil
+                var bestDist = Int.max
+                for i in units.indices where units[i].kind == .prose && startOffsets[i] >= 0 {
+                    guard units[i].text.drop(while: { $0.isWhitespace }).hasPrefix(title) else { continue }
+                    let dist = abs(startOffsets[i] - offset)
+                    if dist < bestDist { bestDist = dist; best = i }
+                }
+                if let b = best { consider(b, marker) }
+                // else: title not found in any unit — drop the marker.
+            } else {
+                // No title to validate against — promote the prose unit whose
+                // range contains the offset (legacy behavior for title-less markers).
+                if let idx = units.indices.first(where: { i in
+                    units[i].kind == .prose && startOffsets[i] >= 0
+                        && offset >= startOffsets[i]
+                        && offset <= startOffsets[i] + units[i].text.count
+                }) {
+                    consider(idx, marker)
+                }
             }
-            // Heading detector may report the offset at the start of
-            // the paragraph proper or anywhere inside leading
-            // whitespace. Inclusive range check.
-            guard let matched = (start...end).first(where: { headingMarkersByOffset[$0] != nil }),
-                  let marker = headingMarkersByOffset[matched] else {
+        }
+
+        // Phase 3 — emit, promoting resolved units.
+        var out: [ContentUnit] = []
+        out.reserveCapacity(units.count)
+        for (i, unit) in units.enumerated() {
+            if unit.kind == .prose, let marker = promotions[i] {
+                out.append(Self.makeHeadingUnit(from: unit, marker: marker))
+            } else {
                 out.append(unit)
-                continue
             }
-            let titleLength = computeTitleLength(in: unit.text, title: marker.title)
-            out.append(ContentUnit(
-                id: unit.id,
-                documentID: unit.documentID,
-                sequence: unit.sequence,
-                kind: .heading,
-                text: unit.text,
-                metadata: ContentUnitMetadata(
-                    headingLevel: marker.level,
-                    titleLength: titleLength
-                ),
-                revision: unit.revision,
-                sourceTier: unit.sourceTier
-            ))
         }
         return out
+    }
+
+    /// Build a `.heading` unit from a prose `unit`, carrying the marker's level
+    /// and the computed title-prefix length (so the renderer styles only the
+    /// title, not any trailing body in the same unit).
+    private static func makeHeadingUnit(from unit: ContentUnit, marker: HeadingMarker) -> ContentUnit {
+        ContentUnit(
+            id: unit.id,
+            documentID: unit.documentID,
+            sequence: unit.sequence,
+            kind: .heading,
+            text: unit.text,
+            metadata: ContentUnitMetadata(
+                headingLevel: marker.level,
+                titleLength: computeTitleLength(in: unit.text, title: marker.title)
+            ),
+            revision: unit.revision,
+            sourceTier: unit.sourceTier
+        )
     }
 
     /// If `title` is a prefix of `unitText` (after trimming leading

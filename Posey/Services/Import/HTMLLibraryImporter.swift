@@ -106,10 +106,14 @@ struct HTMLLibraryImporter {
         // ── `.heading` units. Reuse the TOC resolution that already
         // ── searches plainText for each heading's title.
         let resolvedHeadings = resolveHeadingOffsets(headings, in: plainText)
+        // 2026-05-31 (ingestion audit): keep-first on duplicate offsets —
+        // `Dictionary(uniqueKeysWithValues:)` fatal-errors on a key collision
+        // (two headings resolving to the same offset). See PDFLibraryImporter.
         let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
-            uniqueKeysWithValues: resolvedHeadings.map {
+            resolvedHeadings.map {
                 ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
-            }
+            },
+            uniquingKeysWith: { first, _ in first }
         )
         let units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,

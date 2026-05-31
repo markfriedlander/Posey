@@ -152,10 +152,18 @@ struct PDFLibraryImporter {
         // ── skips non-prose units (pageBreak / image) and only
         // ── advances the offset cursor on prose-bearing kinds —
         // ── matches the persister's plain_text join scheme.
+        // 2026-05-31 (ingestion audit): tolerate duplicate offsets. Two TOC
+        // entries CAN resolve to the same plainTextOffset (front-matter titles
+        // with no unique body location, repeated titles, or unresolved entries
+        // defaulting to the same anchor). `Dictionary(uniqueKeysWithValues:)`
+        // FATAL-ERRORS on a duplicate key — this crashed GEB import
+        // (EXC_BREAKPOINT) the moment the run-on TOC detector emitted entries.
+        // Keep the first marker at each offset; never trap on a collision.
         let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
-            uniqueKeysWithValues: parsed.tocEntries.map {
+            parsed.tocEntries.map {
                 ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
-            }
+            },
+            uniquingKeysWith: { first, _ in first }
         )
         let units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,

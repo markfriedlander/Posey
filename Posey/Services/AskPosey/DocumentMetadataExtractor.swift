@@ -110,21 +110,31 @@ enum DocumentMetadataExtractor {
         // 1) Deterministic.
         var result = parseDeterministic(opening, knownTitle: knownTitle)
 
-        // 2) AFM fallback — only when a field is still missing, so a clean
-        //    Gutenberg header skips the model round-trip entirely.
-        let needsAuthor = result.authors.isEmpty
+        // 2) AFM fallback — YEAR ONLY. 2026-05-31 (ingestion audit): AFM was
+        //    taking the AUTHOR field too, and it HALLUCINATES authors from
+        //    ordinary prose when none is named — "An AI Assistant Driven by
+        //    Curiosity and Ethical Principles" → authors ["Curiosity","Ethical
+        //    Principles"]; a README's "sorted by where they occur in the
+        //    document" → "where they occur in the document"; a Wikipedia
+        //    article's "LibriVox recording by Karen Savage" → "Karen Savage".
+        //    A confidently-wrong author poisons Ask Posey's DOCUMENT METADATA
+        //    block, so authors now come ONLY from authoritative signals:
+        //    deterministic Gutenberg "Author:" header or a line-anchored
+        //    byline (parseDeterministic above). AFM is still trusted for the
+        //    YEAR — a 4-digit publication year is far harder to fabricate
+        //    plausibly than a name, and it has no comparable failure mode.
+        //    FOLLOW-UP (filed): wire embedded metadata (EPUB OPF dc:creator,
+        //    DOCX core.xml) as the authoritative author source — those
+        //    importers already PARSE the creator but don't feed metadata_authors.
         let needsYear = (result.year ?? "").isEmpty
-        if needsAuthor || needsYear {
+        if needsYear {
             #if canImport(FoundationModels)
             if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *),
                let afm = await extractViaAFM(plainText: plainText) {
-                if needsAuthor && !afm.authors.isEmpty {
-                    result.authors = afm.authors
-                }
-                if needsYear, let y = afm.year, !y.isEmpty {
+                if let y = afm.year, !y.isEmpty {
                     result.year = y
+                    result.source = result.source == "deterministic" ? "hybrid" : "afm"
                 }
-                result.source = result.source == "deterministic" ? "hybrid" : "afm"
             }
             #endif
         }
@@ -148,19 +158,26 @@ enum DocumentMetadataExtractor {
             pattern: #"(?im)^\s*Author:\s*(.+?)\s*$"#) {
             authors = splitAuthors(m)
         }
-        // (b) A clean byline: "by <Name>" on a single line, NOT a
-        //     "Preface by / Introduction by / Edited by / Translated by"
-        //     attribution (those name the apparatus author, not the work's).
-        //     Name words require an initial-cap-then-LOWERCASE shape
-        //     ("Herman", "Melville") so ALL-CAPS headings that follow on
-        //     the next line ("CONTENTS", "ETYMOLOGY") can't be swept in,
-        //     and the word separator is HORIZONTAL whitespace only
-        //     ([ \t], never a newline) so the byline can't cross into the
-        //     table of contents.
+        // (b) A clean byline: "by <Name>" as a STANDALONE line (the byline
+        //     must START the line — `^[ \t]*by`). 2026-05-31 (ingestion audit):
+        //     the prior `\bby` matched "by" ANYWHERE, so ordinary prose
+        //     produced fabricated authors — "An AI Assistant Driven *by
+        //     Curiosity and Ethical Principles*" → authors ["Curiosity",
+        //     "Ethical Principles"] (RTF); "LibriVox recording *by Karen
+        //     Savage*" → "Karen Savage" (Wikipedia HTML). A real byline sits
+        //     on its own line under the title ("Moby Dick\nby Herman
+        //     Melville"); a mid-sentence "by X" never does. Line-anchoring
+        //     kills the prose false-positives — empty is FAR better than a
+        //     confidently-wrong author feeding Ask Posey's metadata block.
+        //     The "Preface by / Edited by …" lookbehinds are no longer needed:
+        //     those lines start with "Preface"/"Edited", not "by", so they
+        //     can't match a line-anchored "by". Name words keep the
+        //     initial-cap-then-lowercase shape; separator is horizontal
+        //     whitespace only so the byline can't cross into the next line.
         if authors.isEmpty,
            let m = firstCapture(in: opening,
-            pattern: #"(?im)(?<!preface )(?<!introduction )(?<!edited )(?<!translated )(?<!foreword )\bby[ \t]+([A-Z][a-z][\p{L}.'’-]*(?:[ \t]+(?:[A-Z][a-z][\p{L}.'’-]*|[A-Z]\.))*)"#) {
-            // Reject obvious false positives (sentence "by the …").
+            pattern: #"(?im)^[ \t]*(?:(?:co-)?authored[ \t]+|written[ \t]+)?by[ \t]+([A-Z][a-z][\p{L}.'’-]*(?:[ \t]+(?:[A-Z][a-z][\p{L}.'’-]*|[A-Z]\.))*)"#) {
+            // Reject obvious false positives (a rare line that opens "by the …").
             let lowerFirst = m.split(separator: " ").first.map { $0.lowercased() } ?? ""
             let stop: Set<String> = ["the","a","an","this","that","his","her","their","which","whom","means","way","far","then","now","day"]
             if !stop.contains(lowerFirst) { authors = splitAuthors(m) }

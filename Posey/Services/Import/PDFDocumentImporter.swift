@@ -427,6 +427,17 @@ extension PDFDocumentImporter {
         if tocSkipUntilOffset == 0,
            let generalized = PDFGeneralizedTOCDetector.detect(pageTexts: readableTextPages) {
             tocSkipUntilOffset = generalized.regionEndOffset
+            // 2026-05-31 — the generalized detector now emits entries for
+            // run-on / whitespace TOCs (OCR'd scanned books like GEB, whose
+            // TOC has no dot leaders and no line breaks). Wire them through
+            // the same buildEntries path so navigable TOC entries AND heading
+            // units get built — not just a silent skip region. Only when the
+            // earlier strategies produced no entries (this is the fallback).
+            if tocEntries.isEmpty, !generalized.entries.isEmpty {
+                tocEntries = buildEntries(for: generalized.entries,
+                                          in: plainText,
+                                          postTOCOffset: generalized.regionEndOffset)
+            }
         }
 
         return ParsedPDFDocument(

@@ -91,10 +91,14 @@ struct DOCXLibraryImporter {
         // ── Step 9 prerequisite — promote prose paragraphs whose
         // ── offsets match heading entries into `.heading` units, so
         // ── the unified UnitRowView renderer styles them by kind.
+        // 2026-05-31 (ingestion audit): keep-first on duplicate offsets —
+        // `Dictionary(uniqueKeysWithValues:)` fatal-errors on a key collision
+        // (two headings resolving to the same offset). See PDFLibraryImporter.
         let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
-            uniqueKeysWithValues: headings.map {
+            headings.map {
                 ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
-            }
+            },
+            uniquingKeysWith: { first, _ in first }
         )
         let units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,

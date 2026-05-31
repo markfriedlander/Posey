@@ -131,35 +131,77 @@ final class EmbedderMigrationCoordinator: ObservableObject {
         to target: EmbeddingBackend,
         database: DatabaseManager
     ) async {
-        // Phase 1 — Download.
+        // Phase 1 — Switch the flag + LOAD the target backend BEFORE
+        // touching any stored embedding. (D6 fix, 2026-05-31 — Rule 9A port
+        // of Hal's wait-for-isLoaded gate; full diff in
+        // docs-internal/EMBEDDER-MIGRATION-D6-HAL-DIFF-2026-05-31.md.)
         //
-        // NLContextual: OS-built-in; the embedder framework
-        // requests assets transparently on first use. No
-        // orchestration needed here.
+        // The defect this replaces: the old order wiped every embedding to
+        // NULL, flipped the backend, then raced the re-embed loop against a
+        // still-downloading Nomic asset — `embed()` returned nil for every
+        // chunk (warmUp had already set `nomicLoadAttempted`, so the per-chunk
+        // load short-circuited instead of waiting), 128 nils tripped the
+        // perma-nil guard → `.error`, and the store was left fully
+        // semantic-dark (backend = nomic, every row NULL, retrieval silently
+        // BM25-only). Reproduced live on the phone during the item-5 switch.
         //
-        // Nomic (Step 8h, live): `EmbeddingProvider.shared.warmUp()`
-        // below triggers `NomicBert.loadModelBundle(from: repoID)`
-        // on a background task, which does the HuggingFace fetch
-        // itself. We don't drive progress here — the picker UI
-        // reports `.switching` until `isLoaded` flips. A polish
-        // pass can wire HuggingFace's progress reporter into a
-        // `.downloading` phase later.
+        // Hal's invariant: NEVER run the re-embed loop against an unloaded
+        // model, and NEVER destroy the old embeddings until the new backend is
+        // proven loadable. So: flip the flag, warm-load the target (first-time
+        // Nomic downloads ~522 MB implicitly inside the load), and WAIT for
+        // `isLoaded` BEFORE wiping. On timeout / cancel / load failure, revert
+        // the flag and leave every embedding intact → prior working state
+        // preserved, zero semantic-dark window.
 
         if Task.isCancelled {
             await MainActor.run { self.publish(.cancelled) }
             return
         }
 
-        // Phase 2 — Switch + wipe. Atomic from the app's POV:
-        // flip UserDefaults, NULL every row in one statement.
+        let previousBackend = EmbeddingBackend.current()
         await MainActor.run { self.publish(.switching) }
         UserDefaults.standard.set(target.rawValue, forKey: EmbeddingBackend.defaultsKey)
 
-        // Warm the new backend before we start the re-embed loop
-        // so the first embed call doesn't pay the full load cost
-        // serialized on the migration's critical path.
+        // Warm-load the now-active backend off-main. NLContextual is
+        // OS-built-in (loads near-instantly); Nomic's first-time load performs
+        // the HuggingFace fetch itself.
         EmbeddingProvider.shared.warmUp()
 
+        // Wait for the bundle to be ready. Generous + cancellable because the
+        // first-time Nomic switch includes the ~522 MB download on this path
+        // (Hal's 60s cap assumes a pre-downloaded model — disk load only). A
+        // timeout or cancel reverts the flag so we stay on the prior working
+        // backend and NEVER reach the wipe.
+        let loadDeadline = Date().addingTimeInterval(target == .nlContextual ? 60 : 600)
+        while !EmbeddingProvider.shared.isLoaded {
+            if Task.isCancelled {
+                UserDefaults.standard.set(previousBackend.rawValue, forKey: EmbeddingBackend.defaultsKey)
+                await MainActor.run { self.publish(.cancelled) }
+                return
+            }
+            if Date() > loadDeadline {
+                UserDefaults.standard.set(previousBackend.rawValue, forKey: EmbeddingBackend.defaultsKey)
+                await MainActor.run {
+                    self.publish(.error(
+                        "\(target.rawValue) didn't finish loading in time. No embeddings were changed — still using \(previousBackend.rawValue). Check your connection and try again."
+                    ))
+                }
+                return
+            }
+            // Surface a real loading/downloading phase. No fine-grained
+            // progress hook exists on the swift-embeddings load path, so the
+            // fraction is indeterminate (the UI renders a spinner/indeterminate
+            // bar for .downloading). Wiring HuggingFace's progress reporter in
+            // is a future polish.
+            await MainActor.run {
+                self.publish(.downloading(modelID: target.rawValue, progressFraction: 0))
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+
+        // Phase 2 — Bundle is loaded. NOW it is safe to wipe. Atomic NULL of
+        // every row in one statement.
+        await MainActor.run { self.publish(.switching) }
         do {
             try database.nullAllUnitEmbeddingChunkEmbeddings()
         } catch {
@@ -175,7 +217,7 @@ final class EmbedderMigrationCoordinator: ObservableObject {
             return
         }
 
-        // Phase 3 — Re-embed every NULL row under the new backend.
+        // Phase 3 — Re-embed every NULL row under the new (loaded) backend.
         await reEmbedAllNullRows(database: database)
 
         // 2026-05-31 — Ask Posey unlock signal. A successful switch to Nomic

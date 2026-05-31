@@ -367,10 +367,13 @@ extension PDFDocumentImporter {
         // existing TOC sheet can navigate the document.
         let tocResult = PDFTOCDetector.detect(pageTexts: readableTextPages)
         var tocSkipUntilOffset = tocResult?.regionEndOffset ?? 0
+        // 2026-05-31 (Bug F) — `buildEntries` moved to the shared
+        // `PDFTextStructureDetector` so the end-of-enhancement re-detect path
+        // uses the identical resolver. This is a pure relocation.
         var tocEntries: [PDFTOCEntry] = tocResult.map { result in
-            buildEntries(for: result.entries,
-                         in: plainText,
-                         postTOCOffset: result.regionEndOffset)
+            PDFTextStructureDetector.buildEntries(for: result.entries,
+                                                  in: plainText,
+                                                  postTOCOffset: result.regionEndOffset)
         } ?? []
 
         // 2026-05-06 — PDF native outline (PDFKit's outlineRoot) as a
@@ -434,9 +437,10 @@ extension PDFDocumentImporter {
             // units get built — not just a silent skip region. Only when the
             // earlier strategies produced no entries (this is the fallback).
             if tocEntries.isEmpty, !generalized.entries.isEmpty {
-                tocEntries = buildEntries(for: generalized.entries,
-                                          in: plainText,
-                                          postTOCOffset: generalized.regionEndOffset)
+                tocEntries = PDFTextStructureDetector.buildEntries(
+                    for: generalized.entries,
+                    in: plainText,
+                    postTOCOffset: generalized.regionEndOffset)
             }
         }
 
@@ -451,39 +455,10 @@ extension PDFDocumentImporter {
         )
     }
 
-    /// For each detector entry, find the title's first occurrence in plainText
-    /// AFTER the TOC region. That offset is where the chapter actually begins
-    /// and is what the TOC sheet will jump to.
-    private func buildEntries(for entries: [PDFTOCDetector.Entry],
-                              in plainText: String,
-                              postTOCOffset: Int) -> [PDFTOCEntry] {
-        guard postTOCOffset >= 0, postTOCOffset <= plainText.count else { return [] }
-        let startIndex = plainText.index(plainText.startIndex, offsetBy: postTOCOffset)
-        let body = plainText[startIndex...]
-        var built: [PDFTOCEntry] = []
-        for (index, entry) in entries.enumerated() {
-            // Try the title with its label ("I. Introduction") first, then
-            // fall back to the bare title ("Introduction") since the body
-            // header may not include the outline label.
-            let bareTitle = entry.title.split(separator: " ", maxSplits: 1).last.map(String.init) ?? entry.title
-            let needles = [entry.title, bareTitle]
-            var found: Int? = nil
-            for needle in needles {
-                guard !needle.isEmpty else { continue }
-                if let r = body.range(of: needle, options: .caseInsensitive) {
-                    found = postTOCOffset + body.distance(from: body.startIndex, to: r.lowerBound)
-                    break
-                }
-            }
-            // Fall back to the post-TOC offset if we can't locate the title
-            // — better than dropping the entry entirely.
-            built.append(PDFTOCEntry(title: entry.title,
-                                     plainTextOffset: found ?? postTOCOffset,
-                                     playOrder: index,
-                                     level: 1))
-        }
-        return built
-    }
+    /// 2026-05-31 (Bug F) — `buildEntries` moved to
+    /// `PDFTextStructureDetector.buildEntries` so the importer and the
+    /// end-of-enhancement re-detect path share one resolver. Call sites above
+    /// now use the shared static.
 
     /// 2026-05-06 — Walk the PDF native outline tree and emit
     /// `PDFTOCEntry` rows. Fallback used when the text-pattern TOC

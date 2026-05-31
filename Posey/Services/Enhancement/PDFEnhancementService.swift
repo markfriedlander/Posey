@@ -230,6 +230,22 @@ actor PDFEnhancementService {
             return
         }
 
+        // 2026-05-31 (ingestion audit, Bug F) — re-detect document structure
+        // against the now-corrected text BEFORE marking complete + firing the
+        // chunker. A PDF whose TOC page was a scanned image extracted zero
+        // text at Tier-1, so TOC/heading detection found nothing. Tier-2
+        // Vision has now filled that text in; re-running the text-pattern
+        // detectors recovers the TOC + promotes the chapter headings that
+        // were undetectable at import. Runs before the chunker fire so the
+        // rebuilt chunks see the corrected unit kinds. No-op (early return)
+        // when Tier-1 already found structure.
+        await redetectStructureIfNeeded(documentID: documentID)
+
+        if cancelled.contains(documentID) {
+            cancelled.remove(documentID)
+            return
+        }
+
         do {
             try await MainActor.run {
                 try db.updateEnhancementState(documentID: documentID, status: "complete", error: nil)
@@ -263,6 +279,202 @@ actor PDFEnhancementService {
             }
         } catch {
             dbgLog("PDFEnhancementService: failed to mark complete for %@: %@",
+                   documentID.uuidString, String(describing: error))
+        }
+    }
+
+    // MARK: Structure re-detection (Bug F)
+
+    /// Re-run TEXT-PATTERN structure detection against the corrected unit text
+    /// and, if a TOC/headings were recovered that Tier-1 missed, persist them.
+    ///
+    /// **The bug this fixes.** TOC + heading detection ran only at Tier-1
+    /// import. A PDF whose TOC page is a scanned IMAGE yields zero text for
+    /// that page at Tier-1, so the detectors find nothing and the document
+    /// opens with 0 navigation. Tier-2 Vision later OCRs the TOC page and
+    /// writes the recovered text into the page's units — but detection never
+    /// re-ran, so the document stayed 0-nav and the recovered TOC read aloud
+    /// as dot-leader prose. This method closes that gap.
+    ///
+    /// **STEP 3 — the category + why the gate keys on TOC ENTRIES, not skip.**
+    /// The category is "any PDF whose navigable structure (TOC entries +
+    /// heading units) is missing after import, but whose post-enhancement text
+    /// can yield it." The thing we recover is NAVIGATION — `document_toc`
+    /// entries the chapter sheet jumps to, plus promoted heading units. The
+    /// reliable "navigation is missing" signal is therefore `tocCount == 0`,
+    /// NOT the skip offset. This distinction is load-bearing and was found
+    /// empirically (see below). Within the category:
+    ///   • Tier-1 found NOTHING (toc=0, skip=0): re-detect builds both. ✓
+    ///   • Tier-1 set a SKIP but no entries (toc=0, skip>0): re-detect builds
+    ///     the entries + headings and preserves/refines the skip. ✓ This is the
+    ///     dominant real case and the one a skip-based gate wrongly blocked.
+    ///     It happens because `PDFDocumentImporter` OCRs no-text pages
+    ///     synchronously at import (2× DeviceGray) — good enough for the
+    ///     generalized detector to set a skip REGION, but the import-OCR
+    ///     reading order (titles in one column, page numbers in another) often
+    ///     defeats the run-on entry parser, so 0 entries. Tier-2's 4× extractor
+    ///     then produces clean title→number adjacency the parser CAN read — but
+    ///     only if the re-detect actually runs. Verified on the synthetic
+    ///     scanned-TOC fixture: import set skip=221/toc=0; Tier-2 text parsed
+    ///     to 6 entries once the gate let the re-detect proceed.
+    ///   • No formal TOC at all: re-detect finds nothing → stays 0-nav. ✓ no
+    ///     regression (cheap string-only pass, no inference).
+    ///   • PDF that ALREADY has TOC entries (toc>0 — dot-leader text layer or
+    ///     PDFKit outline): we **early-return**. Re-detecting a doc that already
+    ///     navigates risks DOUBLING the TOC or fighting outline-derived entries
+    ///     this text-only pass can't reproduce. Keying on `tocCount == 0` fixes
+    ///     the bug with zero doubling risk. Residual: a doc with a PARTIAL
+    ///     Tier-1 TOC plus an additional scanned-TOC page does not get the
+    ///     scanned entries merged in — merging partial TOCs across a text/
+    ///     outline boundary is riskier, has no corpus example, and is filed
+    ///     rather than built speculatively.
+    ///   • Heading promotion uses the hardened title-validated
+    ///     `applyHeadingMarkers` — a recovered TOC title that doesn't head any
+    ///     body unit is dropped (no false headings), and OCR line-wrap in the
+    ///     titles ("Chapter One: The Salt\nMarsh") is absorbed by its
+    ///     whitespace-tolerant match.
+    ///
+    /// Deliberately uses only the TEXT-PATTERN detectors (dot-leader +
+    /// generalized), NOT the PDFKit outline / outline-walker: those read the
+    /// PDF's embedded structural outline, which is import-time metadata Tier-2
+    /// OCR never changes — re-running them would find exactly what Tier-1 did.
+    private func redetectStructureIfNeeded(documentID: UUID) async {
+        guard let db = databaseManager else { return }
+
+        struct Inputs {
+            let plainText: String
+            let units: [ContentUnit]
+            let tocCount: Int
+            let skipOffset: Int
+        }
+
+        let inputs: Inputs?
+        do {
+            inputs = try await MainActor.run { () throws -> Inputs in
+                let pt = try db.plainText(for: documentID) ?? ""
+                let us = try db.units(for: documentID)
+                let toc = try db.tocEntries(for: documentID)
+                // The skip OFFSET (>0) — NOT skip_unit_id — is the reliable
+                // "Tier-1 found a skip region" signal. The importer sets
+                // skip_unit_id to the first unit even when the offset is 0
+                // (firstUnit(atOrAfterPlainTextOffset: 0) returns units.first),
+                // so its presence would falsely gate every PDF out of the
+                // re-detect. Verified empirically on the scanned-TOC fixture:
+                // a doc with 0 TOC and 0 skip still had skip_unit_id set.
+                let skipOffset = try db.playbackSkipOffset(for: documentID)
+                return Inputs(
+                    plainText: pt,
+                    units: us,
+                    tocCount: toc.count,
+                    skipOffset: skipOffset
+                )
+            }
+        } catch {
+            dbgLog("PDFEnhancementService: Bug F re-detect — input read failed for %@: %@",
+                   documentID.uuidString, String(describing: error))
+            return
+        }
+        guard let inputs else { return }
+
+        // Gate: re-detect only when NAVIGATION is missing (no TOC entries).
+        // A pre-existing skip with zero entries still needs entries built, so
+        // the gate keys on tocCount, not skip (see the doc comment above).
+        if inputs.tocCount > 0 {
+            dbgLog("PDFEnhancementService: Bug F re-detect — %@ already has %d TOC entries, skipping",
+                   documentID.uuidString, inputs.tocCount)
+            return
+        }
+        if inputs.plainText.isEmpty || inputs.units.isEmpty { return }
+
+        // Reconstruct per-page text from the corrected units: each pageBreak
+        // unit starts a page; prose-bearing units accumulate; join a page's
+        // text with "\n\n" (the persister's plain_text join convention, so the
+        // offsets line up with applyHeadingMarkers' own unit-start arithmetic).
+        let ordered = inputs.units.sorted { $0.sequence < $1.sequence }
+        var pageTexts: [String] = []
+        var current: [String] = []
+        var startedPage = false
+        for unit in ordered {
+            if unit.kind == .pageBreak {
+                if startedPage { pageTexts.append(current.joined(separator: "\n\n")) }
+                current = []
+                startedPage = true
+            } else if unit.kind.carriesProseText {
+                current.append(unit.text)
+            }
+        }
+        if startedPage { pageTexts.append(current.joined(separator: "\n\n")) }
+        if pageTexts.isEmpty { return }
+
+        // Run the text-pattern detectors against the corrected text.
+        let detected = PDFTextStructureDetector.detect(
+            pageTexts: pageTexts, plainText: inputs.plainText
+        )
+        guard detected.skipOffset > 0 || !detected.entries.isEmpty else {
+            dbgLog("PDFEnhancementService: Bug F re-detect — nothing recovered on %@",
+                   documentID.uuidString)
+            return
+        }
+
+        // Promote headings via the hardened shared path.
+        let markersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
+            detected.entries.map {
+                ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let promotedUnits = ContentUnitBuilder.applyHeadingMarkers(
+            to: inputs.units,
+            headingMarkersByOffset: markersByOffset
+        )
+
+        // Diff: which units became headings? Map by id for a stable compare.
+        let oldKindByID = Dictionary(uniqueKeysWithValues: inputs.units.map { ($0.id, $0.kind) })
+        var promotions: [DatabaseManager.HeadingPromotion] = []
+        for unit in promotedUnits where unit.kind == .heading && oldKindByID[unit.id] == .prose {
+            promotions.append(DatabaseManager.HeadingPromotion(
+                unitID: unit.id,
+                level: unit.metadata.headingLevel ?? 1,
+                titleLength: unit.metadata.titleLength
+            ))
+        }
+
+        // Skip offset: prefer the freshly-detected region, but never REGRESS a
+        // skip the importer already established — if the re-detect produced
+        // entries but no skip region (rare; the dot-leader path can), keep the
+        // Tier-1 skip so the TOC still doesn't read aloud.
+        let finalSkipOffset = detected.skipOffset > 0 ? detected.skipOffset : inputs.skipOffset
+        let skipUnitID = ContentUnitBuilder.firstUnit(
+            in: inputs.units, atOrAfterPlainTextOffset: finalSkipOffset
+        )?.id
+
+        let storedTOC: [StoredTOCEntry] = detected.entries.map {
+            StoredTOCEntry(
+                title: $0.title,
+                plainTextOffset: $0.plainTextOffset,
+                playOrder: $0.playOrder,
+                level: $0.level
+            )
+        }
+
+        // Snapshot the accumulated promotions into a `let` so the MainActor.run
+        // closure captures by value (Swift 6 concurrency — no captured var).
+        let finalPromotions = promotions
+        do {
+            try await MainActor.run {
+                try db.applyRedetectedStructure(
+                    documentID: documentID,
+                    tocEntries: storedTOC,
+                    promotions: finalPromotions,
+                    skipUnitID: skipUnitID,
+                    skipOffset: finalSkipOffset,
+                    skipSource: finalSkipOffset > 0 ? "heuristic" : ""
+                )
+            }
+            dbgLog("PDFEnhancementService: Bug F re-detect APPLIED on %@ — toc=%d headings=%d skip=%d",
+                   documentID.uuidString, storedTOC.count, finalPromotions.count, finalSkipOffset)
+        } catch {
+            dbgLog("PDFEnhancementService: Bug F re-detect — persist failed for %@: %@",
                    documentID.uuidString, String(describing: error))
         }
     }

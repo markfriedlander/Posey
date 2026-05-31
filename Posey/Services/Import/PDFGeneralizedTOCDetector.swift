@@ -229,9 +229,15 @@ struct PDFGeneralizedTOCDetector {
             // "viii" all read as numbers, and "MU-puzzle" stays a word.
             let trimmed = token.trimmingCharacters(
                 in: CharacterSet(charactersIn: ".,:;()[]"))
+            // 2026-05-31 (Bug F) — a token that is PURE punctuation (a dot
+            // leader "....", an ellipsis "…", a stray ":") trims to empty. It
+            // is neither a page number nor a title word — drop it so it does
+            // not pollute the accumulated title. Real OCR'd TOCs are full of
+            // dot leaders ("The Salt Marsh ... 2"); without this they end up
+            // inside the entry title and break the later body title-match.
+            if trimmed.isEmpty { continue }
             if let page = pageNumberValue(trimmed) {
-                let title = titleWords.joined(separator: " ")
-                    .trimmingCharacters(in: .whitespaces)
+                let title = cleanEntryTitle(titleWords.joined(separator: " "))
                 if isPlausibleEntryTitle(title) {
                     entries.append(PDFTOCDetector.Entry(title: title, pageNumber: page))
                 }
@@ -244,6 +250,28 @@ struct PDFGeneralizedTOCDetector {
             }
         }
         return entries
+    }
+
+    /// Clean an accumulated run-on title before it becomes a TOC entry.
+    /// 2026-05-31 (Bug F): the flow region begins right after the "Contents"
+    /// anchor, so the FIRST entry's title accumulates the anchor words
+    /// ("Table of Contents Chapter I: …"). A real chapter title never starts
+    /// with the Contents header, and the polluted prefix breaks both the body
+    /// title-search (`buildEntries`) and heading promotion (`applyHeadingMarkers`
+    /// matches the unit text against this title). Strip a leading anchor phrase,
+    /// then trim stray leading/trailing dot-leader / punctuation. Interior
+    /// punctuation (the "I:" in "Chapter I:") is preserved — it must survive so
+    /// the title still matches the body heading exactly.
+    static func cleanEntryTitle(_ raw: String) -> String {
+        var t = raw.trimmingCharacters(in: .whitespaces)
+        for anchor in ["table of contents", "contents"] {
+            if t.lowercased().hasPrefix(anchor) {
+                t = String(t.dropFirst(anchor.count))
+                break
+            }
+        }
+        // Trim leading/trailing whitespace + dot-leader + boundary punctuation.
+        return t.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n.…:;,-"))
     }
 
     /// A token is a page number if it is 1–4 arabic digits, or a

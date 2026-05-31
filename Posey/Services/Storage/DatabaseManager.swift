@@ -758,6 +758,21 @@ extension DatabaseManager {
         }
         return entries
     }
+
+    /// The document's `playback_skip_until_offset`. This is the reliable
+    /// "Tier-1 found a skip region" signal — unlike `skip_unit_id`, which the
+    /// importer sets to the first unit even when the offset is 0 (because
+    /// `ContentUnitBuilder.firstUnit(atOrAfterPlainTextOffset: 0)` returns
+    /// `units.first`). Used by the Bug F re-detect gate.
+    func playbackSkipOffset(for documentID: UUID) throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = "SELECT playback_skip_until_offset FROM documents WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(statement, 0))
+    }
 }
 
 // ========== BLOCK 05B: DOCUMENT TOC - END ==========
@@ -2589,6 +2604,121 @@ extension DatabaseManager {
         }
         try bind(documentID.uuidString, at: 3, for: statement)
         try step(statement)
+    }
+
+    // MARK: Enhancement — structure re-detection (Bug F)
+
+    /// One promoted heading produced by an end-of-enhancement structure
+    /// re-detect. Only `kind` + `metadata` change — the unit's `text`,
+    /// `sequence`, and `id` are preserved, so sentences, intra-offsets, and
+    /// the derived plain_text/display_text all stay valid and need no refresh.
+    struct HeadingPromotion: Sendable {
+        let unitID: UUID
+        let level: Int
+        let titleLength: Int?
+    }
+
+    /// Apply the result of an end-of-enhancement structure re-detect (Bug F)
+    /// in ONE atomic transaction:
+    ///
+    ///   1. Replace `document_toc` with the freshly-detected entries.
+    ///   2. Flip each promoted prose unit to a `.heading` unit (kind +
+    ///      heading metadata only; text untouched).
+    ///   3. Set the skip unit reference + the legacy skip offset/source.
+    ///
+    /// **Why one transaction.** This runs on the background enhancement actor
+    /// after Tier-2/Tier-3. A crash between separate writes would leave a
+    /// document with a TOC but no headings (or a skip with no TOC). Doing it
+    /// atomically means the document either gains its full recovered structure
+    /// or stays exactly as it was — never a half state. (And `enhancement_status`
+    /// is already `complete` by the time bootstrap runs, so there is no resume
+    /// pass to repair a partial write.)
+    ///
+    /// **Why no sentence/plain_text refresh.** Heading promotion changes only
+    /// `kind` + `metadata_json`. `document_sentences` rows reference the unit
+    /// by id and store intra-unit offsets into the unchanged `text`; the
+    /// derived `plain_text`/`display_text` join unit *text*, which is also
+    /// unchanged. So none of them need rewriting — unlike `replaceUnitsForPage`
+    /// / `replaceTokenInUnits`, which mutate text and therefore must.
+    func applyRedetectedStructure(
+        documentID: UUID,
+        tocEntries: [StoredTOCEntry],
+        promotions: [HeadingPromotion],
+        skipUnitID: UUID?,
+        skipOffset: Int,
+        skipSource: String
+    ) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        try execute("BEGIN TRANSACTION;")
+        do {
+            // 1 — replace TOC. Dedup on (title, offset) like insertTOCEntries.
+            try execute("DELETE FROM document_toc WHERE document_id = '\(documentID.uuidString)';")
+            let tocSQL = """
+            INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level)
+            VALUES (?, ?, ?, ?, ?);
+            """
+            var seen = Set<String>()
+            for entry in tocEntries {
+                let key = "\(entry.title)|\(entry.plainTextOffset)"
+                guard seen.insert(key).inserted else { continue }
+                let stmt = try prepareStatement(sql: tocSQL)
+                defer { sqlite3_finalize(stmt) }
+                try bind(documentID.uuidString, at: 1, for: stmt)
+                sqlite3_bind_int(stmt, 2, Int32(entry.playOrder))
+                try bind(entry.title, at: 3, for: stmt)
+                sqlite3_bind_int(stmt, 4, Int32(entry.plainTextOffset))
+                sqlite3_bind_int(stmt, 5, Int32(entry.level))
+                try step(stmt)
+            }
+
+            // 2 — promote prose units to headings (kind + metadata only).
+            let promoteSQL = """
+            UPDATE document_units
+            SET kind = ?, metadata_json = ?, revision = revision + 1, source_tier = ?
+            WHERE id = ?;
+            """
+            for promotion in promotions {
+                let metadata = ContentUnitMetadata(
+                    headingLevel: promotion.level,
+                    titleLength: promotion.titleLength
+                )
+                let metaJSON: String = {
+                    guard let data = try? JSONEncoder().encode(metadata),
+                          let s = String(data: data, encoding: .utf8) else { return "{}" }
+                    return s
+                }()
+                let stmt = try prepareStatement(sql: promoteSQL)
+                defer { sqlite3_finalize(stmt) }
+                try bind(ContentUnitKind.heading.rawValue, at: 1, for: stmt)
+                try bind(metaJSON, at: 2, for: stmt)
+                try bind("redetect_structure", at: 3, for: stmt)
+                try bind(promotion.unitID.uuidString, at: 4, for: stmt)
+                try step(stmt)
+            }
+
+            // 3 — skip references (unit id + legacy offset/source).
+            let skipSQL = """
+            UPDATE documents
+            SET skip_unit_id = ?, playback_skip_until_offset = ?, skip_source = ?
+            WHERE id = ?;
+            """
+            let skipStmt = try prepareStatement(sql: skipSQL)
+            defer { sqlite3_finalize(skipStmt) }
+            if let skipUnitID {
+                try bind(skipUnitID.uuidString, at: 1, for: skipStmt)
+            } else {
+                sqlite3_bind_null(skipStmt, 1)
+            }
+            sqlite3_bind_int(skipStmt, 2, Int32(skipOffset))
+            try bind(skipSource, at: 3, for: skipStmt)
+            try bind(documentID.uuidString, at: 4, for: skipStmt)
+            try step(skipStmt)
+
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
     }
 
     // MARK: Enhancement — unit-based replacements

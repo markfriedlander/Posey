@@ -70,17 +70,45 @@ struct RTFLibraryImporter {
         )
         let documentID = existingDocument?.id ?? UUID()
 
-        // ── Heading offset → level lookup for the unit builder.
-        var levelByOffset: [Int: Int] = [:]
-        for h in headings {
-            levelByOffset[h.plainTextOffset] = max(levelByOffset[h.plainTextOffset] ?? 0, h.level)
-        }
-
-        // ── Build units (heading or prose) from plainText paragraphs.
-        let units = Self.buildUnits(
+        // ── Build PROSE units from plainText paragraphs, then promote headings
+        //    via the hardened shared ContentUnitBuilder.applyHeadingMarkers.
+        //    2026-05-31 (ingestion audit, Bug C): RTF's own offset-only marking
+        //    (buildUnits with a level-by-offset map, no TITLE validation)
+        //    promoted whatever unit a font-size heading-offset landed in — which
+        //    (a) FUSED the heading with the following body paragraph into one
+        //    "heading" unit, and (b) turned font-size-false-positive body
+        //    paragraphs into headings. The shared path validates the marker's
+        //    TITLE against the unit text (whitespace-tolerant, exact-match-first):
+        //    a marker whose title doesn't head a unit is DROPPED, and a fused
+        //    "title + body" unit is styled by titleLength (title prefix only) —
+        //    the same correctness Bug B gave EPUB/PDF/DOCX/HTML.
+        //
+        //    STEP 3 — category: ANY RTF whose headings come from the font-size
+        //    detector. Verified on AI-Collab.rtf: 76→50 headings; the TOC-listing
+        //    mash and the body-paragraph false-positives ("In writing this
+        //    book…") drop to prose; fused "title↵body" units style only the
+        //    title; legitimately long titles (this doc uses whole questions as
+        //    section headings) survive. CAVEAT: the corpus has ONE RTF, so the
+        //    fix is verified on it + reasoned for the category (it reuses the
+        //    proven shared path). RESIDUAL: a heading still shares a unit with
+        //    its following body (rendered correctly via titleLength, same as
+        //    GEB's PDF dialogues) — physically SPLITTING the fusion needs RTF
+        //    \par-normalization (separate, deeper, filed). Reader-facing
+        //    rendering is correct; the data model is not yet one-unit-per-block.
+        let proseUnits = Self.buildUnits(
             from: plainText,
             documentID: documentID,
-            headingLevelByOffset: levelByOffset
+            headingLevelByOffset: [:]
+        )
+        let headingMarkersByOffset = Dictionary(
+            headings.map {
+                ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let units = ContentUnitBuilder.applyHeadingMarkers(
+            to: proseUnits,
+            headingMarkersByOffset: headingMarkersByOffset
         )
 
         // ── Smart-skip: same TOCSkipDetector pass, then map to unit.

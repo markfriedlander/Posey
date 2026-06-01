@@ -613,30 +613,45 @@ enum ContentUnitBuilder {
         in units: [ContentUnit],
         atOrAfterPlainTextOffset offset: Int
     ) -> ContentUnit? {
-        guard offset > 0 else { return units.first }
-        var cumulative = 0
-        for unit in units {
-            if cumulative >= offset { return unit }
-            if unit.kind.carriesProseText {
-                cumulative += unit.text.count + 2
+        // A skip / content-end target must be READABLE content, never a
+        // structural unit (pageBreak / horizontalRule / empty image marker).
+        // 2026-06-01 (foundation audit, AUDIT-3): the Crypto/IRS PDFs opened on
+        // a blank page — `firstUnit` returned the `pageBreak` unit that sits at
+        // the skip offset, so the reader showed white space instead of the
+        // Introduction that is the very next unit. Always advance to the first
+        // prose-bearing unit at/after the chosen position.
+        func firstContent(from index: Int) -> ContentUnit? {
+            var i = max(0, index)
+            while i < units.count {
+                if units[i].kind.carriesProseText { return units[i] }
+                i += 1
             }
-            // 2026-05-28 — Mark caught: Pride EPUB opens past the
-            // famous "IT is a truth universally acknowledged…" first
-            // line into "However little known…" (second sentence).
-            // Root cause was here: when the skip offset falls INSIDE
-            // a unit's range (cumulative_before ≤ offset <
-            // cumulative_after), the prior code returned the NEXT
-            // unit — skipping past the unit that ACTUALLY contains
-            // the offset. The user-visible expectation for smart-skip
-            // is "start reading here, at the beginning of the
-            // paragraph that includes this offset." Return the
-            // current unit when the offset falls inside its range
-            // rather than jumping past it.
-            if cumulative > offset {
-                return unit
-            }
+            return units.indices.contains(index) ? units[index]
+                 : units.last(where: { $0.kind.carriesProseText }) ?? units.last
         }
-        return units.last
+        guard offset > 0 else { return firstContent(from: 0) }
+        var cumulative = 0
+        for (i, unit) in units.enumerated() {
+            if cumulative >= offset { return firstContent(from: i) }
+            guard unit.kind.carriesProseText else { continue }
+            let textEnd = cumulative + unit.text.count
+            // 2026-05-28 — Mark caught (Pride EPUB): when the offset falls INSIDE
+            // a unit's TEXT, return THAT unit (start reading at the paragraph
+            // that contains the offset), not the next one.
+            if offset < textEnd { return unit }
+            // 2026-06-01 (AUDIT/TXT-1): advance past the text AND its "\n\n"
+            // separator. An offset that lands in the SEPARATOR [textEnd,
+            // textEnd+2) — e.g. Moby TXT's smart-skip at 26038, one char short
+            // of "CHAPTER 1"'s unit-start 26039 due to a single-vs-double
+            // newline drift between the importer's plainText and the unit join —
+            // belongs to the NEXT unit, not this one. The previous code returned
+            // THIS unit for separator offsets, so Moby opened/played on the last
+            // EXTRACT instead of "Call me Ishmael." Letting the loop continue
+            // maps the separator to the next unit via the `cumulative >= offset`
+            // check on the following iteration.
+            cumulative = textEnd + 2
+        }
+        return units.last(where: { $0.kind.carriesProseText }) ?? units.last
     }
 }
 

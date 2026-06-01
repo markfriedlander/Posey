@@ -28,16 +28,20 @@ import Vision
 ///   • TOC entries:               0.57 – 0.63   (end short    → hard break)
 ///   • headings / paragraph ends: 0.34 – 0.58   (end short    → hard break)
 ///
-/// **Why a FIXED page-width threshold, not content-relative.** A page that is
-/// ALL table-of-contents has no full-width paragraph line to calibrate "fills
-/// the margin" against — the longest TOC entry would set the reference and
-/// every entry would read as "full," re-flattening the list. A fixed fraction
-/// of PAGE width (0.74) sidesteps that: a book's body column reaches ≥ ~0.82 of
-/// page width, a list entry reaches ~0.6, and the threshold sits cleanly
-/// between. Known limit: a document with an unusually wide right margin (text
-/// column ending before 0.74 of page width) would over-split body prose into
-/// per-line paragraphs. That is rare for book-shaped scans and strictly no
-/// worse to read than the previous run-on; documented rather than over-built.
+/// **TOC pages are gated by the detector, NOT the maxX threshold.** The
+/// margin-fill threshold alone is fragile for a table of contents: it works
+/// only when the page numbers end short of the threshold (close to the title).
+/// A TOC whose numbers are right-aligned to the margin (GEB: "Chapter I: The
+/// MU-puzzle 33" reaching maxX 0.76) would read as "margin-filling" and
+/// re-flatten into a run-on — the maxX value is partly an artifact of the
+/// page's margins. So `reflowLines` first asks `isTOCContent` (the existing
+/// Contents-anchor + entry-density detectors): on a TOC page EVERY visual line
+/// is preserved as its own paragraph, geometry-independent. The maxX threshold
+/// (0.74) is then used ONLY for body / general pages — splitting paragraphs
+/// where a line ends short, reflowing wrapped lines where it fills the column.
+/// Same gate + same `reflowLines` is reused by the text-layer path
+/// (`page.string` lines), so a TOC reads one entry per line whether the text
+/// came from Vision OCR or PDFKit extraction.
 enum OCRLineReflow {
 
     /// Fraction of PAGE width a line must reach to be treated as a soft wrap
@@ -50,11 +54,18 @@ enum OCRLineReflow {
     /// a line into several horizontal boxes) and joined with a space.
     static let sameLineMidYDelta: CGFloat = 0.012
 
-    private struct Line {
+    private struct Fragment {
         let text: String
         let minX: CGFloat
         let maxX: CGFloat
         let midY: CGFloat
+    }
+
+    /// A merged visual line: same-midY fragments joined left-to-right.
+    struct VisualLine {
+        let text: String
+        /// Right extent of the line (max fragment maxX), normalized 0–1.
+        let maxX: CGFloat
     }
 
     /// Reflow Vision observations into structure-preserving text. Hard breaks
@@ -64,39 +75,85 @@ enum OCRLineReflow {
     /// blank lines — turn each TOC entry / paragraph into its own content unit,
     /// rendering on its own line. Soft wraps are spaces (same paragraph).
     static func reflow(_ observations: [VNRecognizedTextObservation]) -> String {
-        var lines: [Line] = []
+        var fragments: [Fragment] = []
         for o in observations {
             guard let candidate = o.topCandidates(1).first else { continue }
             let text = candidate.string.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { continue }
             let box = o.boundingBox
-            lines.append(Line(text: text, minX: box.minX, maxX: box.maxX, midY: box.midY))
+            fragments.append(Fragment(text: text, minX: box.minX, maxX: box.maxX, midY: box.midY))
         }
-        guard !lines.isEmpty else { return "" }
+        guard !fragments.isEmpty else { return "" }
+        return reflowLines(mergeVisualLines(fragments))
+    }
 
-        // Reading order: top-to-bottom (larger midY = higher on the page), then
-        // left-to-right for fragments sharing a visual line.
-        lines.sort { a, b in
+    /// Merge fragments into visual lines (group by midY, order left-to-right),
+    /// top-to-bottom. Shared shape so the text-layer path can build the same
+    /// `VisualLine` list from PDFKit line selections and reuse `reflowLines`.
+    private static func mergeVisualLines(_ fragments: [Fragment]) -> [VisualLine] {
+        let sorted = fragments.sorted { a, b in
             if abs(a.midY - b.midY) < sameLineMidYDelta { return a.minX < b.minX }
             return a.midY > b.midY
         }
+        var lines: [VisualLine] = []
+        var curText = sorted[0].text
+        var curMaxX = sorted[0].maxX
+        var curMidY = sorted[0].midY
+        for i in 1..<sorted.count {
+            let f = sorted[i]
+            if abs(f.midY - curMidY) < sameLineMidYDelta {
+                curText += " " + f.text
+                curMaxX = max(curMaxX, f.maxX)
+            } else {
+                lines.append(VisualLine(text: curText, maxX: curMaxX))
+                curText = f.text; curMaxX = f.maxX; curMidY = f.midY
+            }
+        }
+        lines.append(VisualLine(text: curText, maxX: curMaxX))
+        return lines
+    }
 
+    /// Turn visual lines into structure-preserving text.
+    ///
+    /// **TOC pages get every line preserved as its own paragraph** — gated on
+    /// the precise `isTOCContent` check (Contents anchor + entry signals), NOT
+    /// on per-line geometry. This is the robust path for the case the
+    /// maxX-threshold cannot handle: a TOC whose page numbers are right-aligned
+    /// to the margin (e.g. GEB's "Chapter I: The MU-puzzle 33" reaching maxX
+    /// 0.76). Those lines "fill the margin" and would be wrongly soft-wrapped
+    /// back into a run-on; keying on the page being a TOC sidesteps the maxX
+    /// dependence entirely. Body pages (no Contents anchor) fall through to the
+    /// geometry reflow — zero risk to body-prose reflow.
+    static func reflowLines(_ lines: [VisualLine]) -> String {
+        guard !lines.isEmpty else { return "" }
+        if isTOCContent(lines.map(\.text)) {
+            return lines.map(\.text).joined(separator: "\n\n")
+        }
+        // Body / general page — geometry reflow (soft wrap fills margin).
         var out = lines[0].text
         for i in 1..<lines.count {
-            let prev = lines[i - 1]
-            let cur = lines[i]
-            if abs(prev.midY - cur.midY) < sameLineMidYDelta {
-                // Same visual line, split into fragments — rejoin with a space.
-                out += " " + cur.text
-            } else if prev.maxX >= marginFillThreshold {
-                // Previous line filled the column → this line is a soft wrap.
-                out += " " + cur.text
+            if lines[i - 1].maxX >= marginFillThreshold {
+                out += " " + lines[i].text          // soft wrap
             } else {
-                // Previous line ended short → hard break (new paragraph).
-                out += "\n\n" + cur.text
+                out += "\n\n" + lines[i].text        // hard break (paragraph)
             }
         }
         return out
+    }
+
+    /// True when a page's lines form a table of contents — reused by both the
+    /// OCR path and the text-layer path so "preserve every entry on its own
+    /// line" fires identically regardless of how the text was extracted. A TOC
+    /// page is the only place we want to defeat the body-prose reflow, and the
+    /// existing detectors already identify it precisely (Contents anchor +
+    /// dot-leader / structural-entry density). `isContinuationOfTOC` covers the
+    /// 2nd+ pages of a multi-page TOC, which carry no anchor.
+    static func isTOCContent(_ lines: [String]) -> Bool {
+        let blob = lines.joined(separator: "\n")
+        return PDFTOCDetector.isTOCPage(blob)
+            || PDFGeneralizedTOCDetector.isTOCPage(blob)
+            || PDFTOCDetector.isContinuationOfTOC(blob)
+            || PDFGeneralizedTOCDetector.isContinuationOfTOC(blob)
     }
 }
 

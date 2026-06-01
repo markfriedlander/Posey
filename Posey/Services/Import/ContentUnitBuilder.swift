@@ -261,9 +261,25 @@ enum ContentUnitBuilder {
         let title: String?
     }
 
+    /// - Parameter minPromotableOffset: units whose start offset is BELOW this
+    ///   are never promoted to headings. Used by the PDF path to pass the
+    ///   TOC-skip offset so a TOC-LISTING entry (which lives in the front-matter
+    ///   contents region, before the body) is never turned into a chapter
+    ///   heading. A TOC-entry marker's intended target is the BODY occurrence of
+    ///   the title (that's where `buildEntries` resolved its offset); without
+    ///   this guard, once the contents listing is split into one unit per entry
+    ///   (so each "Chapter I: The MU-puzzle 33" listing line is its own unit),
+    ///   the listing unit is an EXACT title match and gets promoted alongside —
+    ///   or instead of — the real body heading, producing duplicate / wrong
+    ///   headings in the skipped front matter (GEB). Default 0 = no restriction,
+    ///   so TXT/RTF/DOCX/HTML/EPUB callers (whose front-matter headings like
+    ///   Moby's EXTRACTS / ETYMOLOGY are legitimate and come from other marker
+    ///   sources) are unaffected. The general front-matter-listing suppression
+    ///   across all formats remains the dedicated Bug G task.
     static func applyHeadingMarkers(
         to units: [ContentUnit],
-        headingMarkersByOffset: [Int: HeadingMarker]
+        headingMarkersByOffset: [Int: HeadingMarker],
+        minPromotableOffset: Int = 0
     ) -> [ContentUnit] {
         guard !headingMarkersByOffset.isEmpty else { return units }
 
@@ -367,7 +383,9 @@ enum ContentUnitBuilder {
                 var best: Int? = nil
                 var bestExact = 1          // 0 = exact, 1 = prefix-only (lower wins)
                 var bestDist = Int.max
-                for i in units.indices where units[i].kind == .prose && startOffsets[i] >= 0 {
+                for i in units.indices where units[i].kind == .prose
+                    && startOffsets[i] >= 0
+                    && startOffsets[i] >= minPromotableOffset {
                     // Cheap pre-filter before the char-walk: first non-whitespace
                     // char must match.
                     guard units[i].text.first(where: { !$0.isWhitespace }) == titleFirst else { continue }
@@ -386,6 +404,7 @@ enum ContentUnitBuilder {
                 // range contains the offset (legacy behavior for title-less markers).
                 if let idx = units.indices.first(where: { i in
                     units[i].kind == .prose && startOffsets[i] >= 0
+                        && startOffsets[i] >= minPromotableOffset
                         && offset >= startOffsets[i]
                         && offset <= startOffsets[i] + units[i].text.count
                 }) {

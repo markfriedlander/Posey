@@ -416,7 +416,13 @@ actor PDFEnhancementService {
             return
         }
 
-        // Promote headings via the hardened shared path.
+        // Skip offset: prefer the freshly-detected region, but never REGRESS a
+        // skip the importer already established.
+        let finalSkipOffset = detected.skipOffset > 0 ? detected.skipOffset : inputs.skipOffset
+
+        // Promote headings via the hardened shared path. Pass the skip offset as
+        // minPromotableOffset so a TOC-LISTING entry in the front matter is not
+        // promoted to a chapter heading — only the body occurrences are.
         let markersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
             detected.entries.map {
                 ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
@@ -425,7 +431,8 @@ actor PDFEnhancementService {
         )
         let promotedUnits = ContentUnitBuilder.applyHeadingMarkers(
             to: inputs.units,
-            headingMarkersByOffset: markersByOffset
+            headingMarkersByOffset: markersByOffset,
+            minPromotableOffset: finalSkipOffset
         )
 
         // Diff: which units became headings? Map by id for a stable compare.
@@ -439,11 +446,10 @@ actor PDFEnhancementService {
             ))
         }
 
-        // Skip offset: prefer the freshly-detected region, but never REGRESS a
-        // skip the importer already established — if the re-detect produced
-        // entries but no skip region (rare; the dot-leader path can), keep the
-        // Tier-1 skip so the TOC still doesn't read aloud.
-        let finalSkipOffset = detected.skipOffset > 0 ? detected.skipOffset : inputs.skipOffset
+        // Skip offset already resolved above (finalSkipOffset). Never REGRESS a
+        // skip the importer established — if the re-detect produced entries but
+        // no skip region (rare; the dot-leader path can), the Tier-1 skip is
+        // kept. Map it to a unit.
         let skipUnitID = ContentUnitBuilder.firstUnit(
             in: inputs.units, atOrAfterPlainTextOffset: finalSkipOffset
         )?.id

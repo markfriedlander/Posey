@@ -194,7 +194,32 @@ extension PDFDocumentImporter {
                 }
                 return rawPageString
             }()
-            let pdfText = normalize(stripped)
+            // 2026-05-31 — TOC-page line preservation (text-layer path). PDFKit's
+            // `page.string` already carries a newline per visual line; normalize()
+            // collapses single newlines to spaces to REFLOW wrapped body prose
+            // (the body page emits a newline per wrap, e.g. "…keys: music\nand
+            // art."). That collapse flattens a table of contents into one
+            // unreadable run-on ("Contents Overview viii List of Illustrations
+            // xiv …"), which the reader sees on "Start from Beginning". Same
+            // symptom as the scanned-TOC case but a different mechanism (text
+            // layer, not Vision OCR), so the geometry reflow doesn't apply.
+            // Gate on the precise TOC-page detectors (Contents anchor + entry
+            // density): a TOC page preserves EVERY line as its own paragraph;
+            // body pages collapse/reflow exactly as before (zero body risk —
+            // the gate is false without a Contents anchor).
+            let pdfText: String = {
+                let pageLines = stripped
+                    .components(separatedBy: .newlines)
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                if pageLines.count >= 2, OCRLineReflow.isTOCContent(pageLines) {
+                    return pageLines
+                        .map { normalize($0) }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "\n\n")
+                }
+                return normalize(stripped)
+            }()
 
             // 2026-05-22 Phase 2.2 Step 4 — Tier 2 Vision OCR no
             // longer runs synchronously during import. Flagged pages

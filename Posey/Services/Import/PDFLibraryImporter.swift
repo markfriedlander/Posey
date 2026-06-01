@@ -165,9 +165,14 @@ struct PDFLibraryImporter {
             },
             uniquingKeysWith: { first, _ in first }
         )
+        // 2026-05-31 — pass the TOC-skip offset so a TOC-LISTING entry in the
+        // front matter (now split into one unit per entry by the TOC line-
+        // preservation pass) is never promoted to a chapter heading. The
+        // chapter headings live in the body, after the skip.
         let units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,
-            headingMarkersByOffset: headingMarkersByOffset
+            headingMarkersByOffset: headingMarkersByOffset,
+            minPromotableOffset: parsed.tocSkipUntilOffset
         )
 
         // ── Sentences from prose-bearing units.

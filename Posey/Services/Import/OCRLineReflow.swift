@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import PDFKit
 import Vision
 
 // ========== BLOCK 01: OCR LINE REFLOW - START ==========
@@ -85,6 +86,46 @@ enum OCRLineReflow {
         }
         guard !fragments.isEmpty else { return "" }
         return reflowLines(mergeVisualLines(fragments))
+    }
+
+    /// Reflow a PDF page's TEXT-LAYER lines by PDFKit selection GEOMETRY, IFF
+    /// the page is a table of contents — returns nil otherwise so the caller
+    /// keeps its normal `page.string` extraction.
+    ///
+    /// 2026-05-31 — `page.string` is the wrong source for a two-column TOC.
+    /// GEB's "Part II" contents page lists chapter/dialogue titles in a left
+    /// column and page numbers in a right column; PDFKit's flat `page.string`
+    /// reads them in a jumbled order — fusing some ("…Computer Systems Ant
+    /// Fugue 311") and ORPHANING others ("337" / "369" / "406" on their own
+    /// lines). The per-line SELECTION geometry, however, places each title and
+    /// its page number on the same `midY`, so the existing midY merge pairs
+    /// them correctly ("Chapter X: …Computer Systems" + "285" → one entry).
+    /// We only switch to this path for TOC pages (gated by `isTOCContent`) to
+    /// avoid disturbing body-prose extraction, which `page.string` + the
+    /// running-header strip + `normalize` handle well.
+    static func reflowPDFTextLayerTOC(_ page: PDFPage) -> String? {
+        let pageBounds = page.bounds(for: .mediaBox)
+        let w = pageBounds.width, h = pageBounds.height
+        guard w > 0, h > 0, let selection = page.selection(for: pageBounds) else { return nil }
+
+        var fragments: [Fragment] = []
+        for line in selection.selectionsByLine() {
+            let text = (line.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let b = line.bounds(for: page)
+            fragments.append(Fragment(
+                text: text,
+                minX: (b.minX - pageBounds.minX) / w,
+                maxX: (b.maxX - pageBounds.minX) / w,
+                midY: (b.midY - pageBounds.minY) / h
+            ))
+        }
+        guard !fragments.isEmpty else { return nil }
+
+        let lines = mergeVisualLines(fragments)
+        guard isTOCContent(lines.map(\.text)) else { return nil }
+        // TOC page — one entry per merged visual line.
+        return lines.map(\.text).joined(separator: "\n\n")
     }
 
     /// Merge fragments into visual lines (group by midY, order left-to-right),

@@ -115,7 +115,7 @@ struct HTMLLibraryImporter {
             },
             uniquingKeysWith: { first, _ in first }
         )
-        let units = ContentUnitBuilder.applyHeadingMarkers(
+        let promotedUnits = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,
             headingMarkersByOffset: headingMarkersByOffset
         )
@@ -139,6 +139,15 @@ struct HTMLLibraryImporter {
         // (e.g. Wikipedia articles), in which case the prior offset
         // stays — leaving article-style HTML to open at the top.
         let skipOffset = FirstChapterAdvance.detect(in: plainText, after: postFrontMatter) ?? postFrontMatter
+        // 2026-05-31 (Bug G) — demote the front-matter CONTENTS-listing chapter
+        // headings (Moby HTML promoted both the listing entries AND the body
+        // chapters → 282 heading units for 147 real chapters). Identified by a
+        // BODY twin (same title at/after skip), so the legitimate front-matter
+        // headings ETYMOLOGY and EXTRACTS — which have no body copy — are
+        // preserved (the earlier region-based attempt wrongly demoted ETYMOLOGY).
+        let units = ContentUnitBuilder.demoteDuplicateListingHeadings(
+            promotedUnits, skipOffset: skipOffset
+        )
         let contentEndOffset = boundaryResult.contentEndOffset ?? 0
         let skipSource: String = {
             if gutenbergStart > 0 { return "gutenberg" }

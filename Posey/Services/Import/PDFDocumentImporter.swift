@@ -208,12 +208,15 @@ extension PDFDocumentImporter {
             // body pages collapse/reflow exactly as before (zero body risk —
             // the gate is false without a Contents anchor).
             let pdfText: String = {
-                let pageLines = stripped
-                    .components(separatedBy: .newlines)
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-                if pageLines.count >= 2, OCRLineReflow.isTOCContent(pageLines) {
-                    return pageLines
+                // TOC pages: reflow by PDFKit selection GEOMETRY, not page.string.
+                // page.string flattens a two-column TOC (titles left, page numbers
+                // right) in a jumbled read order — fusing some entries and
+                // orphaning page numbers (GEB's "Part II" contents page). The
+                // selection geometry pairs each title with its number by shared
+                // midY. Returns nil for non-TOC pages → normal extraction.
+                if let tocText = OCRLineReflow.reflowPDFTextLayerTOC(page) {
+                    return tocText
+                        .components(separatedBy: "\n\n")
                         .map { normalize($0) }
                         .filter { !$0.isEmpty }
                         .joined(separator: "\n\n")

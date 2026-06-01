@@ -103,9 +103,20 @@ struct TXTLibraryImporter {
         }()
 
         // ── Paragraph split → prose units.
-        let units = ContentUnitBuilder.proseUnits(
+        let rawUnits = ContentUnitBuilder.proseUnits(
             fromPlainText: plainText,
             documentID: documentID
+        )
+        // 2026-05-31 (Bug G) — Gutenberg books list every "CHAPTER N. Title."
+        // in a front-matter CONTENTS section AND at each real chapter start, so
+        // proseUnits promotes BOTH (Moby TXT: 272 heading units = 136 listing +
+        // 136 body). Demote the LISTING copies back to prose — identified by
+        // having a BODY twin (same title at/after the skip), so legitimate
+        // front-matter headings with no body copy are preserved. The TOC builder
+        // below already excludes the listing from document_toc via the skip
+        // gate; this aligns the heading UNITS.
+        let units = ContentUnitBuilder.demoteDuplicateListingHeadings(
+            rawUnits, skipOffset: skipOffset
         )
 
         // ── Map smart-skip plainText offsets to unit ids.

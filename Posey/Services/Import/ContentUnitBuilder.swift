@@ -488,6 +488,117 @@ enum ContentUnitBuilder {
         return titleMatch(in: unitText, title: title)?.titleLength
     }
 
+    /// Demote front-matter CONTENTS-listing heading units back to `.prose` —
+    /// identified by DUPLICATION, not by region.
+    ///
+    /// 2026-05-31 (Bug G) — Gutenberg TXT/HTML surface "CHAPTER 1. Loomings."
+    /// both in the front-matter CONTENTS listing AND at the real chapter start
+    /// in the body. `proseUnits` / `applyHeadingMarkers` promote BOTH, so Moby
+    /// TXT had 272 heading units (136 listing + 136 body) and Moby HTML 282 —
+    /// the listing copies render as chapter headings inside the skipped front
+    /// matter and duplicate the real ones.
+    ///
+    /// **Why duplication, not a region.** A first attempt scoped demotion to the
+    /// detected Contents region `[postCatalog, postTOC]`. That boundary is
+    /// fragile: on Moby HTML it swallowed the legitimate **ETYMOLOGY** heading
+    /// (which sits inside the region) while sparing EXTRACTS (just past it) —
+    /// the exact EXTRACTS/ETYMOLOGY regression Mark flagged. The robust signal
+    /// is that a listing entry's title RECURS in a strictly LATER heading (the
+    /// body copy always follows the listing copy). So: a heading before the skip
+    /// offset is demoted iff the same (normalized) title appears again in a
+    /// later heading. The body copy — whose title only appears EARLIER, in the
+    /// listing — is never demoted by this asymmetry, which is why no fragile
+    /// body-vs-skip boundary is needed (the skip lands just past the first
+    /// chapter heading, so a boundary test missed exactly CHAPTER 1). Front-
+    /// matter headings with no later twin — ETYMOLOGY, EXTRACTS — are preserved.
+    /// Genuinely repeated front matter (e.g. Frankenstein's two identical "To
+    /// Mrs. Saville, England." letters) is preserved by the `start < skipOffset`
+    /// guard: those letters are reading CONTENT and sit at/after the skip, so
+    /// they are never demotion candidates.
+    ///
+    /// Offset arithmetic matches the persister's `\n\n`-joined plainText.
+    static func demoteDuplicateListingHeadings(
+        _ units: [ContentUnit],
+        skipOffset: Int
+    ) -> [ContentUnit] {
+        guard skipOffset > 0 else { return units }
+
+        func normalizedTitle(_ unit: ContentUnit) -> String {
+            let prefix = unit.metadata.titleLength.map { String(unit.text.prefix($0)) } ?? unit.text
+            return prefix
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+                .lowercased()
+        }
+
+        // The signal is a LATER twin, not the skip boundary. The skip lands a
+        // little PAST the first chapter heading (into its body), so the body
+        // CHAPTER 1 heading is itself before the skip — a body-vs-skip partition
+        // wrongly excluded it and left its listing copy un-demoted (observed:
+        // Moby kept its CHAPTER 1 listing). Instead: a listing copy always
+        // precedes its body copy, so demote a front-matter heading whose title
+        // appears AGAIN in a strictly later heading. The body copy (whose title
+        // only appears EARLIER, in the listing) is never demoted by this
+        // asymmetry — no fragile boundary needed.
+
+        // Pass 1 — last (greatest) start offset at which each heading title occurs.
+        var lastHeadingOffsetByTitle: [String: Int] = [:]
+        var offset = 0
+        var firstProseSeen = false
+        for unit in units {
+            let isProseBearing = unit.kind.carriesProseText
+            if isProseBearing {
+                if firstProseSeen { offset += 2 }
+                firstProseSeen = true
+            }
+            if unit.kind == .heading {
+                let t = normalizedTitle(unit)
+                if !t.isEmpty { lastHeadingOffsetByTitle[t] = offset }
+            }
+            if isProseBearing { offset += unit.text.count }
+        }
+
+        // Pass 2 — identify front-matter headings (start < skipOffset) whose
+        // title recurs in a strictly later heading.
+        var candidateUnitIDs = Set<UUID>()
+        offset = 0
+        firstProseSeen = false
+        for unit in units {
+            let isProseBearing = unit.kind.carriesProseText
+            if isProseBearing {
+                if firstProseSeen { offset += 2 }
+                firstProseSeen = true
+            }
+            let start = offset
+            if unit.kind == .heading, start < skipOffset {
+                let t = normalizedTitle(unit)
+                if !t.isEmpty, (lastHeadingOffsetByTitle[t] ?? start) > start {
+                    candidateUnitIDs.insert(unit.id)
+                }
+            }
+            if isProseBearing { offset += unit.text.count }
+        }
+
+        // Only act when there's clearly a LISTING — a cluster of duplicated
+        // front-matter headings — not a one-off repeat. A real contents listing
+        // has many entries; an isolated duplicate (a genuinely repeated section
+        // title in the front matter) must not be touched. minListingSize = 3.
+        guard candidateUnitIDs.count >= 3 else { return units }
+
+        return units.map { unit in
+            guard candidateUnitIDs.contains(unit.id) else { return unit }
+            return ContentUnit(
+                id: unit.id,
+                documentID: unit.documentID,
+                sequence: unit.sequence,
+                kind: .prose,
+                text: unit.text,
+                metadata: .empty
+            )
+        }
+    }
+
     /// Map a plainText character offset (the coordinate space the
     /// existing smart-skip detectors operate in) to the first unit
     /// whose cumulative position is at or after the offset. Used by

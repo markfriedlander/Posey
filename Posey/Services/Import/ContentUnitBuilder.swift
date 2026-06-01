@@ -445,27 +445,38 @@ enum ContentUnitBuilder {
         )
     }
 
-    /// Whitespace-tolerant title match. Returns nil if `title` does not head
-    /// `unitText` (after leading whitespace). Any run of whitespace in EITHER
-    /// string matches any run in the other — so a TOC title "I. A Scandal in
-    /// Bohemia" matches a unit "I.\nA Scandal in Bohemia" whose heading was
-    /// split across lines in the EPUB source. On a match returns:
+    /// Separator-tolerant title match. Returns nil if `title` does not head
+    /// `unitText` (after leading whitespace). Any run of SEPARATOR characters in
+    /// EITHER string matches any run in the other — where a separator is
+    /// whitespace OR a `:` (colon). The whitespace tolerance lets a TOC title
+    /// "I. A Scandal in Bohemia" match a unit "I.\nA Scandal in Bohemia" whose
+    /// heading was split across lines in the EPUB source. The colon tolerance
+    /// (added 2026-06-01) lets a PDF OUTLINE title "1: Google, Meet OKRs" match a
+    /// body unit "1 Google, Meet OKRs If you…" that sets the chapter number with a
+    /// space, not a colon — 27 of 38 Measure-What-Matters outline entries were
+    /// dropped purely on this colon-vs-space difference, leaving their chapter
+    /// titles as unstyled body. Treating `:` as separator-equivalent is strictly
+    /// ADDITIVE (a separator run still matches a separator run; it only ALSO lets
+    /// `:` match whitespace and vice-versa), and `applyHeadingMarkers` ranks exact
+    /// title==unit matches ahead of prefix matches, so no existing heading
+    /// regresses. On a match returns:
     ///   • `titleLength`: character count from `unitText`'s start through the end
     ///     of the matched title PLUS one trailing separator char — the renderer
     ///     styles `[0, titleLength)` as the heading and the remainder as body.
     ///     nil when the unit IS the title (no body after), i.e. style it whole.
     ///   • `isExact`: true when the unit holds nothing but the title.
-    /// Case-sensitive on non-whitespace (importers preserve case).
+    /// Case-sensitive on non-separator characters (importers preserve case).
     private static func titleMatch(in unitText: String, title: String) -> (titleLength: Int?, isExact: Bool)? {
+        func isSep(_ c: Character) -> Bool { c.isWhitespace || c == ":" }
         let u = Array(unitText)
         let t = Array(title)
         var ui = 0, ti = 0
         while ui < u.count, u[ui].isWhitespace { ui += 1 }
         while ti < t.count {
-            if t[ti].isWhitespace {
-                guard ui < u.count, u[ui].isWhitespace else { return nil }
-                while ui < u.count, u[ui].isWhitespace { ui += 1 }
-                while ti < t.count, t[ti].isWhitespace { ti += 1 }
+            if isSep(t[ti]) {
+                guard ui < u.count, isSep(u[ui]) else { return nil }
+                while ui < u.count, isSep(u[ui]) { ui += 1 }
+                while ti < t.count, isSep(t[ti]) { ti += 1 }
             } else {
                 guard ui < u.count, u[ui] == t[ti] else { return nil }
                 ui += 1; ti += 1
@@ -595,6 +606,91 @@ enum ContentUnitBuilder {
                 kind: .prose,
                 text: unit.text,
                 metadata: .empty
+            )
+        }
+    }
+
+    /// Re-anchor every TOC entry's offset to the TRUE position of the heading
+    /// unit it names, in the reader's coordinate.
+    ///
+    /// 2026-06-01 (phone audit, heading work) — TOC nav precision varied by
+    /// format because each importer stores its TOC `plainTextOffset` in ITS OWN
+    /// detector coordinate, which can drift from the units-joined coordinate the
+    /// reader actually navigates in:
+    ///   • DOCX computes heading offsets in the EXTRACTOR'S displayText (which can
+    ///     differ paragraph-for-paragraph from the plainText the units are built
+    ///     from) — observed: "What We Built" stored at 546 but its heading unit
+    ///     sits at 956, so a tap landed a whole section early, on the prior body.
+    ///   • PDF stores the OUTLINE destination offset (PDFKit coordinate), ~200
+    ///     chars coarse vs the heading unit, leaving a sliver of the prior section
+    ///     above the heading on a tap.
+    /// TXT/HTML/EPUB/RTF already build TOC offsets by walking the units, so they
+    /// land exactly — for them this pass is a NO-OP (it recomputes the same
+    /// value). Anchoring at the shared persist choke point makes nav exact for
+    /// EVERY format and removes the per-importer-coordinate fragility entirely;
+    /// it is the back-of-the-fence correctness behind the visible "tap lands on
+    /// the styled heading."
+    ///
+    /// Coordinate: identical to `ReaderView.makeLoadedContent`'s
+    /// `cumulativeOffsetByUnitID` — a unit's start is recorded BEFORE its own
+    /// text is added; the "\n\n" separator (`+2`) is charged between prose-bearing
+    /// units. So the anchor equals the heading's first-sentence segment
+    /// `startOffset` exactly, and `jumpToTOCEntry`'s `firstIndex(startOffset >=)`
+    /// resolves to the heading itself.
+    ///
+    /// Matching: a TOC entry binds to the `.heading` unit whose text HEADS WITH
+    /// the entry title (the same `titleMatch` used for promotion, so a fused PDF
+    /// heading "1 Google, Meet OKRs If you…" still binds to its outline entry
+    /// "1: Google, Meet OKRs"), choosing — among all title matches — an EXACT
+    /// title==heading match first, then the one NEAREST the entry's original
+    /// offset. Nearest-offset disambiguation (not a forward cursor) is required
+    /// because TOC entries are not always in body order: a PDF "DEDICATION" entry
+    /// can point to a dedication page near the END of the book, which a forward
+    /// cursor would let consume the slot and then skip every chapter after it. It
+    /// also resolves repeated titles (a section label reused per chapter) to the
+    /// occurrence nearest its own listed position. An entry with no matching
+    /// heading keeps its original offset (front matter like "PRAISE FOR…" that has
+    /// no body heading), so this can only improve nav, never regress it.
+    static func reanchorTOCToHeadingUnits(
+        _ toc: [StoredTOCEntry],
+        units: [ContentUnit]
+    ) -> [StoredTOCEntry] {
+        guard !toc.isEmpty else { return toc }
+
+        struct Anchor { let offset: Int; let text: String }
+        var anchors: [Anchor] = []
+        var cumulative = 0
+        for unit in units {
+            if unit.kind == .heading {
+                anchors.append(Anchor(offset: cumulative, text: unit.text))
+            }
+            if unit.kind.carriesProseText {
+                cumulative += unit.text.count + 2 // "\n\n" — matches ReaderView + persister
+            }
+        }
+        guard !anchors.isEmpty else { return toc }
+
+        return toc.map { entry in
+            guard !entry.title.isEmpty else { return entry }
+            var best: Int? = nil
+            var bestExact = false
+            var bestDist = Int.max
+            for (i, anchor) in anchors.enumerated() {
+                guard let m = Self.titleMatch(in: anchor.text, title: entry.title) else { continue }
+                let exact = m.isExact
+                let dist = abs(anchor.offset - entry.plainTextOffset)
+                if best == nil
+                    || (exact && !bestExact)
+                    || (exact == bestExact && dist < bestDist) {
+                    best = i; bestExact = exact; bestDist = dist
+                }
+            }
+            guard let b = best else { return entry } // no body heading — keep original
+            return StoredTOCEntry(
+                title: entry.title,
+                plainTextOffset: anchors[b].offset,
+                playOrder: entry.playOrder,
+                level: entry.level
             )
         }
     }

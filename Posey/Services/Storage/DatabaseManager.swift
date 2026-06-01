@@ -2525,9 +2525,16 @@ extension DatabaseManager {
                 try insertSentence(sentence)
             }
 
-            // TOC.
+            // TOC. Re-anchor each entry's offset to the true position of its
+            // heading unit before persisting (2026-06-01) — importers store TOC
+            // offsets in their own detector coordinate, which drifts from the
+            // units coordinate the reader navigates in (DOCX displayText vs
+            // plainText; PDF outline vs units). A no-op for formats already
+            // unit-aligned (TXT/HTML/EPUB/RTF); exact-fix for DOCX/PDF. See
+            // ContentUnitBuilder.reanchorTOCToHeadingUnits.
+            let reanchoredTOC = ContentUnitBuilder.reanchorTOCToHeadingUnits(parsed.toc, units: parsed.units)
             try execute("DELETE FROM document_toc WHERE document_id = '\(parsed.id.uuidString)';")
-            for entry in parsed.toc {
+            for entry in reanchoredTOC {
                 try insertTOCEntry(entry, for: parsed.id)
             }
 

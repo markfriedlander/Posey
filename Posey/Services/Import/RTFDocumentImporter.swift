@@ -222,6 +222,25 @@ extension RTFDocumentImporter {
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+            // 2026-06-01 (heading-promotion fix) — one paragraph per unit.
+            // RTF (via NSAttributedString) emits a single `\n` at every `\par`
+            // break, but `RTFLibraryImporter.buildUnits` splits paragraphs on
+            // `\n\n`. The mismatch FUSED many `\par` paragraphs into one unit —
+            // a chapter heading like "Chapter 1: What is AI?" ended up buried
+            // mid-paragraph inside a 3000-char prose unit, so `applyHeadingMarkers`
+            // (which promotes a unit only when the title HEADS it) never promoted
+            // it: the title rendered as plain body and TOC nav landed past it.
+            // Collapsing every newline run to exactly `\n\n` makes each `\par` its
+            // own unit (heading paragraphs become standalone, promotable units) AND
+            // keeps ONE coordinate end-to-end: this normalized text, `buildUnits`'
+            // `\n\n` split, and the persister's `\n\n` join all agree, so heading +
+            // TOC + skip offsets stay exact (no drift). The two line-walkers above
+            // (`advancePastDotLeaderRegion`, the needle search) are `\n\n`-safe —
+            // the former already skips empty lines; the latter matches title text.
+            // RESIDUAL (category): an RTF that splits a single heading across lines
+            // with `\line` (a soft break that also surfaces as `\n`) would over-split
+            // that heading into two units; not present in the corpus RTF. Filed.
+            .replacingOccurrences(of: #"\n[ \t\n]*"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -27,7 +27,7 @@ final class LocalAPIServer {
     // Injected at start() — weak to avoid retain cycles, closures to avoid
     // crossing the MainActor boundary unsafely.
     private var commandHandler: (@Sendable (String) async -> String)?
-    private var importHandler:  (@Sendable (String, Data) async -> String)?
+    private var importHandler:  (@Sendable (String, Data, Bool) async -> String)?
     private var stateHandler:   (@Sendable () async -> String)?
     /// Ask Posey backend pipeline handler — runs intent classification,
     /// prompt building, AFM streaming end-to-end and returns JSON.
@@ -116,7 +116,7 @@ extension LocalAPIServer {
 
     func start(
         commandHandler: @escaping @Sendable (String) async -> String,
-        importHandler:  @escaping @Sendable (String, Data) async -> String,
+        importHandler:  @escaping @Sendable (String, Data, Bool) async -> String,
         stateHandler:   @escaping @Sendable () async -> String,
         askHandler:     (@Sendable (Data) async -> String)? = nil,
         openAskPoseyHandler: (@Sendable (Data) async -> String)? = nil
@@ -327,7 +327,13 @@ extension LocalAPIServer {
         guard let handler = importHandler else {
             return (503, #"{"error":"Import handler unavailable"}"#)
         }
-        let result = await handler(filename, data)
+        // Dev convenience: `X-Posey-Overwrite: 1` deletes any existing document
+        // with the same filename before importing, so a re-import re-processes
+        // from scratch instead of dedup'ing to the stale copy. Saves the
+        // delete-then-import dance (and its DB-lock races) during testing.
+        let overwriteRaw = (req.headers["x-posey-overwrite"] ?? "").lowercased()
+        let overwrite = ["1", "true", "yes"].contains(overwriteRaw)
+        let result = await handler(filename, data, overwrite)
         return (200, result)
     }
 

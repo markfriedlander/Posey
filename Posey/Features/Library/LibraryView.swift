@@ -728,8 +728,8 @@ extension LibraryViewModel {
                 commandHandler: { [weak self] cmd in
                     await self?.executeAPICommand(cmd) ?? #"{"error":"unavailable"}"#
                 },
-                importHandler: { [weak self] filename, data in
-                    await self?.apiImport(filename: filename, data: data) ?? #"{"error":"unavailable"}"#
+                importHandler: { [weak self] filename, data, overwrite in
+                    await self?.apiImport(filename: filename, data: data, overwrite: overwrite) ?? #"{"error":"unavailable"}"#
                 },
                 stateHandler: { [weak self] in
                     await self?.apiState() ?? #"{"error":"unavailable"}"#
@@ -3015,9 +3015,19 @@ extension LibraryViewModel {
 
     // MARK: — Import handler
 
-    func apiImport(filename: String, data: Data) async -> String {
+    func apiImport(filename: String, data: Data, overwrite: Bool = false) async -> String {
         let cleanFilename = LibraryViewModel.sanitizeFilename(filename)
         let ext = (cleanFilename as NSString).pathExtension.lowercased()
+        // Dev overwrite: delete any existing document(s) with the same filename
+        // first, so the import re-processes from scratch under the current build
+        // instead of dedup'ing to the stale copy (the importers reuse an
+        // existing id on content match). Filename-scoped: only the doc you're
+        // re-importing is replaced.
+        if overwrite {
+            let stale = ((try? databaseManager.documents()) ?? [])
+                .filter { $0.fileName == cleanFilename }
+            for d in stale { deleteDocument(d) }
+        }
         do {
             let tempURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(cleanFilename)

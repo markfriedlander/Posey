@@ -547,10 +547,21 @@ extension PDFDocumentImporter {
             let avgConfidence = candidates.map(\.confidence).reduce(0, +) / Float(candidates.count)
             guard avgConfidence >= Self.ocrConfidenceThreshold else { return "" }
 
-            let lines = candidates.map(\.string)
-            guard !lines.isEmpty else { return "" }
-
-            return normalize(lines.joined(separator: " "))
+            // 2026-05-31 — reflow by line geometry (OCRLineReflow) instead of
+            // joining every recognized line with a space. The geometry-aware
+            // joiner preserves hard line breaks (a scanned TOC reads one entry
+            // per line) while still reflowing wrapped body-prose lines into
+            // paragraphs. Hard breaks come back as "\n\n"; normalize() collapses
+            // single newlines to spaces, so normalize PER PARAGRAPH and rejoin
+            // with "\n\n" to keep the paragraph structure through to the unit
+            // splitter.
+            let reflowed = OCRLineReflow.reflow(observations)
+            guard !reflowed.isEmpty else { return "" }
+            return reflowed
+                .components(separatedBy: "\n\n")
+                .map { normalize($0) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
         }
     }
 

@@ -61,7 +61,14 @@ struct PDFTier2VisionExtractor {
             let avg = candidates.map(\.confidence).reduce(0, +) / Float(candidates.count)
             guard avg >= minAvgConfidence else { return "" }
 
-            let raw = candidates.map(\.string).joined(separator: " ")
+            // 2026-05-31 — reflow by line geometry instead of flattening every
+            // recognized line into one space-joined run-on. A scanned TOC page
+            // otherwise came back as an unreadable wall ("Table of Contents
+            // Chapter I … 2 Chapter II … 3 …"); the geometry-aware joiner keeps
+            // each entry on its own line (hard break) while still reflowing
+            // wrapped body-prose lines into paragraphs (soft wrap). See
+            // OCRLineReflow.
+            let raw = OCRLineReflow.reflow(observations)
 
             // 2026-05-28 — Apply the same watermark stripper that Tier 1
             // runs on PDFKit text. PDFKit's text-stream extraction picks

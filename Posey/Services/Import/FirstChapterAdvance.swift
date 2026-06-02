@@ -33,6 +33,11 @@ import Foundation
 /// `maxDistance` characters of `startOffset`.
 enum FirstChapterAdvance {
 
+    /// Counts "CHAPTER <numeral>" markers on a line. ≥2 means a fused
+    /// front-matter Contents listing rather than a real chapter start.
+    private static let chapterMarkerRegex: NSRegularExpression =
+        try! NSRegularExpression(pattern: #"(?i)CHAPTER\s+(?:\d|[IVXLCDM])"#)
+
     /// Scan plainText forward from startOffset, looking for the first
     /// chapter-style heading line. Returns that offset on hit, nil
     /// otherwise.
@@ -65,14 +70,18 @@ enum FirstChapterAdvance {
         let lookbackStartIdx = plainText.index(plainText.startIndex, offsetBy: lookbackStart)
         let lookbackEndIdx = plainText.index(plainText.startIndex, offsetBy: startOffset)
         let lookback = plainText[lookbackStartIdx..<lookbackEndIdx]
+        // 2026-06-02 — Gap (A): trailing separator now allows END-OF-LINE
+        // (`(?:[.\s:—–-]|$)`) so a bare "CHAPTER I" / "CHAPTER 12" with no
+        // title still matches (Dracula numbers its body chapters that way).
+        // Roman class widened to [IVXLCDM]{1,7}. Kept line-anchored.
         let lookbackPatterns: [String] = [
-            #"(?im)^\s*CHAPTER\s+\d{1,3}[.\s:—-]"#,
-            #"(?im)^\s*CHAPTER\s+[IVXL]{1,5}[.\s:—-]"#,
-            #"(?im)^\s*CHAPTER\s+(ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN)[.\s:—-]"#,
+            #"(?im)^\s*CHAPTER\s+\d{1,3}(?:[.\s:—–-]|$)"#,
+            #"(?im)^\s*CHAPTER\s+[IVXLCDM]{1,7}(?:[.\s:—–-]|$)"#,
+            #"(?im)^\s*CHAPTER\s+(ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|ELEVEN|TWELVE)(?:[.\s:—–-]|$)"#,
             // Letter/Book/Part headings — same self-guard for the
             // EPUB importer's broader use of FirstChapterAdvance.
-            #"(?im)^\s*LETTER\s+[IVXL]{1,5}[.\s:—-]"#,
-            #"(?im)^\s*(BOOK|PART|VOLUME)\s+[IVXL]{1,5}[.\s:—-]"#,
+            #"(?im)^\s*LETTER\s+[IVXLCDM]{1,7}(?:[.\s:—–-]|$)"#,
+            #"(?im)^\s*(BOOK|PART|VOLUME)\s+[IVXLCDM]{1,7}(?:[.\s:—–-]|$)"#,
         ]
         for pattern in lookbackPatterns {
             if lookback.range(of: pattern, options: .regularExpression) != nil {
@@ -98,29 +107,45 @@ enum FirstChapterAdvance {
         //     is ASCII digits, so Roman only needs to cover up to ~40
         //     which is the upper bound where books still use Roman).
         //   Spelled-out (first ten): ONE..TEN
-        let patterns: [String] = [
-            // CHAPTER 1.  /  CHAPTER 12  /  CHAPTER 12:  /  CHAPTER 1 - Title
-            #"(?im)^\s*CHAPTER\s+\d{1,3}[.\s:—-]"#,
-            // CHAPTER I.  /  CHAPTER XII   /  Chapter I:
-            #"(?im)^\s*CHAPTER\s+[IVXL]{1,5}[.\s:—-]"#,
-            // CHAPTER ONE.  /  Chapter TWO
-            #"(?im)^\s*CHAPTER\s+(ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN)[.\s:—-]"#,
-        ]
-
-        var bestRange: Range<Substring.Index>? = nil
-        for pattern in patterns {
-            if let r = region.range(of: pattern, options: [.regularExpression]) {
-                if bestRange == nil || r.lowerBound < bestRange!.lowerBound {
-                    bestRange = r
-                }
+        // 2026-06-02 — One combined, line-anchored pattern. Gap (A): the
+        // trailing enumerator allows END-OF-LINE so a bare "CHAPTER I" /
+        // "CHAPTER 12" matches. Walk matches IN DOCUMENT ORDER and skip
+        // any whose LINE is a fused front-matter Contents listing (≥2
+        // "CHAPTER <numeral>" markers on one de-wrapped line). Dracula's
+        // Contents block — 27 "CHAPTER N. Title" lines collapsed into one
+        // line by the TXT loader's single-newline de-wrap — starts with
+        // "CHAPTER I." and would otherwise anchor the skip ON the Contents
+        // page (reader opens at the listing, not Chapter 1). Skipping it
+        // lands the skip on the real body "CHAPTER I" further down.
+        //
+        // Uses NSRegularExpression directly (not String.range(of:range:))
+        // because anchoring `^` to a moving sub-range start is unreliable
+        // through the String bridge — the prior sub-range loop never
+        // advanced past Dracula's fused Contents line. UTF-16 match
+        // locations are converted back to Character offsets so the
+        // returned value stays in plainText's Character coordinate.
+        let combinedPattern =
+            #"(?im)^\s*CHAPTER\s+(?:\d{1,3}|[IVXLCDM]{1,7}|ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|ELEVEN|TWELVE)(?:[.\s:—–-]|$)"#
+        guard let combined = try? NSRegularExpression(pattern: combinedPattern) else { return nil }
+        let regionStr = String(region)
+        let regionNS = regionStr as NSString
+        let matches = combined.matches(
+            in: regionStr, options: [],
+            range: NSRange(location: 0, length: regionNS.length))
+        for m in matches {
+            guard let r = Range(m.range, in: regionStr) else { continue }
+            let lineNS = regionNS.lineRange(for: m.range)
+            let line = regionNS.substring(with: lineNS)
+            let markerCount = Self.chapterMarkerRegex.numberOfMatches(
+                in: line, options: [],
+                range: NSRange(location: 0, length: (line as NSString).length))
+            if markerCount < 2 {
+                let relativeOffset = regionStr.distance(from: regionStr.startIndex, to: r.lowerBound)
+                return startOffset + relativeOffset
             }
+            // else: fused Contents listing — keep walking.
         }
-
-        guard let matchRange = bestRange else { return nil }
-
-        // Translate substring index back to absolute offset in plainText.
-        let relativeOffset = region.distance(from: region.startIndex, to: matchRange.lowerBound)
-        return startOffset + relativeOffset
+        return nil
     }
 }
 

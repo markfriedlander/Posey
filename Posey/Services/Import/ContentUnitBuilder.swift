@@ -47,11 +47,55 @@ enum ContentUnitBuilder {
             // FirstChapterAdvance — keep them aligned. Other heading
             // styles (Epilogue, Prologue, Preface, Foreword) included
             // since they're common Gutenberg structure.
-            let isHeading = Self.txtHeadingRegex.firstMatch(
-                in: trimmed,
-                options: [],
-                range: NSRange(location: 0, length: (trimmed as NSString).length)
+            let nsLen = (trimmed as NSString).length
+            let fullRange = NSRange(location: 0, length: nsLen)
+            var isHeading = Self.txtHeadingRegex.firstMatch(
+                in: trimmed, options: [], range: fullRange
             ) != nil
+            // 2026-06-02 — Gap (B): keyword-LESS chapter headings of the
+            // form "I. Introduction", "XII. In the Darkness" (a Roman
+            // numeral + period + title, NO "CHAPTER" word). The Time
+            // Machine (Gutenberg #35) numbers its chapters this way and
+            // the CHAPTER-anchored regex missed every one of them (only
+            // "Epilogue" matched → 1 TOC entry for a 16-chapter book).
+            // Guarded HARD against prose false-positives: it must be a
+            // SHORT standalone paragraph (≤ 80 chars — a real chapter
+            // title line, not a sentence that happens to open "I. e. …"),
+            // and the Roman numeral must be followed by a period. The
+            // fused front-matter Contents block ("I Introduction II The
+            // Machine …") has no period after the first numeral and is
+            // long, so it is NOT matched here. Verified: Time Machine
+            // 1→17 entries; Moby still 136, Tale still 45 (no regression).
+            if !isHeading, trimmed.count <= 80,
+               Self.romanHeadingRegex.firstMatch(
+                in: trimmed, options: [], range: fullRange
+               ) != nil,
+               let last = trimmed.last, !".;!?".contains(last) {
+                // A chapter title is a noun phrase, not a sentence: it
+                // does NOT end in sentence punctuation. This rejects
+                // Moby's enumerated PROSE ("I. A Fast-Fish belongs to the
+                // party fast to it.", "I. THE FOLIO WHALE; II. the OCTAVO
+                // WHALE; III. the DUODECIMO WHALE.") — which matched the
+                // bare-Roman shape and were wrongly promoted (136→139) —
+                // while keeping real titles "I. Introduction" / "XII. In
+                // the Darkness" (The Time Machine).
+                isHeading = true
+            }
+            // Fused-listing guard. A front-matter Contents listing whose
+            // entries got de-wrapped into ONE paragraph (TXT loader joins
+            // single newlines with spaces) matches the CHAPTER pattern but
+            // is NOT a real heading — it carries MANY chapter markers.
+            // Dracula's 27-line Contents fused into a single 990-char unit
+            // and was wrongly promoted, surfacing as a junk TOC entry.
+            // Demote any candidate carrying ≥2 "CHAPTER <numeral>" markers.
+            // A genuine heading ("CHAPTER 1. The Chapter of Doom") has
+            // exactly one CHAPTER-followed-by-a-numeral marker.
+            if isHeading,
+               Self.chapterMarkerRegex.numberOfMatches(
+                in: trimmed, options: [], range: fullRange
+               ) >= 2 {
+                isHeading = false
+            }
             units.append(ContentUnit(
                 documentID: documentID,
                 sequence: sequence,
@@ -69,9 +113,49 @@ enum ContentUnitBuilder {
     /// (^…$ without anchorsMatchLines because we've already trimmed
     /// and the paragraph is supposed to be one line).
     fileprivate static let txtHeadingRegex: NSRegularExpression = {
-        let pattern = #"^\s*(CHAPTER\s+\d{1,3}[.\s:—-].*|Chapter\s+\d{1,3}[.\s:—-].*|CHAPTER\s+[IVXL]{1,5}[.\s:—-].*|Chapter\s+[IVXL]{1,5}[.\s:—-].*|CHAPTER\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN)[.\s:—-].*|Epilogue\.?|Prologue\.?|Preface\.?|Foreword\.?|Introduction\.?)\s*$"#
+        // 2026-06-02 — Gap (A): the trailing separator+title is now
+        // OPTIONAL (`(?:[.\s:—–-].*)?`). Previously the pattern REQUIRED
+        // a separator after the numeral (`[.\s:—-].*`), so a bare chapter
+        // marker with no title — "CHAPTER I", "CHAPTER 12" on its own
+        // line — failed to match. Dracula (Gutenberg #345) titles its
+        // body chapters exactly that way ("CHAPTER I", "CHAPTER II", …),
+        // so NONE of its 27 chapters were promoted (the only heading was
+        // the fused front-matter Contents block). Making the tail
+        // optional promotes bare markers while the `^…$` whole-paragraph
+        // anchor still rejects mid-sentence "CHAPTER I was…" prose (that
+        // case already matched before and is unchanged). Roman class
+        // widened I/V/X/L → +C/D/M and {1,5}→{1,7}; spelled-out extended
+        // to TWELVE; lowercase "Chapter" spelled-out added.
+        let roman = "[IVXLCDM]{1,7}"
+        let spelled = "(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|ELEVEN|TWELVE)"
+        let tail = #"(?:[.\s:—–-].*)?"#   // optional separator + rest
+        let pattern = "^\\s*(?:"
+            + "(?:CHAPTER|Chapter)\\s+\\d{1,3}\(tail)"
+            + "|(?:CHAPTER|Chapter)\\s+\(roman)\(tail)"
+            + "|(?:CHAPTER|Chapter)\\s+\(spelled)\(tail)"
+            + #"|Epilogue\.?|Prologue\.?|Preface\.?|Foreword\.?|Introduction\.?"#
+            + ")\\s*$"
         // Returning a force-tried regex; the pattern is a compile-time
         // constant so the try cannot fail at runtime.
+        return try! NSRegularExpression(pattern: pattern)
+    }()
+
+    /// 2026-06-02 — Gap (B): keyword-LESS Roman-numeral chapter headings,
+    /// e.g. "I. Introduction", "XII. In the Darkness" (The Time Machine).
+    /// REQUIRES a period after the numeral and a non-empty title; callers
+    /// MUST additionally gate on a short paragraph length (see proseUnits)
+    /// so prose that merely opens with a Roman numeral isn't promoted.
+    fileprivate static let romanHeadingRegex: NSRegularExpression = {
+        let pattern = #"^[IVXLCDM]{1,7}\.\s+\S.*$"#
+        return try! NSRegularExpression(pattern: pattern)
+    }()
+
+    /// 2026-06-02 — Counts "CHAPTER <numeral>" markers in a paragraph.
+    /// ≥2 means a fused front-matter Contents listing, not a heading.
+    /// Requires a numeral after CHAPTER so a title that merely contains
+    /// the word "chapter" ("The Chapter of Doom") isn't miscounted.
+    fileprivate static let chapterMarkerRegex: NSRegularExpression = {
+        let pattern = #"(?i)CHAPTER\s+(?:\d|[IVXLCDM])"#
         return try! NSRegularExpression(pattern: pattern)
     }()
 

@@ -168,6 +168,19 @@ struct DOCXDocumentImporter {
                 markerLossPrefix[i + 1] = markerLossPrefix[i] + markerChars
             }
         }
+        // NOTE (2026-06-02) — these heading offsets are computed in the
+        // displayText `\n\n`-split coordinate, which DIVERGES from the units
+        // coordinate the reader navigates whenever a paragraph contains internal
+        // `<w:br/>` line breaks (single `\n`): such a paragraph is ONE entry here
+        // but its lines can become separate units, so the offset lands early.
+        // The value is also non-robust — it shifted from units-aligned to drifted
+        // purely from recompiling the shared module (traced 2026-06-02). It is no
+        // longer authoritative for navigation: `DatabaseManager.persistParsedDocument`
+        // re-anchors every TOC entry to its heading UNIT
+        // (`ContentUnitBuilder.reanchorTOCToHeadingUnits`), which is the canonical,
+        // units-coordinate source of truth. These offsets remain only as the input
+        // the re-anchor disambiguates against (nearest-offset) and as the TOC-skip
+        // hint; both tolerate the imprecision.
         let docxHeadings: [DOCXHeadingEntry] = extracted.headings.compactMap { h in
             guard h.paragraphIndex >= 0, h.paragraphIndex < paragraphStartOffsets.count else {
                 return nil

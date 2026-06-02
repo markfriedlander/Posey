@@ -2531,7 +2531,10 @@ extension DatabaseManager {
             // units coordinate the reader navigates in (DOCX displayText vs
             // plainText; PDF outline vs units). A no-op for formats already
             // unit-aligned (TXT/HTML/EPUB/RTF); exact-fix for DOCX/PDF. See
-            // ContentUnitBuilder.reanchorTOCToHeadingUnits.
+            // ContentUnitBuilder.reanchorTOCToHeadingUnits. (2026-06-02: the DOCX
+            // case was traced to a non-robust importer offset — see that file's
+            // note; the re-anchor is the canonical fix and was verified to make
+            // all 7 formats' TOC nav land exactly on the heading.)
             let reanchoredTOC = ContentUnitBuilder.reanchorTOCToHeadingUnits(parsed.toc, units: parsed.units)
             try execute("DELETE FROM document_toc WHERE document_id = '\(parsed.id.uuidString)';")
             for entry in reanchoredTOC {

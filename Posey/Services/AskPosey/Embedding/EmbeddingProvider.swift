@@ -40,6 +40,41 @@ final class EmbeddingProvider: @unchecked Sendable {
 
     private let lock = NSLock()
 
+    /// 2026-06-02 — CRASH FIX. Serializes Nomic on-device inference so
+    /// only ONE `bundle.encode` (MLX → MetalPerformanceShadersGraph
+    /// executable specialization) runs at a time, process-wide.
+    ///
+    /// **Why (device backtrace, three independent crashes 2026-06-01).**
+    /// `EXC_BAD_ACCESS / SIGSEGV at 0x6` deep inside
+    /// `MetalPerformanceShadersGraph` — `mlir::ANECLayoutAnalysis::run`
+    /// on the `MPSGraphExecutable_queue`, with two-to-six threads
+    /// simultaneously in `NomicBert.Model.callAsFunction` →
+    /// `MPSGraphExecutable specializeWithDevice`. MPSGraph executable
+    /// specialization is NOT safe to run concurrently. The concurrency
+    /// arose from multiple embedding callers overlapping: two
+    /// `UnitEmbeddingService.fillEmbeddings` passes after an
+    /// overwrite-import, the `EmbedderMigrationCoordinator` re-embed
+    /// loop, and RAG query embeds — all funnel through `embedNomic`,
+    /// which previously ran `bundle.encode` on an UNLOCKED `Task.detached`.
+    /// This intermittent (~1/8) crash was misattributed to "PDF Vision
+    /// enhancement" because enhancement-complete fires the chunker →
+    /// embedding fill, and a concurrent delete/overwrite kicked off a
+    /// second indexing pass → two parallel Nomic inferences.
+    ///
+    /// **Category (Rule 10 / Step 3).** The class is "concurrent
+    /// on-device GPU/ANE graph inference." ALL embedding sources route
+    /// through this one method, so this gate closes the whole embedding
+    /// half of the category. NLContextual already serializes on `lock`
+    /// (held across its compute) and never touches MPSGraph, so it needs
+    /// no gate. The other MPSGraph user is the MLX LLM (`MLXService`, an
+    /// actor → self-serialized, and currently dormant — no model
+    /// downloaded). Embedding-vs-LLM concurrency is a documented residual:
+    /// when the LLM is activated (roadmap item 5/6), its generation must
+    /// share a gate with this one. Filed in NEXT.md.
+    private let nomicInferenceQueue = DispatchQueue(
+        label: "com.posey.embedding.nomic-inference"
+    )
+
     // NLContextualEmbedding (mBERT) — the default backend. Asset
     // is downloaded transparently by the system on first launch;
     // until ready, `embed()` returns nil and the retrieval
@@ -206,6 +241,14 @@ final class EmbeddingProvider: @unchecked Sendable {
         // Bridge async MLTensor inference into the sync embed
         // surface via a semaphore. Same pattern Hal uses; bundle.
         // encode is throws and the shapedArray fetch is async.
+        //
+        // 2026-06-02 CRASH FIX — run the whole inference bridge on the
+        // dedicated serial `nomicInferenceQueue` so concurrent embed
+        // callers can never drive MPSGraph specialization in parallel
+        // (the crash). The queue thread blocks on `sem.wait()` while the
+        // one in-flight detached encode runs; the next caller waits its
+        // turn. See `nomicInferenceQueue`'s declaration for the backtrace.
+        return nomicInferenceQueue.sync {
         let sem = DispatchSemaphore(value: 0)
         var resultVec: [Double]?
         Task.detached {
@@ -253,6 +296,7 @@ final class EmbeddingProvider: @unchecked Sendable {
         }
         sem.wait()
         return resultVec
+        }
     }
 
     private nonisolated func ensureNomicLoadedBlocking() {

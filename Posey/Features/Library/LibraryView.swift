@@ -2713,6 +2713,74 @@ extension LibraryViewModel {
                 }
                 return json(["status": "started", "jobID": jobID, "documentID": idStr])
 
+            case "EXPORT_AUDIO_RANGE":
+                // EXPORT_AUDIO_RANGE:<docID>:<startCharOffset>:<endCharOffset>
+                // 2026-06-03 — TTS-verification harness support. Renders ONLY the
+                // plainText[start..<end] character slice's TTS to an M4A (whole-doc
+                // render of a novel is infeasible — Dracula ≈ 18h of audio). This
+                // gives the harness the ACTUAL synth audio output for a bounded
+                // stretch, to be transcribed by an INDEPENDENT on-device/local ASR
+                // (non-circular: not the synth's own willSpeak/didStart callback).
+                // Renders fresh (NOT via runHeadlessAudioExport's docID cache —
+                // that would return/replace the whole-doc cached file). Same
+                // utterance-text stripping as live playback (AudioExporter uses
+                // SpeechPlaybackService.utteranceText), so the transcript reflects
+                // exactly what is spoken aloud (c14 'speaks no junk').
+                do {
+                    let parts = (arg ?? "").split(separator: ":").map(String.init)
+                    guard parts.count == 3, let docID = UUID(uuidString: parts[0]),
+                          let lo = Int(parts[1]), let hi = Int(parts[2]), lo < hi else {
+                        return #"{"error":"Usage: EXPORT_AUDIO_RANGE:<docID>:<startOffset>:<endOffset>"}"#
+                    }
+                    let documents = (try? databaseManager.documents()) ?? []
+                    guard let doc = documents.first(where: { $0.id == docID }) else {
+                        return #"{"error":"Document not found"}"#
+                    }
+                    let chars = Array(doc.plainText)
+                    let n = chars.count
+                    let s = max(0, min(lo, n)); let e = max(s, min(hi, n))
+                    let slice = String(chars[s..<e])
+                    let job = await MainActor.run {
+                        RemoteAudioExportRegistry.shared.create(
+                            documentID: docID, documentTitle: doc.title + " [range \(s)-\(e)]")
+                    }
+                    let jobID = job.id
+                    Task.detached { @MainActor in
+                        let segs = SentenceSegmenter().segments(for: slice)
+                        RemoteAudioExportRegistry.shared.update(jobID) { j in
+                            j.status = .rendering; j.totalSegments = segs.count
+                        }
+                        let exporter = AudioExporter()
+                        let cancellable = exporter.$state.sink { st in
+                            Task { @MainActor in
+                                if case .rendering(let p, let idx, let tot) = st {
+                                    RemoteAudioExportRegistry.shared.update(jobID) { j in
+                                        j.status = .rendering; j.progress = p
+                                        j.currentSegmentIndex = idx; j.totalSegments = tot
+                                    }
+                                }
+                            }
+                        }
+                        defer { _ = cancellable }
+                        do {
+                            let url = try await exporter.render(
+                                segments: segs,
+                                voiceMode: PlaybackPreferences.shared.voiceMode,
+                                outputDirectory: FileManager.default.temporaryDirectory,
+                                documentTitle: "ttsverify-\(jobID)")
+                            RemoteAudioExportRegistry.shared.update(jobID) { j in
+                                j.status = .finished; j.progress = 1; j.resultURL = url
+                            }
+                        } catch {
+                            RemoteAudioExportRegistry.shared.update(jobID) { j in
+                                j.status = .failed; j.errorMessage = error.localizedDescription
+                            }
+                        }
+                    }
+                    return json(["status": "started", "jobID": jobID,
+                                 "rangeStart": s, "rangeEnd": e, "sliceChars": slice.count])
+                }
+
             case "AUDIO_EXPORT_STATUS":
                 guard let jobID = arg, !jobID.isEmpty else {
                     return #"{"error":"Usage: AUDIO_EXPORT_STATUS:<jobID>"}"#

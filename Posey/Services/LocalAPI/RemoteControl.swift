@@ -559,7 +559,22 @@ final class RemoteControlState {
         let inWindow = tv.convert(rect, to: nil)            // nil -> window coords
         let vh = window.bounds.height
         guard vh > 0 else { return nil }
-        return [
+        // c13 STILLNESS instrumentation: the backing UIScrollView's content
+        // offset is the TRUE content-motion signal. Pin-and-step holds it
+        // constant between sentences and steps it at boundaries; a continuous
+        // GLIDE changes it every frame. (Measuring the active line's position
+        // alone can't tell these apart — a glide that keeps the line near 0.35
+        // looks "still" by position.) This reaches the UIScrollView for
+        // MEASUREMENT only (DEBUG); production scroll mechanism is separate.
+        var scrollOffsetY = Double.nan
+        var scrollViewportH = Double.nan
+        var ancestor: UIView? = tv.superview
+        while let v = ancestor, !(v is UIScrollView) { ancestor = v.superview }
+        if let scroll = ancestor as? UIScrollView {
+            scrollOffsetY = Double(scroll.contentOffset.y)
+            scrollViewportH = Double(scroll.bounds.height)
+        }
+        var out: [String: Any] = [
             "top": Double(inWindow.minY),
             "midY": Double(inWindow.midY),
             "bottom": Double(inWindow.maxY),
@@ -568,6 +583,43 @@ final class RemoteControlState {
             "midYFraction": Double(inWindow.midY / vh),
             "topFraction": Double(inWindow.minY / vh),
             "onScreen": inWindow.maxY > 0 && inWindow.minY < vh
+        ]
+        if scrollOffsetY.isFinite { out["scrollOffsetY"] = scrollOffsetY }
+        if scrollViewportH.isFinite && scrollViewportH > 0 { out["scrollViewportHeight"] = scrollViewportH }
+        return out
+    }
+
+    /// Cross-sentence selection probe (SELECT_TEST verb). Programmatically
+    /// selects the ENTIRE active prose unit — which contains multiple sentences
+    /// — in its single UITextView and reads the selection back. Proves the unit
+    /// is one selectable render surface spanning multiple sentences (the c13
+    /// fix must NOT regress this; a per-sentence renderer split would make a
+    /// cross-sentence selection impossible). Physical devices expose no
+    /// long-press-drag primitive, so this is the objective substitute; a
+    /// screenshot taken after shows the native selection handles/highlight.
+    func selectionProbe() -> [String: Any]? {
+        guard let tv = activeProseTextView else { return nil }
+        let nsFull = (tv.text ?? "") as NSString
+        guard nsFull.length > 0,
+              let start = tv.position(from: tv.beginningOfDocument, offset: 0),
+              let end = tv.position(from: tv.beginningOfDocument, offset: nsFull.length),
+              let range = tv.textRange(from: start, to: end) else { return nil }
+        tv.selectedTextRange = range
+        let selected = (tv.text(in: range) ?? "")
+        // Rough sentence count in the selection (terminator-based).
+        let terminators = CharacterSet(charactersIn: ".!?")
+        let sentenceCount = selected
+            .components(separatedBy: terminators)
+            .filter { $0.trimmingCharacters(in: .whitespacesAndNewlines).count > 2 }
+            .count
+        return [
+            "isSelectable": tv.isSelectable,
+            "unitCharCount": nsFull.length,
+            "selectedCharCount": (selected as NSString).length,
+            "approxSentencesSelected": sentenceCount,
+            "spansMultipleSentences": sentenceCount >= 2,
+            "selectedPreviewHead": String(selected.prefix(90)),
+            "selectedPreviewTail": String(selected.suffix(60))
         ]
     }
 
@@ -642,6 +694,7 @@ final class RemoteControlState {
     // c13 active-line position — inert in Release.
     func setActiveProseLine(textView: UITextView, range: NSRange) {}
     func activeLineFrameSnapshot() -> [String: Any]? { nil }
+    func selectionProbe() -> [String: Any]? { nil }
 }
 #endif
 // ========== BLOCK 04: REMOTE-CONTROL STATE BRIDGE - END ==========

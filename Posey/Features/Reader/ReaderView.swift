@@ -123,67 +123,7 @@ struct ReaderView: View {
                     // inside the row's `AttributedString`; the openURL
                     // action below dispatches to `jumpToSentenceID`.
                     ForEach(viewModel.units) { unit in
-                        // 2026-05-28 — incorporate unitAnnotationVersion
-                        // into the row's id() so SwiftUI re-runs the
-                        // body when the version changes. `let _ = …`
-                        // gets optimized away; embedding it in the id
-                        // does not. Without this, annotationFlags is a
-                        // method call SwiftUI doesn't observe, and
-                        // antenna-created notes don't refresh the
-                        // unit-row glyphs.
-                        let annotationVersion = viewModel.unitAnnotationVersion
-                        let annotations = viewModel.annotationFlags(for: unit)
-                        UnitRowView(
-                            unit: unit,
-                            sentencesInUnit: viewModel.sentencesByUnit[unit.id] ?? [],
-                            activeSentence: viewModel.activeSentence,
-                            activeSentenceIndex: viewModel.currentSentenceIndex,
-                            sentenceIndexBase: viewModel.sentenceIndexBase(for: unit),
-                            readingStyle: viewModel.readingStyle,
-                            hasNote: annotations.hasNote,
-                            hasBookmark: annotations.hasBookmark,
-                            annotationVersion: annotationVersion,
-                            onTapBookmark: {
-                                openAnnotationFromGlyph(unit: unit, kind: .bookmark)
-                            },
-                            onTapNote: {
-                                openAnnotationFromGlyph(unit: unit, kind: .note)
-                            },
-                            bodyFontSize: viewModel.fontSize,
-                            imageDataProvider: { viewModel.imageData(for: $0) }
-                        )
-                        .padding(.horizontal, 14)
-                        .id(unit.id)
-                        .accessibilityIdentifier("reader.unit.\(unit.id.uuidString)")
-                        // Citation pill — only on the cited unit.
-                        #if POSEY_ENABLE_ASK_POSEY
-                        .overlay(alignment: .topTrailing) {
-                            if isCitedRow(unit: unit) {
-                                citationReturnPill()
-                                    .padding(.trailing, 8)
-                                    .padding(.top, 2)
-                            }
-                        }
-                        #endif
-                        // Tap-to-jump fallback for image / pageBreak /
-                        // horizontalRule rows that have no sentence
-                        // ranges (the openURL path covers prose-bearing
-                        // kinds). Image rows jump to the first
-                        // sentence of the next prose unit (matches the
-                        // legacy "tap-the-image-block" behavior).
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            guard !unit.kind.carriesProseText else { return }
-                            // Find first sentence whose unit follows
-                            // this one in sequence — caller's "click
-                            // through past this image" intent.
-                            if let firstAfter = viewModel.sentences.first(where: { s in
-                                guard let u = viewModel.units.first(where: { $0.id == s.unitID }) else { return false }
-                                return u.sequence > unit.sequence
-                            }) {
-                                viewModel.jumpToSentenceID(firstAfter.id)
-                            }
-                        }
+                        unitRow(unit)
                     }
 
                     // 2026-05-21 — End-of-book indicator. Appears at
@@ -453,6 +393,12 @@ struct ReaderView: View {
                 let off = (i >= 0 && i < segs.count) ? segs[i].startOffset : 0
                 TTSVerifyHarness.shared.recordHighlight(index: i, offset: off)
             }
+            // c13: during playback, the active sentence's measured pixel midY is
+            // published; pin it to the upper third. Fires AFTER the anchor has
+            // been repositioned to the new sentence (avoids the stale-anchor
+            // race). In a ViewModifier so it type-checks outside the body's
+            // already-large modifier chain.
+            .modifier(C13PinScrollModifier(viewModel: viewModel, proxy: proxy))
             .modifier(ReaderRemoteSnapshotPublisher(viewModel: viewModel, publish: publishRemoteState))
             .onChange(of: viewModel.focusedUnitID) { _, _ in
                 lastProgrammaticScrollAt = Date()
@@ -720,6 +666,60 @@ struct ReaderView: View {
     private func clearRemoteStateIfOurs() {
         if RemoteControlState.shared.visibleDocumentID == viewModel.document.id {
             RemoteControlState.shared.visibleDocumentID = nil
+        }
+    }
+
+    /// One unit row + all its modifiers. Extracted from the `ForEach` body so
+    /// the main `body` expression type-checks (adding the c13 anchor overlay +
+    /// publish closure tipped the Swift type-checker over its time limit).
+    /// Behavior is unchanged from the prior inline row.
+    @ViewBuilder
+    private func unitRow(_ unit: ContentUnit) -> some View {
+        // 2026-05-28 — incorporate unitAnnotationVersion into the row's id() so
+        // SwiftUI re-runs the body when the version changes (annotationFlags is
+        // a method call SwiftUI doesn't observe otherwise).
+        let annotationVersion = viewModel.unitAnnotationVersion
+        let annotations = viewModel.annotationFlags(for: unit)
+        UnitRowView(
+            unit: unit,
+            sentencesInUnit: viewModel.sentencesByUnit[unit.id] ?? [],
+            activeSentence: viewModel.activeSentence,
+            activeSentenceIndex: viewModel.currentSentenceIndex,
+            sentenceIndexBase: viewModel.sentenceIndexBase(for: unit),
+            readingStyle: viewModel.readingStyle,
+            hasNote: annotations.hasNote,
+            hasBookmark: annotations.hasBookmark,
+            annotationVersion: annotationVersion,
+            onTapBookmark: { openAnnotationFromGlyph(unit: unit, kind: .bookmark) },
+            onTapNote: { openAnnotationFromGlyph(unit: unit, kind: .note) },
+            bodyFontSize: viewModel.fontSize,
+            imageDataProvider: { viewModel.imageData(for: $0) },
+            onActiveLine: { tv, range in viewModel.setActiveProseLine(tv, range) }
+        )
+        .padding(.horizontal, 14)
+        .id(unit.id)
+        .accessibilityIdentifier("reader.unit.\(unit.id.uuidString)")
+        #if POSEY_ENABLE_ASK_POSEY
+        .overlay(alignment: .topTrailing) {
+            if isCitedRow(unit: unit) {
+                citationReturnPill()
+                    .padding(.trailing, 8)
+                    .padding(.top, 2)
+            }
+        }
+        #endif
+        // Tap-to-jump fallback for image / pageBreak / horizontalRule rows that
+        // have no sentence ranges (image rows jump to the first sentence of the
+        // next prose unit — the legacy "tap-the-image-block" behavior).
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard !unit.kind.carriesProseText else { return }
+            if let firstAfter = viewModel.sentences.first(where: { s in
+                guard let u = viewModel.units.first(where: { $0.id == s.unitID }) else { return false }
+                return u.sequence > unit.sequence
+            }) {
+                viewModel.jumpToSentenceID(firstAfter.id)
+            }
         }
     }
 
@@ -1668,6 +1668,22 @@ private struct ReaderRemoteSnapshotPublisher: ViewModifier {
         content
             .onChange(of: viewModel.segments.count) { _, _ in publish() }
             .onChange(of: viewModel.units.count) { _, _ in publish() }
+    }
+}
+
+/// c13 auto-scroll pin: when the active prose line updates (`activeLineTick`),
+/// scroll the backing UIScrollView so the active line holds at the fixed
+/// upper-third viewport position during playback. In its own ViewModifier so it
+/// type-checks outside the reader body's large modifier chain.
+private struct C13PinScrollModifier: ViewModifier {
+    @ObservedObject var viewModel: ReaderViewModel
+    let proxy: ScrollViewProxy
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: viewModel.activeLineTick) { _, _ in
+                viewModel.scrollToActiveAnchor(with: proxy)
+            }
     }
 }
 
@@ -4212,49 +4228,84 @@ final class ReaderViewModel: ObservableObject {
             return
         }
 
-        var anchor = nextScrollAnchor
+        let anchor = nextScrollAnchor
         nextScrollAnchor = .center
 
         // 2026-05-28 (post-cross-sentence-selection-fix) — units are
         // now single UITextView rows again (one render surface per
         // unit so native selection spans all sentences in the unit).
-        // Sentence-level scrollTo by id is no longer possible because
-        // sentences don't have their own SwiftUI views; sentence
-        // anchoring works approximately via `UnitPoint(x:0.5, y:k/N)`
-        // on the parent unit, placing the unit's k/N point at viewport
-        // center. The active sentence drifts slightly within the unit
-        // as TTS advances (sentence heights aren't uniform) but stays
-        // in roughly the upper-third viewport zone. A future iteration
-        // can publish per-sentence rects from `ProseUnitTextView` for
-        // pixel-precise targeting via `ScrollPosition` (iOS 17+);
-        // that polish is independent of the selection-correctness fix
-        // that motivated reverting to a single render surface.
-        if focusedUnitID == nil,
-           anchor == .center,
-           sentences.indices.contains(currentSentenceIndex) {
-            let activeSentence = sentences[currentSentenceIndex]
-            let activeUnit = activeSentence.unitID
-            var positionInUnit = 0
-            var unitTotal = 0
-            for (i, s) in sentences.enumerated() where s.unitID == activeUnit {
-                if i == currentSentenceIndex { positionInUnit = unitTotal }
-                unitTotal += 1
-            }
-            if unitTotal >= 2 {
-                let y = (Double(positionInUnit) + 0.5) / Double(unitTotal)
-                anchor = UnitPoint(x: 0.5, y: y)
-            }
+        // c13 auto-scroll fix (2026-06-04): for the STANDARD reader's
+        // playback advance, pin the active SENTENCE to a fixed upper-third
+        // viewport position (Apple-Music-lyrics behavior) instead of anchoring
+        // the whole UNIT.
+        //
+        // The prior code set `anchor = UnitPoint(x:0.5, y:(k+0.5)/N)` on the
+        // unit. Because `scrollTo` applies one anchor to BOTH the view and the
+        // viewport, that placed sentence k of N at viewport-fraction k/N — so
+        // as TTS advanced through a multi-sentence unit the line marched DOWN
+        // the screen (0.05→0.95) before the next unit reset it. That sawtooth
+        // is exactly the "highlight drifting down the screen" (measured: median
+        // ~0.6, only ~10% in the top third, reaching the bottom edge).
+        //
+        // Fix: during PLAYBACK, `scrollToActiveAnchor` scrolls the backing
+        // UIScrollView so the active SENTENCE's measured glyph rect sits at a
+        // fixed `activeLineAnchorY` of the viewport — independent of where the
+        // sentence sits within its unit. So we SKIP the unit scroll here during
+        // playback (it's handled per-line by scrollToActiveAnchor). When NOT
+        // playing (manual nav, TOC `.top`, visual-pause `focusedUnitID`), the
+        // normal unit scroll applies.
+        if focusedUnitID == nil, playbackState == .playing, activeProseTextView != nil {
+            return
         }
 
-        let action = {
-            proxy.scrollTo(scrollTargetID, anchor: anchor)
-        }
-
+        let action = { proxy.scrollTo(scrollTargetID, anchor: anchor) }
         if animated && !Self.reduceMotionEnabled {
             withAnimation(.easeInOut(duration: 0.25), action)
         } else {
             action()
         }
+    }
+
+    /// c13: the fixed viewport fraction the active line is pinned to (upper
+    /// third — Apple-Music-lyrics). Mark's sign-off: ~0.35.
+    static let activeLineAnchorY: CGFloat = 0.35
+
+    /// c13 upper-third pin (standard reader, during playback). Scrolls the
+    /// backing UIScrollView so the active sentence's LIVE glyph rect sits at
+    /// `activeLineAnchorY` of the viewport. Recomputes the rect from the current
+    /// layout (always fresh). Falls back to the SwiftUI unit scroll if the
+    /// UIScrollView can't be located. `proxy` retained for that fallback.
+    func scrollToActiveAnchor(with proxy: ScrollViewProxy) {
+        guard focusedUnitID == nil, playbackState == .playing,
+              let tv = activeProseTextView, let range = activeProseRange,
+              tv.window != nil else { return }
+        // Walk up to the backing UIScrollView (SwiftUI ScrollView's UIKit host).
+        var ancestor: UIView? = tv.superview
+        while let v = ancestor, !(v is UIScrollView) { ancestor = v.superview }
+        guard let scroll = ancestor as? UIScrollView, scroll.bounds.height > 0 else {
+            if let unitID = activeUnitID {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    proxy.scrollTo(unitID, anchor: UnitPoint(x: 0.5, y: Self.activeLineAnchorY))
+                }
+            }
+            return
+        }
+        // Active sentence glyph rect → content-Y in the scroll view, then set
+        // contentOffset so it lands at activeLineAnchorY of the visible height.
+        let lm = tv.layoutManager
+        // Force complete layout first: a freshly-scrolled-in row's glyphs may not
+        // be fully laid out yet, which would yield a short/low boundingRect and a
+        // slightly-off pin that accumulates into a downward creep over a run.
+        lm.ensureLayout(for: tv.textContainer)
+        let glyph = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var rect = lm.boundingRect(forGlyphRange: glyph, in: tv.textContainer)
+        rect = rect.offsetBy(dx: tv.textContainerInset.left, dy: tv.textContainerInset.top)
+        let contentMidY = tv.convert(rect, to: scroll).midY
+        let targetY = contentMidY - Self.activeLineAnchorY * scroll.bounds.height
+        let maxOffset = max(0, scroll.contentSize.height - scroll.bounds.height)
+        let newY = min(max(0, targetY), maxOffset)
+        let action = { scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: newY), animated: !Self.reduceMotionEnabled) }
+        action()
     }
 
     private var currentSegment: TextSegment? {
@@ -4784,6 +4835,26 @@ final class ReaderViewModel: ObservableObject {
     /// The unit that contains the active sentence. Used by
     /// `scrollToCurrentSentence` to scroll to the right row.
     var activeUnitID: UUID? { activeSentence?.unitID }
+
+    /// c13 auto-scroll fix (2026-06-04): the live (UITextView, sentence range)
+    /// of the active prose line, published by `ProseUnitTextView`. `activeLineTick`
+    /// bumps on each update to drive the upper-third pin scroll
+    /// (`scrollToActiveAnchor`), which computes the glyph rect from these and
+    /// scrolls the backing UIScrollView. `weak` so a recycled row's textview
+    /// can't leak. This does NOT split the renderer — one UITextView per unit,
+    /// native cross-sentence selection preserved.
+    weak var activeProseTextView: UITextView?
+    var activeProseRange: NSRange?
+    @Published var activeLineTick: Int = 0
+    func setActiveProseLine(_ textView: UITextView, _ range: NSRange) {
+        // Dedup: ProseUnitTextView.updateUIView can fire several times per
+        // sentence change; only bump the tick (→ one pin scroll) when the active
+        // line actually changed. Avoids redundant scroll churn / oscillation.
+        if activeProseTextView === textView, activeProseRange == range { return }
+        activeProseTextView = textView
+        activeProseRange = range
+        activeLineTick &+= 1
+    }
 
     /// Jump to the nearest sentence at the offset corresponding to the
     /// given 1-indexed page number. Returns true on a successful jump,

@@ -134,6 +134,10 @@ struct UnitRowView: View {
         }
     }
 
+    /// c13: forwarded to `ProseUnitTextView` so the active prose row can
+    /// publish its live (UITextView, sentence range) for upper-third pinning.
+    var onActiveLine: ((UITextView, NSRange) -> Void)? = nil
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             switch unit.kind {
@@ -215,7 +219,8 @@ struct UnitRowView: View {
                 // so the existing sentence-link routing handles it.
                 guard let url = URL(string: "\(Self.sentenceURLScheme)://\(sentenceID.uuidString)") else { return }
                 openURL(url)
-            }
+            },
+            onActiveLine: onActiveLine
         )
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 4)
@@ -624,6 +629,14 @@ struct ProseUnitTextView: UIViewRepresentable {
     /// Safari.
     let onSentenceTap: (UUID) -> Void
 
+    /// c13 auto-scroll fix (2026-06-04): when this row carries the active
+    /// sentence highlight, publishes the live (UITextView, sentence range) so the
+    /// reader can pin that sentence to a fixed upper-third viewport position by
+    /// scrolling the backing UIScrollView. The reader recomputes the glyph rect
+    /// at scroll time (always-current layout). Does NOT touch the renderer: one
+    /// UITextView per unit, native cross-sentence selection preserved.
+    var onActiveLine: ((UITextView, NSRange) -> Void)? = nil
+
     /// Make the UITextView. Configuration mirrors what a SwiftUI
     /// Text would render — no editable text, no internal scrolling
     /// (the outer ScrollView handles that), transparent background,
@@ -662,20 +675,28 @@ struct ProseUnitTextView: UIViewRepresentable {
         // bounds. Without this, font/opacity/highlight changes can
         // leave the cached glyph layout stale and clip text.
         uiView.invalidateIntrinsicContentSize()
-        #if DEBUG
-        // c13 verification: if this row carries the active-sentence highlight
-        // (the ONLY range with a .backgroundColor attribute), register it so the
-        // ACTIVE_LINE_FRAME antenna verb can read its live on-screen position.
-        // Non-active rows have no backgroundColor range and don't register.
+
+        // c13: locate the active-sentence highlight (the ONLY range carrying a
+        // .backgroundColor attribute). Non-active rows have none.
         let full = NSRange(location: 0, length: attributedText.length)
         var activeRange: NSRange?
         attributedText.enumerateAttribute(.backgroundColor, in: full, options: []) { value, range, stop in
             if value != nil { activeRange = range; stop.pointee = true }
         }
+
         if let activeRange {
+            #if DEBUG
+            // ACTIVE_LINE_FRAME antenna verb reads the live on-screen position.
             RemoteControlState.shared.setActiveProseLine(textView: uiView, range: activeRange)
+            #endif
+            // Publish the live (textView, range) so the reader can pin this
+            // sentence to the upper third by scrolling the backing UIScrollView.
+            // Deferred to the next runloop tick to avoid mutating SwiftUI state
+            // during a view update.
+            if let publish = onActiveLine {
+                DispatchQueue.main.async { publish(uiView, activeRange) }
+            }
         }
-        #endif
     }
 
     /// SwiftUI sizing hook (iOS 16+). Called by the SwiftUI layout

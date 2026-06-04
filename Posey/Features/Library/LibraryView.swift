@@ -2888,6 +2888,16 @@ extension LibraryViewModel {
                 if let frame { return json(frame) }
                 return #"{"error":"No active prose line registered (open a doc and start playback first)"}"#
 
+            case "SELECT_TEST":
+                // c13 regression guard: programmatically select the active prose
+                // unit's full (multi-sentence) range in its single UITextView and
+                // read it back — proves cross-sentence selection is intact (NOT
+                // regressed by the auto-scroll fix). Take a SCREENSHOT after to see
+                // the native selection handles/highlight.
+                let probe = await MainActor.run { RemoteControlState.shared.selectionProbe() }
+                if let probe { return json(probe) }
+                return #"{"error":"No active prose line registered (open a doc + play briefly first)"}"#
+
             case "LIST_AUDIO_CACHE":
                 // 2026-05-13 — A4 diagnostic. Dumps every cached
                 // export with its doc title (looked up from the

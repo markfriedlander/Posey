@@ -94,6 +94,36 @@ struct MarkdownParser {
         }
 
         for line in lines {
+            // 2026-06-04 — Setext heading support (CommonMark §4.3).
+            // A line of only `=` (→ H1) or only `-` (→ H2) that immediately
+            // follows an OPEN paragraph buffer is a setext underline: the
+            // buffered text IS the heading. We intercept here, BEFORE
+            // classify(), because otherwise:
+            //   • a `===` run falls through to .paragraph and leaks into the
+            //     body text (the exact bug md_setext-headings.md caught), and
+            //   • a `---`/`***`/`___` run classifies as .horizontalRule,
+            //     leaving the title line above it as plain prose (no heading,
+            //     so no TOC entry).
+            // Disambiguation — the `---` ambiguity: a dash run is a setext H2
+            // underline ONLY when it underlines a non-empty text line
+            // (paragraphBuffer non-empty). A dash run surrounded by blanks
+            // (paragraphBuffer empty) falls through to classify() and stays a
+            // thematic break / horizontal rule. `=` has no thematic-break
+            // meaning, so a bare `===` with no open paragraph is just text.
+            // Category (Rule 10): all .md/.markdown — Gutenberg- and
+            // pandoc-derived files routinely use setext. Multi-line heading
+            // text is joined like a paragraph. ATX (`#…`) is unaffected
+            // (matched first in classify); standalone HRs and the Dracula TXT
+            // path (TXTLibraryImporter, not this parser) are unaffected.
+            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+            if let level = setextUnderlineLevel(trimmedLine),
+               paragraphBuffer.isEmpty == false {
+                let headingText = paragraphBuffer.joined(separator: " ")
+                paragraphBuffer.removeAll()
+                flushQuoteBuffer()
+                appendBlock(kind: .heading(level: level), text: headingText)
+                continue
+            }
             switch classify(line: line) {
             case .blank:
                 flushParagraphBuffer()
@@ -166,6 +196,25 @@ struct MarkdownParser {
         }
 
         return .paragraph(text: trimmed)
+    }
+
+    /// 2026-06-04 — Setext underline shape-test (CommonMark §4.3).
+    /// Returns the heading level when `trimmed` is a setext underline
+    /// candidate — a line made up of one-or-more identical underline
+    /// characters and nothing else: all `=` → level 1 (H1), all `-` →
+    /// level 2 (H2). Returns nil otherwise. This is PURELY the shape
+    /// test; the caller decides whether it actually promotes a heading
+    /// (only when it underlines an open paragraph) vs. stays a thematic
+    /// break / plain text. A single `-`/`=` qualifies — setext underlines
+    /// have no minimum length, unlike the 3+-char thematic-rule test in
+    /// classify(). `trimmed` is already whitespace-trimmed, so an
+    /// underline with internal spaces (e.g. `- - -`) fails allSatisfy and
+    /// is left to classify() (where it reads as a bullet, as before).
+    private func setextUnderlineLevel(_ trimmed: String) -> Int? {
+        guard trimmed.isEmpty == false else { return nil }
+        if trimmed.allSatisfy({ $0 == "=" }) { return 1 }
+        if trimmed.allSatisfy({ $0 == "-" }) { return 2 }
+        return nil
     }
 
     private func match(in text: String, pattern: String) -> (String, String)? {

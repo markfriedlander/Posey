@@ -2878,6 +2878,16 @@ extension LibraryViewModel {
                 if let payload { return json(payload) }
                 return #"{"error":"No finished run to fetch (poll TTS_VERIFY_STATUS until status=finished)"}"#
 
+            case "ACTIVE_LINE_FRAME":
+                // 2026-06-04 — c13 (TTS flow / auto-scroll) probe. Returns the
+                // LIVE on-screen rect of the highlighted active sentence:
+                // midYFraction = vertical center as a fraction of viewport
+                // (window) height. Poll during playback to measure whether the
+                // active line holds in the upper third or drifts down the screen.
+                let frame = await MainActor.run { RemoteControlState.shared.activeLineFrameSnapshot() }
+                if let frame { return json(frame) }
+                return #"{"error":"No active prose line registered (open a doc and start playback first)"}"#
+
             case "LIST_AUDIO_CACHE":
                 // 2026-05-13 — A4 diagnostic. Dumps every cached
                 // export with its doc title (looked up from the

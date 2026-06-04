@@ -531,6 +531,46 @@ final class RemoteControlState {
     }
     func resetSpokenUtterances() { _spokenUtterances.removeAll() }
 
+    // ===== c13 (TTS flow / auto-scroll) — active-line on-screen position =====
+    // 2026-06-04 — objective measurement of WHERE the highlighted active
+    // sentence sits in the viewport over time (Mark's "highlight drifting down
+    // the screen"). The active unit's ProseUnitTextView registers itself + the
+    // highlighted sentence's character range here on each highlight change; the
+    // ACTIVE_LINE_FRAME verb recomputes the LIVE rect on demand (so it reflects
+    // the current scroll position, not just the last highlight change). This is
+    // the rendered frame — theme-independent, not a fragile screenshot color
+    // heuristic. (A 30%-alpha dark-mode highlight is not reliably pixel-detectable.)
+    weak var activeProseTextView: UITextView?
+    var activeProseRange: NSRange?
+    func setActiveProseLine(textView: UITextView, range: NSRange) {
+        activeProseTextView = textView
+        activeProseRange = range
+    }
+    /// Live on-screen frame of the active sentence: vertical center as a
+    /// fraction of viewport (window) height, plus raw geometry. nil if no
+    /// active prose line is currently registered/on a window.
+    func activeLineFrameSnapshot() -> [String: Any]? {
+        guard let tv = activeProseTextView, let range = activeProseRange,
+              let window = tv.window else { return nil }
+        let lm = tv.layoutManager
+        let glyph = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var rect = lm.boundingRect(forGlyphRange: glyph, in: tv.textContainer)
+        rect = rect.offsetBy(dx: tv.textContainerInset.left, dy: tv.textContainerInset.top)
+        let inWindow = tv.convert(rect, to: nil)            // nil -> window coords
+        let vh = window.bounds.height
+        guard vh > 0 else { return nil }
+        return [
+            "top": Double(inWindow.minY),
+            "midY": Double(inWindow.midY),
+            "bottom": Double(inWindow.maxY),
+            "lineHeight": Double(inWindow.height),
+            "viewportHeight": Double(vh),
+            "midYFraction": Double(inWindow.midY / vh),
+            "topFraction": Double(inWindow.minY / vh),
+            "onScreen": inWindow.maxY > 0 && inWindow.minY < vh
+        ]
+    }
+
     func snapshot() -> [String: Any] {
         var dict: [String: Any] = [
             "currentSentenceIndex": currentSentenceIndex,
@@ -599,6 +639,9 @@ final class RemoteControlState {
     func recordSpokenUtterance(_ text: String) {}
     func resetSpokenUtterances() {}
     func snapshot() -> [String: Any] { [:] }
+    // c13 active-line position — inert in Release.
+    func setActiveProseLine(textView: UITextView, range: NSRange) {}
+    func activeLineFrameSnapshot() -> [String: Any]? { nil }
 }
 #endif
 // ========== BLOCK 04: REMOTE-CONTROL STATE BRIDGE - END ==========

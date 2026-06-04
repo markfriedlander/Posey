@@ -662,6 +662,20 @@ struct ProseUnitTextView: UIViewRepresentable {
         // bounds. Without this, font/opacity/highlight changes can
         // leave the cached glyph layout stale and clip text.
         uiView.invalidateIntrinsicContentSize()
+        #if DEBUG
+        // c13 verification: if this row carries the active-sentence highlight
+        // (the ONLY range with a .backgroundColor attribute), register it so the
+        // ACTIVE_LINE_FRAME antenna verb can read its live on-screen position.
+        // Non-active rows have no backgroundColor range and don't register.
+        let full = NSRange(location: 0, length: attributedText.length)
+        var activeRange: NSRange?
+        attributedText.enumerateAttribute(.backgroundColor, in: full, options: []) { value, range, stop in
+            if value != nil { activeRange = range; stop.pointee = true }
+        }
+        if let activeRange {
+            RemoteControlState.shared.setActiveProseLine(textView: uiView, range: activeRange)
+        }
+        #endif
     }
 
     /// SwiftUI sizing hook (iOS 16+). Called by the SwiftUI layout

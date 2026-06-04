@@ -443,6 +443,15 @@ struct ReaderView: View {
                 viewModel.scrollToCurrentSentence(with: proxy, animated: true)
                 publishRemoteState()
                 publishReadingPositionForEnhancement()
+                // TTS-verify harness: log the on-screen-highlight transition on
+                // the shared CACurrentMediaTime clock (no-op unless a run is
+                // recording). This is the "seen" timeline — the exact index that
+                // drives the highlight — to be compared against ASR of the live
+                // captured audio ("heard"). DEBUG-only; Release stub ignores it.
+                let segs = viewModel.segments
+                let i = viewModel.currentSentenceIndex
+                let off = (i >= 0 && i < segs.count) ? segs[i].startOffset : 0
+                TTSVerifyHarness.shared.recordHighlight(index: i, offset: off)
             }
             .modifier(ReaderRemoteSnapshotPublisher(viewModel: viewModel, publish: publishRemoteState))
             .onChange(of: viewModel.focusedUnitID) { _, _ in
@@ -1687,6 +1696,28 @@ private struct ReaderRemoteControlPlaybackObservers: ViewModifier {
                 guard matches(note, viewModel: viewModel) else { return }
                 viewModel.restartFromBeginning()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteTTSVerifyRun)) { note in
+                guard matches(note, viewModel: viewModel) else { return }
+                let start = note.userInfo?["startSentence"] as? Int ?? 0
+                let num = note.userInfo?["numSentences"] as? Int ?? 8
+                let runID = note.userInfo?["runID"] as? String ?? UUID().uuidString
+                // Start the recorder + shared clock FIRST, then play live from
+                // `start` so audio and highlight share one timeline.
+                let ok = TTSVerifyHarness.shared.begin(
+                    runID: runID,
+                    segments: viewModel.segments,
+                    startSentence: start,
+                    numSentences: num,
+                    onStop: { viewModel.ttsVerifyStopPlayback() }
+                )
+                guard ok else { return }
+                viewModel.ttsVerifyStartPlayback(fromSentence: start)
+                // Anchor sample for the start sentence at t≈0 (onChange won't
+                // fire if currentSentenceIndex was already `start`).
+                let segs = viewModel.segments
+                let off = (start >= 0 && start < segs.count) ? segs[start].startOffset : 0
+                TTSVerifyHarness.shared.recordHighlight(index: start, offset: off)
+            }
             .onReceive(NotificationCenter.default.publisher(for: .remoteDebugForcePlaybackState)) { note in
                 // No doc-id matching — the verb is global; whatever
                 // doc is currently visible gets the state forced. The
@@ -1696,6 +1727,11 @@ private struct ReaderRemoteControlPlaybackObservers: ViewModifier {
                 viewModel.debugForcePlaybackState(stateName)
             }
             .onReceive(viewModel.$playbackState) { newState in
+                // TTS-verify: if playback finishes on its own, close the run so
+                // the trailing audio is flushed and the JSON is written.
+                if newState == .finished {
+                    TTSVerifyHarness.shared.end(reason: "playback-finished")
+                }
                 let label: String
                 switch newState {
                 case .idle:     label = "idle"
@@ -3767,6 +3803,26 @@ final class ReaderViewModel: ObservableObject {
         currentSentenceIndex = 0
         playbackService.stop()
         playbackService.prepare(at: currentSentenceIndex)
+        persistPosition()
+    }
+
+    /// 2026-06-03 — TTS-verify harness driver. Starts LIVE playback fresh from
+    /// `idx` (the same real playback path a user gets), so the harness's mic
+    /// recording and the highlight log it captures share one clock.
+    func ttsVerifyStartPlayback(fromSentence idx: Int) {
+        guard !segments.isEmpty else { return }
+        focusedUnitID = nil
+        let bounded = max(0, min(idx, segments.count - 1))
+        currentSentenceIndex = bounded
+        playbackState = .playing
+        playbackService.restart(segments: segments, startingAt: bounded)
+    }
+
+    /// Pause the live playback the harness started (invoked via the harness's
+    /// onStop when a run ends).
+    func ttsVerifyStopPlayback() {
+        playbackService.pause()
+        playbackState = .paused
         persistPosition()
     }
 

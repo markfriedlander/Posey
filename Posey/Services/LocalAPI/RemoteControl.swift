@@ -126,6 +126,12 @@ extension Notification.Name {
     /// `userInfo["documentID"]: UUID`. ReaderView observes; calls
     /// `viewModel.restartFromBeginning()`.
     static let remotePlaybackRestart = Notification.Name("PoseyRemotePlaybackRestart")
+    /// 2026-06-03 — TTS-verify LIVE-audio harness kickoff.
+    /// `userInfo["documentID"]: UUID`, `["startSentence"]: Int`,
+    /// `["numSentences"]: Int`, `["runID"]: String`. ReaderView observes;
+    /// starts `TTSVerifyHarness.shared` recording (mic), then plays live from
+    /// `startSentence` so the captured audio + highlight log share one clock.
+    static let remoteTTSVerifyRun = Notification.Name("PoseyRemoteTTSVerifyRun")
 
     // ===== Sheet opens ==============================================
     /// No userInfo. ReaderView observes; sets `isShowingPreferencesSheet`.

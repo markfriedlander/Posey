@@ -2809,6 +2809,75 @@ extension LibraryViewModel {
                     "base64": data.base64EncodedString()
                 ])
 
+            case "TTS_VERIFY_CAPTURE_START":
+                // 2026-06-03 — start the BATCHED silent ReplayKit app-audio
+                // capture session. One iOS consent alert; keep it running across
+                // many TTS_VERIFY_RUN stretches, then TTS_VERIFY_CAPTURE_STOP.
+                // No microphone; no audible playback (phone media volume at 0).
+                let res: (Bool, String?) = await withCheckedContinuation { cont in
+                    Task { @MainActor in
+                        TTSVerifyHarness.shared.startCapture { ok, err in cont.resume(returning: (ok, err)) }
+                    }
+                }
+                return json(["started": res.0, "error": res.1.map { $0 as Any } ?? NSNull(),
+                             "note": "grant the 'Allow recording' alert once; set phone media volume to 0 for silence"])
+
+            case "TTS_VERIFY_CAPTURE_STOP":
+                let res: (Bool, String?) = await withCheckedContinuation { cont in
+                    Task { @MainActor in
+                        TTSVerifyHarness.shared.stopCapture { ok, err in cont.resume(returning: (ok, err)) }
+                    }
+                }
+                return json(["stopped": res.0, "error": res.1.map { $0 as Any } ?? NSNull()])
+
+            case "TTS_CAPTURE_PROBE_ENGINE":
+                // Evidence probe: does an AVAudioEngine mainMixer tap capture
+                // speak() output? (~0 == no; confirms the "preferred" engine-tap
+                // path can't see production speech — see TTSVerifyHarness header.)
+                let probe: [String: Any] = await withCheckedContinuation { cont in
+                    Task { @MainActor in
+                        TTSVerifyHarness.shared.probeEngineTap { result in cont.resume(returning: result) }
+                    }
+                }
+                return json(probe)
+
+            case "TTS_VERIFY_RUN":
+                // TTS_VERIFY_RUN:<docID>:<startSentenceIndex>:<numSentences>
+                // 2026-06-03 — one SILENT capture stretch under the active
+                // ReplayKit session (call TTS_VERIFY_CAPTURE_START first). The
+                // reader must be OPEN on <docID>. Starts a fresh audio file +
+                // shared clock, then plays live from startSentence; highlight
+                // transitions are logged on the same clock. Poll
+                // TTS_VERIFY_STATUS, then TTS_VERIFY_FETCH:<runID> for audio+log.
+                do {
+                    let parts = (arg ?? "").split(separator: ":").map(String.init)
+                    guard parts.count == 3, let docID = UUID(uuidString: parts[0]),
+                          let start = Int(parts[1]), let num = Int(parts[2]), num > 0 else {
+                        return #"{"error":"Usage: TTS_VERIFY_RUN:<docID>:<startSentenceIndex>:<numSentences>"}"#
+                    }
+                    let runID = UUID().uuidString.prefix(8).lowercased()
+                    await MainActor.run {
+                        NotificationCenter.default.post(
+                            name: .remoteTTSVerifyRun, object: nil,
+                            userInfo: ["documentID": docID, "startSentence": start,
+                                       "numSentences": num, "runID": String(runID)])
+                    }
+                    return json(["status": "posted", "runID": String(runID),
+                                 "documentID": parts[0], "startSentence": start,
+                                 "numSentences": num,
+                                 "note": "poll TTS_VERIFY_STATUS; reader must be open on this doc; mic permission required"])
+                }
+
+            case "TTS_VERIFY_STATUS":
+                let snap = await MainActor.run { TTSVerifyHarness.shared.statusSnapshot() }
+                return json(snap)
+
+            case "TTS_VERIFY_FETCH":
+                // TTS_VERIFY_FETCH[:<runID>] — defaults to the most recent run.
+                let payload = await MainActor.run { TTSVerifyHarness.shared.fetchPayload(runID: arg) }
+                if let payload { return json(payload) }
+                return #"{"error":"No finished run to fetch (poll TTS_VERIFY_STATUS until status=finished)"}"#
+
             case "LIST_AUDIO_CACHE":
                 // 2026-05-13 — A4 diagnostic. Dumps every cached
                 // export with its doc title (looked up from the

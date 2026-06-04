@@ -199,6 +199,27 @@ final class TTSVerifyHarness {
         let recorder = RPScreenRecorder.shared()
         guard recorder.isAvailable else { completion(false, "RPScreenRecorder not available"); return }
         guard !captureActive else { completion(true, "already active"); return }
+        // 2026-06-04 — Self-heal the black-screen leak: a previous run can leave
+        // the RP session RECORDING at the system level even when our own
+        // `captureActive` flag is false (see stopCapture below). Starting a
+        // second capture on top of a still-live one is what wedged the display.
+        // If isRecording is already true, tear the stale session down first,
+        // THEN start fresh.
+        if recorder.isRecording {
+            recorder.stopCapture { [weak self] _ in
+                Task { @MainActor in self?.startFreshCapture(recorder, completion: completion) }
+            }
+        } else {
+            startFreshCapture(recorder, completion: completion)
+        }
+        #else
+        completion(false, "ReplayKit unavailable on this platform")
+        #endif
+    }
+
+    #if canImport(ReplayKit)
+    private func startFreshCapture(_ recorder: RPScreenRecorder,
+                                   completion: @escaping (Bool, String?) -> Void) {
         recorder.isMicrophoneEnabled = false
         // Capture the Sendable sink locally — the handler runs on a background
         // queue and must NOT touch the @MainActor harness's `self`.
@@ -220,18 +241,38 @@ final class TTSVerifyHarness {
                 }
             }
         })
-        #else
-        completion(false, "ReplayKit unavailable on this platform")
-        #endif
     }
+    #endif
 
+    /// Tear down the ReplayKit capture session. ROBUST against the black-screen
+    /// bug (Mark, 2026-06-04): the previous version early-returned "not active"
+    /// whenever our own `captureActive` flag had drifted to false — so it
+    /// reported stopped:true while the REAL `RPScreenRecorder` was still
+    /// recording. A still-live capture session keeps compositing over the app
+    /// window and blacks the PHYSICAL display (only a full app-lifecycle cycle
+    /// cleared it; cold relaunch / lock-unlock did not). Now we:
+    ///   1. tear down whenever EITHER our flag OR `recorder.isRecording` is true
+    ///      (so a flag that drifted out of sync can't strand a live session), and
+    ///   2. VERIFY `isRecording == false` after stopCapture's completion and
+    ///      report a FALSE stop honestly instead of a phantom success.
     func stopCapture(completion: @escaping (Bool, String?) -> Void) {
         #if canImport(ReplayKit)
-        guard captureActive else { completion(true, "not active"); return }
-        RPScreenRecorder.shared().stopCapture { [weak self] error in
+        let recorder = RPScreenRecorder.shared()
+        guard captureActive || recorder.isRecording else {
+            completion(true, "not active")
+            return
+        }
+        recorder.stopCapture { [weak self] error in
             Task { @MainActor in
                 self?.captureActive = false
-                completion(error == nil, error?.localizedDescription)
+                let stillRecording = RPScreenRecorder.shared().isRecording
+                if let error = error {
+                    completion(false, error.localizedDescription)
+                } else if stillRecording {
+                    completion(false, "stopCapture completed but isRecording is still true")
+                } else {
+                    completion(true, nil)
+                }
             }
         }
         #else
@@ -348,11 +389,19 @@ final class TTSVerifyHarness {
     }
 
     func statusSnapshot() -> [String: Any] {
-        [
+        #if canImport(ReplayKit)
+        let recorderIsRecording = RPScreenRecorder.shared().isRecording
+        #else
+        let recorderIsRecording = false
+        #endif
+        return [
             "runID": runID,
             "status": status.rawValue,
             "reason": lastReason,
             "captureActive": captureActive,
+            // 2026-06-04 — true RP session state, so a test harness can confirm
+            // the session actually released after stopCapture (black-screen bug).
+            "recorderIsRecording": recorderIsRecording,
             "sampleCount": samplesAbs.count,
             "lastPeakAmplitude": lastAmplitude,
             "lastAudioBytes": lastAudioBytes,

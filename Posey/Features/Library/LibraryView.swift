@@ -2681,6 +2681,34 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "SEARCH_MATCHES":
+                // c15 search verifier: report the current query's matched segments
+                // (char offset + snippet) so a Mac-side verifier can confirm
+                // correct hits spanning early/late and correct tap-to-jump
+                // landings against GET_PLAIN_TEXT ground truth. Returns ALL match
+                // offsets (cheap ints) + snippets for a sample (first 4 + last 4).
+                let snap = await MainActor.run { () -> (idx: [Int], pos: Int, segs: [(index: Int, text: String, startOffset: Int, endOffset: Int)]) in
+                    (RemoteControlState.shared.searchMatchIndices,
+                     RemoteControlState.shared.currentSearchMatchPosition,
+                     RemoteControlState.shared.segmentTexts)
+                }
+                let segByIndex = Dictionary(snap.segs.map { ($0.index, $0) }, uniquingKeysWith: { a, _ in a })
+                let offsets = snap.idx.compactMap { segByIndex[$0]?.startOffset }
+                let sampleIdx: [Int]
+                if snap.idx.count <= 8 { sampleIdx = snap.idx }
+                else { sampleIdx = Array(snap.idx.prefix(4)) + Array(snap.idx.suffix(4)) }
+                let samples: [[String: Any]] = sampleIdx.compactMap { i in
+                    guard let s = segByIndex[i] else { return nil }
+                    return ["segIndex": i, "startOffset": s.startOffset,
+                            "snippet": String(s.text.prefix(80))]
+                }
+                return json([
+                    "count": snap.idx.count,
+                    "currentPosition": snap.pos,
+                    "matchOffsets": offsets,
+                    "samples": samples
+                ])
+
             case "SEARCH_CLEAR":
                 await MainActor.run {
                     NotificationCenter.default.post(name: .remoteSearchClear, object: nil)

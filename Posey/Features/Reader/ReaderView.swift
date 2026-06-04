@@ -1894,6 +1894,7 @@ private struct ReaderRemoteControlSearchObservers: ViewModifier {
             }
             .onReceive(viewModel.$searchMatchIndices) { matches in
                 RemoteControlState.shared.searchMatchCount = matches.count
+                RemoteControlState.shared.searchMatchIndices = matches
             }
             .onReceive(viewModel.$currentSearchMatchPosition) { pos in
                 RemoteControlState.shared.currentSearchMatchPosition = pos ?? 0

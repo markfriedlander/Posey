@@ -508,6 +508,11 @@ final class RemoteControlState {
     var searchQuery: String = ""
     var searchMatchCount: Int = 0
     var currentSearchMatchPosition: Int = 0
+    /// c15 search verifier (2026-06-04): the segment indices that matched the
+    /// current query (live mirror of `ReaderViewModel.searchMatchIndices`), so
+    /// the `SEARCH_MATCHES` verb can report each hit's char offset + snippet and
+    /// the verifier can confirm correct hits spanning early/late + landings.
+    var searchMatchIndices: [Int] = []
     /// 2026-05-07 (parity #10): live snapshot of the reader's segments
     /// (sentence-row path) and displayBlocks (block path) so the
     /// `LIST_SEGMENTS_MATCHING` verb can search by text without going
@@ -680,6 +685,9 @@ final class RemoteControlState {
     }
     var currentSearchMatchPosition: Int {
         get { 0 } set { _ = newValue }
+    }
+    var searchMatchIndices: [Int] {
+        get { [] } set { _ = newValue }
     }
     var segmentTexts: [(index: Int, text: String, startOffset: Int, endOffset: Int)] {
         get { [] } set { _ = newValue }

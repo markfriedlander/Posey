@@ -155,10 +155,38 @@ extension RTFDocumentImporter {
             guard !needleFull.isEmpty else { continue }
             let needle = String(needleFull.prefix(40))
 
-            guard let range = normalized.range(of: needle, range: searchFrom..<normalized.endIndex) else { continue }
+            var foundRange = normalized.range(of: needle, range: searchFrom..<normalized.endIndex)
+            if foundRange == nil {
+                // 2026-06-04 — Fallback for titles with non-ASCII characters.
+                // The raw RTF tokenizer reads via ISO-Latin1 while the plaintext
+                // comes from NSAttributedString (Windows-1252) — and on an RTF
+                // with raw-UTF-8 bytes those two decode a curly apostrophe /
+                // accent DIFFERENTLY (needle "…Harkerâs" vs plaintext
+                // "…Harker's"), so the exact needle never matches and the
+                // heading is silently dropped from the TOC (its offset map
+                // entry is missing). Retry with the title's ASCII-only PREFIX,
+                // which is decode-independent. ≥8 chars keeps it unique enough.
+                let asciiPrefix = String(needleFull.prefix(while: { $0.isASCII }))
+                    .trimmingCharacters(in: .whitespaces)
+                if asciiPrefix.count >= 8 {
+                    foundRange = normalized.range(of: asciiPrefix, range: searchFrom..<normalized.endIndex)
+                }
+            }
+            guard let range = foundRange else { continue }
             let offset = normalized.distance(from: normalized.startIndex, to: range.lowerBound)
             let level = (topThree.firstIndex(of: h.pointSize) ?? 2) + 1
-            out.append(RTFHeadingEntry(level: level, title: needleFull, plainTextOffset: offset))
+            // 2026-06-04 — Title the TOC entry from the CLEAN normalized
+            // plaintext line at the matched offset, not from `needleFull`: the
+            // raw-tokenizer needle can carry residual mojibake ("Harkerâs") that
+            // the NSAttributedString plaintext doesn't, so using it would show a
+            // garbled TOC title. The plaintext line is the user-facing truth.
+            let lineEnd = normalized.range(of: "\n", range: range.lowerBound..<normalized.endIndex)?.lowerBound
+                ?? normalized.endIndex
+            let cleanTitle = String(normalized[range.lowerBound..<lineEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(RTFHeadingEntry(level: level,
+                                       title: cleanTitle.isEmpty ? needleFull : cleanTitle,
+                                       plainTextOffset: offset))
             searchFrom = range.upperBound
 
             // 2026-05-07 (parity #6 closure): always advance past

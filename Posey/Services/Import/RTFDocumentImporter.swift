@@ -215,7 +215,11 @@ extension RTFDocumentImporter {
     }
 
     fileprivate func normalize(_ text: String) -> String {
-        TextNormalizer.stripMojibakeAndControlCharacters(text)
+        // 2026-06-04 — repair UTF-8-as-CP1252 mojibake FIRST. RTFs that embed raw
+        // UTF-8 under a `\ansi` declaration (no \ansicpg/\u escapes) make
+        // NSAttributedString surface `’`→`â€™`, `è`→`Ã¨`, etc. Reassemble the real
+        // characters before the control-char strip and offset math run.
+        TextNormalizer.stripMojibakeAndControlCharacters(TextNormalizer.repairCP1252Mojibake(text))
             .replacingOccurrences(of: "\u{00A0}", with: " ")
             .replacingOccurrences(of: "\u{00AD}", with: "")
             .replacingOccurrences(of: "\u{000C}", with: "")   // form feed (#12)

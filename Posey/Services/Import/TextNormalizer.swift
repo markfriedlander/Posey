@@ -103,6 +103,59 @@ enum TextNormalizer {
         return String(cleaned)
     }
 
+    /// 2026-06-04 — Repair UTF-8-misread-as-Windows-1252 mojibake.
+    ///
+    /// Common real-world RTF/DOCX/HTML (pandoc, web exports, scripts) embed raw
+    /// UTF-8 bytes while declaring `\ansi` (or no charset). `NSAttributedString`
+    /// then decodes those bytes per Windows-1252, so e.g. the UTF-8 bytes for `’`
+    /// (E2 80 99) surface as the three glyphs `â€™` (â=0xE2, €=0x80→U+20AC,
+    /// ™=0x99→U+2122). The char-class strip above can't fix this — â/€/™ are all
+    /// legitimate Unicode outside its strip ranges. This pass REASSEMBLES the
+    /// original UTF-8: walk the scalars, and wherever a maximal run re-encodes
+    /// (via CP1252) to a valid UTF-8 multi-byte sequence, decode it back.
+    ///
+    /// Safety: it only acts on a scalar whose CP1252 byte is a UTF-8 *lead*
+    /// (0xC2–0xF4) followed by the exact number of CP1252-continuation bytes
+    /// (0x80–0xBF), and only when those bytes decode to exactly ONE scalar. A
+    /// correctly-decoded `’` (U+2019, CP1252 byte 0x92), em dash, accented letter
+    /// surrounded by ASCII, etc. all fail that test and pass through untouched —
+    /// so this is a no-op on clean text. Idempotent. Run BEFORE the control strip.
+    static func repairCP1252Mojibake(_ text: String) -> String {
+        // Quick exit: mojibake always carries a high-Latin lead glyph.
+        guard text.unicodeScalars.contains(where: { $0.value >= 0xC2 }) else { return text }
+
+        func cp1252Byte(_ s: Unicode.Scalar) -> UInt8? {
+            guard let d = String(s).data(using: .windowsCP1252), d.count == 1 else { return nil }
+            return d[0]
+        }
+
+        let scalars = Array(text.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        var i = 0
+        while i < scalars.count {
+            if let lead = cp1252Byte(scalars[i]), lead >= 0xC2, lead <= 0xF4 {
+                let need = lead >= 0xF0 ? 4 : (lead >= 0xE0 ? 3 : 2)
+                if i + need <= scalars.count {
+                    var bytes: [UInt8] = [lead]
+                    var ok = true
+                    for k in 1..<need {
+                        guard let b = cp1252Byte(scalars[i + k]), b >= 0x80, b <= 0xBF else { ok = false; break }
+                        bytes.append(b)
+                    }
+                    if ok, let decoded = String(bytes: bytes, encoding: .utf8),
+                       decoded.unicodeScalars.count == 1 {
+                        out.append(contentsOf: decoded.unicodeScalars)
+                        i += need
+                        continue
+                    }
+                }
+            }
+            out.append(scalars[i])
+            i += 1
+        }
+        return String(out)
+    }
+
     // ========== BLOCK 02: INVISIBLE-CHARACTER PASSES - START ==========
 
     /// Strip the U+FEFF BOM if it appears at the start of the text.

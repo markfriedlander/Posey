@@ -751,6 +751,20 @@ struct HTMLDocumentImporter {
             // as the very first plainText line (chrome, not article prose).
             // Strip any <figure> that contains an <audio> element.
             #"(?si)<figure\b[^>]*>(?:(?!</figure>).)*?<audio\b(?:(?!</figure>).)*?</figure\s*>"#,
+            // 2026-06-07 — Wikipedia CS1 citation error/maintenance messages.
+            // Wikipedia wraps editor-facing citation diagnostics in
+            // <span class="cs1-hidden-error citation-comment">, "cs1-visible-error
+            // citation-comment", and "cs1-maint citation-comment". These render
+            // (some hidden, some visible-red) as cruft like
+            //   "{{cite news}}: CS1 maint: url-status (link)"
+            //   "{{cite book}}: ISBN / Date incompatibility (help)"
+            // and leak into References → plainText (c1/c3 junk; spoken by TTS, c14).
+            // The shared, stable marker across all variants is the
+            // `citation-comment` class. Each such span is self-contained (no nested
+            // <span>), so a lazy match to the first </span> is safe. This strips the
+            // WHOLE category of CS1/CS2 citation-comment diagnostics, not just the
+            // two seen in Pride-and-Prejudice (Rule 10 generalization).
+            #"(?si)<span[^>]*\bclass\s*=\s*["'][^"']*\bcitation-comment\b[^"']*["'][^>]*>.*?</span\s*>"#,
         ]
         var html = rawHTML
         for pattern in patterns {

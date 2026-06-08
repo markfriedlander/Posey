@@ -29,19 +29,19 @@ final class DocumentPageMapTests: XCTestCase {
         }
     }
 
-    // MARK: - PDF builder
+    // MARK: - PDF builder (units-based — audit fix #3, 2026-06-08)
 
-    /// Three pages of unequal length, no visual markers. Expected
-    /// offsets:
+    /// Three plain text pages, no visual pages. Offsets must match the
+    /// global plainText space (prose units joined by "\n\n"):
     ///   page 1 → 0
-    ///   page 2 → len(page1) + 2  (the "\n\n" separator in plainText)
+    ///   page 2 → len(page1) + 2
     ///   page 3 → len(page1) + 2 + len(page2) + 2
     func testPDFThreePlainPagesMapsCorrectOffsets() {
-        let p1 = "Hello"            // 5 chars
-        let p2 = "World again"       // 11 chars
-        let p3 = "Final page text."  // 16 chars
-        let displayText = "\(p1)\u{000C}\(p2)\u{000C}\(p3)"
-        let map = DocumentPageMap.buildForPDF(displayText: displayText)
+        let units = pdfUnits(pages: [.text("Hello"),            // 5
+                                     .text("World again"),       // 11
+                                     .text("Final page text.")]) // 16
+        let map = DocumentPageMap.buildForPDF(
+            units: units, plainTextOffsetByUnitID: offsetMap(for: units))
         XCTAssertEqual(map.pageCount, 3)
         XCTAssertEqual(map.offset(forPage: 1), 0)
         XCTAssertEqual(map.offset(forPage: 2), 5 + 2)
@@ -50,29 +50,64 @@ final class DocumentPageMapTests: XCTestCase {
         XCTAssertNil(map.offset(forPage: 4))
     }
 
-    /// Visual page markers must NOT contribute to the plainText
-    /// offset — they're stripped during plainText construction.
-    func testPDFVisualPageMarkersAreStripped() {
-        let marker = "[[POSEY_VISUAL_PAGE:2:abc-uuid]]"
-        let p1 = "Page one."                      // 9 chars in plainText
-        let p2 = marker                            // visual-only → 0 chars in plainText
-        let p3 = "Page three text."                // 16 chars in plainText
-        let displayText = "\(p1)\u{000C}\(p2)\u{000C}\(p3)"
-        let map = DocumentPageMap.buildForPDF(displayText: displayText)
+    /// THE DRIFT REGRESSION (audit confirmed finding #4). A visual /
+    /// cover / figure page contributes nothing to plainText, so it must
+    /// NOT add a phantom "\n\n" separator. Page 2 here is visual; page 3's
+    /// text begins right after page 1 + "\n\n" = 11. The OLD form-feed
+    /// implementation drifted page 3 to 13 (it added a separator for the
+    /// visual page). The visual page itself resolves to the next text (11).
+    func testPDFVisualPageDoesNotDriftOffsets() {
+        let units = pdfUnits(pages: [.text("Page one."),        // 9 chars
+                                     .visual,                    // contributes 0
+                                     .text("Page three text.")]) // 16 chars
+        let map = DocumentPageMap.buildForPDF(
+            units: units, plainTextOffsetByUnitID: offsetMap(for: units))
         XCTAssertEqual(map.pageCount, 3)
         XCTAssertEqual(map.offset(forPage: 1), 0)
-        // Page 2 starts after page 1 + "\n\n".
+        // Visual page 2 → next text content (start of page 3), no drift.
         XCTAssertEqual(map.offset(forPage: 2), 9 + 2)
-        // Page 3 starts after page 1 + "\n\n" + (visual page contributes 0) + "\n\n".
-        XCTAssertEqual(map.offset(forPage: 3), 9 + 2 + 0 + 2)
+        // Page 3 starts at 11 — NOT 13. No phantom separator for the visual page.
+        XCTAssertEqual(map.offset(forPage: 3), 9 + 2)
     }
 
-    func testPDFEmptyDisplayTextProducesEmptyMap() {
-        XCTAssertFalse(DocumentPageMap.buildForPDF(displayText: "").hasPages)
+    /// A leading visual cover page (the common case) must not push the
+    /// body's offsets off by the cover.
+    func testPDFLeadingCoverPage() {
+        let units = pdfUnits(pages: [.visual,                    // cover
+                                     .text("Chapter one begins.")])
+        let map = DocumentPageMap.buildForPDF(
+            units: units, plainTextOffsetByUnitID: offsetMap(for: units))
+        XCTAssertEqual(map.pageCount, 2)
+        XCTAssertEqual(map.offset(forPage: 1), 0)   // cover → start of body
+        XCTAssertEqual(map.offset(forPage: 2), 0)   // body text starts at 0
     }
 
-    func testPDFSingleNoFormFeedDocument() {
-        let map = DocumentPageMap.buildForPDF(displayText: "Single page document.")
+    /// A blank page is skipped by the importer (no pageBreak unit), leaving
+    /// a gap in pageNumber. The dense map backfills it with the previous
+    /// offset so a typed in-gap page lands reasonably, not out of range.
+    func testPDFBlankPageGapBackfills() {
+        // Pages 0 and 2 present (1-based: 1 and 3); page index 1 blank/skipped.
+        let units = pdfUnits(pageNumbers: [0, 2],
+                             pages: [.text("First page."),       // 11
+                                     .text("Third page text.")]) // 16
+        let map = DocumentPageMap.buildForPDF(
+            units: units, plainTextOffsetByUnitID: offsetMap(for: units))
+        XCTAssertEqual(map.pageCount, 3)
+        XCTAssertEqual(map.offset(forPage: 1), 0)
+        XCTAssertEqual(map.offset(forPage: 2), 0,
+                       "Skipped blank page backfills to the previous offset")
+        XCTAssertEqual(map.offset(forPage: 3), 11 + 2)
+    }
+
+    func testPDFEmptyUnitsProducesEmptyMap() {
+        XCTAssertFalse(DocumentPageMap.buildForPDF(
+            units: [], plainTextOffsetByUnitID: [:]).hasPages)
+    }
+
+    func testPDFSinglePage() {
+        let units = pdfUnits(pages: [.text("Single page document.")])
+        let map = DocumentPageMap.buildForPDF(
+            units: units, plainTextOffsetByUnitID: offsetMap(for: units))
         XCTAssertEqual(map.pageCount, 1)
         XCTAssertEqual(map.offset(forPage: 1), 0)
     }
@@ -174,6 +209,56 @@ final class DocumentPageMapTests: XCTestCase {
 
     func testEPUBEmptyEntriesProducesEmptyMap() {
         XCTAssertFalse(DocumentPageMap.buildForEPUB(tocEntries: []).hasPages)
+    }
+
+    // MARK: - PDF test helpers
+
+    /// A page's content for the PDF unit builder below.
+    fileprivate enum PDFPageContent {
+        case text(String)
+        case visual   // a cover/figure page → an .image unit (no prose)
+    }
+
+    /// Build the unit list the PDF importer would produce: a `pageBreak`
+    /// unit (0-based pageNumber) before each page, then a prose or image
+    /// unit. Mirrors `ContentUnitBuilder.unitsFromPDFDisplayText`.
+    /// `pageNumbers` lets tests inject gaps (blank pages the importer skips).
+    private func pdfUnits(pageNumbers: [Int]? = nil,
+                          pages: [PDFPageContent]) -> [ContentUnit] {
+        let docID = UUID()
+        var units: [ContentUnit] = []
+        var seq = 10
+        for (i, page) in pages.enumerated() {
+            let pn = pageNumbers?[i] ?? i
+            units.append(ContentUnit(documentID: docID, sequence: seq, kind: .pageBreak,
+                                     text: "", metadata: ContentUnitMetadata(pageNumber: pn)))
+            seq += 10
+            switch page {
+            case .text(let t):
+                units.append(ContentUnit(documentID: docID, sequence: seq, kind: .prose, text: t))
+            case .visual:
+                units.append(ContentUnit(documentID: docID, sequence: seq, kind: .image,
+                                         text: "Visual content",
+                                         metadata: ContentUnitMetadata(imageID: "img-\(i)")))
+            }
+            seq += 10
+        }
+        return units
+    }
+
+    /// Replicate `ReaderViewModel.computeContentFromUnits`'s global
+    /// plainText offset assignment: each unit records the cumulative
+    /// offset; only prose-bearing units advance it (text.count + 2 for the
+    /// "\n\n" join). So pageBreak/image units record the offset of the next
+    /// prose content — exactly what the production offset map carries.
+    private func offsetMap(for units: [ContentUnit]) -> [UUID: Int] {
+        var map: [UUID: Int] = [:]
+        var cumulative = 0
+        for u in units {
+            map[u.id] = cumulative
+            if u.kind.carriesProseText { cumulative += u.text.count + 2 }
+        }
+        return map
     }
 
     // MARK: - Helpers

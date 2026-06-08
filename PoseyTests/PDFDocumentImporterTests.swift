@@ -36,6 +36,48 @@ final class PDFDocumentImporterTests: XCTestCase {
         XCTAssertFalse(document.plainText.contains("POSEY_VISUAL_PAGE"))
     }
 
+    /// Audit fix #3 end-to-end: a real (generated) PDF with a visual
+    /// middle page must NOT drift the Go-to-page offsets. Exercises the
+    /// REAL pipeline — PDFDocumentImporter → ContentUnitBuilder.units
+    /// FromPDFDisplayText → DocumentPageMap.buildForPDF — not synthetic
+    /// units. Page 2 is image-only (no text); page 3's offset must land
+    /// exactly where its text begins in the unit-derived plainText, with
+    /// the visual page contributing zero (no phantom "\n\n").
+    func testGoToPageMapHasNoDriftAcrossVisualPage() throws {
+        let data = try makeMixedTextAndVisualPDFData()
+        let document = try PDFDocumentImporter().loadDocument(fromData: data)
+
+        let docID = UUID()
+        let units = ContentUnitBuilder.unitsFromPDFDisplayText(document.displayText,
+                                                               documentID: docID)
+
+        // Reconstruct the reader's global plainText offset map exactly as
+        // ReaderViewModel.computeContentFromUnits does.
+        var offsetByUnit: [UUID: Int] = [:]
+        var cumulative = 0
+        for u in units {
+            offsetByUnit[u.id] = cumulative
+            if u.kind.carriesProseText { cumulative += u.text.count + 2 }
+        }
+        let plainText = units.filter { $0.kind.carriesProseText }
+            .map(\.text).joined(separator: "\n\n")
+
+        let map = DocumentPageMap.buildForPDF(units: units,
+                                              plainTextOffsetByUnitID: offsetByUnit)
+
+        XCTAssertEqual(map.pageCount, 3, "three PDF pages → three page-map entries")
+        XCTAssertEqual(map.offset(forPage: 1), 0)
+
+        // Page 3's text really starts here in the unit-derived plainText.
+        let p3 = try XCTUnwrap(plainText.range(of: "Page three"))
+        let expectedP3 = plainText.distance(from: plainText.startIndex, to: p3.lowerBound)
+        XCTAssertEqual(map.offset(forPage: 3), expectedP3,
+                       "page 3 offset must match its real plainText position — no drift from the visual page")
+        // The visual page 2 carries no text → resolves to the next text (page 3).
+        XCTAssertEqual(map.offset(forPage: 2), map.offset(forPage: 3),
+                       "a visual page resolves to the next text content")
+    }
+
     private func makeImageOnlyPDFData() throws -> Data {
         try makePDFData { context in
             context.setFillColor(gray: 0.85, alpha: 1)

@@ -3678,7 +3678,11 @@ final class ReaderViewModel: ObservableObject {
 
         // 2. DB side dishes (cheap).
         self.tocEntries = (try? databaseManager.tocEntries(for: document.id)) ?? []
-        self.pageMap = DocumentPageMap.build(for: document, tocEntries: self.tocEntries)
+        self.pageMap = DocumentPageMap.build(
+            for: document,
+            tocEntries: self.tocEntries,
+            units: self.units,
+            plainTextOffsetByUnitID: self.fullPlainTextOffsetByUnitID)
 
         // 3. Prepare playback for the restored index.
         self.playbackService.prepare(at: self.currentSentenceIndex)

@@ -3,8 +3,9 @@ import Foundation
 // ========== BLOCK 01: PAGE MAP - START ==========
 /// Maps a 1-indexed page number to the plainText offset where that
 /// page starts. Built once at reader-view-model init from data we
-/// already have (displayText and TOC entries) so no schema migration
-/// is needed for v1's "Go to page" jump.
+/// already have (PDF: `pageBreak` units + their plainText offsets;
+/// EPUB: "Page N" TOC entries) so no schema migration is needed for
+/// v1's "Go to page" jump.
 ///
 /// Construction is per-format — PDFs and EPUBs have different ground
 /// truth for what a "page" is — but the public API is uniform. The
@@ -51,14 +52,23 @@ extension DocumentPageMap {
     static let empty = DocumentPageMap(pageOffsets: [])
 
     /// Build a page map for any document by dispatching on its file
-    /// type. Pure function so the call site stays simple. Caller
-    /// supplies the document's persisted TOC entries (from
-    /// `document_toc`); they're only consulted for EPUB but threading
-    /// them through both paths keeps the API uniform.
-    static func build(for document: Document, tocEntries: [StoredTOCEntry]) -> DocumentPageMap {
+    /// type. Pure function so the call site stays simple.
+    ///
+    /// - `tocEntries` are consulted only for EPUB (the "Page N" spine
+    ///   shape).
+    /// - `units` + `plainTextOffsetByUnitID` are consulted only for PDF:
+    ///   the unit list carries `pageBreak` units (one per page, with a
+    ///   0-based `metadata.pageNumber`), and the offset map gives each
+    ///   unit's global plainText offset. Both are threaded through both
+    ///   paths to keep the API uniform; non-PDF callers can omit them.
+    static func build(for document: Document,
+                      tocEntries: [StoredTOCEntry],
+                      units: [ContentUnit] = [],
+                      plainTextOffsetByUnitID: [UUID: Int] = [:]) -> DocumentPageMap {
         switch document.fileType.lowercased() {
         case "pdf":
-            return buildForPDF(displayText: document.displayText)
+            return buildForPDF(units: units,
+                               plainTextOffsetByUnitID: plainTextOffsetByUnitID)
         case "epub":
             return buildForEPUB(tocEntries: tocEntries)
         default:
@@ -66,35 +76,59 @@ extension DocumentPageMap {
         }
     }
 
-    /// Build a page map for a PDF from its `displayText`. Pages are
-    /// separated by `\u{000C}` (form feed) in displayText. The
-    /// corresponding plainText separator is `\n\n` (two characters).
-    /// Visual-only pages are written as `[[POSEY_VISUAL_PAGE:N:UUID]]`
-    /// markers in displayText and are NOT present in plainText, so we
-    /// account for them by tracking how many displayText chars get
-    /// stripped per page.
-    static func buildForPDF(displayText: String) -> DocumentPageMap {
-        guard !displayText.isEmpty else { return .empty }
+    /// Build a page map for a PDF from its content units.
+    ///
+    /// **Why units, not displayText (audit fix #3, 2026-06-08).** The
+    /// previous implementation split `document.displayText` on `\u{000C}`
+    /// form feeds and assumed each chunk == one plainText page joined by
+    /// `\n\n`. That broke two ways: (1) the derived `displayText` no
+    /// longer carries form feeds at all — pagination moved to `pageBreak`
+    /// units (DatabaseManager `displayText(for:)` just joins prose units),
+    /// so the split produced a single chunk and every PDF collapsed to one
+    /// page; and (2) even with form feeds it double-counted visual/blank
+    /// pages, drifting offsets on any PDF with a cover/figure/OCR-rejected
+    /// page (the form-feed chunk had a `\n\n` added for it, but plainText
+    /// has none — visual pages aren't prose-bearing).
+    ///
+    /// The units ARE the source of truth. Each `pageBreak` unit marks the
+    /// start of a 0-based PDF page; its entry in `plainTextOffsetByUnitID`
+    /// is the global plainText offset where that page's first prose begins.
+    /// That holds because the offset map records the *cumulative* offset at
+    /// the break, and pageBreak/image units don't advance the cumulative —
+    /// so a visual or blank page resolves to the next text content, which
+    /// is the only place go-to-page can land (those pages carry no
+    /// sentences). User-facing page numbers are 1-based (`pageNumber + 1`).
+    static func buildForPDF(units: [ContentUnit],
+                            plainTextOffsetByUnitID: [UUID: Int]) -> DocumentPageMap {
+        guard !units.isEmpty else { return .empty }
 
-        // Each page in displayText = the substring between consecutive
-        // form feeds (or document edges). For each page we compute the
-        // length of the corresponding plainText slice (which is just
-        // the page text WITHOUT the visual-page markers — those are
-        // stripped during plainText construction).
-        var offsets: [Int] = [0]  // page 1 starts at plainText offset 0
-        var plainOffset = 0
-        let pages = displayText.components(separatedBy: "\u{000C}")
-        for (index, page) in pages.enumerated() {
-            // The plainText length contributed by this page: the page
-            // text minus any visual-page markers.
-            let plainPage = stripVisualPageMarkers(from: page)
-            plainOffset += plainPage.count
-            // The next page starts AFTER the "\n\n" separator that was
-            // inserted in plainText between pages. The last page has
-            // no trailing separator.
-            if index < pages.count - 1 {
-                plainOffset += 2 // "\n\n"
-                offsets.append(plainOffset)
+        // Collect (1-based page, plainText offset) from every pageBreak.
+        var pairs: [(page: Int, offset: Int)] = []
+        for unit in units where unit.kind == .pageBreak {
+            guard let zeroBasedPage = unit.metadata.pageNumber,
+                  let offset = plainTextOffsetByUnitID[unit.id] else { continue }
+            pairs.append((page: zeroBasedPage + 1, offset: offset))
+        }
+        guard !pairs.isEmpty else { return .empty }
+
+        // Sort by page (units are normally already in page order, but a
+        // re-detect/rewrite could reorder). Then build a dense 1-indexed
+        // array, backfilling gaps (blank pages skipped by the importer)
+        // with the previous known offset so a typed in-gap page lands
+        // reasonably rather than out of range — same policy as buildForEPUB.
+        pairs.sort { $0.page < $1.page }
+        let maxPage = pairs.last!.page
+        guard maxPage >= 1 else { return .empty }
+        var offsets = Array(repeating: 0, count: maxPage)
+        var lastOffset = 0
+        var nextPair = 0
+        for page in 1...maxPage {
+            if nextPair < pairs.count, pairs[nextPair].page == page {
+                offsets[page - 1] = pairs[nextPair].offset
+                lastOffset = pairs[nextPair].offset
+                nextPair += 1
+            } else {
+                offsets[page - 1] = lastOffset
             }
         }
         return DocumentPageMap(pageOffsets: offsets)
@@ -159,21 +193,6 @@ extension DocumentPageMap {
             }
         }
         return DocumentPageMap(pageOffsets: offsets)
-    }
-
-    /// Strip `[[POSEY_VISUAL_PAGE:N:UUID]]` markers (and the older
-    /// no-UUID variant `[[POSEY_VISUAL_PAGE:N]]`) from a string
-    /// without otherwise altering it. Used to compute plainText-
-    /// equivalent length per PDF page.
-    fileprivate static func stripVisualPageMarkers(from text: String) -> String {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"\[\[POSEY_VISUAL_PAGE:[^\]]*\]\]"#,
-            options: []
-        ) else { return text }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.stringByReplacingMatches(
-            in: text, options: [], range: range, withTemplate: ""
-        )
     }
 }
 // ========== BLOCK 02: BUILDERS - END ==========

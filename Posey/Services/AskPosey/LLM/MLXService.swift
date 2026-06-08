@@ -56,14 +56,13 @@ actor MLXService {
     // MARK: - Public surface
 
     /// Snapshot of load progress for `modelID` in `[0, 1]`. nil
-    /// when no load has been attempted. Read by the picker UI.
+    /// when no load has been attempted. (Currently has no caller — the
+    /// picker UI reads download progress from the background-download
+    /// coordinator, not from here — but it's the sole reader of
+    /// `loadProgressByID`, kept until the load-progress state is excised
+    /// wholesale; audit fix #4 left that lifecycle untouched.)
     func progress(for modelID: String) -> Double? {
         return loadProgressByID[modelID]
-    }
-
-    /// True if the named model's container is loaded and ready.
-    func isLoaded(modelID: String) -> Bool {
-        return containers[modelID] != nil
     }
 
     /// Stream a chat response from the named model. Loads the
@@ -421,9 +420,6 @@ actor MLXService {
         }
     }
 
-    private func recordProgress(modelID: String, fraction: Double) {
-        loadProgressByID[modelID] = fraction
-    }
 }
 
 // ========== BLOCK 01: MLX SERVICE - END ==========

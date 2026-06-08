@@ -94,14 +94,6 @@ struct PDFSourceStore {
         }
     }
 
-    /// True iff the source PDF for `documentID` is on disk. Cheap
-    /// existence check used by the enhancement service before
-    /// attempting Tier 2.
-    static func exists(_ documentID: UUID) -> Bool {
-        guard let url = url(for: documentID) else { return false }
-        return FileManager.default.fileExists(atPath: url.path)
-    }
-
     /// Remove the source PDF for a document. Called on document
     /// delete and on enhancement completion. No-op if the source
     /// wasn't on disk to begin with.

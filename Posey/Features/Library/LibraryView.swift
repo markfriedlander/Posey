@@ -3559,14 +3559,6 @@ extension LibraryViewModel {
         return json(response)
     }
 
-    // MARK: — Notifications for the simulator MCP UI driver
-
-    // Defined here rather than in a separate file because it's used
-    // only by the local API → UI handoff path.
-    static var openAskPoseyForDocumentNotification: Notification.Name {
-        Notification.Name.openAskPoseyForDocument
-    }
-
     // MARK: — Autonomous audio test harnesses (2026-05-12)
 
     /// Runs the PLAYBACK_STOP_BLOCK_TEST sequence. Caller must ensure

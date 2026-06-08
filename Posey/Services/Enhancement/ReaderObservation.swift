@@ -24,14 +24,22 @@ import Foundation
 ///      off.
 ///
 /// Producers (writers):
-///   - `ReaderViewModel` posts current offset + visible chunk IDs on
-///     scroll / position changes
-///   - `SpeechPlaybackService` posts the in-use chunk ID on utterance
-///     enqueue / didFinish / didCancel
+///   - `ReaderViewModel` posts the current offset + the active unit id
+///     (`setCurrentUnit`) on scroll / segment changes
 ///
 /// Consumer (reader):
 ///   - `PDFEnhancementService` reads via `await MainActor.run { ... }`
 ///     at every chunk-update boundary
+///
+/// **Vestigial chunk-level lock (2026-06-08).** The per-chunk
+/// `(documentID, chunkIndex)` lock surface — `visibleChunks` /
+/// `ttsInUseChunk` — was superseded by the unit-level `currentUnitID`
+/// in the units rebuild (8f). Its writers (`setVisibleChunks` /
+/// `setTTSInUse`) were never wired and have been removed; the read-only
+/// fields remain (always empty) only because the `READER_OBSERVATION`
+/// diagnostic still reports them. The viewport/TTS lock described in
+/// items 2–3 above is NOT actually enforced — `currentUnitID` is the
+/// live lock signal.
 ///
 /// Single global @MainActor instance — values are small, mutations are
 /// frequent (every scroll tick), and main-actor isolation matches the
@@ -116,18 +124,6 @@ final class ReaderObservation {
     func setCurrentOffset(_ offset: Int?) {
         guard currentOffset != offset else { return }
         currentOffset = offset
-        post()
-    }
-
-    func setVisibleChunks(_ chunks: Set<ChunkID>) {
-        guard visibleChunks != chunks else { return }
-        visibleChunks = chunks
-        post()
-    }
-
-    func setTTSInUse(_ chunk: ChunkID?) {
-        guard ttsInUseChunk != chunk else { return }
-        ttsInUseChunk = chunk
         post()
     }
 

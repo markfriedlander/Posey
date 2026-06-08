@@ -52,12 +52,6 @@ final class AudioExportNotifications {
 
     private let categoryIdentifier = "AudioExportComplete"
 
-    /// Cached after first `requestAuthorization` so subsequent exports
-    /// don't pay the round-trip. Reset when the system settings
-    /// change is observed (we re-check on every export kickoff
-    /// regardless — this is just a hot-path memo).
-    private var lastKnownStatus: UNAuthorizationStatus = .notDetermined
-
     /// Returns true if notifications are authorized (or provisionally
     /// authorized). False if the user denied or the system can't
     /// schedule. Safe to call repeatedly; only prompts on first
@@ -65,7 +59,6 @@ final class AudioExportNotifications {
     func requestAuthorizationIfNeeded() async -> Bool {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
-        lastKnownStatus = settings.authorizationStatus
         switch settings.authorizationStatus {
         case .authorized, .provisional, .ephemeral:
             return true
@@ -76,7 +69,6 @@ final class AudioExportNotifications {
                 let granted = try await center.requestAuthorization(
                     options: [.alert, .sound, .badge]
                 )
-                lastKnownStatus = granted ? .authorized : .denied
                 return granted
             } catch {
                 return false

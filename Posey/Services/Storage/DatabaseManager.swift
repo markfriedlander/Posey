@@ -1864,16 +1864,6 @@ extension DatabaseManager {
             .joined(separator: "\n\n")
     }
 
-    /// **Step 10 — derived from units.** Mirror of `plainText(for:)`.
-    /// For non-PDF docs, `displayText` historically equaled
-    /// `plainText`. For PDFs, displayText included form-feed page
-    /// separators — that semantic moved to `pageBreak` units, so the
-    /// derived form just joins prose units like plainText.
-    func displayText(for documentID: UUID) throws -> String? {
-        dbLock.lock(); defer { dbLock.unlock() }
-        return try plainText(for: documentID)
-    }
-
 }
 
 // ========== BLOCK 08: PHASE 2.2 CONTENT BOUNDARIES + PAGE REWRITE - END ==========
@@ -2116,8 +2106,8 @@ extension DatabaseManager {
     /// Replace the entire unit list for a document. Atomic — the
     /// transaction either succeeds wholesale or rolls back. Used by
     /// importers at import time. For incremental edits (Tier 2 page
-    /// swap, Tier 3 token correction) see `replaceUnits(in:with:for:)`
-    /// and `updateUnitText(...)` below.
+    /// swap, Tier 3 token correction) see `replaceUnitsForPage(...)`
+    /// and `replaceTokenInUnits(...)`.
     func replaceAllUnits(_ units: [ContentUnit], for documentID: UUID) throws {
         dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN TRANSACTION;")
@@ -2157,65 +2147,6 @@ extension DatabaseManager {
         try bind(metaJSON, at: 6, for: statement)
         sqlite3_bind_int64(statement, 7, sqlite3_int64(unit.revision))
         try bind(unit.sourceTier, at: 8, for: statement)
-        try step(statement)
-    }
-
-    /// Replace a contiguous run of units (identified by sequence
-    /// range) with a new list. Used by Tier 2 Vision OCR when it
-    /// re-extracts a page: delete the page's units, insert the new
-    /// ones. The new units may have a different count than what they
-    /// replaced; sequence numbers come from the caller.
-    ///
-    /// Atomic. The caller is responsible for re-segmenting the new
-    /// units' sentences afterward (see `SentenceIndexer`).
-    func replaceUnits(
-        inSequenceRange range: ClosedRange<Int>,
-        with newUnits: [ContentUnit],
-        for documentID: UUID
-    ) throws {
-        dbLock.lock(); defer { dbLock.unlock() }
-        try execute("BEGIN TRANSACTION;")
-        do {
-            let deleteSQL = """
-            DELETE FROM document_units
-            WHERE document_id = ? AND sequence >= ? AND sequence <= ?;
-            """
-            let deleteStmt = try prepareStatement(sql: deleteSQL)
-            try bind(documentID.uuidString, at: 1, for: deleteStmt)
-            sqlite3_bind_int64(deleteStmt, 2, sqlite3_int64(range.lowerBound))
-            sqlite3_bind_int64(deleteStmt, 3, sqlite3_int64(range.upperBound))
-            try step(deleteStmt)
-            sqlite3_finalize(deleteStmt)
-            for unit in newUnits {
-                try insertUnit(unit)
-            }
-            try execute("COMMIT;")
-        } catch {
-            try? execute("ROLLBACK;")
-            throw error
-        }
-    }
-
-    /// Mutate one unit's text in place, bumping revision and updating
-    /// source_tier. Used by Tier 3 AFM fusion repair on individual
-    /// units containing a corrected token. The caller is responsible
-    /// for regenerating that unit's sentences afterward.
-    func updateUnitText(
-        _ unitID: UUID,
-        newText: String,
-        sourceTier: String
-    ) throws {
-        dbLock.lock(); defer { dbLock.unlock() }
-        let sql = """
-        UPDATE document_units
-        SET text = ?, revision = revision + 1, source_tier = ?
-        WHERE id = ?;
-        """
-        let statement = try prepareStatement(sql: sql)
-        defer { sqlite3_finalize(statement) }
-        try bind(newText, at: 1, for: statement)
-        try bind(sourceTier, at: 2, for: statement)
-        try bind(unitID.uuidString, at: 3, for: statement)
         try step(statement)
     }
 
@@ -2271,79 +2202,7 @@ extension DatabaseManager {
         return out
     }
 
-    /// Fetch sentences for one unit, ordered by sentence_index.
-    /// Used by the reader when only one unit's sentences are needed
-    /// (e.g., on a single-unit replacement during Tier 3).
-    func sentences(forUnitID unitID: UUID) throws -> [Sentence] {
-        dbLock.lock(); defer { dbLock.unlock() }
-        let sql = """
-        SELECT id, document_id, unit_sequence, sentence_index, intra_start, intra_end, text
-        FROM document_sentences
-        WHERE unit_id = ?
-        ORDER BY sentence_index ASC;
-        """
-        let statement = try prepareStatement(sql: sql)
-        defer { sqlite3_finalize(statement) }
-        try bind(unitID.uuidString, at: 1, for: statement)
-        var out: [Sentence] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard let idStr = sqliteString(statement, index: 0),
-                  let id = UUID(uuidString: idStr),
-                  let docIDStr = sqliteString(statement, index: 1),
-                  let documentID = UUID(uuidString: docIDStr),
-                  let text = sqliteString(statement, index: 6) else {
-                continue
-            }
-            out.append(Sentence(
-                id: id,
-                documentID: documentID,
-                unitID: unitID,
-                unitSequence: Int(sqlite3_column_int64(statement, 2)),
-                sentenceIndex: Int(sqlite3_column_int64(statement, 3)),
-                intraStart: Int(sqlite3_column_int64(statement, 4)),
-                intraEnd: Int(sqlite3_column_int64(statement, 5)),
-                text: text
-            ))
-        }
-        return out
-    }
-
     // MARK: Sentences — write
-
-    /// Replace the sentence list for a single unit. Atomic per-unit
-    /// transaction. Used by `SentenceIndexer` at import time (initial
-    /// indexing) and after every Tier 2 / Tier 3 unit edit.
-    func replaceSentences(_ sentences: [Sentence], forUnitID unitID: UUID) throws {
-        dbLock.lock(); defer { dbLock.unlock() }
-        try execute("BEGIN TRANSACTION;")
-        do {
-            try execute("DELETE FROM document_sentences WHERE unit_id = '\(unitID.uuidString)';")
-            for sentence in sentences {
-                try insertSentence(sentence)
-            }
-            try execute("COMMIT;")
-        } catch {
-            try? execute("ROLLBACK;")
-            throw error
-        }
-    }
-
-    /// Bulk-replace every sentence for an entire document. Used by
-    /// the initial indexing pass after `replaceAllUnits` at import.
-    func replaceAllSentences(_ sentences: [Sentence], for documentID: UUID) throws {
-        dbLock.lock(); defer { dbLock.unlock() }
-        try execute("BEGIN TRANSACTION;")
-        do {
-            try execute("DELETE FROM document_sentences WHERE document_id = '\(documentID.uuidString)';")
-            for sentence in sentences {
-                try insertSentence(sentence)
-            }
-            try execute("COMMIT;")
-        } catch {
-            try? execute("ROLLBACK;")
-            throw error
-        }
-    }
 
     private func insertSentence(_ sentence: Sentence) throws {
         let sql = """
@@ -2974,54 +2833,6 @@ struct StoredUnitEmbeddingChunk: Sendable, Equatable {
 
 extension DatabaseManager {
 
-    /// Insert or replace a batch of chunks atomically. Used by the
-    /// unit-aware chunker on import and on Tier 2/3 invalidation.
-    /// Replaces every chunk for `documentID` whose `chunk_index`
-    /// is not in the new set is NOT a concern of this method —
-    /// callers should explicitly delete first or use
-    /// `replaceAllUnitEmbeddingChunks`.
-    func upsertUnitEmbeddingChunks(_ chunks: [StoredUnitEmbeddingChunk]) throws {
-        dbLock.lock(); defer { dbLock.unlock() }
-        guard !chunks.isEmpty else { return }
-        try execute("BEGIN IMMEDIATE TRANSACTION;")
-        do {
-            let sql = """
-                INSERT OR REPLACE INTO unit_embedding_chunks
-                    (id, document_id, chunk_index,
-                     start_unit_id, start_intra_offset,
-                     end_unit_id, end_intra_offset,
-                     text, embedding)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """
-            let stmt = try prepareStatement(sql: sql)
-            defer { sqlite3_finalize(stmt) }
-            for chunk in chunks {
-                sqlite3_reset(stmt)
-                sqlite3_clear_bindings(stmt)
-                sqlite3_bind_text(stmt, 1, chunk.id.uuidString, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(stmt, 2, chunk.documentID.uuidString, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_int(stmt, 3, Int32(chunk.chunkIndex))
-                sqlite3_bind_text(stmt, 4, chunk.startUnitID.uuidString, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_int(stmt, 5, Int32(chunk.startIntraOffset))
-                sqlite3_bind_text(stmt, 6, chunk.endUnitID.uuidString, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_int(stmt, 7, Int32(chunk.endIntraOffset))
-                sqlite3_bind_text(stmt, 8, chunk.text, -1, SQLITE_TRANSIENT)
-                if let emb = chunk.embedding {
-                    var bytes = emb
-                    let byteCount = bytes.count * MemoryLayout<Double>.size
-                    sqlite3_bind_blob(stmt, 9, &bytes, Int32(byteCount), SQLITE_TRANSIENT)
-                } else {
-                    sqlite3_bind_null(stmt, 9)
-                }
-                try step(stmt)
-            }
-            try execute("COMMIT;")
-        } catch {
-            try? execute("ROLLBACK;")
-            throw error
-        }
-    }
-
     /// Replace every chunk for `documentID` with the supplied set.
     /// Atomic: deletes old then inserts new in a single transaction.
     ///
@@ -3208,16 +3019,6 @@ extension DatabaseManager {
             rows.append(.init(id: id, text: String(cString: textCStr)))
         }
         return rows
-    }
-
-    /// Total count of unit_embedding_chunks rows (both NULL and
-    /// filled). Used by the migration UI to report progress.
-    func unitEmbeddingChunkTotalCount() throws -> Int {
-        dbLock.lock(); defer { dbLock.unlock() }
-        let stmt = try prepareStatement(sql: "SELECT COUNT(*) FROM unit_embedding_chunks;")
-        defer { sqlite3_finalize(stmt) }
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
-        return Int(sqlite3_column_int(stmt, 0))
     }
 
     /// Count of unit_embedding_chunks rows currently lacking an

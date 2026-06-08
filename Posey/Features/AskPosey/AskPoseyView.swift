@@ -57,7 +57,6 @@ struct AskPoseyView: View {
     private var isMLXModel: Bool {
         ModelCatalog.current().source == .mlx
     }
-    @State private var showFirstUseSheet: Bool = false
     /// Live viewport height of the conversation ScrollView, used to
     /// size the trailing spacer so scrollTo(.top) on the user message
     /// can actually reach the literal top of the visible area.
@@ -1487,30 +1486,6 @@ struct AskPoseyMessageBubble: View {
     /// Rewrites the raw assistant text so each `[N]` marker that
     /// resolves to a known chunk becomes a markdown link with a
     /// unicode-superscript label and a `posey-cite://N` URL. The
-    /// AskPoseyView root installs an `OpenURLAction` that intercepts
-    /// `posey-cite://` URLs and dispatches them to `onJumpToChunk`.
-    /// Markers without a matching chunk (e.g. AFM hallucinated
-    /// `[12]` when only 4 chunks were injected) fall through
-    /// unchanged so they're visible but inert.
-    /// When AFM didn't emit any markers (it's inconsistent about
-    /// following the citation instruction even with the rule
-    /// repeated three times in the prompt), the renderer falls
-    /// back to auto-attributing each sentence to its best-match
-    /// chunk by unique-keyword overlap.
-    /// 2026-05-05 — Retained for the BubbleSelectionAndCopy
-    /// modifier's clipboard path; the on-screen renderer no longer
-    /// uses this. Citations are rendered as Buttons by
-    /// CitationFlowText; copy still strips the legacy markdown link
-    /// wrappers via stripCitationMarkup if any older messages in
-    /// the DB still have them.
-    private var renderedMarkdown: String {
-        guard message.role == .assistant,
-              !message.chunksInjected.isEmpty else { return message.content }
-        return AskPoseyCitationRenderer.render(
-            text: message.content,
-            chunks: message.chunksInjected
-        )
-    }
 
     private var accessibilityLabel: String {
         switch message.role {
@@ -1521,71 +1496,14 @@ struct AskPoseyMessageBubble: View {
     }
 }
 
-/// Maps `[N]` inline citation markers in an assistant response to
-/// SwiftUI markdown links pointing at `posey-cite://N`, with the
-/// link's display text rendered as unicode-superscript digits so
-/// they read like Perplexity-style superscript citations.
+/// Owns the `posey-cite://N` citation URL scheme. On-screen citations
+/// are rendered as tappable chips by `CitationFlowText`; this type now
+/// only defines the scheme and resolves a chunk number back out of a
+/// citation URL for the tap handler. (The legacy `[N]`→superscript-
+/// markdown-link transform was removed 2026-06-08, audit fix #4 — it
+/// had no live caller after the chip renderer replaced it.)
 enum AskPoseyCitationRenderer {
     static let citationURLScheme = "posey-cite"
-
-    /// Convert `[N]` markers in the answer text to tappable
-    /// superscript markdown links. The text reaching this renderer
-    /// has already been through embedding-based attribution
-    /// upstream (AskPoseyChatViewModel.finalizeAssistantTurn) — the
-    /// renderer's only job is the marker→link transform.
-    static func render(text: String, chunks: [RetrievedChunk]) -> String {
-        convertMarkersToLinks(text, chunkCount: chunks.count)
-    }
-
-    /// Test seam matching the original signature.
-    static func render(text: String, chunkCount: Int) -> String {
-        convertMarkersToLinks(text, chunkCount: chunkCount)
-    }
-
-    private static func convertMarkersToLinks(_ text: String, chunkCount: Int) -> String {
-        guard chunkCount > 0 else { return text }
-        let pattern = #"\[(\d{1,2})\]"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
-        let nsRange = NSRange(text.startIndex..., in: text)
-        var result = ""
-        var lastEnd = text.startIndex
-        // 2026-05-05 (revert) — Mark wants superscript citations
-        // kept, not the bracketed body-size chips I unilaterally
-        // switched to. Two named problems addressed:
-        //
-        //   1. Adjacent citations like `[2][3]` previously rendered
-        //      as `²³` and read as the number 23. Now we inject a
-        //      visible separator " · " (space + middle dot + space)
-        //      between two adjacent citation markers so they read
-        //      unambiguously as two numbers.
-        //   2. Tap target. The superscript itself stays small per
-        //      design intent, but the rendered link is not the only
-        //      thing that gets a hit area — see the
-        //      `.environment(\.openURL)` handler which also
-        //      registers padding-aware tap zones around the
-        //      superscript glyphs. (TODO if that's not enough,
-        //      switch to an HStack of small chips.)
-        regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
-            guard let match,
-                  let fullRange = Range(match.range, in: text),
-                  let numRange = Range(match.range(at: 1), in: text),
-                  let n = Int(text[numRange]),
-                  n >= 1, n <= chunkCount else { return }
-            // If the previous emitted token was a citation link
-            // (lastEnd-to-now is empty), inject the visible
-            // " · " separator so adjacent superscripts don't fuse.
-            let between = text[lastEnd..<fullRange.lowerBound]
-            if between.isEmpty {
-                result += " · "
-            } else {
-                result += between
-            }
-            result += "[\(superscript(for: n))](\(citationURLScheme)://\(n))"
-            lastEnd = fullRange.upperBound
-        }
-        result += text[lastEnd..<text.endIndex]
-        return result
-    }
 
     /// Resolve the chunk number out of a `posey-cite://N` URL.
     /// Returns nil for any other URL shape so the global URL handler
@@ -1595,15 +1513,6 @@ enum AskPoseyCitationRenderer {
               let host = url.host,
               let n = Int(host) else { return nil }
         return n
-    }
-
-    private static let superscriptDigits: [Character: Character] = [
-        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
-        "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹"
-    ]
-
-    private static func superscript(for n: Int) -> String {
-        String(String(n).map { superscriptDigits[$0] ?? $0 })
     }
 }
 
@@ -1986,34 +1895,3 @@ private struct PopulatedAskPoseyPreview: View {
 // ========== BLOCK 04: PREVIEWS - END ==========
 
 
-// ========== BLOCK 05: PREFERENCE KEYS (Item 5 dynamic scroll) - START ==========
-
-/// 2026-05-05 — Posts the measured height of the latest user-message
-/// bubble through the SwiftUI preference pipeline so the ScrollView
-/// can read it at scroll-on-send time. See AskPoseyView's
-/// scrollToLatestUserMessage and the .background GeometryReader on
-/// user bubbles.
-struct UserMessageHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        // Last-writer-wins is the right reducer: each user bubble
-        // posts its own height; the latest bubble's value is what
-        // we want to capture, and the last child to be enumerated
-        // is the bottom-most (latest) one in our LazyVStack.
-        value = nextValue()
-    }
-}
-
-/// 2026-05-05 — Reserved for symmetry; the ScrollView height is
-/// captured directly via .background GeometryReader rather than a
-/// preference because we have a single producer (the ScrollView
-/// container). Kept as a documented type for future use if multiple
-/// children need to participate in viewport measurement.
-struct ScrollViewportHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-// ========== BLOCK 05: PREFERENCE KEYS - END ==========

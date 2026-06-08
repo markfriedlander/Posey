@@ -51,12 +51,6 @@ extension Notification.Name {
     /// `addBookmarkForCurrentSentence()`.
     static let remoteCreateBookmark = Notification.Name("PoseyRemoteCreateBookmark")
 
-    /// `userInfo["accessibilityID"]: String`. ReaderView /
-    /// AskPoseyView / etc. don't observe this — it's handled in
-    /// `RemoteControl.tap(accessibilityID:)` which walks the key
-    /// window's UIView tree directly.
-    static let remoteScrollToAccessibilityID = Notification.Name("PoseyRemoteScrollToAccessibilityID")
-
     /// No userInfo. ReaderView observes; calls `toggleChrome()` —
     /// the same code path as a real in-reader tap. Used by the
     /// API to verify chrome reveal/dismiss behavior on device
@@ -215,13 +209,6 @@ extension Notification.Name {
     /// `userInfo["fontSize"]: Double`. ReaderView observes; sets
     /// `viewModel.fontSize`.
     static let remoteSetFontSize = Notification.Name("PoseyRemoteSetFontSize")
-    /// `userInfo["readingStyle"]: String` (raw value: standard, focus,
-    /// immersive, motion). ReaderView observes; sets
-    /// `viewModel.readingStyle`.
-    static let remoteSetReadingStyle = Notification.Name("PoseyRemoteSetReadingStyle")
-    /// `userInfo["motionPreference"]: String` (raw value: off, on,
-    /// auto). ReaderView observes; sets `viewModel.motionPreference`.
-    static let remoteSetMotionPreference = Notification.Name("PoseyRemoteSetMotionPreference")
 
     // ===== TOC + search =============================================
     /// `userInfo["documentID"]: UUID`, `userInfo["page"]: Int`.
@@ -302,12 +289,6 @@ enum RemoteControl {
             }
         }
         return nil
-    }
-
-    /// Back-compat alias kept so external code expecting a UIView
-    /// keeps compiling — only returns a hit when it IS a UIView.
-    static func findView(accessibilityID id: String, in root: UIView) -> UIView? {
-        findResponder(accessibilityID: id, in: root) as? UIView
     }
 
     /// Walks every active window plus every presented view

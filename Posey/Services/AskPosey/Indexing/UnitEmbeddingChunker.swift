@@ -52,7 +52,6 @@ struct UnitEmbeddingChunker {
         // length-dependent (a chunk is a small group of whole sentences
         // regardless of doc length), so a single tight size is correct.
         static let `default` = Configuration(chunkSize: 400, chunkOverlap: 50)
-        static let longDocument = Configuration(chunkSize: 400, chunkOverlap: 50)
         static let longDocumentThresholdChars: Int = 200_000
 
         /// All document sizes use the same sentence-aware 400/50 config now.

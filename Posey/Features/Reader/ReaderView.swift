@@ -4108,12 +4108,6 @@ final class ReaderViewModel: ObservableObject {
         segment.id == currentSentenceIndex
     }
 
-    /// 2026-05-16 — Motion detector removed (Mark spec). The function
-    /// remains as a no-op so callers compile; CoreMotion never engages.
-    private func reconcileMotionDetector() {
-        // intentionally empty — motion auto-detection removed 2026-05-16
-    }
-
     /// M8 Immersive/Motion render distance — how many rows away the
     /// segment is from the active sentence. Active row returns 0,
     /// neighbours return 1, and so on. Used by the render path to
@@ -4148,53 +4142,10 @@ final class ReaderViewModel: ObservableObject {
     // (annotation indicators are a follow-up polish — they were on
     // the legacy renderer's row chrome which is now gone).
 
-    /// 2026-05-06 (parity #3) — single source of truth for heading
-    /// typography across both render paths (displayBlocks rows and
-    /// sentence rows). The scale is intentionally perceptible: a
-    /// chapter title and a subsection should feel like different
-    /// kinds of break, not just slightly different sizes. The 1pt-per-
-    /// level scale that lived here previously was too subtle to read
-    /// as hierarchy at normal reading distance.
-    static func headingFontSize(body: CGFloat, level: Int) -> CGFloat {
-        // 2026-05-22 — Pushed multipliers stronger (Mark spec). The
-        // prior 1.50 / 1.30 / 1.15 scale read as "all roughly the
-        // same size" at normal reading distance, particularly on
-        // technical Markdown documents where H1/H2/H3 are the
-        // primary structural cue. The new scale makes the hierarchy
-        // feel real:
-        //   H1 = 1.75× body   (chapter-feeling title)
-        //   H2 = 1.40× body   (section)
-        //   H3 = 1.20× body   (subsection)
-        //   H4-H6 = body (weight-only differentiation as before)
-        let multiplier: CGFloat
-        switch max(1, min(6, level)) {
-        case 1: multiplier = 1.75
-        case 2: multiplier = 1.40
-        case 3: multiplier = 1.20
-        default: multiplier = 1.00 // level 4-6 collapse to body size, weight only
-        }
-        return body * multiplier
-    }
-
-    static func headingWeight(level: Int) -> Font.Weight {
-        switch max(1, min(6, level)) {
-        case 1, 2: return .bold
-        default: return .semibold
-        }
-    }
-
-    /// Extra top spacing applied above a heading row so the section
-    /// break reads as one. More breathing room above level 1; less
-    /// for deeper levels. A reader that flips past a chapter break
-    /// should feel a perceptible pause.
-    static func headingTopSpacing(level: Int) -> CGFloat {
-        switch max(1, min(6, level)) {
-        case 1: return 24
-        case 2: return 18
-        case 3: return 12
-        default: return 8
-        }
-    }
+    // 2026-06-08 (audit fix #4) — the static heading typography helpers
+    // (headingFontSize / headingWeight / headingTopSpacing) were removed:
+    // they were an unused duplicate of the live heading typography in
+    // UnitRowView, which is the single source of truth post-Step-9.
 
     // Step 9 — foregroundStyle(for: block) deleted; UnitRowView styles
     // by kind directly (blockquote uses italic + secondary indent bar;

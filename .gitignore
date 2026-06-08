@@ -18,6 +18,13 @@ DerivedData/
 /tmp/PoseyDeviceDerived/
 *.ipa
 
+# Stray SQLite artifacts (e.g. a default-path DatabaseManager() created during
+# a test/build run dropping posey.sqlite into the source tree). Real app DBs
+# live in Application Support, never in the repo.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
 # macOS
 .DS_Store
 __pycache__/

@@ -105,12 +105,20 @@ struct HTMLDocumentImporter {
         }
 
         let (markedData, images) = extractInlineImages(from: workingData, baseDirectory: baseDirectory)
-        let displayText = try loadText(fromData: markedData)
+        let displayTextRaw = try loadText(fromData: markedData)
+        // 2026-06-05 — re-establish headings Readability dropped. Source every
+        // article heading from preCleanedHTML (all present there) and inject any
+        // whose title the Readability output lost back into displayText at its
+        // body anchor. The returned `headings` is the full ordered list for the
+        // downstream title-based TOC + styling resolution.
+        let (displayText, headings) = reinjectArticleHeadings(
+            into: displayTextRaw,
+            specs: extractHeadingSpecs(fromHTML: preCleanedHTML)
+        )
         // 2026-05-06 (parity #2) — displayText KEEPS markers;
         // HTMLDisplayParser converts them to .visualPlaceholder
         // blocks. plainText is the marker-stripped form for TTS.
         let plainText = stripVisualPageMarkers(from: displayText)
-        let headings = extractHeadings(fromRawData: workingData)
         return (displayText, plainText, images, headings)
     }
 
@@ -156,6 +164,22 @@ struct HTMLDocumentImporter {
 
     private func decodeMinimalEntities(_ s: String) -> String {
         var t = s
+        // 2026-06-05 — Numeric entities (&#160; nbsp, &#8217; quote, &#93; ]…)
+        // so body-anchor text matches NSAttributedString's decoded plaintext.
+        if let regex = try? NSRegularExpression(pattern: #"&#(\d{1,7});"#) {
+            let ns = t as NSString
+            var result = ""
+            var last = 0
+            for m in regex.matches(in: t, range: NSRange(location: 0, length: ns.length)) {
+                result += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+                let code = Int(ns.substring(with: m.range(at: 1))) ?? 0
+                if code == 160 { result += " " }                               // nbsp → space
+                else if let scalar = Unicode.Scalar(code) { result.unicodeScalars.append(scalar) }
+                last = m.range.location + m.range.length
+            }
+            result += ns.substring(from: last)
+            t = result
+        }
         // Just the entities most likely to appear in heading text.
         // Full HTML entity decoding would require a real HTML parser,
         // and the loaded plainText has already had everything decoded
@@ -175,7 +199,154 @@ struct HTMLDocumentImporter {
         // search target matches NSAttributedString's whitespace
         // collapsing.
         t = t.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        // 2026-06-05 — drop the space a stripped inline tag leaves BEFORE
+        // punctuation ("Prejudice , like" → "Prejudice, like"); NSAttributedString
+        // emits no such space, so this lets a body anchor match the plaintext.
+        t = t.replacingOccurrences(of: #"\s+([,;:.!?)\]])"#, with: "$1", options: .regularExpression)
         return t
+    }
+
+    // 2026-06-05 — Re-establish article headings that Readability drops.
+    // On structured web articles (Wikipedia/MDN/blogs) Readability keeps each
+    // section's CONTENT but inconsistently strips the section heading text — on
+    // the P&P article it dropped 18 of 24 headings, leaving the body unheaded
+    // (empty TOC, no section breaks). `extractHeadings(fromRawData: workingData)`
+    // ran on the Readability OUTPUT, so it only saw the survivors. The fix:
+    // source EVERY real article heading from `preCleanedHTML` (post-chrome-strip,
+    // pre-Readability — where they all still exist), and for any whose title the
+    // Readability output dropped, INJECT the title back into `displayText` at the
+    // section's body-anchor position. Then the existing title-based
+    // resolveHeadingOffsets (TOC) + applyHeadingMarkers (styling) work unchanged.
+    // Forward-only/monotonic; a heading whose anchor is ambiguous/missing is
+    // SKIPPED + logged, never guessed (a missing heading is recoverable; a
+    // misplaced one is a silent lie). Chrome section headings are denylisted.
+
+    /// Section-heading titles that are site chrome, not article content.
+    private static let chromeHeadingDenylist: Set<String> = [
+        "references", "external links", "see also", "notes", "citations",
+        "bibliography", "further reading", "sources", "footnotes", "contents",
+        "navigation menu", "navigation", "tools", "languages", "in this article",
+        "related topics", "related articles", "explanation", "site map",
+    ]
+
+    private struct HeadingSpec { let level: Int; let title: String; let bodyAnchor: String }
+
+    /// Length-preserving punctuation fold (curly quotes / dashes → ASCII) so a
+    /// raw-HTML-derived anchor still matches NSAttributedString's smart-quoted
+    /// plaintext. 1 grapheme → 1 grapheme, so offsets stay valid across the fold.
+    private func foldPunctuation(_ s: String) -> String {
+        var t = s
+        for (a, b) in [("\u{2018}", "'"), ("\u{2019}", "'"),
+                       ("\u{201C}", "\""), ("\u{201D}", "\""),
+                       ("\u{2013}", "-"), ("\u{2014}", "-")] {
+            t = t.replacingOccurrences(of: a, with: b)
+        }
+        return t
+    }
+
+    private func stripTagsToSpaces(_ s: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "<[^>]+>") else { return s }
+        return regex.stringByReplacingMatches(
+            in: s, range: NSRange(s.startIndex..., in: s), withTemplate: " ")
+    }
+
+    /// Hatnote / cross-reference lead-ins that aren't section prose.
+    private static let hatnotePattern = try? NSRegularExpression(
+        pattern: #"^(?:main article|see also|further information|part of a series|this article|from wikipedia)\b"#,
+        options: [.caseInsensitive])
+
+    /// First substantial PROSE element (<p>/<li>/<blockquote>/<dd>) text in a
+    /// section's HTML, cleaned to match NSAttributedString's plaintext; nil if
+    /// none ≥24 chars. Skips hatnotes ("Main article: …") and — by only
+    /// considering prose elements — the image <figcaption>s, genealogy <table>s
+    /// and quotebox <style> CSS that Readability strips or renders differently
+    /// (anchoring on those was the source of false anchor misses).
+    private func firstProseAnchor(inSectionHTML html: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?si)<(p|li|blockquote|dd)\b[^>]*>(.*?)</\1\s*>"#) else { return nil }
+        let ns = html as NSString
+        for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            let text = decodeMinimalEntities(stripTagsToSpaces(ns.substring(with: m.range(at: 2))))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.count >= 24 else { continue }
+            if let hp = Self.hatnotePattern,
+               hp.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil { continue }
+            return String(text.prefix(80)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
+    /// Pull `(level, title, bodyAnchor)` for every real article heading in `html`
+    /// (expects `preCleanedHTML`). `bodyAnchor` is the section's first prose
+    /// element text (see `firstProseAnchor`); chrome-titled headings are dropped.
+    private func extractHeadingSpecs(fromHTML html: String) -> [HeadingSpec] {
+        let pattern = #"(?si)<h([1-6])\b[^>]*>(.*?)</h\1\s*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = html as NSString
+        var specs: [HeadingSpec] = []
+        for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            guard m.numberOfRanges == 3,
+                  let level = Int(ns.substring(with: m.range(at: 1))) else { continue }
+            let title = decodeMinimalEntities(stripHeadingInnerTags(ns.substring(with: m.range(at: 2))))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty,
+                  !Self.chromeHeadingDenylist.contains(title.lowercased()) else { continue }
+            let after = m.range.location + m.range.length
+            guard after < ns.length else { continue }
+            var tail = ns.substring(from: after)
+            // Cut at the next heading so the anchor is THIS section's own content
+            // (a parent heading with no intro prose finds no anchor and is
+            // skipped, not mis-anchored onto its first subsection).
+            if let nextH = tail.range(of: #"(?i)<h[1-6]\b"#, options: .regularExpression) {
+                tail = String(tail[..<nextH.lowerBound])
+            }
+            guard let anchor = firstProseAnchor(inSectionHTML: tail) else { continue }
+            specs.append(HeadingSpec(level: level, title: title, bodyAnchor: anchor))
+        }
+        return specs
+    }
+
+    /// Inject each dropped heading's title back into `displayText` at its
+    /// body-anchor position; return the augmented text + the full ordered
+    /// heading list for TOC/styling resolution.
+    private func reinjectArticleHeadings(
+        into displayText: String, specs: [HeadingSpec]
+    ) -> (String, [HTMLHeadingEntry]) {
+        guard !specs.isEmpty else { return (displayText, []) }
+        let folded = foldPunctuation(displayText)
+        let fStart = folded.startIndex
+        var injections: [(offset: Int, text: String)] = []
+        var headings: [HTMLHeadingEntry] = []
+        var cursorOffset = 0
+        for spec in specs {
+            let foldedAnchor = foldPunctuation(spec.bodyAnchor)
+            let searchStart = folded.index(fStart, offsetBy: cursorOffset,
+                                           limitedBy: folded.endIndex) ?? folded.endIndex
+            guard let aRange = folded.range(of: foldedAnchor,
+                                            range: searchStart..<folded.endIndex) else {
+                print("PoseyHTML: heading skipped — body anchor not found: \(spec.title)")
+                continue
+            }
+            let anchorOffset = folded.distance(from: fStart, to: aRange.lowerBound)
+            // Survivor? title text already present in this section's lead-in.
+            let backSpan = min(300, anchorOffset - cursorOffset)
+            let preStart = folded.index(aRange.lowerBound, offsetBy: -backSpan,
+                                        limitedBy: fStart) ?? fStart
+            let isSurvivor = String(folded[preStart..<aRange.lowerBound])
+                .contains(foldPunctuation(spec.title))
+            if !isSurvivor {
+                injections.append((anchorOffset, spec.title + "\n\n"))
+            }
+            headings.append(HTMLHeadingEntry(level: spec.level, title: spec.title))
+            cursorOffset = folded.distance(from: fStart, to: aRange.upperBound)
+        }
+        // Apply high-offset-first so earlier offsets stay valid.
+        var result = displayText
+        for inj in injections.sorted(by: { $0.offset > $1.offset }) {
+            let idx = result.index(result.startIndex, offsetBy: inj.offset)
+            result.insert(contentsOf: inj.text, at: idx)
+        }
+        return (result, headings)
     }
 
     func loadText(from url: URL) throws -> String {
@@ -568,6 +739,18 @@ struct HTMLDocumentImporter {
             #"(?si)<table[^>]*\bclass\s*=\s*["'][^"']*\b(?:navbox|vertical-navbox)\b[^"']*["'][^>]*>.*?</table\s*>"#,
             // Side-bar / hat-note / disambiguation chrome.
             #"(?si)<(?:div|table)[^>]*\bclass\s*=\s*["'][^"']*\b(?:sidebar|hatnote|dablink)\b[^"']*["'][^>]*>.*?</(?:div|table)\s*>"#,
+            // 2026-06-05 — "[edit]" section-edit links. Wikipedia wraps each
+            // heading's edit affordance in <span class="mw-editsection">…[…edit…]…
+            // </span> (nested bracket spans). It renders as a literal "[edit]"
+            // that leaks into the heading line in plainText → spoken by TTS (c14)
+            // and visible in the reader (c3). Match from the editsection span open
+            // lazily to the closing "]"/&#93; + its two </span> closes.
+            #"(?si)<span[^>]*\bclass\s*=\s*["'][^"']*\bmw-editsection\b[^"']*["'][^>]*>.*?(?:\]|&#93;)\s*</span>\s*</span>"#,
+            // 2026-06-05 — LibriVox / audio <figure>. The article embeds a
+            // "LibriVox recording by …" audio player whose <figcaption> leaks in
+            // as the very first plainText line (chrome, not article prose).
+            // Strip any <figure> that contains an <audio> element.
+            #"(?si)<figure\b[^>]*>(?:(?!</figure>).)*?<audio\b(?:(?!</figure>).)*?</figure\s*>"#,
         ]
         var html = rawHTML
         for pattern in patterns {

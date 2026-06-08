@@ -10,7 +10,15 @@ final class TXTDocumentImporterTests: XCTestCase {
 
         let text = try TXTDocumentImporter().loadText(from: fileURL)
 
-        XCTAssertEqual(text, "Alpha\nBeta\nGamma")
+        // TXT normalizes CRLF/CR → LF and trims outer whitespace, THEN reflows
+        // hard-wrapped lines (Gutenberg ~72-char display wraps, intended since
+        // 2026-05-27): single-newline-separated lines of one paragraph join
+        // with spaces. So the three lines become one reflowed line — proving
+        // the line endings were normalized (no literal \r survives) and outer
+        // whitespace trimmed. (Paragraph breaks, \n\n, are preserved — see the
+        // reflow assertions in FormatNormalizationParityTests.)
+        XCTAssertEqual(text, "Alpha Beta Gamma")
+        XCTAssertFalse(text.contains("\r"))
     }
 
     func testLoadTextRejectsEmptyDocument() throws {

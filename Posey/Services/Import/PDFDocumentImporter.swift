@@ -820,17 +820,21 @@ extension PDFDocumentImporter {
     }
 
     private func normalize(_ text: String) -> String {
-        // Task 8 (2026-05-03 — format parity): delegate the shared
-        // passes to `TextNormalizer.normalize(_:)` (BOM strip, soft
-        // hyphen + zero-width strip, line-ending normalize, trailing
-        // whitespace trim, hyphen collapse, spaced-letter/digit
-        // collapse, tab→space, blank-line collapse). Then layer
-        // PDF-specific behavior on top: single-newline → space (PDF
-        // text extraction emits soft line breaks within paragraphs
-        // that would otherwise read as hard breaks). The page-
-        // boundary `collapseLineBreakHyphens` pass still runs once
-        // more in `loadDocument` after pages are joined with `\f`.
-        var t = TextNormalizer.normalize(text)
+        // 2026-06-08 (normalizer-parity pass): run the shared universal
+        // pipeline (`TextNormalizer.normalize`: BOM/mojibake/control strip,
+        // CP1252 repair, line-ending normalize, trailing-ws trim, line-break
+        // hyphen collapse, asterism strip, tab→space, blank-line collapse),
+        // then layer the PDF-specific passes ON TOP — these live OUTSIDE the
+        // universal path so other formats don't false-collapse intentional
+        // spacing:
+        //   - `normalizePDFGlyphArtifacts`: spaced-letter (`C O N T E N T S`)
+        //     + spaced-digit (`1 9 4 5`) repair (PDFKit glyph-positioning).
+        //   - single-newline → space: PDF extraction emits soft line breaks
+        //     within paragraphs that would otherwise read as hard breaks.
+        // The page-boundary `stripLineBreakHyphens` pass still runs once more
+        // in `loadDocument` after pages are joined with `\f`.
+        var t = TextNormalizer.normalizeUniversal(text)   // shared path (incl. _Mem._ strip)
+        t = TextNormalizer.normalizePDFGlyphArtifacts(t)
         t = t.replacingOccurrences(of: #"\n(?!\n)"#, with: " ", options: .regularExpression)
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
     }

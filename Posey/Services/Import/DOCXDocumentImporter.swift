@@ -197,24 +197,20 @@ struct DOCXDocumentImporter {
 // ========== BLOCK 03: NORMALIZATION - START ==========
     /// Display normalization preserves visual-page markers; plain-text
     /// normalization is applied after marker strip.
+    ///
+    /// 2026-06-08 (normalizer-parity pass): both route through the single
+    /// shared `TextNormalizer.normalizeUniversal` — replacing the prior
+    /// hand-rolled subset — so DOCX gets the SAME cleanup as every other
+    /// format, including `stripGutenbergItalics` (`_Mem._` → `Mem.`) and
+    /// CP1252 mojibake repair it previously lacked. hardWrapped:false (DOCX
+    /// emits real paragraphs). The `[[POSEY_VISUAL_PAGE:…]]` markers contain
+    /// no `_`/hyphen-wrap patterns, so the universal passes leave them intact.
     private func normalizeDisplay(_ text: String) -> String {
-        TextNormalizer.stripMojibakeAndControlCharacters(text)
-            .replacingOccurrences(of: "\u{00A0}", with: " ")
-            .replacingOccurrences(of: "\u{00AD}", with: "")
-            .replacingOccurrences(of: "\t", with: " ")
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: #"[ ]{2,}"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
-            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        TextNormalizer.normalizeUniversal(text)
     }
 
     private func normalizePlain(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: #"[ ]{2,}"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        TextNormalizer.normalizeUniversal(text)
     }
 
     private func stripVisualPageMarkers(from text: String) -> String {

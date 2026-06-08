@@ -18,12 +18,36 @@ import Foundation
 /// twice — once per page and again across page boundaries).
 enum TextNormalizer {
 
-    /// Apply the full normalization pass appropriate for plain-text input.
-    /// Order matters — line-ending normalization must run before regex
-    /// passes that anchor on `\n`, hyphen collapsing must run before
-    /// newline-to-space conversion, etc. Idempotent and safe on clean text.
+    /// **THE shared entry point every importer routes through (2026-06-08
+    /// normalizer-parity pass).** Applies the full universal cleanup so all 7
+    /// formats clean text identically, then folds in the two universal
+    /// à-la-carte fixes that previously only TXT ran:
+    ///   - `stripGutenbergItalics` — `_Mem._` → `Mem.` (now universal: real
+    ///     RTF/DOCX/HTML/EPUB/MD derived from Gutenberg carry literal
+    ///     underscores that NSAttributedString / Readability preserve).
+    ///   - `unwrapHardLineBreaks` — ONLY when `hardWrapped` is true (TXT and
+    ///     other ~72-char hard-wrapped sources). Structured formats emit
+    ///     discrete paragraphs already, so they pass `hardWrapped: false`.
+    ///
+    /// Genuinely format-specific passes stay OUT of here: PDF glyph-spacing
+    /// repair (`normalizePDFGlyphArtifacts`) and the PDF cross-page hyphen
+    /// second pass are applied by the PDF importer on top of this.
+    static func normalizeUniversal(_ text: String, hardWrapped: Bool = false) -> String {
+        var t = normalize(text)
+        if hardWrapped { t = unwrapHardLineBreaks(t) }
+        t = stripGutenbergItalics(t)
+        return t
+    }
+
+    /// The universal cleanup pipeline (no format-specific passes). Order
+    /// matters — line-ending normalization must run before regex passes that
+    /// anchor on `\n`, hyphen collapsing must run before newline-to-space
+    /// conversion, etc. Idempotent and safe on clean text. Most callers
+    /// should use `normalizeUniversal(_:hardWrapped:)`; this is exposed for
+    /// the PDF path, which composes it with its own glyph/hyphen passes.
     static func normalize(_ text: String) -> String {
         var t = text
+        t = repairCP1252Mojibake(t)         // 2026-06-08 — universal (before control strip, per its docstring)
         t = stripBOM(t)
         t = stripMojibakeAndControlCharacters(t)  // 2026-05-05 — universal
         t = stripInvisibleCharacters(t)
@@ -32,11 +56,25 @@ enum TextNormalizer {
         t = stripLineBreakHyphens(t)        // catches both - and ¬ as line-break markers
         t = stripWaybackPrintHeaders(t)     // PDF-from-Wayback artifacts
         t = stripAsterismLines(t)           // 2026-05-20 — PG scene-break asterisks
-        t = collapseSpacedLetters(t)
-        t = collapseSpacedDigits(t)
+        // collapseSpacedLetters / collapseSpacedDigits are PDF-glyph-specific
+        // (see normalizePDFGlyphArtifacts) — NOT run here: other formats have
+        // real text runs and would suffer false collapses on intentional
+        // letter-spacing.
         t = normalizeTabsAndSpaces(t)
         t = collapseExcessiveBlankLines(t)
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// PDF-specific glyph-positioning repair: `C O N T E N T S` → `CONTENTS`,
+    /// `1 9 4 5` → `1945`. These artifacts come from PDFKit splitting glyphs
+    /// during extraction; real-text formats don't produce them, so this is
+    /// applied ONLY by the PDF importer (on top of `normalize`), never in the
+    /// universal path — collapsing intentional letter-spacing in a DOCX/HTML
+    /// would corrupt prose.
+    static func normalizePDFGlyphArtifacts(_ text: String) -> String {
+        var t = collapseSpacedLetters(text)
+        t = collapseSpacedDigits(t)
+        return t
     }
 
     /// Universal mojibake + control-character strip. Per Mark's

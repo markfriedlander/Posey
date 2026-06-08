@@ -563,58 +563,24 @@ struct HTMLDocumentImporter {
 
 // ========== BLOCK 3: TEXT NORMALIZATION - START ==========
     private func normalize(_ text: String) -> String {
-        var t = text
-        // 2026-05-05 — Universal mojibake + control-character strip
-        // (TextNormalizer.stripMojibakeAndControlCharacters covers
-        // C0/C1 controls, PUA, replacement char, known iOS sentinel
-        // mojibake, etc.). Format-parity policy.
-        t = TextNormalizer.stripMojibakeAndControlCharacters(t)
-        t = t.replacingOccurrences(of: "\u{00A0}", with: " ")   // non-breaking space
-        t = t.replacingOccurrences(of: "\u{00AD}", with: "")    // Unicode soft hyphen (invisible; strip entirely)
-        // 2026-05-05 — Strip ANY Unicode Private Use Area characters
-        // (U+E000–U+F8FF), control characters (U+0080–U+009F), and
-        // bare U+E001 paragraph-sentinel residue. The
-        // injectParagraphMarkers pass uses U+E001 as a paragraph
-        // sentinel and the post-extraction replace handles most cases,
-        // but on iOS 18+ NSAttributedString sometimes leaves residue
-        // — a multi-byte sequence shows up where the U+E001 was, with
-        // U+0081 control chars adjacent. Real documents never contain
-        // PUA or C1 control chars in normal text, so a blanket filter
-        // is safe and prevents the language detector from seeing
-        // these as non-Latin script content (which was tripping the
-        // non-English banner on the Estuaries article).
-        //
-        // Using unicodeScalars filter rather than regex because ICU
-        // regex character-class escaping inside Swift raw strings is
-        // fragile (\u{XXXX} braces aren't standard ICU). The filter
-        // is deterministic and easy to reason about.
-        t = String(String.UnicodeScalarView(t.unicodeScalars.compactMap { scalar -> Unicode.Scalar? in
-            let v = scalar.value
-            // Strip PUA range
-            if v >= 0xE000 && v <= 0xF8FF { return nil }
-            // Strip C1 control characters (the U+0081 leftover crowd)
-            if v >= 0x0080 && v <= 0x009F { return nil }
-            return scalar
-        }))
-        t = t.replacingOccurrences(of: "\r\n", with: "\n")
-        t = t.replacingOccurrences(of: "\r",   with: "\n")
-        t = t.replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
-        t = collapseLineBreakHyphens(t)                         // "word-\nword" → "wordword" (EPUB/HTML line-break hyphens)
-        t = t.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 2026-06-08 (normalizer-parity pass): route through the single shared
+        // entry point. This is the per-chapter/per-document text exit for BOTH
+        // standalone HTML (loadDocument → loadText) AND EPUB (which calls
+        // loadText per spine item), so one call brings both formats to full
+        // parity — `stripGutenbergItalics` (`_Mem._` → `Mem.`), CP1252 mojibake
+        // repair, BOM/invisible strip, tab/space normalize, line-break-hyphen
+        // collapse — all previously absent here. The prior hand-rolled subset
+        // (mojibake/control strip, PUA/C1 filter, nbsp/soft-hyphen, CRLF,
+        // collapseLineBreakHyphens, blank-line collapse) is fully subsumed by
+        // `normalizeUniversal` (stripMojibakeAndControlCharacters already covers
+        // PUA + C1). hardWrapped:false — HTML/EPUB emit real paragraphs.
+        // normalizeUniversal is idempotent, so EPUB's later normalizeDisplay
+        // re-pass over the joined chapters causes no length drift and the
+        // per-chapter offset map stays aligned.
+        TextNormalizer.normalizeUniversal(text)
     }
-
-    /// Collapses line-break hyphenation: "fas-\ncism" or "fas- cism" → "fascism".
-    /// Only fires when a lowercase continuation follows "- " or "-\n",
-    /// distinguishing line-break splits from intentional compound words like "anti-fascist".
-    private func collapseLineBreakHyphens(_ text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z]+)-[ \n]([a-z]+)"#) else { return text }
-        return regex.stringByReplacingMatches(
-            in: text,
-            range: NSRange(text.startIndex..., in: text),
-            withTemplate: "$1$2"
-        )
-    }
+    // (collapseLineBreakHyphens removed 2026-06-08 — subsumed by the shared
+    //  TextNormalizer.stripLineBreakHyphens inside normalizeUniversal.)
 // ========== BLOCK 3: TEXT NORMALIZATION - END ==========
 
 

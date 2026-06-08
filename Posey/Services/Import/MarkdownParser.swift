@@ -69,7 +69,17 @@ struct MarkdownParser {
         }
 
         func appendBlock(kind: DisplayBlockKind, text: String, displayPrefix: String? = nil) {
-            let cleaned = cleanInlineMarkdown(text)
+            // 2026-06-08 (normalizer-parity pass): after stripping inline
+            // markdown syntax (which already removes `_Mem._` → `Mem.`), route
+            // the block text through the single shared `normalizeUniversal` so
+            // Markdown gets the SAME universal cleanup as every other format
+            // (CP1252 mojibake repair, mojibake/control/PUA strip, BOM +
+            // invisible-char strip) — previously absent for MD. Applied here,
+            // BEFORE the offset computation below, so block offsets stay exact.
+            // hardWrapped:false (cleanInlineMarkdown already collapsed the
+            // block to a single line); stripGutenbergItalics is a safe no-op
+            // (the parser removed the underscores already).
+            let cleaned = TextNormalizer.normalizeUniversal(cleanInlineMarkdown(text))
             guard cleaned.isEmpty == false else { return }
 
             let separatorLength = plainTextParts.isEmpty ? 0 : 2

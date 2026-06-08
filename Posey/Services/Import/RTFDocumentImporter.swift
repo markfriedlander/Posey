@@ -243,17 +243,15 @@ extension RTFDocumentImporter {
     }
 
     fileprivate func normalize(_ text: String) -> String {
-        // 2026-06-04 — repair UTF-8-as-CP1252 mojibake FIRST. RTFs that embed raw
-        // UTF-8 under a `\ansi` declaration (no \ansicpg/\u escapes) make
-        // NSAttributedString surface `’`→`â€™`, `è`→`Ã¨`, etc. Reassemble the real
-        // characters before the control-char strip and offset math run.
-        TextNormalizer.stripMojibakeAndControlCharacters(TextNormalizer.repairCP1252Mojibake(text))
-            .replacingOccurrences(of: "\u{00A0}", with: " ")
-            .replacingOccurrences(of: "\u{00AD}", with: "")
-            .replacingOccurrences(of: "\u{000C}", with: "")   // form feed (#12)
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+        // 2026-06-08 (normalizer-parity pass): route through the single shared
+        // entry point so RTF gets the SAME universal cleanup as every other
+        // format — CP1252 mojibake repair (RTFs embedding raw UTF-8 under
+        // `\ansi`), control/invisible strip, line-break hyphens, asterism
+        // strip, AND `stripGutenbergItalics` (`_Mem._` → `Mem.`). This is
+        // called on BOTH the body text (line 75) and the heading-search needle
+        // (line 154), so the offset coordinate system stays self-consistent.
+        // hardWrapped:false — RTF emits real paragraphs, not ~72-char wraps.
+        TextNormalizer.normalizeUniversal(text)
             // 2026-06-01 (heading-promotion fix) — one paragraph per unit.
             // RTF (via NSAttributedString) emits a single `\n` at every `\par`
             // break, but `RTFLibraryImporter.buildUnits` splits paragraphs on

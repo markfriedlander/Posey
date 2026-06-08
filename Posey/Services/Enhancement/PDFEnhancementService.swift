@@ -178,9 +178,9 @@ actor PDFEnhancementService {
     }
 
     /// Process a single document through Tier 2 → Tier 3 → embedding.
-    /// **Step 5 (this commit):** runs Tier 2 (Vision OCR + reconciler
-    /// + streaming chunk replacement with reader-aware priority + TTS
-    /// + viewport locks). Tier 3 stub remains — Step 6 fills it in.
+    /// Tier 2 = Vision OCR + reconciler + streaming chunk replacement with
+    /// reader-aware priority + TTS + viewport locks. Tier 3 = AFM fusion-token
+    /// repair (`runTier3`, applied via `DatabaseManager.replaceTokenInUnits`).
     private func processDocument(_ documentID: UUID) async {
         guard let db = databaseManager else {
             dbgLog("PDFEnhancementService: processDocument(%@) skipped — no databaseManager",
@@ -504,7 +504,7 @@ actor PDFEnhancementService {
     /// `document_afm_corrections`), and for each remaining token:
     /// asks AFM via `FusionCorrectionAFM.correct`, records the
     /// verdict, and (if AFM proposed a change) applies the swap
-    /// across the whole document via `DatabaseManager.replaceTokenInDocument`.
+    /// across the whole document via `DatabaseManager.replaceTokenInUnits`.
     ///
     /// Sequential per Mark's directive — one token per AFM call (Rule
     /// 6: local inference is free; batching gives no quality benefit

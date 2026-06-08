@@ -71,22 +71,15 @@ struct TXTDocumentImporter {
     }
 
     private func normalize(_ text: String) -> String {
-        // Delegates to the shared TextNormalizer. Brings TXT to parity with
-        // the PDF importer so artifacts that came up via the synthetic-corpus
-        // verifier (line-break hyphens, ZWSP, tabs, multi-blank collapse,
-        // per-line trailing whitespace, spaced letters/digits, ¬ as wrap
-        // marker) are handled consistently.
-        //
-        // 2026-05-27 — then unwrap Gutenberg-style hard line wraps
-        // (~72-char display-width breaks) within each paragraph block.
-        // Without this, prose paragraphs render with the source file's
-        // line breaks preserved, so every paragraph ladders down the
-        // screen instead of reflowing to the device width. See
-        // TextNormalizer.unwrapHardLineBreaks for the tradeoffs.
-        TextNormalizer.stripGutenbergItalics(
-            TextNormalizer.unwrapHardLineBreaks(
-                TextNormalizer.normalize(text)
-            )
-        )
+        // 2026-06-08 (normalizer-parity pass): route through the single shared
+        // entry point. TXT is a hard-wrapped source (Gutenberg's ~72-char
+        // display-width breaks), so `hardWrapped: true` reflows in-paragraph
+        // line breaks; `normalizeUniversal` also applies the universal cleanup
+        // + `stripGutenbergItalics` (`_Mem._` → `Mem.`). Behavior is identical
+        // to the prior `normalize → unwrapHardLineBreaks → stripGutenbergItalics`
+        // chain, now via the same path all 7 importers use. (Spaced-glyph
+        // repair was PDF-glyph-specific and is no longer applied to TXT — clean
+        // Gutenberg prose doesn't carry the artifact.)
+        TextNormalizer.normalizeUniversal(text, hardWrapped: true)
     }
 }

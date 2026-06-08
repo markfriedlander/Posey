@@ -108,6 +108,17 @@ struct UnitRowView: View {
     /// Format: `posey-sentence://<sentence-uuid>`.
     static let sentenceURLScheme = "posey-sentence"
 
+    /// Custom attribute that marks a sentence's character range in the
+    /// UITextView prose path, used INSTEAD of `.link`. UITextView force-renders
+    /// `.link` ranges with a blue underline that TextKit 2 won't let us
+    /// suppress (neither `linkTextAttributes[.underlineStyle:0]` nor per-range
+    /// `underlineStyle`/`underlineColor` removes it — confirmed on device,
+    /// 2026-06-08). Marking ranges with this custom key instead means no link
+    /// styling is ever applied; `ProseUnitTextView`'s tap gesture maps a tap
+    /// location to this attribute and dispatches the jump. Value: sentence
+    /// UUID `uuidString`.
+    static let sentenceIDAttribute = NSAttributedString.Key("poseySentenceID")
+
     /// Bound to the openURL action ReaderView installs via
     /// `.environment(\.openURL, ...)`. Captured here so the UITextView
     /// wrapper's sentence-tap callback can dispatch a posey-sentence://
@@ -268,10 +279,13 @@ struct UnitRowView: View {
             guard nsLower >= 0, nsUpper <= utf16.count, nsLower < nsUpper else { continue }
             let range = NSRange(location: nsLower, length: nsUpper - nsLower)
 
-            // Sentence-link URL for tap-to-jump dispatch.
-            if let url = URL(string: "\(Self.sentenceURLScheme)://\(sentence.id.uuidString)") {
-                attributed.addAttribute(.link, value: url, range: range)
-            }
+            // Sentence marker for tap-to-jump dispatch. CUSTOM attribute, NOT
+            // `.link`: UITextView force-renders `.link` ranges with a blue
+            // underline that TextKit 2 won't suppress. The tap gesture in
+            // ProseUnitTextView maps a tap location to this attribute and
+            // dispatches the jump — so prose renders as plain prose, zero link
+            // styling.
+            attributed.addAttribute(Self.sentenceIDAttribute, value: sentence.id.uuidString, range: range)
 
             // M8 dimming opacity for non-active sentences.
             let flatIdx = sentenceIndexBase + positionInUnit
@@ -649,16 +663,20 @@ struct ProseUnitTextView: UIViewRepresentable {
         tv.backgroundColor = .clear
         tv.textContainerInset = .zero
         tv.textContainer.lineFragmentPadding = 0
-        // Word-level link interaction (single-tap on a sentence
-        // dispatches; long-press still triggers selection).
-        tv.linkTextAttributes = [
-            .foregroundColor: UIColor.label,
-            .underlineStyle: 0
-        ]
         // Disable data detectors (UITextView would otherwise underline
         // URLs in the prose text itself, which we don't want).
         tv.dataDetectorTypes = []
         tv.delegate = context.coordinator
+        // Single-tap → sentence jump. We mark sentence ranges with a CUSTOM
+        // attribute (not `.link`, which UITextView force-underlines), so the
+        // tap is dispatched here by mapping the tap location to the sentence
+        // attribute. `cancelsTouchesInView = false` keeps long-press text
+        // selection working.
+        let tap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleSentenceTap(_:)))
+        tap.cancelsTouchesInView = false
+        tv.addGestureRecognizer(tap)
         // Let SwiftUI's parent (`.frame(maxWidth: .infinity)`) decide
         // the width; we'll size height to fit the wrapped text via
         // `sizeThatFits` below. Horizontal compression resistance low
@@ -736,26 +754,23 @@ struct ProseUnitTextView: UIViewRepresentable {
             self.onSentenceTap = onSentenceTap
         }
 
-        /// iOS 17+ replacement for the deprecated
-        /// `shouldInteractWith:` delegate. Returning a custom
-        /// `UIAction` here overrides the default open-the-URL
-        /// behavior. Posey sentence URLs use the
-        /// `posey-sentence://` scheme; parse the host as a UUID and
-        /// dispatch to the closure. For any other URL we let the
-        /// default action run (no opinion).
-        func textView(
-            _ textView: UITextView,
-            primaryActionFor textItem: UITextItem,
-            defaultAction: UIAction
-        ) -> UIAction? {
-            guard case let .link(url) = textItem.content,
-                  url.scheme == UnitRowView.sentenceURLScheme,
-                  let host = url.host(),
-                  let id = UUID(uuidString: host) else {
-                return defaultAction
-            }
-            return UIAction { [weak self] _ in
-                self?.onSentenceTap(id)
+        /// Single-tap handler. Maps the tap location to a character index
+        /// (via UITextInput — TextKit-version agnostic), reads the custom
+        /// `sentenceIDAttribute` at that index, and dispatches the jump. Taps
+        /// that don't land on a sentence range (margins, trailing space) carry
+        /// no attribute and are ignored. Replaces the old `.link`
+        /// `primaryActionFor` path, which forced a blue underline we couldn't
+        /// suppress.
+        @objc func handleSentenceTap(_ gesture: UITapGestureRecognizer) {
+            guard let tv = gesture.view as? UITextView else { return }
+            let point = gesture.location(in: tv)
+            guard let pos = tv.closestPosition(to: point) else { return }
+            let idx = tv.offset(from: tv.beginningOfDocument, to: pos)
+            guard let attributed = tv.attributedText, idx >= 0, idx < attributed.length else { return }
+            if let raw = attributed.attribute(
+                    UnitRowView.sentenceIDAttribute, at: idx, effectiveRange: nil) as? String,
+               let id = UUID(uuidString: raw) {
+                onSentenceTap(id)
             }
         }
     }

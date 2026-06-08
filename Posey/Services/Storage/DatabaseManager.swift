@@ -2809,25 +2809,28 @@ extension DatabaseManager {
                 for s in sentences { try insertSentence(s) }
             }
 
-            // Refresh derived plain_text on the documents row by
-            // joining all prose-bearing units. Cheap; one read +
-            // one write per page-rewrite.
+            // Refresh the stored `character_count` to match the
+            // rewritten units. The legacy `plain_text` / `display_text`
+            // columns were dropped at Step 10 (migrate(), :1135-1136) —
+            // both text forms now derive from `document_units` on demand
+            // via `plainText(for:)` / `displayText(for:)`, so writing
+            // them here threw "no such column" and rolled the whole
+            // Tier-2 page rewrite back. `character_count` is the one
+            // header column still stored; recompute it with the SAME
+            // prose-only `\n\n`-join semantics as persistParsedDocument
+            // (:2449-2453) so the reading-time / progress meter stay
+            // accurate after the rewrite.
             let refreshedUnits = try units(for: documentID)
-            let joined = refreshedUnits
+            let characterCount = refreshedUnits
                 .filter { $0.kind.carriesProseText }
                 .map(\.text)
                 .joined(separator: "\n\n")
-            let updateSQL = """
-            UPDATE documents
-            SET plain_text = ?, display_text = ?, character_count = ?
-            WHERE id = ?;
-            """
-            let updateStmt = try prepareStatement(sql: updateSQL)
+                .count
+            let updateStmt = try prepareStatement(
+                sql: "UPDATE documents SET character_count = ? WHERE id = ?;")
             defer { sqlite3_finalize(updateStmt) }
-            try bind(joined, at: 1, for: updateStmt)
-            try bind(joined, at: 2, for: updateStmt)
-            sqlite3_bind_int64(updateStmt, 3, sqlite3_int64(joined.count))
-            try bind(documentID.uuidString, at: 4, for: updateStmt)
+            sqlite3_bind_int64(updateStmt, 1, sqlite3_int64(characterCount))
+            try bind(documentID.uuidString, at: 2, for: updateStmt)
             try step(updateStmt)
 
             try execute("COMMIT;")
@@ -2905,25 +2908,27 @@ extension DatabaseManager {
                 totalOccurrences += matches.count
             }
 
-            // Refresh derived plain_text / display_text once at end
-            // (cheap full-doc join).
+            // Refresh the stored `character_count` to match the
+            // corrected units. The legacy `plain_text` / `display_text`
+            // columns were dropped at Step 10 (migrate(), :1135-1136) —
+            // writing them here threw "no such column", rolling back the
+            // whole Tier-3 transaction (the unit-text update AND the
+            // sentence regeneration done earlier), so every AFM token
+            // correction was silently lost. Recompute `character_count`
+            // with the SAME prose-only `\n\n`-join semantics as
+            // persistParsedDocument (:2449-2453).
             if unitsTouched > 0 {
                 let refreshedUnits = try units(for: documentID)
-                let joined = refreshedUnits
+                let characterCount = refreshedUnits
                     .filter { $0.kind.carriesProseText }
                     .map(\.text)
                     .joined(separator: "\n\n")
-                let updateSQL = """
-                UPDATE documents
-                SET plain_text = ?, display_text = ?, character_count = ?
-                WHERE id = ?;
-                """
-                let updateStmt = try prepareStatement(sql: updateSQL)
+                    .count
+                let updateStmt = try prepareStatement(
+                    sql: "UPDATE documents SET character_count = ? WHERE id = ?;")
                 defer { sqlite3_finalize(updateStmt) }
-                try bind(joined, at: 1, for: updateStmt)
-                try bind(joined, at: 2, for: updateStmt)
-                sqlite3_bind_int64(updateStmt, 3, sqlite3_int64(joined.count))
-                try bind(documentID.uuidString, at: 4, for: updateStmt)
+                sqlite3_bind_int64(updateStmt, 1, sqlite3_int64(characterCount))
+                try bind(documentID.uuidString, at: 2, for: updateStmt)
                 try step(updateStmt)
             }
 

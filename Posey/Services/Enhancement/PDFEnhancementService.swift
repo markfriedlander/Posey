@@ -599,8 +599,9 @@ actor PDFEnhancementService {
 
             // Apply the swap atomically across the document via the
             // unit-based replacement (rebuild step 7b). Sentences for
-            // affected units regenerate in the same transaction;
-            // derived plain_text / display_text refresh once at end.
+            // affected units regenerate in the same transaction; the
+            // stored character_count refreshes once at end (plain_text /
+            // display_text are derived from units on demand, not stored).
             do {
                 let result = try await MainActor.run {
                     try db.replaceTokenInUnits(
@@ -848,7 +849,8 @@ actor PDFEnhancementService {
                 // replacement (rebuild step 7b). Page content units
                 // (between consecutive pageBreak units) are swapped
                 // for new prose units derived from the Vision text;
-                // sentences regenerate; derived plain_text refreshes.
+                // sentences regenerate; stored character_count refreshes
+                // (plain_text / display_text derive from units on demand).
                 do {
                     let result = try await MainActor.run { () throws -> DatabaseManager.ReplacePageUnitsResult in
                         try db.replaceUnitsForPage(

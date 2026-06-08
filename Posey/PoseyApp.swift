@@ -110,6 +110,15 @@ struct PoseyApp: App {
                     await PDFEnhancementService.shared.configure(databaseManager: manager)
                     await PDFEnhancementService.shared.bootstrap()
 
+                    // 2026-06-08 (audit fix #2) — RAPTOR summary tree.
+                    // Configure the background builder and sweep the
+                    // library for documents that are indexed but have no
+                    // summary tree yet (pre-feature imports + builds
+                    // interrupted by termination). Self-gates on AFM
+                    // availability; cheap no-op when AFM is unavailable.
+                    await RaptorTreeService.shared.configure(databaseManager: manager)
+                    await RaptorTreeService.shared.bootstrap()
+
                     // 2026-05-23 — Step 8a: warm up the active embedding
                     // backend so any required asset download (e.g.
                     // NLContextual's mBERT on first launch) starts in

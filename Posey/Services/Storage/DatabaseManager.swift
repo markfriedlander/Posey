@@ -3233,6 +3233,41 @@ extension DatabaseManager {
         return Int(sqlite3_column_int(stmt, 0))
     }
 
+    /// Count of EMBEDDED leaf chunks for `documentID` — the rows the
+    /// RAPTOR builder clusters over. Leaves are `chunk_index <
+    /// raptorSummaryIndexBase`; an embedded leaf has a non-NULL vector.
+    /// Used by `RaptorTreeService` to decide whether a document has
+    /// enough indexed material to bother building a summary tree.
+    func embeddedLeafChunkCount(for documentID: UUID) throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let stmt = try prepareStatement(sql: """
+            SELECT COUNT(*) FROM unit_embedding_chunks
+            WHERE document_id = ? AND embedding IS NOT NULL AND chunk_index < ?;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(Self.raptorSummaryIndexBase))
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// Count of stored RAPTOR summary nodes for `documentID` (`chunk_index
+    /// >= raptorSummaryIndexBase`). `RaptorTreeService.bootstrap` uses this
+    /// to skip documents that already have a tree (avoids rebuilding on
+    /// every launch) and to find pre-feature documents that need one.
+    func raptorSummaryNodeCount(for documentID: UUID) throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let stmt = try prepareStatement(sql: """
+            SELECT COUNT(*) FROM unit_embedding_chunks
+            WHERE document_id = ? AND chunk_index >= ?;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(Self.raptorSummaryIndexBase))
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
     /// Fetch every chunk row for `documentID` (including embedding,
     /// possibly nil). Used by the semantic-pass side of the RRF
     /// hybrid retriever — Swift-side cosine over every row's vector.

@@ -194,6 +194,14 @@ actor UnitEmbeddingService {
                     ]
                 )
             }
+            // 2026-06-08 (audit fix #2) — production trigger for the RAPTOR
+            // summary tree. Leaves are embedded and retrievable NOW; the
+            // tree builds in the background and joins the same retrieval
+            // pool when ready ("usable now, improves in background").
+            // RaptorTreeService self-gates on AFM availability + a minimum
+            // leaf count, so this is a cheap no-op for small docs or
+            // AFM-less devices. Re-firing on a re-index correctly rebuilds.
+            Task { await RaptorTreeService.shared.enqueue(documentID) }
         }
 
         let batchSize = 32

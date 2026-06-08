@@ -549,6 +549,10 @@ final class LibraryViewModel: ObservableObject {
             // because its Tier 2/3 work runs on a separate actor
             // queue not bounded by SQLite FK semantics.
             Task { await PDFEnhancementService.shared.cancel(document.id) }
+            // 2026-06-08 (audit fix #2) — cancel any in-flight RAPTOR build
+            // for the same reason: its build runs on a separate actor queue
+            // and could otherwise re-insert summary rows after the cascade.
+            Task { await RaptorTreeService.shared.cancel(document.id) }
             try databaseManager.deleteDocument(document)
             // 2026-05-22 Phase 2.2 Step 5 — drop the source PDF
             // sidecar (no longer needed once the doc is gone).
@@ -824,6 +828,7 @@ extension LibraryViewModel {
                 // explicit cancel — its actor queue isn't bounded
                 // by SQLite cascade semantics.
                 Task { await PDFEnhancementService.shared.cancel(doc.id) }
+                Task { await RaptorTreeService.shared.cancel(doc.id) }  // audit fix #2
                 try databaseManager.deleteDocument(doc)
                 // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecar.
                 PageFlagsStore.delete(documentID: doc.id)
@@ -844,6 +849,9 @@ extension LibraryViewModel {
                 // cancellation removed (see deleteDocument).
                 Task {
                     for doc in docs { await PDFEnhancementService.shared.cancel(doc.id) }
+                }
+                Task {  // audit fix #2 — cancel in-flight RAPTOR builds too
+                    for doc in docs { await RaptorTreeService.shared.cancel(doc.id) }
                 }
                 for doc in docs { try databaseManager.deleteDocument(doc) }
                 // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecars.

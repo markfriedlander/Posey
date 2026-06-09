@@ -2735,8 +2735,8 @@ extension DatabaseManager {
     /// sentences regenerated. Used by `PDFEnhancementService.runTier3`
     /// for AFM fusion-token swaps.
     ///
-    /// Word-boundary regex; case-sensitive (matching the legacy
-    /// `replaceTokenInDocument` behavior).
+    /// Word-boundary regex; case-sensitive (matching the prior
+    /// pre-units token-replace behavior).
     func replaceTokenInUnits(
         documentID: UUID,
         original: String,

@@ -124,9 +124,19 @@ enum FusionCorrectionAFM {
         )
 
         do {
+            // 2026-06-09 (Mark) — greedy (argmax) sampling. Fusion split-vs-keep
+            // is a near-deterministic CLASSIFICATION, not creative generation:
+            // we want the single most-confident answer, and we want it to be the
+            // SAME on every import (the prior default sampling made the per-token
+            // verdict vary run to run — 15/12/11 changes across three GEB runs).
+            // Greedy removes that variance entirely (same token+line → same
+            // verdict) with no downside for this task; the output-resegmentation
+            // invariant still backstops. Mirrors the temperature:0.0 Posey
+            // already uses for query expansion (another classification task).
             let response = try await session.respond(
                 to: prompt,
-                generating: FusionCorrectionVerdict.self
+                generating: FusionCorrectionVerdict.self,
+                options: GenerationOptions(sampling: .greedy)
             )
             let corrected = response.content.corrected
                 .trimmingCharacters(in: .whitespacesAndNewlines)

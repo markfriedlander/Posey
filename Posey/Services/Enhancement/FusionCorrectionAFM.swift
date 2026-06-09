@@ -10,7 +10,7 @@ import FoundationModels
 @Generable
 struct FusionCorrectionVerdict: Sendable {
 
-    @Guide(description: "If the input word is two or more words incorrectly joined together (a fusion error from PDF text extraction), output the corrected form with proper spaces between the words. If the input is a single legitimate word, a personal name, a place name, an acronym, a brand name, a programming identifier, or any other meaningful single token, output the input UNCHANGED. Match the case of the input — if the input is all uppercase, return uppercase; if mixed case, preserve the case structure where possible.")
+    @Guide(description: "The single TOKEN you were given, judged using the LINE it appears in. If the token is a clear OCR fusion of two or more ordinary words (e.g. ANETERNAL, WellTempered), output it split into those words with spaces. If the token is a mathematical or logical formula, an equation, source code, a programming identifier, an acronym, a brand name, or a personal/place name, output it UNCHANGED. Output ONLY the token (corrected or unchanged) — NEVER the surrounding line. Match the case of the input — all uppercase stays uppercase; mixed case preserved where possible.")
     let corrected: String
 }
 #endif
@@ -45,12 +45,21 @@ struct FusionCorrectionVerdict: Sendable {
 ///     the same token isn't re-evaluated on subsequent runs.
 enum FusionCorrectionAFM {
 
-    /// Returns the AFM verdict for `token`, or nil on any failure /
-    /// AFM-unavailable path.
-    static func correct(_ token: String) async -> String? {
+    /// Returns the AFM verdict for `token`, judged in the context of
+    /// `context` (the line/sentence the token appeared in), or nil on
+    /// any failure / AFM-unavailable path.
+    ///
+    /// 2026-06-09 (Mark) — context added to stop catastrophic formula
+    /// mangling. Without surrounding text AFM saw a bare token like
+    /// `Va:(atO)=a` and "split" the OCR-garbled TNT formula ∀a:(a+0)=a
+    /// into the nonsense words "VA AT O". Given the line, AFM can tell a
+    /// formula / equation / code / notation from a real word-fusion and
+    /// leave the former UNCHANGED. The context is used ONLY to judge the
+    /// one token — AFM never rewrites the surrounding text.
+    static func correct(_ token: String, context: String) async -> String? {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-            return await Self.correctIfAvailable(token)
+            return await Self.correctIfAvailable(token, context: context)
         }
         return nil
         #else
@@ -60,56 +69,53 @@ enum FusionCorrectionAFM {
 
     #if canImport(FoundationModels)
     @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
-    private static func correctIfAvailable(_ token: String) async -> String? {
+    private static func correctIfAvailable(_ token: String, context: String) async -> String? {
         let model = SystemLanguageModel.default
         guard case .available = model.availability else {
             return nil
         }
 
         let instructions = """
-        You correct PDF text-extraction errors where two or more \
-        words have been incorrectly joined into a single token. For \
-        each input word, decide:
+        You repair PDF text-extraction errors where two or more ordinary \
+        words got incorrectly joined into ONE token. You are given a TOKEN \
+        and the LINE it appears in. Use the line ONLY to judge that one \
+        token. Decide:
 
-        - If the word is a single legitimate word, name, place, \
-          acronym, brand name, technical term, or programming \
-          identifier, return it UNCHANGED.
-        - If the word is two or more words incorrectly joined, return \
-          the corrected form with proper spaces.
+        - If the token is a clear fusion of two or more ordinary words, \
+          output it split into those words with spaces (use a hyphen \
+          instead only when that is the conventional written form, e.g. \
+          "WellTempered" → "Well-Tempered").
+        - Otherwise output the token UNCHANGED.
 
-        **CamelCase tokens (a lowercase letter followed by an \
-        uppercase letter within a single token, e.g. PowerPoint, \
-        iPhone, DataVault, JavaScript) are almost always intentional \
-        brand names or programming identifiers and should be returned \
-        UNCHANGED.** Splitting a CamelCase brand into two words \
-        damages the document. Only split a CamelCase token when you \
-        are very confident it's a real fusion error (e.g. an all-caps \
-        token that happens to contain a lowercase letter from an OCR \
-        glitch).
+        **Leave the token UNCHANGED when the line shows it is:**
+        - a mathematical or logical FORMULA / equation / notation (it sits \
+          among symbols like = + : ( ) and digits, or near words like \
+          "axiom", "theorem", "proof", "specification") — e.g. \
+          `Va:(atO)=a`, `S(SO+O)`, `(x→y)`. Mangling a formula is the \
+          WORST possible error; when in doubt about notation, KEEP IT.
+        - source code or a programming identifier (NSDictionary, getValue).
+        - an acronym, brand name, or a personal / place name.
 
-        All-uppercase fused tokens (ANETERNAL, INTHESPIRIT) are the \
-        common real fusion errors — those typically should be split. \
-        A single uppercase word (HOFSTADTER, DIFFERENT) is a regular \
-        word or proper noun and stays unchanged.
+        **CamelCase tokens** (a lowercase letter directly followed by an \
+        uppercase one, e.g. PowerPoint, iPhone, JavaScript) are usually \
+        intentional brands/identifiers — KEEP unless the line makes a real \
+        word-fusion obvious.
 
-        Examples:
-          ANETERNAL          → AN ETERNAL          (all-caps fusion, split)
-          INTHESPIRIT        → IN THE SPIRIT       (all-caps fusion, split)
-          HOFSTADTER         → HOFSTADTER          (legitimate surname)
-          DIFFERENT          → DIFFERENT           (legitimate word)
-          PowerPoint         → PowerPoint          (CamelCase brand — KEEP)
-          iPhone             → iPhone              (CamelCase brand — KEEP)
-          DataVault          → DataVault           (CamelCase brand — KEEP)
-          KeyInfrastructure  → KeyInfrastructure   (CamelCase technical name — KEEP)
-          JavaScript         → JavaScript          (CamelCase technical name — KEEP)
-          cATclaW            → cATclaW             (stylized typography — KEEP)
-          NSDictionary       → NSDictionary        (programming identifier — KEEP)
+        Critical: output ONLY the token — corrected or unchanged. NEVER \
+        output any of the surrounding line.
 
-        Output only the corrected (or unchanged) word.
+        Examples (token | line → output):
+          ANETERNAL | "Godel Escher Bach ANETERNAL GOLDEN BRAID"        → AN ETERNAL   (word fusion, split)
+          WellTempered | "fugues from Bach's WellTempered Clavier"      → Well-Tempered (word fusion)
+          AddisonWesley | "published by AddisonWesley in 1979"          → Addison Wesley (word fusion)
+          Va:(atO)=a | "(4) Va:(atO)=a axiom 2  (5) (SO+O)=SO"          → Va:(atO)=a   (FORMULA — keep)
+          HOFSTADTER | "by Douglas HOFSTADTER, a professor"             → HOFSTADTER   (surname — keep)
+          NSDictionary | "store it in an NSDictionary keyed by id"      → NSDictionary (identifier — keep)
         """
 
         let prompt = """
-        Word: \(token)
+        Line: \(context)
+        Token: \(token)
         """
 
         let session = LanguageModelSession(
@@ -122,11 +128,40 @@ enum FusionCorrectionAFM {
                 to: prompt,
                 generating: FusionCorrectionVerdict.self
             )
-            return response.content.corrected.trimmingCharacters(in: .whitespacesAndNewlines)
+            let corrected = response.content.corrected
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Output invariant (Mark, 2026-06-09): a fusion correction may
+            // only RE-SEGMENT the token — insert spaces/hyphens between its
+            // existing characters — never add or remove letters. With the
+            // line now in the prompt, AFM occasionally "completes" a token
+            // from context (e.g. token "FREDERICK" in "…FREDERICK THE GREAT…"
+            // → "FREDERICK THE GREAT"), which the whole-document swap then
+            // DUPLICATES into "FREDERICK THE GREAT THE GREAT". Reject any
+            // output whose alphanumeric content differs from the input and
+            // keep the token unchanged. This is an OUTPUT correctness check
+            // (what "fusion repair" means), NOT an input-class skip — it
+            // passes every genuine split (WellTempered→Well-Tempered,
+            // ANETERNAL→AN ETERNAL) and also backstops formula hallucination.
+            guard isPureResegmentation(of: token, into: corrected) else {
+                return token   // keep original; recorded as a "kept" verdict
+            }
+            return corrected
         } catch {
             // Refusal or other error → silent skip.
             return nil
         }
+    }
+
+    /// True iff `corrected` is `token` with only separators (whitespace /
+    /// hyphens / punctuation) re-arranged — i.e. identical alphanumeric
+    /// content, case-insensitive. Guarantees a correction never adds or
+    /// drops letters/words.
+    fileprivate static func isPureResegmentation(of token: String, into corrected: String) -> Bool {
+        func core(_ s: String) -> String {
+            String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+        }
+        let a = core(token)
+        return !a.isEmpty && a == core(corrected)
     }
     #endif
 }

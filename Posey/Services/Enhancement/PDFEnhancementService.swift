@@ -511,6 +511,35 @@ actor PDFEnhancementService {
     /// for a per-token decision and costs prompt clarity). The actor
     /// isolation provides natural pacing without an explicit
     /// cooldown (matches Phase B chunk enhancement).
+    /// Extract the line/sentence around the FIRST occurrence of `token`
+    /// in `plainText` so AFM can judge fusion-vs-notation in context
+    /// (Mark, 2026-06-09). Returns the enclosing newline-delimited line,
+    /// capped to a ~240-char window centered on the token so a long
+    /// paragraph doesn't bloat the prompt. Falls back to the bare token
+    /// if it can't be located (shouldn't happen — detector found it here).
+    private static func contextLine(for token: String, in plainText: String) -> String {
+        guard let r = plainText.range(of: token) else { return token }
+        let lineStart = plainText.range(of: "\n", options: .backwards,
+                                        range: plainText.startIndex..<r.lowerBound)?.upperBound
+            ?? plainText.startIndex
+        let lineEnd = plainText.range(of: "\n",
+                                      range: r.upperBound..<plainText.endIndex)?.lowerBound
+            ?? plainText.endIndex
+        var line = String(plainText[lineStart..<lineEnd])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let maxLen = 240
+        if line.count > maxLen, let tr = line.range(of: token) {
+            let tStart = line.distance(from: line.startIndex, to: tr.lowerBound)
+            let half = maxLen / 2
+            let lo = max(0, tStart - half)
+            let hi = min(line.count, tStart + token.count + half)
+            let loIdx = line.index(line.startIndex, offsetBy: lo)
+            let hiIdx = line.index(line.startIndex, offsetBy: hi)
+            line = String(line[loIdx..<hiIdx])
+        }
+        return line.isEmpty ? token : line
+    }
+
     private func runTier3(documentID: UUID) async {
         guard let db = databaseManager else { return }
 
@@ -571,7 +600,13 @@ actor PDFEnhancementService {
                 return
             }
 
-            let verdict = await FusionCorrectionAFM.correct(token)
+            // 2026-06-09 (Mark) — give AFM the line the token sits in so
+            // it can tell a real word-fusion from formula/code/notation
+            // (the `Va:(atO)=a → VA AT O` formula-mangling fix). The
+            // context comes straight from this plainText, where the
+            // detector found the token.
+            let context = Self.contextLine(for: token, in: plainText)
+            let verdict = await FusionCorrectionAFM.correct(token, context: context)
             guard let corrected = verdict else {
                 // AFM unavailable or refused — skip silently.
                 dbgLog("PDFEnhancementService: Tier 3 — AFM returned nil for token '%@'", token)

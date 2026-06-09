@@ -32,6 +32,17 @@ struct RTFDocumentImporter {
     struct RTFParsedDocument {
         let plainText: String
         let headings: [RTFHeadingEntry]
+        /// 2026-06-09 (#2 RTF images) — `plainText` with inline
+        /// `[[POSEY_VISUAL_PAGE:0:<uuid>]]` markers spliced in at each
+        /// embedded image's position (located via the extractor's
+        /// preceding-text needle). Equals `plainText` when the RTF has no
+        /// decodable images. The library importer runs this through
+        /// `VisualPlaceholderSplitter` to interleave `.image` units, exactly
+        /// like DOCX/EPUB/HTML.
+        let displayText: String
+        /// Decoded embedded images (`\pngblip` / `\jpegblip`), in document
+        /// order, ready for `DatabaseManager.insertImage`. Empty when none.
+        let images: [PageImageRecord]
     }
 }
 // ========== BLOCK 1: TYPES + ERRORS - END ==========
@@ -79,7 +90,23 @@ extension RTFDocumentImporter {
         let rawHeadings = detectHeadings(rawParagraphs: rawParagraphs)
         let headings = mapHeadingsToNormalizedOffsets(rawHeadings, in: normalized)
 
-        return RTFParsedDocument(plainText: normalized, headings: headings)
+        // 2026-06-09 (#2 RTF images) — extract embedded `\pict` blips and
+        // splice their markers into a displayText built from the SAME
+        // normalized plainText, so the units coordinate stays consistent
+        // (markers contribute 0 chars to plainText; image units are skipped
+        // by applyHeadingMarkers' offset cursor — see buildDisplayText).
+        let extractedImages = RTFImageExtractor.extract(from: data)
+        let (displayText, usedImages) = Self.buildDisplayText(
+            plainText: normalized,
+            images: extractedImages
+        )
+
+        return RTFParsedDocument(
+            plainText: normalized,
+            headings: headings,
+            displayText: displayText,
+            images: usedImages
+        )
     }
 }
 // ========== BLOCK 2: PUBLIC LOAD ENTRYPOINTS - END ==========
@@ -275,6 +302,95 @@ extension RTFDocumentImporter {
     }
 }
 // ========== BLOCK 4: OFFSET MAPPING + NORMALIZATION - END ==========
+
+// ========== BLOCK 6: IMAGE DISPLAYTEXT ASSEMBLY - START ==========
+extension RTFDocumentImporter {
+    /// Splice `[[POSEY_VISUAL_PAGE:0:<uuid>]]` markers into the normalized
+    /// plainText to produce the displayText the units pipeline consumes.
+    ///
+    /// **Placement via needle.** `RTFImageExtractor` can't give a plainText
+    /// offset directly — it walks the RAW RTF (ISO-Latin1) while plainText
+    /// comes from `NSAttributedString`, two different renderings — so each
+    /// image carries a `precedingTextTail`: up to 60 chars of best-effort
+    /// rendered text immediately before its `\pict`. We locate that needle in
+    /// the normalized plainText and insert the marker right after it (its own
+    /// paragraph, `\n\n`-delimited). This mirrors the needle technique the
+    /// importer already uses to anchor headings.
+    ///
+    /// **Tolerant match (category, Rule 10).** The raw-RTF needle and the
+    /// NSAttributedString plainText can diverge on escapes the raw walker
+    /// renders coarsely (a `舗` curly apostrophe surfaces as `?` in the
+    /// needle but `’` in plainText). So we don't require an exact 60-char
+    /// hit: we search for the LONGEST trailing slice of the needle that
+    /// occurs in plainText (down to 10 chars), advancing a forward cursor so
+    /// multiple images keep document order. If nothing matches (heavily
+    /// diverged or empty needle → leading image), the marker is appended at
+    /// the end rather than dropped — the image still reaches the reader.
+    /// Markers contribute ZERO characters to plainText, so `plainText`
+    /// remains the heading-offset coordinate untouched.
+    static func buildDisplayText(
+        plainText: String,
+        images: [RTFImageExtractor.ExtractedImage]
+    ) -> (displayText: String, used: [PageImageRecord]) {
+        guard !images.isEmpty else { return (plainText, []) }
+
+        // Resolve an insertion char-offset for each image (document order).
+        var insertions: [(offset: Int, imageID: String)] = []
+        var used: [PageImageRecord] = []
+        var cursor = plainText.startIndex
+
+        for img in images {
+            used.append(img.record)
+            if let matchEnd = longestSuffixMatchEnd(
+                needle: img.precedingTextTail,
+                in: plainText,
+                from: cursor
+            ) {
+                let off = plainText.distance(from: plainText.startIndex, to: matchEnd)
+                insertions.append((off, img.record.imageID))
+                cursor = matchEnd
+            } else {
+                // Needle empty (leading image) or unmatched → append at end.
+                insertions.append((plainText.count, img.record.imageID))
+            }
+        }
+
+        // Splice markers in DESCENDING offset order so earlier offsets stay
+        // valid as we mutate. Each marker becomes its own `\n\n` paragraph.
+        var result = plainText
+        for ins in insertions.sorted(by: { $0.offset > $1.offset }) {
+            let marker = "\n\n[[POSEY_VISUAL_PAGE:0:\(ins.imageID)]]"
+            let idx = result.index(result.startIndex,
+                                   offsetBy: min(ins.offset, result.count))
+            result.insert(contentsOf: marker, at: idx)
+        }
+        return (result, used)
+    }
+
+    /// Return the end `String.Index` of the longest trailing slice of
+    /// `needle` (≥10 chars, trimmed) found in `text` at or after `from`.
+    /// Nil when `needle` is empty/too short or nothing matches.
+    private static func longestSuffixMatchEnd(
+        needle: String,
+        in text: String,
+        from: String.Index
+    ) -> String.Index? {
+        let trimmed = needle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 10 else { return nil }
+        let chars = Array(trimmed)
+        let minLen = 10
+        var len = chars.count
+        while len >= minLen {
+            let slice = String(chars.suffix(len))
+            if let r = text.range(of: slice, range: from..<text.endIndex) {
+                return r.upperBound
+            }
+            len -= 1
+        }
+        return nil
+    }
+}
+// ========== BLOCK 6: IMAGE DISPLAYTEXT ASSEMBLY - END ==========
 
 // ========== BLOCK 5: RAW RTF TOKENIZER - START ==========
 /// Minimal RTF tokenizer just for heading-detection purposes.

@@ -35,6 +35,8 @@ struct RTFLibraryImporter {
             fileName: url.lastPathComponent,
             fileType: url.pathExtension.lowercased(),
             plainText: parsed.plainText,
+            displayText: parsed.displayText,
+            images: parsed.images,
             headings: parsed.headings,
             contentHash: contentHash
         )
@@ -49,6 +51,8 @@ struct RTFLibraryImporter {
             fileName: fileName,
             fileType: fileType,
             plainText: parsed.plainText,
+            displayText: parsed.displayText,
+            images: parsed.images,
             headings: parsed.headings,
             contentHash: contentHash
         )
@@ -59,6 +63,8 @@ struct RTFLibraryImporter {
         fileName: String,
         fileType: String,
         plainText: String,
+        displayText: String,
+        images: [PageImageRecord],
         headings: [RTFDocumentImporter.RTFHeadingEntry],
         contentHash: String?
     ) throws -> Document {
@@ -95,11 +101,17 @@ struct RTFLibraryImporter {
         //    GEB's PDF dialogues) — physically SPLITTING the fusion needs RTF
         //    \par-normalization (separate, deeper, filed). Reader-facing
         //    rendering is correct; the data model is not yet one-unit-per-block.
-        let proseUnits = Self.buildUnits(
-            from: plainText,
-            documentID: documentID,
-            headingLevelByOffset: [:]
-        )
+        // 2026-06-09 (#2 RTF images) — when the RTF has embedded images,
+        // `displayText` carries `[[POSEY_VISUAL_PAGE:…]]` markers; route it
+        // through the SHARED VisualPlaceholderSplitter → block→unit path
+        // (same as DOCX/EPUB/HTML) so images interleave as `.image` units.
+        // When there are NO images the splitter returns no blocks and we keep
+        // the EXACT existing RTF paragraph-split path — zero behavior change
+        // for image-free RTFs (rtf_styled-headings / rtf_business-letter).
+        let blocks = VisualPlaceholderSplitter.parse(displayText: displayText)
+        let proseUnits: [ContentUnit] = blocks.isEmpty
+            ? Self.buildUnits(from: plainText, documentID: documentID, headingLevelByOffset: [:])
+            : ContentUnitBuilder.units(from: blocks, documentID: documentID)
         let headingMarkersByOffset = Dictionary(
             headings.map {
                 ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
@@ -150,6 +162,14 @@ struct RTFLibraryImporter {
             editionLabel: nil
         )
         try databaseManager.persistParsedDocument(parsedDoc)
+
+        // 2026-06-09 (#2 RTF images) — persist extracted images to the
+        // side-store the `.image` units' `metadata.imageID` references
+        // (mirrors DOCXLibraryImporter). Replace-on-reimport: clear first.
+        try databaseManager.deleteImages(for: documentID)
+        for image in images {
+            try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
+        }
 
         if existingDocument == nil {
             try databaseManager.upsertReadingPosition(.initial(for: documentID))

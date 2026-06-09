@@ -77,13 +77,18 @@ struct ReaderProgressEstimate: Equatable {
 
 
 // ========== BLOCK 02: VIEW - START ==========
-/// Ambient reader progress meter — thin bar + "~N min left" label.
-/// Sits at the bottom of the reader, always visible regardless of
-/// chrome state. Quiet typography (caption, secondary) so it doesn't
-/// pull attention from the document.
+/// Ambient reader "time remaining" label. Sits at the bottom of the
+/// reader, always visible regardless of chrome state. Quiet typography
+/// (caption, secondary) so it doesn't pull attention from the document.
 ///
-/// The progress bar uses the system tint at 35% opacity over a
-/// neutral track so it blends with both reading background variants.
+/// 2026-06-08 — Mark: REMOVED the thin progress bar (the "blue line").
+/// A prior instance added a 2px Capsule progress bar above this label
+/// (gray track + accent fill whose width tracked the reading fraction).
+/// Floating over the scrolling prose it read as a stray half-blue/
+/// half-gray underline beneath whatever sentence happened to be behind
+/// it — undocumented, unrequested, and visually noisy. Only the
+/// "N min left" label remains; the `fraction` is still computed and
+/// surfaced via the accessibility label.
 struct ReaderProgressMeter: View {
     @ObservedObject var viewModel: ReaderViewModel
 
@@ -107,49 +112,37 @@ struct ReaderProgressMeter: View {
 
     var body: some View {
         let snap = estimate
-        VStack(spacing: 4) {
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.08))
-                    Capsule()
-                        .fill(Color.accentColor.opacity(0.55))
-                        .frame(width: proxy.size.width * snap.fraction)
-                }
-            }
-            .frame(height: 2)
-            HStack {
-                Spacer()
-                Text(snap.label)
-                    .font(.caption2)
-                    // 2026-05-22 — Was .secondary (~0.6 opacity) which
-                    // got visually drowned by body text scrolling past
-                    // beneath the safe-area inset. .primary at 0.85
-                    // gives a clearly readable label without changing
-                    // the meter's quiet typography or layout.
-                    .foregroundStyle(.primary.opacity(0.85))
-                    // 2026-05-28 (N4) — Mark: add an opaque pill
-                    // background behind the remaining-time label so it
-                    // reads clearly regardless of what document text
-                    // is scrolling past underneath. Was a bare Text on
-                    // top of body prose; legibility depended on the
-                    // chars that happened to be behind it. Capsule
-                    // with `Color(.systemBackground)` is truly opaque
-                    // (not Material) and adapts to light/dark via the
-                    // system colorScheme. Subtle border keeps the pill
-                    // distinct from the page edge in either mode.
-                    .padding(.vertical, 3)
-                    .padding(.horizontal, 8)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(Color(.systemBackground))
-                            .overlay(
-                                Capsule(style: .continuous)
-                                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
-                            )
-                    )
-                    .accessibilityIdentifier("reader.progressMeter.label")
-            }
+        HStack {
+            Spacer()
+            Text(snap.label)
+                .font(.caption2)
+                // 2026-05-22 — Was .secondary (~0.6 opacity) which
+                // got visually drowned by body text scrolling past
+                // beneath the safe-area inset. .primary at 0.85
+                // gives a clearly readable label without changing
+                // the meter's quiet typography or layout.
+                .foregroundStyle(.primary.opacity(0.85))
+                // 2026-05-28 (N4) — Mark: add an opaque pill
+                // background behind the remaining-time label so it
+                // reads clearly regardless of what document text
+                // is scrolling past underneath. Was a bare Text on
+                // top of body prose; legibility depended on the
+                // chars that happened to be behind it. Capsule
+                // with `Color(.systemBackground)` is truly opaque
+                // (not Material) and adapts to light/dark via the
+                // system colorScheme. Subtle border keeps the pill
+                // distinct from the page edge in either mode.
+                .padding(.vertical, 3)
+                .padding(.horizontal, 8)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color(.systemBackground))
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                        )
+                )
+                .accessibilityIdentifier("reader.progressMeter.label")
         }
         .padding(.horizontal, 18)
         .padding(.bottom, 4)

@@ -1913,6 +1913,27 @@ extension DatabaseManager {
         try step(statement)
     }
 
+    /// 2026-06-09 (#3 Tier-3 verify) — read the recorded AFM fusion
+    /// verdicts for a document, newest first. Diagnostic surface for the
+    /// antenna's `LIST_AFM_CORRECTIONS` verb. Rows where `corrected ==
+    /// original` are AFM "kept" verdicts (recorded only for idempotency);
+    /// rows where they DIFFER are real applied fusion corrections — the
+    /// signal that proves Tier-3 actually fired, not just ran.
+    func afmCorrections(for documentID: UUID) throws -> [(original: String, corrected: String)] {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = "SELECT original, corrected FROM document_afm_corrections WHERE document_id = ? ORDER BY applied_at DESC;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        var out: [(original: String, corrected: String)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let o = sqliteString(statement, index: 0) ?? ""
+            let c = sqliteString(statement, index: 1) ?? ""
+            out.append((original: o, corrected: c))
+        }
+        return out
+    }
+
 }
 
 // ========== BLOCK 09: PHASE 2.2 TIER 3 FUSION REPAIR HELPERS - END ==========

@@ -1210,6 +1210,27 @@ extension LibraryViewModel {
                     "queuePosition": snapshot.queue.firstIndex(of: id) ?? -1
                 ])
 
+            case "LIST_AFM_CORRECTIONS":
+                // 2026-06-09 (#3 Tier-3 verify) — diagnostic verb exposing the
+                // recorded AFM fusion verdicts for a document. `changed` lists
+                // rows where corrected != original (REAL applied corrections —
+                // proves Tier-3 fired, not just ran); `keptCount` is the
+                // unchanged verdicts recorded for idempotency. Lets the antenna
+                // confirm a fusion correction fired AND persisted (survives
+                // relaunch, since it reads the on-disk table).
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: LIST_AFM_CORRECTIONS:<doc-id>"}"#
+                }
+                let afmRows = try databaseManager.afmCorrections(for: id)
+                let changed = afmRows.filter { $0.original != $0.corrected }
+                return json([
+                    "documentID": id.uuidString,
+                    "total": afmRows.count,
+                    "changedCount": changed.count,
+                    "keptCount": afmRows.count - changed.count,
+                    "changed": changed.map { ["original": $0.original, "corrected": $0.corrected] }
+                ])
+
             case "LIST_PAGE_FLAGS":
                 // 2026-05-22 — Tier 1/2 Phase 1 calibration verb.
                 // Returns the per-page confidence-detector output for

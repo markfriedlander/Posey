@@ -111,24 +111,29 @@ enum EPUBAnchorExtractor {
 
         let nsHtml = html as NSString
         let matches = regex.matches(in: html, range: NSRange(location: 0, length: nsHtml.length))
+        if matches.isEmpty { return data }
 
-        // Walk matches in reverse so insertion offsets don't shift earlier
-        // matches' positions out from under us.
-        for match in matches.reversed() {
+        // 2026-06-10 — SINGLE-PASS construction. The previous reverse-insert
+        // loop held `html[..<tagStart]` (a Substring sharing html's storage)
+        // across `html.insert`, forcing a full copy-on-write of the whole
+        // string EVERY iteration → on a large, marker-dense chapter (moby:
+        // ~270 markers in one 1.2 MB spine file) that churned ~hundreds of
+        // 1.2 MB copies and OOM'd the import. Build one output string forward
+        // instead: O(n) total, one allocation.
+        var out = ""
+        out.reserveCapacity(html.count + matches.count * 24)
+        var cursor = html.startIndex
+        for match in matches {
             guard match.numberOfRanges >= 2,
                   let idRange = Range(match.range(at: 1), in: html),
                   let tagStart = Range(match.range, in: html) else { continue }
             let fragmentID = String(html[idRange])
-            // Skip if a sentinel for this same id immediately precedes the
-            // tag — defends against double-insertion when the helper runs
-            // twice on the same HTML (shouldn't, but cheap safety).
-            let sentinel = "\(sentinelPrefix)\(fragmentID)\(sentinelSuffix)"
-            let upToTag = html[..<tagStart.lowerBound]
-            if upToTag.hasSuffix(sentinel) { continue }
-            html.insert(contentsOf: sentinel, at: tagStart.lowerBound)
+            out.append(contentsOf: html[cursor..<tagStart.lowerBound])
+            out.append("\(sentinelPrefix)\(fragmentID)\(sentinelSuffix)")
+            cursor = tagStart.lowerBound  // the tag itself is emitted on the next slice
         }
-
-        return html.data(using: .utf8) ?? data
+        out.append(contentsOf: html[cursor..<html.endIndex])
+        return out.data(using: .utf8) ?? data
     }
 
     /// Insert `[[POSEY_HEADING:N]]` immediately before each `<h1>`–`<h6>`
@@ -144,7 +149,7 @@ enum EPUBAnchorExtractor {
     /// are unaffected: their `<hN>` text equals the body unit text, so the
     /// title-anchored promotion produces the same headings.
     static func insertHeadingSentinels(from data: Data) -> Data {
-        guard var html = String(data: data, encoding: .utf8)
+        guard let html = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1) else {
             return data
         }
@@ -156,17 +161,23 @@ enum EPUBAnchorExtractor {
         }
         let nsHtml = html as NSString
         let matches = regex.matches(in: html, range: NSRange(location: 0, length: nsHtml.length))
-        for match in matches.reversed() {
+        if matches.isEmpty { return data }
+        // SINGLE-PASS construction (see insertAnchorSentinels for why — repeated
+        // String.insert with a held substring COW-copies the whole chapter each
+        // time and OOM'd heading-dense EPUBs).
+        var out = ""
+        out.reserveCapacity(html.count + matches.count * 18)
+        var cursor = html.startIndex
+        for match in matches {
             guard match.numberOfRanges >= 2,
                   let levelRange = Range(match.range(at: 1), in: html),
                   let tagStart = Range(match.range, in: html) else { continue }
-            let level = String(html[levelRange])
-            let sentinel = "\(headingSentinelPrefix)\(level)\(sentinelSuffix)"
-            let upToTag = html[..<tagStart.lowerBound]
-            if upToTag.hasSuffix(sentinel) { continue }
-            html.insert(contentsOf: sentinel, at: tagStart.lowerBound)
+            out.append(contentsOf: html[cursor..<tagStart.lowerBound])
+            out.append("\(headingSentinelPrefix)\(String(html[levelRange]))\(sentinelSuffix)")
+            cursor = tagStart.lowerBound
         }
-        return html.data(using: .utf8) ?? data
+        out.append(contentsOf: html[cursor..<html.endIndex])
+        return out.data(using: .utf8) ?? data
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -184,8 +195,8 @@ enum EPUBAnchorExtractor {
         let anchors: [Anchor]
         /// One entry per `[[POSEY_HEADING:N]]` sentinel, in document order.
         /// `offset` is the position in the stripped `plainText` of the
-        /// heading text's start; `level` is the `<hN>` level (1…6). The
-        /// caller reads the title from `plainText` at `offset`.
+        /// heading text's start; `level` is the `<hN>` level (1…6); `title`
+        /// is the heading line text (computed once, cheaply — see below).
         let headings: [HeadingHit]
 
         struct Anchor {
@@ -195,6 +206,7 @@ enum EPUBAnchorExtractor {
         struct HeadingHit {
             let level: Int
             let offset: Int
+            let title: String
         }
     }
 
@@ -218,7 +230,11 @@ enum EPUBAnchorExtractor {
 
         var result = ""
         var anchors: [ExtractionResult.Anchor] = []
-        var headings: [ExtractionResult.HeadingHit] = []
+        // Heading (level, offset) recorded during the pass; titles resolved
+        // ONCE after `result` is built (see below) so we never re-scan the
+        // chapter text per heading — that O(headings × textLen) cost OOM'd
+        // heading-dense, multi-chapter-per-spine EPUBs (moby: 136 `<h2>`).
+        var headingMarks: [(level: Int, offset: Int)] = []
         var cursor = input.startIndex
         let nsInput = input as NSString
 
@@ -236,7 +252,7 @@ enum EPUBAnchorExtractor {
             let value = String(input[valueRange])
             if kind == "HEADING" {
                 if let level = Int(value) {
-                    headings.append(ExtractionResult.HeadingHit(level: level, offset: result.count))
+                    headingMarks.append((level, result.count))
                 }
             } else {
                 anchors.append(ExtractionResult.Anchor(fragmentID: value, offset: result.count))
@@ -245,6 +261,24 @@ enum EPUBAnchorExtractor {
         }
         // Trailing tail after the last sentinel (or all of input if no matches).
         result.append(contentsOf: input[cursor..<input.endIndex])
+
+        // Resolve heading titles with a SINGLE Array conversion (O(n) total,
+        // not O(headings × n)): the title is the heading line — from the
+        // offset, skip leading whitespace/newlines, take to the next newline.
+        var headings: [ExtractionResult.HeadingHit] = []
+        if !headingMarks.isEmpty {
+            let chars = Array(result)
+            for (level, offset) in headingMarks {
+                var i = offset
+                while i < chars.count, chars[i] == "\n" || chars[i] == " " || chars[i] == "\t" { i += 1 }
+                var titleChars: [Character] = []
+                while i < chars.count, chars[i] != "\n" { titleChars.append(chars[i]); i += 1 }
+                let title = String(titleChars).trimmingCharacters(in: .whitespaces)
+                if !title.isEmpty {
+                    headings.append(ExtractionResult.HeadingHit(level: level, offset: offset, title: title))
+                }
+            }
+        }
         return ExtractionResult(plainText: result, anchors: anchors, headings: headings)
     }
 

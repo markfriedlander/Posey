@@ -262,16 +262,11 @@ extension EPUBDocumentImporter {
             // chapter's final plainText.
             let plainWithAnchors = buildPlainText(from: chapterText)
             let extraction = EPUBAnchorExtractor.extractAnchors(from: plainWithAnchors)
-            // 2026-06-10 — resolve each `<hN>` sentinel's title from the
-            // chapter's final plainText (the heading text runs from the
-            // sentinel position to the next line break). Drop empty headings
-            // (decorative `<hN></hN>`).
+            // 2026-06-10 — heading (level, offset, title) already resolved in
+            // extractAnchors with a single O(n) pass (titles are non-empty,
+            // decorative `<hN></hN>` already dropped there).
             let chapterHeadings: [(level: Int, localOffset: Int, title: String)] =
-                extraction.headings.compactMap { hit in
-                    let title = Self.headingTitle(in: extraction.plainText, at: hit.offset)
-                    guard !title.isEmpty else { return nil }
-                    return (hit.level, hit.offset, title)
-                }
+                extraction.headings.map { (level: $0.level, localOffset: $0.offset, title: $0.title) }
             allChapters.append(ChapterRecord(
                 path: path,
                 href: href,
@@ -453,22 +448,6 @@ extension EPUBDocumentImporter {
             bodyHeadings: bodyHeadings,
             playbackSkipUntilOffset: frontMatterResult.skipUntilOffset
         )
-    }
-
-    /// Reads a heading's title from `text` starting at `offset`: skips leading
-    /// whitespace/newlines, then takes characters up to the next newline.
-    /// The `<hN>` content becomes a paragraph in the converted plainText, so
-    /// this yields the heading line (e.g. "CHAPTER V"). For multi-line headings
-    /// (`<h2>CHAPTER I.<br>The Period</h2>` → "CHAPTER I.\nThe Period") it
-    /// returns the first line — a valid prefix that applyHeadingMarkers matches.
-    static func headingTitle(in text: String, at offset: Int) -> String {
-        let chars = Array(text)
-        guard offset >= 0, offset < chars.count else { return "" }
-        var i = offset
-        while i < chars.count, chars[i] == "\n" || chars[i] == " " || chars[i] == "\t" { i += 1 }
-        var out = ""
-        while i < chars.count, chars[i] != "\n" { out.append(chars[i]); i += 1 }
-        return out.trimmingCharacters(in: .whitespaces)
     }
 }
 

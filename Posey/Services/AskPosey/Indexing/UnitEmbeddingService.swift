@@ -245,9 +245,16 @@ actor UnitEmbeddingService {
             // actor's context directly. SQLite serializes internally.
             var successesThisBatch = 0
             for row in batch {
-                let vector = await Task.detached(priority: .utility) {
-                    EmbeddingProvider.shared.embed(row.text, as: .document)
-                }.value
+                // Global serial lane — chunk embedding is heavy background
+                // compute. Routing each embed through the lane (instead of a
+                // free Task.detached) makes it serialize app-wide with OCR /
+                // AFM / RAPTOR, so only one heavy op runs at a time. Still
+                // off-main (the lane is a plain actor). DB write below stays
+                // on this actor's isolation (off-main).
+                let text = row.text
+                let vector = await HeavyWorkLane.shared.run(label: "embed") {
+                    EmbeddingProvider.shared.embed(text, as: .document)
+                }
                 guard let vector else { continue }
                 do {
                     try databaseManager.updateUnitEmbeddingChunkEmbedding(

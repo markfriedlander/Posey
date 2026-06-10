@@ -135,7 +135,12 @@ public actor RaptorTreeBuilder {
             guard !source.isEmpty else { continue }
 
             // Summarize (active model; AFM @Generable). Skip cluster on failure.
-            guard let raw = await summarize(source: source) else {
+            // Global serial lane — the RAPTOR summary AFM call is heavy
+            // background compute; only one heavy op runs app-wide at a time.
+            guard let raw = await HeavyWorkLane.shared.run(
+                label: "RAPTOR-summary",
+                { await self.summarize(source: source) }
+            ) else {
                 // Transient/guardrail — back off so a bad streak doesn't trip
                 // AFM's sustained-pressure state, then continue.
                 try? await Task.sleep(nanoseconds: UInt64(config.afmBackoffSeconds * 1_000_000_000))

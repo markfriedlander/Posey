@@ -243,9 +243,11 @@ actor RaptorTreeService {
         toStore.reserveCapacity(summaryNodes.count)
         for (i, node) in summaryNodes.enumerated() {
             let text = node.text
-            let emb = await Task.detached(priority: .utility) {
+            // Global serial lane — embedding a RAPTOR summary is heavy
+            // background compute; serialize app-wide (was a free Task.detached).
+            let emb = await HeavyWorkLane.shared.run(label: "RAPTOR-embed") {
                 EmbeddingProvider.shared.embed(text, as: .document)
-            }.value
+            }
             toStore.append(StoredUnitEmbeddingChunk(
                 id: UUID(),
                 documentID: documentID,

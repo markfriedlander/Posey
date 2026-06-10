@@ -606,7 +606,11 @@ actor PDFEnhancementService {
             // context comes straight from this plainText, where the
             // detector found the token.
             let context = Self.contextLine(for: token, in: plainText)
-            let verdict = await FusionCorrectionAFM.correct(token, context: context)
+            // Global serial lane — AFM fusion-split is heavy background
+            // compute; only one heavy op runs app-wide at a time.
+            let verdict = await HeavyWorkLane.shared.run(label: "AFM-fusion") {
+                await FusionCorrectionAFM.correct(token, context: context)
+            }
             guard let corrected = verdict else {
                 // AFM unavailable or refused — skip silently.
                 dbgLog("PDFEnhancementService: Tier 3 — AFM returned nil for token '%@'", token)
@@ -841,7 +845,11 @@ actor PDFEnhancementService {
             // as visually-rendered text that matches the same regex).
             // Without stripping, the reconciler accepts the Vision
             // text as "more text wins" and reintroduces the watermark.
-            let rawVisionText = PDFTier2VisionExtractor.extract(pdfPage)
+            // Global serial lane — Vision OCR is the heaviest background op;
+            // run it as the single in-flight heavy op (off-main, serialized).
+            let rawVisionText = await HeavyWorkLane.shared.run(label: "OCR-page\(page.pageIndex)") {
+                PDFTier2VisionExtractor.extract(pdfPage)
+            }
             let visionText = PDFWatermarkStripper.strip(rawVisionText)
             if rawVisionText.count != visionText.count {
                 dbgLog("PDFEnhancementService: page %d on %@ — watermark stripped from Vision (%d → %d chars)",

@@ -149,7 +149,15 @@ public actor RaptorTreeBuilder {
 
             // VERIFY — two complementary gates.
             // (1) Embedding-cosine: drop topically-ungrounded sentences.
-            let v = verifier.filteredSummary(raw, sources: memberTexts)
+            //     filteredSummary embeds the source + summary sentences, so
+            //     it's heavy background compute — route it through the global
+            //     serial lane too (auditor catch, 2026-06-09: it fired outside
+            //     the summarize() slot). Entity-grounding (gate 2 below) does
+            //     NOT embed (string/NER), so it stays off the lane.
+            let v = await HeavyWorkLane.shared.run(
+                label: "RAPTOR-verify",
+                { verifier.filteredSummary(raw, sources: memberTexts) }
+            )
             let verified = v.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if verified.isEmpty { continue }
             // (2) Entity-grounding: reject a summary that NAMES a person/

@@ -1430,7 +1430,13 @@ extension LibraryViewModel {
                 // Embed each verified summary (NLContextual .document) + store.
                 var toStore: [StoredUnitEmbeddingChunk] = []
                 for (i, node) in summaryNodes2.enumerated() {
-                    let emb = EmbeddingProvider.shared.embed(node.text, as: .document)
+                    // Global serial lane (this is the DEBUG manual-RAPTOR verb;
+                    // route its summary embeds through the lane too so a manual
+                    // build can't overlap automatic background heavy work).
+                    let nodeText = node.text
+                    let emb = await HeavyWorkLane.shared.run(label: "RAPTOR-embed-debug") {
+                        EmbeddingProvider.shared.embed(nodeText, as: .document)
+                    }
                     toStore.append(StoredUnitEmbeddingChunk(
                         id: UUID(),
                         documentID: id,

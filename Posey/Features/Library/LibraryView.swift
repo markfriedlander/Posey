@@ -1231,6 +1231,44 @@ extension LibraryViewModel {
                     "changed": changed.map { ["original": $0.original, "corrected": $0.corrected] }
                 ])
 
+            case "HEAVY_LANE_STATUS":
+                // 2026-06-09 (global serial lane) — diagnostic + on-device
+                // SEQUENTIAL PROOF. `maxConcurrentObserved` must stay 1 and
+                // `overlapsInRing` must be 0 (the lane's recorded START/END
+                // intervals never overlap → only one heavy op runs at a
+                // time). `recent` lists the last ops with start/end so the
+                // non-overlapping timeline is visible. Queried mid-processing
+                // it also shows the antenna stays responsive under load.
+                let lane = await HeavyWorkLane.shared.status()
+                let sortedRing = lane.recent.sorted { $0.startedAt < $1.startedAt }
+                var overlaps = 0
+                if sortedRing.count >= 2 {
+                    for i in 1..<sortedRing.count where sortedRing[i].startedAt < sortedRing[i - 1].endedAt {
+                        overlaps += 1
+                    }
+                }
+                let recentJSON = sortedRing.suffix(20).map { e -> [String: Any] in
+                    ["label": e.label,
+                     "ms": e.durationMs,
+                     "start": Int(e.startedAt.timeIntervalSince1970 * 1000),
+                     "end": Int(e.endedAt.timeIntervalSince1970 * 1000)]
+                }
+                return json([
+                    "currentLabel": lane.currentLabel ?? "",
+                    "queueDepth": lane.queueDepth,
+                    "concurrentNow": lane.concurrentNow,
+                    "maxConcurrentObserved": lane.maxConcurrentObserved,
+                    "totalCompleted": lane.totalCompleted,
+                    "overlapsInRing": overlaps,
+                    "recent": recentJSON
+                ])
+
+            case "HEAVY_LANE_RESET":
+                // Reset the lane telemetry so a verification run starts the
+                // maxConcurrentObserved / totalCompleted tally clean.
+                await HeavyWorkLane.shared.resetTelemetry()
+                return #"{"reset":true}"#
+
             case "LIST_PAGE_FLAGS":
                 // 2026-05-22 — Tier 1/2 Phase 1 calibration verb.
                 // Returns the per-page confidence-detector output for

@@ -307,7 +307,14 @@ final class EmbedderMigrationCoordinator: ObservableObject {
                     await MainActor.run { self.publish(.cancelled) }
                     return
                 }
-                let vector = EmbeddingProvider.shared.embed(row.text, as: .document)
+                // Global serial lane — embedder migration re-embeds the whole
+                // library; route each embed through the one lane so it
+                // serializes app-wide with OCR / AFM / RAPTOR / indexing
+                // embeds (no overlap, no stacked memory). Still off-main.
+                let text = row.text
+                let vector = await HeavyWorkLane.shared.run(label: "embed-migration") {
+                    EmbeddingProvider.shared.embed(text, as: .document)
+                }
                 processed += 1
                 if let vector {
                     do {

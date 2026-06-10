@@ -46,6 +46,24 @@ enum EPUBAnchorExtractor {
     /// Regex matching one sentinel and capturing the fragment ID in group 1.
     static let sentinelRegex = #"\[\[POSEY_TOC_ANCHOR:([^\]]+)\]\]"#
 
+    /// Heading sentinel: `[[POSEY_HEADING:N]]` (N = 1…6), inserted before
+    /// each `<h1>`–`<h6>` opening tag so the heading's position + level can
+    /// be recovered after the HTML→plainText (NSAttributedString) conversion
+    /// discards element tags. 2026-06-10 (fix-pass): EPUB body-`<hN>` heading
+    /// detection. The previous heading source — nav/NCX `tocEntries` with
+    /// fuzzy title→offset resolution — silently dropped chapters whose nav
+    /// title/offset didn't align with the body (dracula: 9 of 27 detected,
+    /// because Gutenberg packs many chapters per spine file so only file-start
+    /// chapters got an offset; Illuminatus: 0, because its nav is a page-list).
+    /// Scanning the body `<hN>` directly captures EVERY chapter heading with
+    /// its EXACT text, which `ContentUnitBuilder.applyHeadingMarkers` then
+    /// promotes by title (offset only disambiguates) — robust regardless of
+    /// spine-file packing or nav quality.
+    static let headingSentinelPrefix = "[[POSEY_HEADING:"
+    /// Combined regex matching EITHER sentinel: group 1 = kind
+    /// (`TOC_ANCHOR` | `HEADING`), group 2 = value (fragment id | level).
+    static let combinedSentinelRegex = #"\[\[POSEY_(TOC_ANCHOR|HEADING):([^\]]+)\]\]"#
+
     // ──────────────────────────────────────────────────────────────────────
     // MARK: - HTML-side insertion
     // ──────────────────────────────────────────────────────────────────────
@@ -113,6 +131,44 @@ enum EPUBAnchorExtractor {
         return html.data(using: .utf8) ?? data
     }
 
+    /// Insert `[[POSEY_HEADING:N]]` immediately before each `<h1>`–`<h6>`
+    /// opening tag (N = the level digit). Mirrors `insertAnchorSentinels`:
+    /// the sentinel lands right before the heading's text content, so after
+    /// the HTML→plainText conversion the sentinel sits at the heading text's
+    /// start and `extractAnchors` recovers (level, offset). Idempotent.
+    ///
+    /// Generality: every spine item is scanned, so multi-chapter-per-file
+    /// EPUBs (Gutenberg dracula/P&P) get a marker per chapter, and EPUBs
+    /// with only a page-list nav (Illuminatus) still get real chapter
+    /// headings from their body `<hN>`. EPUBs that already worked via nav
+    /// are unaffected: their `<hN>` text equals the body unit text, so the
+    /// title-anchored promotion produces the same headings.
+    static func insertHeadingSentinels(from data: Data) -> Data {
+        guard var html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) else {
+            return data
+        }
+        // <hN ...> — capture the level digit (group 1). Case-insensitive,
+        // dot-matches-newline for multi-line tags.
+        let pattern = #"(?si)<h([1-6])(?:\s+[^>]*)?>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return data
+        }
+        let nsHtml = html as NSString
+        let matches = regex.matches(in: html, range: NSRange(location: 0, length: nsHtml.length))
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 2,
+                  let levelRange = Range(match.range(at: 1), in: html),
+                  let tagStart = Range(match.range, in: html) else { continue }
+            let level = String(html[levelRange])
+            let sentinel = "\(headingSentinelPrefix)\(level)\(sentinelSuffix)"
+            let upToTag = html[..<tagStart.lowerBound]
+            if upToTag.hasSuffix(sentinel) { continue }
+            html.insert(contentsOf: sentinel, at: tagStart.lowerBound)
+        }
+        return html.data(using: .utf8) ?? data
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // MARK: - PlainText-side extraction
     // ──────────────────────────────────────────────────────────────────────
@@ -126,9 +182,18 @@ enum EPUBAnchorExtractor {
         /// the sentinel sat — i.e., the position of the next character
         /// after the stripped sentinel.
         let anchors: [Anchor]
+        /// One entry per `[[POSEY_HEADING:N]]` sentinel, in document order.
+        /// `offset` is the position in the stripped `plainText` of the
+        /// heading text's start; `level` is the `<hN>` level (1…6). The
+        /// caller reads the title from `plainText` at `offset`.
+        let headings: [HeadingHit]
 
         struct Anchor {
             let fragmentID: String
+            let offset: Int
+        }
+        struct HeadingHit {
+            let level: Int
             let offset: Int
         }
     }
@@ -143,33 +208,44 @@ enum EPUBAnchorExtractor {
     /// stripped output. This matches what callers want: "where in the
     /// final plainText does this fragment land."
     static func extractAnchors(from input: String) -> ExtractionResult {
-        guard let regex = try? NSRegularExpression(pattern: sentinelRegex) else {
-            return ExtractionResult(plainText: input, anchors: [])
+        // 2026-06-10 — single pass strips BOTH anchor and heading sentinels
+        // so all recorded offsets are measured against the SAME final output
+        // (heading sentinels would otherwise shift anchor offsets and vice
+        // versa). Group 1 = kind, group 2 = value.
+        guard let regex = try? NSRegularExpression(pattern: combinedSentinelRegex) else {
+            return ExtractionResult(plainText: input, anchors: [], headings: [])
         }
 
         var result = ""
         var anchors: [ExtractionResult.Anchor] = []
+        var headings: [ExtractionResult.HeadingHit] = []
         var cursor = input.startIndex
         let nsInput = input as NSString
 
         let matches = regex.matches(in: input, range: NSRange(location: 0, length: nsInput.length))
 
         for match in matches {
-            guard match.numberOfRanges >= 2,
+            guard match.numberOfRanges >= 3,
                   let matchRange = Range(match.range, in: input),
-                  let idRange = Range(match.range(at: 1), in: input) else { continue }
+                  let kindRange = Range(match.range(at: 1), in: input),
+                  let valueRange = Range(match.range(at: 2), in: input) else { continue }
             // Append the slice from cursor up to the sentinel start.
             result.append(contentsOf: input[cursor..<matchRange.lowerBound])
             // The sentinel itself is dropped; record its post-strip offset.
-            anchors.append(ExtractionResult.Anchor(
-                fragmentID: String(input[idRange]),
-                offset: result.count
-            ))
+            let kind = String(input[kindRange])
+            let value = String(input[valueRange])
+            if kind == "HEADING" {
+                if let level = Int(value) {
+                    headings.append(ExtractionResult.HeadingHit(level: level, offset: result.count))
+                }
+            } else {
+                anchors.append(ExtractionResult.Anchor(fragmentID: value, offset: result.count))
+            }
             cursor = matchRange.upperBound
         }
         // Trailing tail after the last sentinel (or all of input if no matches).
         result.append(contentsOf: input[cursor..<input.endIndex])
-        return ExtractionResult(plainText: result, anchors: anchors)
+        return ExtractionResult(plainText: result, anchors: anchors, headings: headings)
     }
 
     /// Convenience: strip sentinels from a string without recording
@@ -177,7 +253,9 @@ enum EPUBAnchorExtractor {
     /// to know where the anchors WERE — we just don't want sentinel
     /// strings rendered to the user.
     static func stripSentinels(from input: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: sentinelRegex) else {
+        // Strip BOTH anchor and heading sentinels (2026-06-10) so neither
+        // reaches the renderer / plainText.
+        guard let regex = try? NSRegularExpression(pattern: combinedSentinelRegex) else {
             return input
         }
         let nsInput = input as NSString

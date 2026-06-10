@@ -17,6 +17,17 @@ struct EPUBTOCEntry {
     let level: Int
 }
 
+/// One heading found in the body via a native `<h1>`–`<h6>` tag.
+/// 2026-06-10 (fix-pass) — the body-`<hN>` heading source that replaces
+/// fuzzy nav-title resolution for c4 heading promotion. `offset` is into
+/// the combined plainText; `level` is the `<hN>` level; `title` is the
+/// EXACT heading text (so `applyHeadingMarkers` promotes by title match).
+struct EPUBBodyHeading {
+    let offset: Int
+    let level: Int
+    let title: String
+}
+
 struct ParsedEPUBDocument {
     let title: String?
     /// **Bundle 2 follow-up (2026-05-26)** — edition-disambiguating
@@ -37,6 +48,9 @@ struct ParsedEPUBDocument {
     let images: [PageImageRecord]
     /// Table of contents entries in reading order. Empty if no nav/NCX was found.
     let tocEntries: [EPUBTOCEntry]
+    /// Headings found directly in the body via native `<h1>`–`<h6>` tags,
+    /// in reading order. Drives c4 heading promotion (see `EPUBBodyHeading`).
+    let bodyHeadings: [EPUBBodyHeading]
     /// Character offset in plainText past which the reader should
     /// auto-jump on first open. Set non-zero by `EPUBFrontMatterDetector`
     /// when the spine starts with auto-generator boilerplate (the
@@ -164,6 +178,9 @@ extension EPUBDocumentImporter {
             let chapterText: String
             let plainText: String
             let anchors: [EPUBAnchorExtractor.ExtractionResult.Anchor]
+            /// Native `<hN>` headings with CHAPTER-LOCAL plainText offsets +
+            /// exact title text. Promoted to global offsets in pass 2.
+            let headings: [(level: Int, localOffset: Int, title: String)]
             let images: [PageImageRecord]
         }
         var allChapters: [ChapterRecord] = []
@@ -225,7 +242,12 @@ extension EPUBDocumentImporter {
             // the following text. See `stripDropcapSpans` for the
             // class/style patterns matched.
             let dropcapStripped = Self.stripDropcapSpans(from: asterismStripped)
-            let anchorMarked = EPUBAnchorExtractor.insertAnchorSentinels(from: dropcapStripped)
+            // 2026-06-10 — insert native `<hN>` heading sentinels (then anchor
+            // sentinels) so heading positions survive the HTML→plainText
+            // conversion. Both land before their tag's text; extraction below
+            // recovers them together.
+            let headingMarked = EPUBAnchorExtractor.insertHeadingSentinels(from: dropcapStripped)
+            let anchorMarked = EPUBAnchorExtractor.insertAnchorSentinels(from: headingMarked)
 
             let (processedData, chapterImages) = extractInlineImages(
                 from: anchorMarked,
@@ -240,6 +262,16 @@ extension EPUBDocumentImporter {
             // chapter's final plainText.
             let plainWithAnchors = buildPlainText(from: chapterText)
             let extraction = EPUBAnchorExtractor.extractAnchors(from: plainWithAnchors)
+            // 2026-06-10 — resolve each `<hN>` sentinel's title from the
+            // chapter's final plainText (the heading text runs from the
+            // sentinel position to the next line break). Drop empty headings
+            // (decorative `<hN></hN>`).
+            let chapterHeadings: [(level: Int, localOffset: Int, title: String)] =
+                extraction.headings.compactMap { hit in
+                    let title = Self.headingTitle(in: extraction.plainText, at: hit.offset)
+                    guard !title.isEmpty else { return nil }
+                    return (hit.level, hit.offset, title)
+                }
             allChapters.append(ChapterRecord(
                 path: path,
                 href: href,
@@ -248,6 +280,7 @@ extension EPUBDocumentImporter {
                 chapterText: chapterText,
                 plainText: extraction.plainText,
                 anchors: extraction.anchors,
+                headings: chapterHeadings,
                 images: chapterImages
             ))
         }
@@ -275,9 +308,21 @@ extension EPUBDocumentImporter {
         var chapterPlainLengths: [Int] = []
         var imageRecords: [PageImageRecord] = []
         var pathToPlainOffset: [String: Int] = [:]
+        var bodyHeadings: [EPUBBodyHeading] = []
         for record in strippedChapters {
             let cumulativeOffset = chapterPlainLengths.reduce(0, +)
                 + max(0, chapterPlainLengths.count - 1) * 2
+            // 2026-06-10 — promote this chapter's native `<hN>` headings to
+            // global plainText offsets (same cumulative accounting as anchors).
+            // Offsets are approximate (post-normalization drift) but the EXACT
+            // title makes applyHeadingMarkers promote the right unit anyway.
+            for h in record.headings {
+                bodyHeadings.append(EPUBBodyHeading(
+                    offset: cumulativeOffset + h.localOffset,
+                    level: h.level,
+                    title: h.title
+                ))
+            }
             if !record.bareHref.isEmpty && pathToPlainOffset[record.bareHref] == nil {
                 pathToPlainOffset[record.bareHref] = cumulativeOffset
             }
@@ -405,8 +450,25 @@ extension EPUBDocumentImporter {
             plainText: plainText,
             images: imageRecordsWithCover,
             tocEntries: tocEntries,
+            bodyHeadings: bodyHeadings,
             playbackSkipUntilOffset: frontMatterResult.skipUntilOffset
         )
+    }
+
+    /// Reads a heading's title from `text` starting at `offset`: skips leading
+    /// whitespace/newlines, then takes characters up to the next newline.
+    /// The `<hN>` content becomes a paragraph in the converted plainText, so
+    /// this yields the heading line (e.g. "CHAPTER V"). For multi-line headings
+    /// (`<h2>CHAPTER I.<br>The Period</h2>` → "CHAPTER I.\nThe Period") it
+    /// returns the first line — a valid prefix that applyHeadingMarkers matches.
+    static func headingTitle(in text: String, at offset: Int) -> String {
+        let chars = Array(text)
+        guard offset >= 0, offset < chars.count else { return "" }
+        var i = offset
+        while i < chars.count, chars[i] == "\n" || chars[i] == " " || chars[i] == "\t" { i += 1 }
+        var out = ""
+        while i < chars.count, chars[i] != "\n" { out.append(chars[i]); i += 1 }
+        return out.trimmingCharacters(in: .whitespaces)
     }
 }
 

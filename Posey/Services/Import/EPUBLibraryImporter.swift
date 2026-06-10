@@ -101,10 +101,22 @@ struct EPUBLibraryImporter {
         // 2026-05-31 (ingestion audit): keep-first on duplicate offsets —
         // `Dictionary(uniqueKeysWithValues:)` fatal-errors on a key collision
         // (two TOC entries resolving to the same offset). See PDFLibraryImporter.
+        // 2026-06-10 (fix-pass) — heading markers come from BOTH the native
+        // body `<hN>` headings (precise, exact-title — the new primary source)
+        // AND the nav/NCX tocEntries (kept for EPUBs without `<hN>` and as a
+        // belt-and-suspenders for the working ones). applyHeadingMarkers
+        // promotes by title with offset only disambiguating, so overlapping
+        // markers for the same chapter are idempotent. Body headings fix
+        // dracula (multi-chapter-per-spine-file) and Illuminatus (page-list nav).
+        var headingMarkerPairs: [(Int, ContentUnitBuilder.HeadingMarker)] =
+            parsed.bodyHeadings.map {
+                ($0.offset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
+            }
+        headingMarkerPairs += parsed.tocEntries.map {
+            ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
+        }
         let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
-            parsed.tocEntries.map {
-                ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
-            },
+            headingMarkerPairs,
             uniquingKeysWith: { first, _ in first }
         )
         let units = ContentUnitBuilder.applyHeadingMarkers(

@@ -242,21 +242,22 @@ struct EPUBLibraryImporter {
             currentSkip: afterInProse
         )
         let postWalker = max(afterInProse, walkResult.newSkipOffset ?? afterInProse)
-        // 2026-05-27 — chapter-advance refinement. Pride and Prejudice
-        // EPUB opens at the Saintsbury Preface (offset ~2876) instead
-        // of "It is a truth universally acknowledged…" Chapter 1.
-        // FirstChapterAdvance scans for CHAPTER N. / Chapter I. /
-        // CHAPTER ONE. patterns within the next 80 KB and returns
-        // that offset on hit. Returns nil for non-chapter-structured
-        // EPUBs (encyclopedia entries, single-essay collections),
-        // where the prior offset stays.
-        //
-        // 2026-05-28 — FirstChapterAdvance.detect now self-guards: if
-        // startOffset is already just past a recent CHAPTER heading
-        // (lookback ~400 chars), returns nil so we don't over-advance
-        // past Ch I to Ch II. Pride still works because Saintsbury
-        // Preface has no preceding CHAPTER heading.
-        let finalSkip = FirstChapterAdvance.detect(in: plainText, after: postWalker) ?? postWalker
+        // 2026-06-11 [DECISION] (Mark — SUPERSEDES the 2026-05-27 FirstChapterAdvance
+        // decision): ALL prefaces (author AND editorial) are BOOK CONTENT. A
+        // gutenberg book opens at the FIRST REAL PROSE after (a) the PG license
+        // boilerplate and (b) the in-book Contents/TOC listing — it NEVER skips a
+        // preface to Chapter I.
+        //   (B) The old `FirstChapterAdvance.detect(...)` "skip in-work front-matter
+        //       (ETYMOLOGY / Saintsbury Preface / Letters) -> Chapter 1" step is
+        //       REMOVED. Pride & Prejudice now opens at the Saintsbury Preface
+        //       (the reversal — now intended); Moby opens at "ETYMOLOGY."
+        //   (A) If the skip is still sitting ON a Contents listing (Dracula stayed
+        //       at 1116 because the listing entry "CHAPTER I." never second-matched
+        //       the merged body heading "CHAPTER I:"), advance past the listing to
+        //       the first prose — Dracula → Stoker's preface (~2400), NOT Chapter I.
+        //       No-op when not on a Contents listing (guarded by a nearby header).
+        let finalSkip = InProseTOCDetector.firstProseAfterContentsListing(
+            in: plainText, at: postWalker, tocTitles: tocEntries.map { $0.title }) ?? postWalker
 
         let source: String
         if gutenbergStart > 0 {

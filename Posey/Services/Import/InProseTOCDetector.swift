@@ -159,6 +159,109 @@ enum InProseTOCDetector {
         return secondOffset
     }
 
+    /// 2026-06-11 [DECISION] (Mark, supersedes 2026-05-27) — all prefaces are
+    /// BOOK CONTENT: a gutenberg book opens at the FIRST REAL PROSE after the
+    /// in-book Contents LISTING, never skipping a preface to Chapter I. This
+    /// helper handles the case the `endOfTOCRegion` second-occurrence heuristic
+    /// MISSES: the skip is still sitting ON a Contents listing (e.g. Dracula —
+    /// the TOC entry "CHAPTER I. Jonathan Harker's Journal" never finds a second
+    /// occurrence because the merged body heading is "CHAPTER I: JONATHAN
+    /// HARKER'S JOURNAL" — period vs colon). It walks the contiguous run of
+    /// chapter-entry lines and returns the offset of the first SUBSTANTIAL PROSE
+    /// line after them (Dracula → Stoker's preface "How these papers…", NOT
+    /// Chapter I). GUARDED to fire ONLY when `skipOffset` is on a Contents
+    /// listing (a "Contents" header sits just before it), so it's a NO-OP for
+    /// docs whose skip already advanced past their Contents (Moby/Alice/Sherlock)
+    /// and for docs with no in-prose Contents (Pride & Prejudice → nav-only).
+    ///
+    /// `tocTitles` (the structural nav entries) widen entry-line recognition
+    /// beyond the CHAPTER/LETTER/PART/BOOK shapes for listings that don't use
+    /// those prefixes.
+    static func firstProseAfterContentsListing(
+        in plainText: String, at skipOffset: Int, tocTitles: [String]
+    ) -> Int? {
+        guard skipOffset >= 0, skipOffset < plainText.count else { return nil }
+        let skipIdx = plainText.index(plainText.startIndex, offsetBy: skipOffset)
+
+        // GUARD — find an in-book "Contents" header AHEAD of skipOffset, within a
+        // bounded window (the title page + publishing front-matter before the
+        // Contents is short; cap so we never match a "Contents" word deep in the
+        // body). The skip may sit BEFORE the Contents (Dracula: skip at the title
+        // page ~813, Contents header ~1103) or just on it — either way we search
+        // forward from skipOffset. No header ahead → the skip already cleared any
+        // Contents (Moby at ETYMOLOGY, P&P nav-only) → NO-OP.
+        let windowEnd = plainText.index(skipIdx, offsetBy: min(6000, plainText.count - skipOffset))
+        let window = plainText[skipIdx..<windowEnd]
+        let headerRe = #"(?im)^\s*(?:contents|table\s+of\s+contents)[:.]?\s*$"#
+        guard let headerRange = window.range(of: headerRe, options: .regularExpression) else { return nil }
+
+        // Normalize the nav titles for fuzzy line matching.
+        let normTitles = Set(tocTitles.map { normalizeForMatch($0) }.filter { $0.count >= 4 })
+
+        // Walk lines forward from JUST AFTER the Contents header. Skip the
+        // contiguous run of chapter-entry / listing lines; stop at the first
+        // substantial PROSE line (≥60 chars, sentence-shaped, not a heading) —
+        // Dracula → Stoker's preface "How these papers…", NOT Chapter I. Cap the
+        // walk so a malformed listing can't run away.
+        let walkStart = headerRange.upperBound
+        let walkStartOffset = plainText.distance(from: plainText.startIndex, to: walkStart)
+        let region = plainText[walkStart..<plainText.endIndex]
+        let lines = region.split(separator: "\n", maxSplits: 300, omittingEmptySubsequences: false)
+        var consumed = 0  // characters walked past the header (offset delta)
+        var sawEntry = false
+        for line in lines {
+            let raw = String(line)
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lineLen = raw.count + 1  // +1 for the split "\n"
+            if trimmed.isEmpty { consumed += lineLen; continue }
+            if isContentsEntryLine(trimmed, normTitles: normTitles) {
+                sawEntry = true; consumed += lineLen; continue
+            }
+            // First non-entry, substantial-prose line → the body/preface start.
+            if sawEntry, isSubstantialProse(trimmed) {
+                let leadingWS = raw.prefix(while: { $0 == " " || $0 == "\t" }).count
+                let target = walkStartOffset + consumed + leadingWS
+                return target > skipOffset ? target : nil
+            }
+            // A non-entry, non-prose line before we saw any entry → the header
+            // wasn't followed by a listing; bail (no-op) rather than guess.
+            if !sawEntry { return nil }
+            consumed += lineLen
+        }
+        return nil
+    }
+
+    /// A line that belongs to a Contents listing: a CHAPTER/LETTER/PART/BOOK/
+    /// VOLUME heading line, OR a short title-ish line, OR a fuzzy match to a
+    /// structural nav title. NOT substantial prose.
+    private static func isContentsEntryLine(_ s: String, normTitles: Set<String>) -> Bool {
+        if isNumeralOnly(s) { return true }
+        if s.range(of: #"(?i)^\s*(CHAPTER|LETTER|PART|BOOK|VOLUME)\s+(\d{1,3}|[IVXLCDM]{1,7})\b"#,
+                   options: .regularExpression) != nil { return true }
+        if normTitles.contains(normalizeForMatch(s)) { return true }
+        // Short title-case-ish line with no sentence punctuation → likely a
+        // listing entry, not prose.
+        if s.count <= 70 && !isSubstantialProse(s) { return true }
+        return false
+    }
+
+    /// Substantial prose: long enough and sentence-shaped (contains ". " or ends
+    /// with sentence punctuation). The preface "How these papers have been
+    /// placed in sequence…" qualifies; a chapter title does not.
+    private static func isSubstantialProse(_ s: String) -> Bool {
+        guard s.count >= 60 else { return false }
+        if s.contains(". ") || s.contains(", ") { return true }
+        if let last = s.last, ".!?".contains(last) { return true }
+        return false
+    }
+
+    private static func normalizeForMatch(_ s: String) -> String {
+        return s.lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9 ]"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+
     /// True when `s` consists only of digits, roman numerals (I/V/X/L/C/D/M),
     /// optional period, and whitespace. Used to skip TOC numeral prefixes
     /// that appear on their own line in some Gutenberg editions.

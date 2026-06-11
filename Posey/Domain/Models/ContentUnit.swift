@@ -47,11 +47,21 @@ enum ContentUnitKind: String, Equatable, Hashable, Sendable {
     /// silently.
     case horizontalRule = "horizontal_rule"
 
+    /// 2026-06-11 — A fenced code block. `text` is the verbatim code with
+    /// newlines + indentation preserved (fence lines + language label
+    /// stripped at parse time). Carries text — it IS displayed (monospace)
+    /// and is searchable (c15) — so it contributes to the derived
+    /// plainText/displayText and offsets like any prose-bearing unit. TTS
+    /// handling (announce "code block" / skip rather than read syntax
+    /// verbatim) is a deferred c13/c14 concern; the distinct `.code` kind is
+    /// the handle that makes it possible without touching the parser again.
+    case code = "code"
+
     /// True iff this kind carries prose-style text that TTS should
     /// read aloud and that contributes to search / RAG retrieval.
     var carriesProseText: Bool {
         switch self {
-        case .prose, .heading, .blockquote, .listItem:
+        case .prose, .heading, .blockquote, .listItem, .code:
             return true
         case .image, .pageBreak, .horizontalRule:
             return false

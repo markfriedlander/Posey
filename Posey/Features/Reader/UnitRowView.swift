@@ -166,6 +166,8 @@ struct UnitRowView: View {
                 pageBreakRow
             case .horizontalRule:
                 horizontalRuleRow
+            case .code:
+                codeRow
             }
             // **Bundle fix #1 (2026-05-26)** — annotation glyphs
             // moved out of the prose overlay into a footer row
@@ -567,6 +569,29 @@ struct UnitRowView: View {
         .padding(.vertical, 14)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Page break")
+    }
+
+    // MARK: - Code block
+
+    /// 2026-06-11 — Fenced code block. Monospaced, verbatim (newlines +
+    /// indentation preserved), in a tinted box, horizontally scrollable so
+    /// long lines don't reflow or clip. Never styled as prose; text selection
+    /// stays enabled for copy. Deliberately NOT routed through the per-sentence
+    /// prose path — code is one unit, read/skip decisions are a TTS concern.
+    private var codeRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Text(unit.text)
+                .font(.system(size: bodyFontSize * 0.9, design: .monospaced))
+                .lineSpacing(bodyFontSize * 0.25)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(12)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.primary.opacity(0.06))
+        )
+        .padding(.vertical, 6)
     }
 
     // MARK: - Horizontal rule

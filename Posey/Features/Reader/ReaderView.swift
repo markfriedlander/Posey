@@ -658,6 +658,7 @@ struct ReaderView: View {
             case .image: kindLabel = "visualPlaceholder"
             case .pageBreak: kindLabel = "pageBreak"
             case .horizontalRule: kindLabel = "horizontalRule"
+            case .code: kindLabel = "code"
             }
             return (index: i, kind: kindLabel, text: unit.text, startOffset: 0, endOffset: unit.text.count)
         }

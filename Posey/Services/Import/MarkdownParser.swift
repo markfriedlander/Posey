@@ -33,6 +33,16 @@ struct MarkdownParser {
         var offset = 0
         var paragraphBuffer: [String] = []
         var quoteBuffer: [String] = []
+        // 2026-06-11 — fenced-code-block state (CommonMark §4.5). When a fence
+        // opens, every line until the matching close is buffered VERBATIM (no
+        // classify(), no inline-markdown stripping) so code keeps its newlines,
+        // indentation, and literal `#`/`-`/`>` characters instead of leaking as
+        // headings/bullets/quotes. Tracks the fence char + run length so the
+        // close must match (same char, length ≥ open).
+        var inCodeBlock = false
+        var codeBuffer: [String] = []
+        var codeFenceChar: Character = "`"
+        var codeFenceLen = 3
 
         func flushParagraphBuffer() {
             guard paragraphBuffer.isEmpty == false else { return }
@@ -103,7 +113,68 @@ struct MarkdownParser {
             offset = endOffset
         }
 
+        // 2026-06-11 — Emit the buffered fenced-code lines as ONE `.code` block,
+        // VERBATIM: no cleanInlineMarkdown (that strips backticks + collapses all
+        // whitespace to single spaces, destroying code) and no normalizeUniversal
+        // line-collapse — newlines + indentation are preserved. The source was
+        // already BOM/mojibake/control/line-ending normalized by normalizeSource,
+        // so the buffered lines are safe to append as-is. Offset math mirrors
+        // appendBlock (2-char "\n\n" join separator) so block offsets stay
+        // consistent with the unit-join coordinate space the persister uses.
+        func flushCodeBuffer() {
+            inCodeBlock = false
+            var codeLines = codeBuffer
+            codeBuffer.removeAll()
+            // Trim only fully-blank leading/trailing lines; keep internal blanks
+            // and every line's indentation.
+            while let first = codeLines.first,
+                  first.trimmingCharacters(in: .whitespaces).isEmpty { codeLines.removeFirst() }
+            while let last = codeLines.last,
+                  last.trimmingCharacters(in: .whitespaces).isEmpty { codeLines.removeLast() }
+            let code = codeLines.joined(separator: "\n")
+            guard code.isEmpty == false else { return }
+            let separatorLength = plainTextParts.isEmpty ? 0 : 2
+            if separatorLength > 0 { offset += separatorLength }
+            let startOffset = offset
+            let endOffset = startOffset + code.count
+            blocks.append(
+                DisplayBlock(
+                    id: blocks.count,
+                    kind: .code,
+                    text: code,
+                    displayPrefix: nil,
+                    startOffset: startOffset,
+                    endOffset: endOffset
+                )
+            )
+            plainTextParts.append(code)
+            offset = endOffset
+        }
+
         for line in lines {
+            // 2026-06-11 — Fenced code blocks (CommonMark §4.5) take priority over
+            // every other line rule: inside a fence every line is literal. The
+            // opening fence + its language-info string and the closing fence are
+            // dropped (not shown, not spoken); the body is buffered verbatim and
+            // flushed as one `.code` block. An unterminated fence (no closing
+            // line before EOF) is flushed after the loop — lenient, matching how
+            // real-world docs sometimes omit the closing fence.
+            if inCodeBlock {
+                if isClosingFence(line, fenceChar: codeFenceChar, minLength: codeFenceLen) {
+                    flushCodeBuffer()
+                } else {
+                    codeBuffer.append(line)   // RAW — preserve indentation
+                }
+                continue
+            }
+            if let (ch, len) = openingFence(line) {
+                flushParagraphBuffer()
+                flushQuoteBuffer()
+                inCodeBlock = true
+                codeFenceChar = ch
+                codeFenceLen = len
+                continue   // drop the opening fence + info string
+            }
             // 2026-06-04 — Setext heading support (CommonMark §4.3).
             // A line of only `=` (→ H1) or only `-` (→ H2) that immediately
             // follows an OPEN paragraph buffer is a setext underline: the
@@ -163,6 +234,7 @@ struct MarkdownParser {
             }
         }
 
+        if inCodeBlock { flushCodeBuffer() }   // unterminated fence at EOF
         flushParagraphBuffer()
         flushQuoteBuffer()
 
@@ -171,6 +243,39 @@ struct MarkdownParser {
             plainText: plainTextParts.joined(separator: "\n\n"),
             blocks: blocks
         )
+    }
+
+    /// 2026-06-11 — Opening code fence (CommonMark §4.5): up to 3 leading
+    /// spaces, then a run of ≥3 backticks OR ≥3 tildes, then an optional
+    /// info string. Returns (fenceChar, runLength) or nil. A backtick info
+    /// string may not contain a backtick (CommonMark) — but we drop the info
+    /// string entirely either way, so we don't enforce that here.
+    private func openingFence(_ line: String) -> (Character, Int)? {
+        let trimmed = line.drop(while: { $0 == " " })
+        // Reject >3 spaces of indent (that'd be an indented code block, a
+        // different construct we don't open a fence for).
+        guard line.count - trimmed.count <= 3 else { return nil }
+        for fence: Character in ["`", "~"] {
+            let run = trimmed.prefix(while: { $0 == fence }).count
+            if run >= 3 {
+                // For backtick fences the info string must not contain a
+                // backtick; if it does, this isn't a code fence (it's inline).
+                let rest = trimmed.dropFirst(run)
+                if fence == "`" && rest.contains("`") { return nil }
+                return (fence, run)
+            }
+        }
+        return nil
+    }
+
+    /// Closing code fence: ≤3 leading spaces, then a run of the SAME fence
+    /// char with length ≥ the opening run, then only whitespace.
+    private func isClosingFence(_ line: String, fenceChar: Character, minLength: Int) -> Bool {
+        let trimmed = line.drop(while: { $0 == " " })
+        guard line.count - trimmed.count <= 3 else { return false }
+        let run = trimmed.prefix(while: { $0 == fenceChar }).count
+        guard run >= minLength else { return false }
+        return trimmed.dropFirst(run).allSatisfy { $0 == " " || $0 == "\t" }
     }
 
     private func classify(line: String) -> LineKind {

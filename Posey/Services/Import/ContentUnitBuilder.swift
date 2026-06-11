@@ -292,6 +292,15 @@ enum ContentUnitBuilder {
                 kind: .horizontalRule,
                 text: ""
             )
+        case .code:
+            // 2026-06-11 — fenced code block; text preserves newlines/indentation
+            // verbatim (fence + lang label already stripped by the parser).
+            return ContentUnit(
+                documentID: documentID,
+                sequence: sequence,
+                kind: .code,
+                text: block.text
+            )
         case .visualPlaceholder:
             return ContentUnit(
                 documentID: documentID,

@@ -16,6 +16,13 @@ enum DisplayBlockKind: Equatable, Hashable {
     /// passes silently through the rule rather than reading "dash
     /// dash dash".
     case horizontalRule
+
+    /// 2026-06-11 — A fenced code block (Markdown ```` ``` ````/`~~~`).
+    /// The whole fence-to-fence span is ONE block; `text` preserves
+    /// newlines + indentation verbatim, with the fence lines and the
+    /// language-info label stripped. Renderer shows it monospaced in a
+    /// tinted box (never reflowed as prose). Maps to `ContentUnitKind.code`.
+    case code
 }
 
 // ========== BLOCK 01: DISPLAY BLOCK KIND - END ==========

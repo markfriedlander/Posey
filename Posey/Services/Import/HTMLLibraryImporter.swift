@@ -105,7 +105,24 @@ struct HTMLLibraryImporter {
         // ── Step 9 prerequisite — promote heading paragraphs into
         // ── `.heading` units. Reuse the TOC resolution that already
         // ── searches plainText for each heading's title.
-        let resolvedHeadings = resolveHeadingOffsets(headings, in: plainText)
+        // 2026-06-11 — dedupe TOC entries by plainText offset (keep-first) and
+        // sort by offset. Two entries can land on the SAME offset when a stray
+        // in-body reference shares a real section's title (mdn HTTP-caching:
+        // 'Validation' appeared twice, both @10104, the dup out-of-order after
+        // 'Cache Busting'). The heading-marker dict already deduped by offset
+        // for promotion; the TOC did not, so the duplicate reached LIST_TOC /
+        // the reader's contents sheet. A TOC must never list one location twice.
+        let rawResolvedHeadings = resolveHeadingOffsets(headings, in: plainText)
+        let resolvedHeadings: [StoredTOCEntry] = {
+            let deduped = Dictionary(
+                rawResolvedHeadings.map { ($0.plainTextOffset, $0) },
+                uniquingKeysWith: { first, _ in first }
+            ).values.sorted { $0.plainTextOffset < $1.plainTextOffset }
+            return deduped.enumerated().map { idx, e in
+                StoredTOCEntry(title: e.title, plainTextOffset: e.plainTextOffset,
+                               playOrder: idx + 1, level: e.level)
+            }
+        }()
         // 2026-05-31 (ingestion audit): keep-first on duplicate offsets —
         // `Dictionary(uniqueKeysWithValues:)` fatal-errors on a key collision
         // (two headings resolving to the same offset). See PDFLibraryImporter.

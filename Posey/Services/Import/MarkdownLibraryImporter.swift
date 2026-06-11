@@ -81,7 +81,10 @@ struct MarkdownLibraryImporter {
         let documentID = existingDocument?.id ?? UUID()
 
         // ── Build units from MarkdownParser's display blocks.
-        let units = ContentUnitBuilder.units(from: parsed.blocks, documentID: documentID)
+        // 2026-06-11 heading standard — merge label-only heading + title line
+        // into one heading (md_setext: "CHAPTER I" + "JONATHAN HARKER'S JOURNAL").
+        let units = ContentUnitBuilder.mergeLabelTitleHeadings(
+            ContentUnitBuilder.units(from: parsed.blocks, documentID: documentID))
 
         // ── Pre-compute sentences per unit.
         let sentences = SentenceIndexer.sentences(for: units)

@@ -507,7 +507,10 @@ enum ContentUnitBuilder {
                 out.append(unit)
             }
         }
-        return out
+        // 2026-06-11 heading standard — merge label-only heading + title line
+        // into one heading (covers the block formats: EPUB/DOCX/HTML/PDF, which
+        // finalize headings here). No-op when headings already carry a title.
+        return mergeLabelTitleHeadings(out)
     }
 
     /// Build a `.heading` unit from a prose `unit`, carrying the marker's level
@@ -777,6 +780,75 @@ enum ContentUnitBuilder {
                 level: entry.level
             )
         }
+    }
+
+    // ── Heading standard (2026-06-11, auditor/Mark): a chapter heading is ONE
+    // line. A label-only heading line ("CHAPTER I", "II.") MERGES with the
+    // title line immediately below it → "CHAPTER I: Jonathan Harker's Journal",
+    // "II. The Red-Headed League". A trailing parenthetical ("(Kept in
+    // shorthand.)") stays body. Offset-safe: plainText/displayText derive from
+    // the unit list (see persistParsedDocument), so a consistent merge keeps
+    // offsets / search / anchors / sentences aligned — no length games needed.
+    // NO-OP for headings that already carry a title (DOCX/RTF/MD
+    // "CHAPTER XXVII. Mina Harker's Journal") and single-phrase section
+    // headings (Wikipedia "Plot summary"): those fail isLabelOnlyHeading.
+    // Both heading paths use it: TXT (proseUnits) and the block formats
+    // (EPUB/DOCX/HTML after applyHeadingMarkers).
+    static func mergeLabelTitleHeadings(_ units: [ContentUnit]) -> [ContentUnit] {
+        guard units.count > 1 else { return units }
+        var out: [ContentUnit] = []
+        var i = 0
+        while i < units.count {
+            let u = units[i]
+            if u.kind == .heading, i + 1 < units.count, isLabelOnlyHeading(u.text),
+               isMergeableTitleLine(units[i + 1]) {
+                out.append(ContentUnit(
+                    documentID: u.documentID,
+                    sequence: u.sequence,
+                    kind: .heading,
+                    text: joinLabelAndTitle(label: u.text, title: units[i + 1].text),
+                    metadata: u.metadata   // keep the label heading's level
+                ))
+                i += 2
+                continue
+            }
+            out.append(u)
+            i += 1
+        }
+        return out
+    }
+
+    /// A pure chapter label with NO title: "CHAPTER I", "Chapter 1", "II.",
+    /// "12", "I.". Rejects anything carrying title words.
+    private static let labelOnlyHeadingRegex: NSRegularExpression = {
+        let pattern = #"^(?:(?:CHAPTER|Chapter)\s+)?(?:\d{1,3}|[IVXLCDM]{1,7})\.?$"#
+        return try! NSRegularExpression(pattern: pattern)
+    }()
+    static func isLabelOnlyHeading(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.count <= 20 else { return false }
+        return labelOnlyHeadingRegex.firstMatch(
+            in: t, range: NSRange(t.startIndex..., in: t)) != nil
+    }
+    /// The line below a label that should become its title: a following heading
+    /// unit (EPUB/Sherlock split), or a SHORT title-like prose line (TXT
+    /// "JONATHAN HARKER'S JOURNAL"). Never a parenthetical, another bare label,
+    /// or a multi-sentence body paragraph.
+    static func isMergeableTitleLine(_ unit: ContentUnit) -> Bool {
+        let t = unit.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t.count <= 80, !t.hasPrefix("("),
+              !isLabelOnlyHeading(t) else { return false }
+        switch unit.kind {
+        case .heading: return true
+        case .prose:   return !t.contains(". ")   // one phrase, not a body sentence
+        default:       return false
+        }
+    }
+    static func joinLabelAndTitle(label: String, title: String) -> String {
+        let l  = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ti = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let last = l.last, ".:—–-".contains(last) { return "\(l) \(ti)" }
+        return "\(l): \(ti)"
     }
 
     /// Map a plainText character offset (the coordinate space the

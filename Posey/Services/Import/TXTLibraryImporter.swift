@@ -115,9 +115,14 @@ struct TXTLibraryImporter {
         // front-matter headings with no body copy are preserved. The TOC builder
         // below already excludes the listing from document_toc via the skip
         // gate; this aligns the heading UNITS.
-        let units = ContentUnitBuilder.demoteDuplicateListingHeadings(
+        let demotedUnits = ContentUnitBuilder.demoteDuplicateListingHeadings(
             rawUnits, skipOffset: skipOffset
         )
+        // 2026-06-11 heading standard — merge a label-only chapter heading with
+        // the title line below it into ONE heading ("CHAPTER I" + "JONATHAN
+        // HARKER'S JOURNAL" → "CHAPTER I: JONATHAN HARKER'S JOURNAL"). Runs
+        // before skip/sentence mapping so they see the final unit list.
+        let units = ContentUnitBuilder.mergeLabelTitleHeadings(demotedUnits)
 
         // ── Map smart-skip plainText offsets to unit ids.
         let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: skipOffset)?.id

@@ -414,7 +414,14 @@ struct MarkdownParser {
         }
 
         if let heading = match(in: trimmed, pattern: #"^(#{1,6})\s+(.*)$"#) {
-            return .heading(level: heading.0.count, text: heading.1)
+            // 2026-06-11 — strip the OPTIONAL closing hash sequence of an ATX
+            // heading (CommonMark §4.2): "### Title ###" → "Title". The closing
+            // #s must be preceded by a space and followed only by spaces, so a
+            // trailing "#1" (e.g. "Heading #1") or a mid-text "C# basics" is left
+            // intact. pandoc-the-manual uses the closed form ("Fenced code blocks ###").
+            let title = heading.1.replacingOccurrences(
+                of: #"\s+#+\s*$"#, with: "", options: .regularExpression)
+            return .heading(level: heading.0.count, text: title)
         }
 
         // 2026-05-22 — Horizontal rule. CommonMark §4.1: a line of

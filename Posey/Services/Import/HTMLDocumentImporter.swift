@@ -71,7 +71,16 @@ struct HTMLDocumentImporter {
         // raw-HTML stage lets the reader open at the article body
         // instead of "Pride and Prejudice / Title page / Author /
         // Jane Austen / Working title / First Impressions / …".
-        let preCleanedHTML = Self.stripWikipediaChrome(rawHTML: rawHTML)
+        // 2026-06-11 — strip code-block LANGUAGE-LABEL chrome. MDN (and other
+        // doc sites) render fenced code as
+        //   <div class="code-example"><div class="example-header">
+        //     <span class="language-name">http</span></div><pre><code>…</code></pre></div>
+        // The `example-header` is a UI label, not content; without stripping it
+        // a bare "http" / "html" line leaks into the reading text right before
+        // every code block (c3 fidelity defect). Remove the header div; keep the
+        // <pre><code> body. Shared pre-clean, not an mdn special-case.
+        let preCleanedHTML = Self.stripCodeExampleHeaders(
+            from: Self.stripWikipediaChrome(rawHTML: rawHTML))
         // 2026-05-31 (ingestion audit, Bug D) — BYPASS Readability for Project
         // Gutenberg HTML books. Readability is for web articles (it strips
         // nav/sidebar/infobox chrome — essential for Wikipedia). But it treats
@@ -369,7 +378,16 @@ struct HTMLDocumentImporter {
             ?? ""
         // 2026-05-27 — Wikipedia chrome strip (same rationale as the
         // url-based loadDocument path above).
-        let preCleanedHTML = Self.stripWikipediaChrome(rawHTML: rawHTML)
+        // 2026-06-11 — strip code-block LANGUAGE-LABEL chrome. MDN (and other
+        // doc sites) render fenced code as
+        //   <div class="code-example"><div class="example-header">
+        //     <span class="language-name">http</span></div><pre><code>…</code></pre></div>
+        // The `example-header` is a UI label, not content; without stripping it
+        // a bare "http" / "html" line leaks into the reading text right before
+        // every code block (c3 fidelity defect). Remove the header div; keep the
+        // <pre><code> body. Shared pre-clean, not an mdn special-case.
+        let preCleanedHTML = Self.stripCodeExampleHeaders(
+            from: Self.stripWikipediaChrome(rawHTML: rawHTML))
         let cleanedHTML = await ReadabilityExtractor.extractArticleHTML(
             rawHTML: preCleanedHTML, baseURL: nil
         )
@@ -739,6 +757,31 @@ struct HTMLDocumentImporter {
                 in: html,
                 range: NSRange(html.startIndex..., in: html),
                 withTemplate: " "
+            )
+        }
+        return html
+    }
+
+    /// Remove the code-block LANGUAGE-LABEL header that doc sites render above
+    /// fenced code (MDN: `<div class="example-header"><span
+    /// class="language-name">http</span></div>`). Left in, it leaks a bare
+    /// "http" / "html" line into the reading text before each code block — a c3
+    /// fidelity defect. Strips the whole `example-header` div (the label is the
+    /// only thing inside it); the `<pre><code>` body that follows is untouched.
+    /// Also strips a lone `<span class="language-name">…</span>` as a fallback
+    /// for sites that don't wrap it in an `example-header` div.
+    static func stripCodeExampleHeaders(from rawHTML: String) -> String {
+        var html = rawHTML
+        let patterns = [
+            #"(?si)<div[^>]*\bclass\s*=\s*["'][^"']*\bexample-header\b[^"']*["'][^>]*>.*?</div\s*>"#,
+            #"(?si)<span[^>]*\bclass\s*=\s*["'][^"']*\blanguage-name\b[^"']*["'][^>]*>.*?</span\s*>"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            html = regex.stringByReplacingMatches(
+                in: html,
+                range: NSRange(html.startIndex..., in: html),
+                withTemplate: ""
             )
         }
         return html

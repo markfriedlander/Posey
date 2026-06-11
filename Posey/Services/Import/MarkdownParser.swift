@@ -175,6 +175,26 @@ struct MarkdownParser {
                 codeFenceLen = len
                 continue   // drop the opening fence + info string
             }
+            // 2026-06-11 (auditor ruling) — CONSUME link reference definitions
+            // (CommonMark §4.7): `[label]: <url> "title"`. These are invisible
+            // link TARGETS referenced elsewhere by `[text][label]`; CommonMark
+            // never renders them, so emitting them as body text is a fidelity
+            // defect. Generalizes across the whole MD corpus (well-written
+            // READMEs lean on reference links), not pandoc-only. Guarded by a
+            // URL-ish RHS so it can't eat legitimate prose like "[note]: a
+            // remark." DEFERRED [DECISION] (auditor): 4-space INDENTED code
+            // blocks (CommonMark §4.4) are NOT handled here — disambiguating a
+            // 4-space indent from nested-list continuation needs real list-
+            // context tracking, and getting it wrong breaks nested lists (worse
+            // than the leak). Modern docs use fenced code; indented code is
+            // exercised mainly by pandoc-the-manual's syntax examples. Handle in
+            // a dedicated later pass; until then a rare indented-code example may
+            // reflow as prose (documented known-limitation).
+            if isLinkReferenceDefinition(line) {
+                flushParagraphBuffer()
+                flushQuoteBuffer()
+                continue
+            }
             // 2026-06-04 — Setext heading support (CommonMark §4.3).
             // A line of only `=` (→ H1) or only `-` (→ H2) that immediately
             // follows an OPEN paragraph buffer is a setext underline: the
@@ -266,6 +286,27 @@ struct MarkdownParser {
             }
         }
         return nil
+    }
+
+    /// 2026-06-11 — Link reference definition (CommonMark §4.7):
+    /// `[label]: destination "optional title"`, up to 3 leading spaces. Returns
+    /// true only when the destination is URL-ish (scheme://, mailto:, an angle-
+    /// bracket `<…>`, a root-relative `/path`, or a `domain.tld`) so a prose
+    /// line like `[note]: a quick remark.` is NOT mistaken for a definition.
+    private func isLinkReferenceDefinition(_ line: String) -> Bool {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"^ {0,3}\[[^\]]+\]:[ \t]+(\S+)"#) else { return false }
+        let ns = line as NSString
+        guard let m = regex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)),
+              m.numberOfRanges >= 2 else { return false }
+        let rhs = ns.substring(with: m.range(at: 1))
+        if rhs.contains("://") || rhs.hasPrefix("mailto:") || rhs.hasPrefix("/")
+            || rhs.hasPrefix("<")
+            || rhs.range(of: #"^[\w.-]+\.[a-z]{2,}"#,
+                         options: [.regularExpression, .caseInsensitive]) != nil {
+            return true
+        }
+        return false
     }
 
     /// Closing code fence: ≤3 leading spaces, then a run of the SAME fence

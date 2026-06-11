@@ -2417,7 +2417,18 @@ extension DatabaseManager {
             // all 7 formats' TOC nav land exactly on the heading.)
             let reanchoredTOC = ContentUnitBuilder.reanchorTOCToHeadingUnits(parsed.toc, units: parsed.units)
             try execute("DELETE FROM document_toc WHERE document_id = '\(parsed.id.uuidString)';")
+            // 2026-06-11 — dedupe on (title, offset), as insertTOCEntries and
+            // persistParsedDocumentIncrementally already do; this loop did not.
+            // reanchorTOCToHeadingUnits can map two same-title TOC entries (e.g.
+            // a section title that also appears as in-body text → resolved twice
+            // by resolveHeadingOffsets) onto the SAME heading unit's offset,
+            // producing identical (title, offset) rows. mdn_http-caching listed
+            // 'Validation' twice (both @10104, the dup out-of-order). A TOC must
+            // never list one location twice.
+            var seenTOCKeys = Set<String>()
             for entry in reanchoredTOC {
+                let key = "\(entry.title)|\(entry.plainTextOffset)"
+                guard seenTOCKeys.insert(key).inserted else { continue }
                 try insertTOCEntry(entry, for: parsed.id)
             }
 

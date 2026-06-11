@@ -120,10 +120,13 @@ struct HTMLDocumentImporter {
         // whose title the Readability output lost back into displayText at its
         // body anchor. The returned `headings` is the full ordered list for the
         // downstream title-based TOC + styling resolution.
-        let (displayText, headings) = reinjectArticleHeadings(
+        let (displayTextHeadings, headings) = reinjectArticleHeadings(
             into: displayTextRaw,
             specs: extractHeadingSpecs(fromHTML: preCleanedHTML)
         )
+        // 2026-06-11 — restore a lede Readability dropped (no-op if it survived).
+        let displayText = reinjectDroppedLede(
+            into: displayTextHeadings, preCleanedHTML: preCleanedHTML)
         // 2026-05-06 (parity #2) — displayText KEEPS markers;
         // HTMLDisplayParser converts them to .visualPlaceholder
         // blocks. plainText is the marker-stripped form for TTS.
@@ -358,6 +361,64 @@ struct HTMLDocumentImporter {
         return (result, headings)
     }
 
+    // 2026-06-11 — Restore a dropped article LEDE.
+    // CATEGORY (Rule 10): "leading article prose that Mozilla Readability scored
+    // out." Readability keeps high-text-density containers; when a site wraps its
+    // intro in a low-density wrapper, the whole wrapper is dropped. MDN's HTTP
+    // pages put the lede in `<section>…</section>` BEFORE the first `<h2>` — that
+    // section scores low and Readability drops it, so plainText starts at the
+    // first heading ("Types of caches") and loses the 4 intro paragraphs.
+    // reinjectArticleHeadings restores dropped *headings* but the lede has no
+    // heading, so the prose was lost. EDGE CASES: Wikipedia/most articles put the
+    // lede in plain `<p>` directly under the content root — Readability KEEPS it,
+    // so this must be a NO-OP there. We guarantee that by prepending ONLY the
+    // leading run of substantial pre-heading paragraphs that are ABSENT from the
+    // Readability output; the moment a paragraph is found present, the lede is
+    // judged to have survived and nothing is prepended. Verified MDN (lede
+    // restored) + Wikipedia P&P / Dracula (untouched — first lede para present).
+    private func reinjectDroppedLede(into displayText: String,
+                                     preCleanedHTML: String) -> String {
+        // Region = the prose between the article title (`</h1>`) and the first
+        // section (`<h2>`). The lede is, by definition, body prose that precedes
+        // any section heading. We deliberately do NOT match the first heading by
+        // TITLE: real heading markup wraps the text in anchors/comments
+        // (MDN: `<h2 id=…><!--lit-node--><a class="heading-anchor">Types of caches</a>`),
+        // so a "title right after `>`" cut silently misses. Scoping by tag
+        // structure (after </h1>, before first <h2>) is robust to that.
+        // CONSERVATIVE: if there is no `<h1>` we can't safely separate lede from
+        // site nav, so we bail (no-op) rather than risk prepending chrome.
+        guard let h1 = preCleanedHTML.range(of: #"(?si)</h1\s*>"#, options: .regularExpression)
+        else { return displayText }
+        var region = String(preCleanedHTML[h1.upperBound...])
+        if let h2 = region.range(of: #"(?si)<h2\b"#, options: .regularExpression) {
+            region = String(region[..<h2.lowerBound])
+        }
+        // Substantial prose paragraphs, in order. The length + sentence-punctuation
+        // gates exclude nav/breadcrumb/TOC <a> fragments; hatnote gate excludes
+        // "Main article:" style lead-ins. Single pass with early break: collect the
+        // LEADING run of paragraphs ABSENT from the Readability output; stop at the
+        // first one that survived (proof the lede is already present → no-op, which
+        // is what happens for Wikipedia/Dracula whose lede Readability keeps).
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?si)<(p|li|blockquote|dd)\b[^>]*>(.*?)</\1\s*>"#) else { return displayText }
+        let rns = region as NSString
+        let folded = foldPunctuation(displayText)
+        var missing: [String] = []
+        for m in regex.matches(in: region, range: NSRange(location: 0, length: rns.length)) {
+            let text = decodeMinimalEntities(stripTagsToSpaces(rns.substring(with: m.range(at: 2))))
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.count >= 60, text.contains(". ") || text.hasSuffix(".") else { continue }
+            if let hp = Self.hatnotePattern,
+               hp.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil { continue }
+            if folded.contains(foldPunctuation(String(text.prefix(60)))) { break }
+            missing.append(text)
+        }
+        guard !missing.isEmpty else { return displayText }
+        print("PoseyHTML: reinjected dropped lede — \(missing.count) paragraph(s)")
+        return missing.joined(separator: "\n\n") + "\n\n" + displayText
+    }
+
     func loadText(from url: URL) throws -> String {
         let data = try Data(contentsOf: url)
         return try loadText(fromData: data)
@@ -397,8 +458,12 @@ struct HTMLDocumentImporter {
         } else {
             workingData = data
         }
-        let text = try loadText(fromData: workingData)
+        let textRaw = try loadText(fromData: workingData)
         let headings = extractHeadings(fromRawData: workingData)
+        // 2026-06-11 — restore a lede Readability dropped (no-op if it survived);
+        // parity with the url-based loadDocument path.
+        let text = reinjectDroppedLede(
+            into: textRaw, preCleanedHTML: preCleanedHTML)
         return (text, headings)
     }
 

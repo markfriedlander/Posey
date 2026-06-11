@@ -773,8 +773,15 @@ enum ContentUnitBuilder {
                 }
             }
             guard let b = best else { return entry } // no body heading — keep original
+            // 2026-06-11 (auditor ruling) — the TOC entry MUST show the same text
+            // as the body heading it points to. After the label+title merge a
+            // body heading reads "CHAPTER I: JONATHAN HARKER'S JOURNAL" but a nav/
+            // listing-sourced TOC entry may still read bare "CHAPTER I" — a reader
+            // must not see one in the contents and the other in the body. Adopt
+            // the matched heading unit's (merged) text as the TOC title. Applies
+            // to every format that routes through persistParsedDocument.
             return StoredTOCEntry(
-                title: entry.title,
+                title: anchors[b].text.trimmingCharacters(in: .whitespacesAndNewlines),
                 plainTextOffset: anchors[b].offset,
                 playOrder: entry.playOrder,
                 level: entry.level

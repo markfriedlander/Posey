@@ -228,12 +228,15 @@ struct HTMLDocumentImporter {
     }
 
     /// Prepend the author byline as plain prose at the top of the body (under the
-    /// title). No-op when there is no byline or it's already the leading text.
+    /// title), in the natural spoken-attribution form "By <author>" (Mark's call,
+    /// 2026-06-11 — it's the opener of the listening experience, so it should read
+    /// as attribution, not a bare name). No-op when there is no byline or the name
+    /// is already the leading text.
     private func prependByline(_ byline: String?, to text: String) -> String {
         guard let byline, !byline.isEmpty else { return text }
-        let head = String(text.prefix(byline.count + 4))
+        let head = String(text.prefix(byline.count + 8))
         if head.contains(byline) { return text }   // already present at the top
-        return byline + "\n\n" + text
+        return "By " + byline + "\n\n" + text
     }
 
     private func stripHeadingInnerTags(_ s: String) -> String {

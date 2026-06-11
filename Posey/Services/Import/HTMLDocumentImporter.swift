@@ -145,27 +145,53 @@ struct HTMLDocumentImporter {
                          String(data: data, encoding: .isoLatin1) else {
             return []
         }
-        // Capture the level digit and the inner content. `(?s)` makes
-        // `.` cross newlines so headings spanning multiple source
-        // lines still match. `?` keeps the inner match non-greedy
-        // so consecutive headings don't merge.
-        let pattern = #"(?si)<h([1-6])\b[^>]*>(.*?)</h\1\s*>"#
+        // Capture the level digit, the open-tag ATTRIBUTES, and the inner
+        // content. `(?s)` makes `.` cross newlines so headings spanning multiple
+        // source lines still match. `?` keeps the inner match non-greedy so
+        // consecutive headings don't merge. The attributes (group 2) feed the
+        // byline filter below.
+        let pattern = #"(?si)<h([1-6])\b([^>]*)>(.*?)</h\1\s*>"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let range = NSRange(html.startIndex..., in: html)
         var out: [HTMLHeadingEntry] = []
         for match in regex.matches(in: html, range: range) {
-            guard match.numberOfRanges == 3,
+            guard match.numberOfRanges == 4,
                   let lvlR = Range(match.range(at: 1), in: html),
-                  let txtR = Range(match.range(at: 2), in: html),
+                  let attrR = Range(match.range(at: 2), in: html),
+                  let txtR = Range(match.range(at: 3), in: html),
                   let level = Int(String(html[lvlR])) else { continue }
             let raw = String(html[txtR])
             let stripped = stripHeadingInnerTags(raw)
             let decoded = decodeMinimalEntities(stripped)
             let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
+            guard !Self.isBylineHeading(attrs: String(html[attrR]),
+                                        innerHTML: raw, text: trimmed) else { continue }
             out.append(HTMLHeadingEntry(level: level, title: trimmed))
         }
         return out
+    }
+
+    /// 2026-06-11 (auditor ruling) — an author/byline node marked up as a heading
+    /// is metadata, NOT a section heading: it must never enter heading detection
+    /// or the TOC. A flat article's TOC should be its title or empty, never the
+    /// author's name. CATEGORY (Rule 10): "byline/author element styled as <hN>."
+    /// Seen on codinghorror (Ghost): `<h4 class="gh-article-author-name">
+    /// <a href="/author/jeff-atwood/">Jeff Atwood</a></h4>` became the lone TOC
+    /// entry while the title was dropped. Generalize across HTML by the common
+    /// authorship signals — class/itemprop/rel containing "author", an
+    /// `<a href="/author/…">` link, or a "Written by …" lead-in. Conservative:
+    /// these signals appear in metadata, not in genuine section titles.
+    private static func isBylineHeading(attrs: String, innerHTML: String, text: String) -> Bool {
+        let a = attrs.lowercased()
+        // class="…author…", itemprop="author", rel="author" (rel may also be on
+        // the inner <a>, covered below).
+        if a.contains("author") { return true }
+        let inner = innerHTML.lowercased()
+        if inner.contains("href=\"/author/") || inner.contains("rel=\"author\"")
+            || inner.contains("itemprop=\"author\"") { return true }
+        if text.range(of: #"(?i)^\s*written by\b"#, options: .regularExpression) != nil { return true }
+        return false
     }
 
     private func stripHeadingInnerTags(_ s: String) -> String {
@@ -292,17 +318,20 @@ struct HTMLDocumentImporter {
     /// (expects `preCleanedHTML`). `bodyAnchor` is the section's first prose
     /// element text (see `firstProseAnchor`); chrome-titled headings are dropped.
     private func extractHeadingSpecs(fromHTML html: String) -> [HeadingSpec] {
-        let pattern = #"(?si)<h([1-6])\b[^>]*>(.*?)</h\1\s*>"#
+        let pattern = #"(?si)<h([1-6])\b([^>]*)>(.*?)</h\1\s*>"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = html as NSString
         var specs: [HeadingSpec] = []
         for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
-            guard m.numberOfRanges == 3,
+            guard m.numberOfRanges == 4,
                   let level = Int(ns.substring(with: m.range(at: 1))) else { continue }
-            let title = decodeMinimalEntities(stripHeadingInnerTags(ns.substring(with: m.range(at: 2))))
+            let attrs = ns.substring(with: m.range(at: 2))
+            let innerHTML = ns.substring(with: m.range(at: 3))
+            let title = decodeMinimalEntities(stripHeadingInnerTags(innerHTML))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty,
-                  !Self.chromeHeadingDenylist.contains(title.lowercased()) else { continue }
+                  !Self.chromeHeadingDenylist.contains(title.lowercased()),
+                  !Self.isBylineHeading(attrs: attrs, innerHTML: innerHTML, text: title) else { continue }
             let after = m.range.location + m.range.length
             guard after < ns.length else { continue }
             var tail = ns.substring(from: after)

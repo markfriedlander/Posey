@@ -28,6 +28,14 @@ struct MarkdownParser {
         }
 
         let lines = normalizedSource.components(separatedBy: "\n")
+        // 2026-06-11 (auditor ruling ii) — collect the labels of link reference
+        // definitions we will CONSUME, so cleanInlineMarkdown can unwrap the
+        // matching inline reference links ([label] / [text][label]) and NOT
+        // leave dangling bracket junk. GUARD: only labels with a real consumed
+        // def are unwrapped, so [1] / [sic] / [citation needed] / [^1] (no def)
+        // stay untouched. Fence-aware so a def shown INSIDE a code example isn't
+        // collected. Labels normalized per CommonMark (case-fold + ws-collapse).
+        let consumedRefLabels = collectLinkRefLabels(lines)
         var blocks: [DisplayBlock] = []
         var plainTextParts: [String] = []
         var offset = 0
@@ -89,7 +97,8 @@ struct MarkdownParser {
             // hardWrapped:false (cleanInlineMarkdown already collapsed the
             // block to a single line); stripGutenbergItalics is a safe no-op
             // (the parser removed the underscores already).
-            let cleaned = TextNormalizer.normalizeUniversal(cleanInlineMarkdown(text))
+            let cleaned = TextNormalizer.normalizeUniversal(
+                cleanInlineMarkdown(text, refLabels: consumedRefLabels))
             guard cleaned.isEmpty == false else { return }
 
             let separatorLength = plainTextParts.isEmpty ? 0 : 2
@@ -290,23 +299,102 @@ struct MarkdownParser {
 
     /// 2026-06-11 — Link reference definition (CommonMark §4.7):
     /// `[label]: destination "optional title"`, up to 3 leading spaces. Returns
-    /// true only when the destination is URL-ish (scheme://, mailto:, an angle-
-    /// bracket `<…>`, a root-relative `/path`, or a `domain.tld`) so a prose
-    /// line like `[note]: a quick remark.` is NOT mistaken for a definition.
-    private func isLinkReferenceDefinition(_ line: String) -> Bool {
+    /// the NORMALIZED label when the line is a definition with a URL-ish
+    /// destination (scheme://, mailto:, angle-bracket `<…>`, root-relative
+    /// `/path`, or `domain.tld`), else nil — so a prose line like
+    /// `[note]: a quick remark.` is NOT mistaken for a definition.
+    private func linkRefDefLabel(_ line: String) -> String? {
         guard let regex = try? NSRegularExpression(
-            pattern: #"^ {0,3}\[[^\]]+\]:[ \t]+(\S+)"#) else { return false }
+            pattern: #"^ {0,3}\[([^\]]+)\]:[ \t]+(\S+)"#) else { return nil }
         let ns = line as NSString
         guard let m = regex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)),
-              m.numberOfRanges >= 2 else { return false }
-        let rhs = ns.substring(with: m.range(at: 1))
-        if rhs.contains("://") || rhs.hasPrefix("mailto:") || rhs.hasPrefix("/")
+              m.numberOfRanges >= 3 else { return nil }
+        let rhs = ns.substring(with: m.range(at: 2))
+        let urlish = rhs.contains("://") || rhs.hasPrefix("mailto:") || rhs.hasPrefix("/")
             || rhs.hasPrefix("<")
             || rhs.range(of: #"^[\w.-]+\.[a-z]{2,}"#,
-                         options: [.regularExpression, .caseInsensitive]) != nil {
-            return true
+                         options: [.regularExpression, .caseInsensitive]) != nil
+        guard urlish else { return nil }
+        return normalizeLabel(ns.substring(with: m.range(at: 1)))
+    }
+
+    private func isLinkReferenceDefinition(_ line: String) -> Bool {
+        return linkRefDefLabel(line) != nil
+    }
+
+    /// CommonMark label matching: case-fold + collapse internal whitespace + trim.
+    private func normalizeLabel(_ s: String) -> String {
+        return s.lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// 2026-06-11 (auditor ruling ii) — pre-pass: the set of labels whose link
+    /// reference definition we consume. Fence-aware (a def shown inside a code
+    /// example is literal content, not a real def, so it isn't collected).
+    private func collectLinkRefLabels(_ lines: [String]) -> Set<String> {
+        var labels: Set<String> = []
+        var inFence = false
+        var fenceChar: Character = "`"
+        var fenceLen = 3
+        for line in lines {
+            if inFence {
+                if isClosingFence(line, fenceChar: fenceChar, minLength: fenceLen) { inFence = false }
+                continue
+            }
+            if let (ch, len) = openingFence(line) { inFence = true; fenceChar = ch; fenceLen = len; continue }
+            if let label = linkRefDefLabel(line) { labels.insert(label) }
         }
-        return false
+        return labels
+    }
+
+    /// 2026-06-11 (auditor ruling ii) — unwrap inline reference links whose
+    /// definition we consumed, leaving dangling bracket junk behind otherwise.
+    /// Full/collapsed ref `[text][label]` / `[text][]` → `text`; shortcut ref
+    /// `[label]` → `label`. GUARDED: only when the (normalized) label is in the
+    /// consumed-def set, so `[1]` / `[sic]` / `[citation needed]` / `[^1]` —
+    /// which have no def — are left intact. Inline links `[text](url)` and
+    /// images `![alt](url)` are already unwrapped earlier in cleanInlineMarkdown,
+    /// so the bracket patterns here only see reference-style links.
+    private func unwrapConsumedRefLinks(_ text: String, labels: Set<String>) -> String {
+        guard !labels.isEmpty, text.contains("[") else { return text }
+        var s = text
+        // Full / collapsed reference links FIRST (so the shortcut pass doesn't
+        // mis-split `[text][label]`). Inner brackets disallowed to stay simple.
+        s = replaceGuardedBrackets(s, pattern: #"\[([^\]\[]+)\]\[([^\]\[]*)\]"#) { groups in
+            let textPart = groups[1]
+            let label = groups[2].isEmpty ? textPart : groups[2]
+            return labels.contains(normalizeLabel(label)) ? textPart : nil
+        }
+        // Shortcut reference links.
+        s = replaceGuardedBrackets(s, pattern: #"\[([^\]\[]+)\]"#) { groups in
+            let label = groups[1]
+            return labels.contains(normalizeLabel(label)) ? label : nil
+        }
+        return s
+    }
+
+    /// Enumerate regex matches LAST-to-FIRST (so replacement ranges stay valid)
+    /// and replace each only when `replacement` returns non-nil for its capture
+    /// groups (group 0 = whole match, 1.. = captures).
+    private func replaceGuardedBrackets(
+        _ text: String, pattern: String,
+        _ replacement: ([String]) -> String?
+    ) -> String {
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return text }
+        let ns = NSMutableString(string: text)
+        let matches = re.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        for m in matches.reversed() {
+            var groups: [String] = []
+            for i in 0..<m.numberOfRanges {
+                let r = m.range(at: i)
+                groups.append(r.location == NSNotFound ? "" : ns.substring(with: r))
+            }
+            if let rep = replacement(groups) {
+                ns.replaceCharacters(in: m.range, with: rep)
+            }
+        }
+        return ns as String
     }
 
     /// Closing code fence: ≤3 leading spaces, then a run of the SAME fence
@@ -406,7 +494,7 @@ struct MarkdownParser {
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func cleanInlineMarkdown(_ text: String) -> String {
+    private func cleanInlineMarkdown(_ text: String, refLabels: Set<String> = []) -> String {
         var cleaned = text
         let replacements: [(String, String)] = [
             (#"`([^`]*)`"#, "$1"),
@@ -425,6 +513,12 @@ struct MarkdownParser {
                 cleaned = regex.stringByReplacingMatches(in: cleaned, options: [], range: range, withTemplate: template)
             }
         }
+
+        // 2026-06-11 (auditor ruling ii) — unwrap inline reference links whose
+        // definition was consumed (runs AFTER inline-link `[text](url)` removal
+        // above, so it only sees reference-style brackets). Guarded by the
+        // consumed-def set so `[1]`/`[sic]` are untouched.
+        cleaned = unwrapConsumedRefLinks(cleaned, labels: refLabels)
 
         return cleaned
             .replacingOccurrences(of: #"\\([\\`*_{}\[\]()#+\-.!>])"#, with: "$1", options: .regularExpression)

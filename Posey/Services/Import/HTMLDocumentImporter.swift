@@ -125,8 +125,15 @@ struct HTMLDocumentImporter {
             specs: extractHeadingSpecs(fromHTML: preCleanedHTML)
         )
         // 2026-06-11 — restore a lede Readability dropped (no-op if it survived).
-        let displayText = reinjectDroppedLede(
+        let displayTextLede = reinjectDroppedLede(
             into: displayTextHeadings, preCleanedHTML: preCleanedHTML)
+        // 2026-06-11 (auditor product call) — reinject the author as PLAIN byline
+        // text at the top (under the title), since isBylineHeading removed it from
+        // headings (and Readability dropped it from the body). Not a heading, not
+        // a TOC entry — a reader still gets attribution. No-op when there is no
+        // byline (mdn/Wikipedia) or it's already present.
+        let displayText = prependByline(
+            extractByline(fromHTML: preCleanedHTML), to: displayTextLede)
         // 2026-05-06 (parity #2) — displayText KEEPS markers;
         // HTMLDisplayParser converts them to .visualPlaceholder
         // blocks. plainText is the marker-stripped form for TTS.
@@ -192,6 +199,41 @@ struct HTMLDocumentImporter {
             || inner.contains("itemprop=\"author\"") { return true }
         if text.range(of: #"(?i)^\s*written by\b"#, options: .regularExpression) != nil { return true }
         return false
+    }
+
+    /// 2026-06-11 (auditor product call) — the author's NAME for plain-byline
+    /// reinjection. Returns the first byline heading's text with a "Written by "
+    /// lead-in stripped (so "<h4>Written by Jeff Atwood</h4>" → "Jeff Atwood"),
+    /// or nil if the doc has no byline. Same detection as isBylineHeading; the
+    /// FIRST match wins (the author-name node precedes the footer "Written by"
+    /// bio in the markup we've seen).
+    private func extractByline(fromHTML html: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?si)<h([1-6])\b([^>]*)>(.*?)</h\1\s*>"#) else { return nil }
+        let ns = html as NSString
+        for m in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            guard m.numberOfRanges == 4 else { continue }
+            let attrs = ns.substring(with: m.range(at: 2))
+            let inner = ns.substring(with: m.range(at: 3))
+            let text = decodeMinimalEntities(stripHeadingInnerTags(inner))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty,
+                  Self.isBylineHeading(attrs: attrs, innerHTML: inner, text: text) else { continue }
+            let name = text.replacingOccurrences(
+                of: #"(?i)^\s*written by\s+"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        }
+        return nil
+    }
+
+    /// Prepend the author byline as plain prose at the top of the body (under the
+    /// title). No-op when there is no byline or it's already the leading text.
+    private func prependByline(_ byline: String?, to text: String) -> String {
+        guard let byline, !byline.isEmpty else { return text }
+        let head = String(text.prefix(byline.count + 4))
+        if head.contains(byline) { return text }   // already present at the top
+        return byline + "\n\n" + text
     }
 
     private func stripHeadingInnerTags(_ s: String) -> String {
@@ -491,8 +533,10 @@ struct HTMLDocumentImporter {
         let headings = extractHeadings(fromRawData: workingData)
         // 2026-06-11 — restore a lede Readability dropped (no-op if it survived);
         // parity with the url-based loadDocument path.
-        let text = reinjectDroppedLede(
+        let textLede = reinjectDroppedLede(
             into: textRaw, preCleanedHTML: preCleanedHTML)
+        // 2026-06-11 — reinject author as plain byline text (parity with loadDocument).
+        let text = prependByline(extractByline(fromHTML: preCleanedHTML), to: textLede)
         return (text, headings)
     }
 

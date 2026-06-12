@@ -56,6 +56,7 @@ enum TextNormalizer {
         t = stripLineBreakHyphens(t)        // catches both - and ¬ as line-break markers
         t = stripWaybackPrintHeaders(t)     // PDF-from-Wayback artifacts
         t = stripAsterismLines(t)           // 2026-05-20 — PG scene-break asterisks
+        t = stripIllustrationMarkers(t)     // 2026-06-11 — PG [Illustration: caption] markers
         // collapseSpacedLetters / collapseSpacedDigits are PDF-glyph-specific
         // (see normalizePDFGlyphArtifacts) — NOT run here: other formats have
         // real text runs and would suffer false collapses on intentional
@@ -375,6 +376,46 @@ enum TextNormalizer {
             range: NSRange(normalized.startIndex..., in: normalized),
             withTemplate: ""
         )
+    }
+
+    /// 2026-06-11 — Project Gutenberg `[Illustration: caption]` markers.
+    /// Illustrated PG editions (Pride & Prejudice #1342, illustrated Alice
+    /// #19033, etc.) mark every figure with a literal `[Illustration: <caption>]`
+    /// block in the plain-text — which previously rendered as RAW bracketed text
+    /// in the reader ("[Illustration: Reading Jane's Letters. Chap 34. ]").
+    /// FIX (Mark/auditor, shared so ALL formats with these markers benefit):
+    ///   • A marker with NO real caption (pure image placeholder — ~half of
+    ///     P&P's 162) → removed entirely (the blank line folds into the
+    ///     surrounding paragraph break via collapseExcessiveBlankLines after us).
+    ///   • A marker WITH a caption → the `[Illustration:` … `]` wrapper is
+    ///     stripped and the cleaned caption is emitted as its own line (a nested
+    ///     `[_Copyright …_` engraver/copyright fragment and `_emphasis_` are
+    ///     removed). Caption text only — no raw brackets.
+    /// The literal token `[Illustration` does not occur in real prose, so this
+    /// is safe to run universally. (A future enhancement can promote the caption
+    /// to a styled `.image`-caption unit; this pass alone removes the defect.)
+    static func stripIllustrationMarkers(_ text: String) -> String {
+        guard text.contains("[Illustration") else { return text }
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?s)\[Illustration:?(.*?)\]"#) else { return text }
+        let out = NSMutableString(string: text)
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: out.length))
+        // Replace last-to-first so earlier ranges stay valid (NSString/UTF-16
+        // ranges throughout — no Character/UTF-16 index mixing).
+        for m in matches.reversed() {
+            var caption = out.substring(with: m.range(at: 1))
+            // Drop a nested copyright/engraver fragment ("[_Copyright 1894…_").
+            caption = caption.replacingOccurrences(
+                of: #"\[_[^\]]*"#, with: "", options: .regularExpression)
+            // Drop `_emphasis_` wrappers within the caption.
+            caption = caption.replacingOccurrences(
+                of: #"_([^_]+)_"#, with: "$1", options: .regularExpression)
+            caption = caption.replacingOccurrences(
+                of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            out.replaceCharacters(in: m.range, with: caption.isEmpty ? "" : "\n\n" + caption + "\n\n")
+        }
+        return out as String
     }
 
     // ========== BLOCK 03: LINE-ENDING & WHITESPACE PASSES - END ==========

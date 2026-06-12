@@ -410,6 +410,16 @@ enum TextNormalizer {
             // Drop `_emphasis_` wrappers within the caption.
             caption = caption.replacingOccurrences(
                 of: #"_([^_]+)_"#, with: "$1", options: .regularExpression)
+            // Drop decorative middle-dot (U+00B7) title-bands that illustrated PG
+            // editions wrap a chapter-head image in — the band repeats the running
+            // book title and gets glued onto the real chapter label
+            // (P&P #1342 ch I: "[Illustration: ·PRIDE AND PREJUDICE·  …  Chapter I.]"
+            // → caption "·PRIDE AND PREJUDICE· Chapter I." → clean "Chapter I.").
+            // Scoped to caption text only (never touches body prose); a ·…· band is
+            // decorative apparatus, not content. Replace with a space so the
+            // surrounding words don't merge; the \s+ collapse below tidies it.
+            caption = caption.replacingOccurrences(
+                of: #"·[^·]*·"#, with: " ", options: .regularExpression)
             caption = caption.replacingOccurrences(
                 of: #"\s+"#, with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)

@@ -216,11 +216,17 @@ actor UnitEmbeddingService {
         while true {
             let batch: [DatabaseManager.UnitEmbeddingChunkNeedingEmbedding]
             do {
-                batch = try await MainActor.run {
-                    try databaseManager.unitEmbeddingChunksNeedingEmbedding(
-                        for: documentID, limit: batchSize
-                    )
-                }
+                // 2026-06-12 (Mark — background document processing must NEVER
+                // touch the read-along's main thread): the per-batch READ had no
+                // reason to hop MainActor either — same justification as the
+                // 2026-05-28 write-fix below (DatabaseManager is @unchecked
+                // Sendable; SQLite is SQLITE_THREADSAFE=1, serialized internally).
+                // Reading directly from this actor's isolation removes the LAST
+                // main-actor touch in the steady embedding loop, so background
+                // indexing can no longer micro-stutter a reader's TTS highlight.
+                batch = try databaseManager.unitEmbeddingChunksNeedingEmbedding(
+                    for: documentID, limit: batchSize
+                )
             } catch {
                 return
             }

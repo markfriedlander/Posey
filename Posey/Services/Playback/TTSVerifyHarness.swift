@@ -230,8 +230,10 @@ final class TTSVerifyHarness {
                 sink.handleAudioApp(sampleBuffer)
             }
             // .video / .audioMic ignored (mic disabled; video unused).
-        }, completionHandler: { [weak self] error in
-            Task { @MainActor in
+        }, completionHandler: { error in
+            // [weak self] on the Task (not the outer closure) so `self` is a Task-local
+            // `let`, not a reference to an outer captured `var` — Swift 6 concurrency-safe.
+            Task { @MainActor [weak self] in
                 if let error = error {
                     self?.captureActive = false
                     completion(false, error.localizedDescription)
@@ -319,8 +321,8 @@ final class TTSVerifyHarness {
 
         let maxSeconds = Double(playedSegments.count) * 14.0 + 25.0
         watchdog?.invalidate()
-        watchdog = Timer.scheduledTimer(withTimeInterval: maxSeconds, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.end(reason: "watchdog") }
+        watchdog = Timer.scheduledTimer(withTimeInterval: maxSeconds, repeats: false) { _ in
+            Task { @MainActor [weak self] in self?.end(reason: "watchdog") }
         }
         return true
     }
@@ -337,8 +339,8 @@ final class TTSVerifyHarness {
 
     private func scheduleTrailingStop() {
         guard trailingStop == nil else { return }
-        trailingStop = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.end(reason: "reached-target") }
+        trailingStop = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { _ in
+            Task { @MainActor [weak self] in self?.end(reason: "reached-target") }
         }
     }
 
@@ -449,8 +451,13 @@ final class TTSVerifyHarness {
         let u = AVSpeechUtterance(string: "Posey engine tap capture probe one two three four five.")
         u.volume = 0  // keep silent even if the engine path were audible
         synth.speak(u)
-        // Sample for ~4s, then tear down and report.
-        Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { _ in
+        // Sample for ~4s, then tear down and report. Use a @MainActor Task (NOT a
+        // Timer, whose block is a non-isolated @Sendable closure) so the teardown
+        // captures the @MainActor-isolated engine/mixer/synth WITHOUT crossing an
+        // isolation boundary — the Swift-6-correct form (same reason the self?.end
+        // Tasks above don't warn). @preconcurrency imports are NOT needed.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
             mixer.removeTap(onBus: 0)
             engine.stop()
             if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }

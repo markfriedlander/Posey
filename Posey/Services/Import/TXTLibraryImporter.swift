@@ -86,15 +86,19 @@ struct TXTLibraryImporter {
             in: plainText, after: postCatalog
         ) ?? postCatalog
         let postFrontMatter = max(postCatalog, postTOC)
-        // 2026-05-27 — refine the smart-skip target by advancing past
-        // any in-work front matter (Moby's ETYMOLOGY + EXTRACTS;
-        // Frankenstein's Letters; etc.) to the first chapter heading.
-        // Mark's directive: a reader opening Moby Dick wants to start
-        // at "Call me Ishmael." not at the etymology. If no chapter
-        // heading is found within 80 KB of postFrontMatter, the
-        // detector returns nil and we keep the previous offset
-        // (handles books that don't use CHAPTER-numbered structure).
-        let skipOffset = FirstChapterAdvance.detect(in: plainText, after: postFrontMatter) ?? postFrontMatter
+        // 2026-06-11 [DECISION] (Mark — format-parity with the EPUB ruling
+        // a6d892e, SUPERSEDES the 2026-05-27 FirstChapterAdvance step): ALL
+        // prefaces (author AND editorial) are BOOK CONTENT. A gutenberg book
+        // opens at the FIRST REAL PROSE after (a) the PG license boilerplate and
+        // (b) the in-book Contents/TOC listing — it NEVER skips a preface to
+        // Chapter I. So Moby TXT now opens at "ETYMOLOGY." (kept), not "Call me
+        // Ishmael."; Frankenstein keeps its Letters. The old FirstChapterAdvance
+        // "skip in-work front-matter -> Chapter 1" step is REMOVED; in its place,
+        // if the skip still sits on a Contents listing, advance past the listing
+        // to the first prose (no-op when not on a listing). TXT has no structural
+        // TOC titles, so the listing entries are matched structurally (tocTitles []).
+        let skipOffset = InProseTOCDetector.firstProseAfterContentsListing(
+            in: plainText, at: postFrontMatter, tocTitles: []) ?? postFrontMatter
         let contentEndOffset = boundaries.contentEndOffset ?? 0
         let skipSource: String = {
             if gutenbergStart > 0 { return "gutenberg" }

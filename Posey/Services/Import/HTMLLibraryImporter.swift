@@ -130,15 +130,20 @@ struct HTMLLibraryImporter {
             in: plainText, after: postCatalog
         ) ?? postCatalog
         let postFrontMatter = max(postCatalog, postTOC)
-        // 2026-05-27 — same chapter-advance as TXT importer. Gutenberg
-        // HTML editions (Moby Dick #2701, etc.) carry the same front-
-        // matter pattern: "By Herman Melville" / "Original Transcriber's
-        // Notes" before the first chapter. Without this, a reader opens
-        // the HTML edition at notes rather than at "Call me Ishmael."
-        // Returns nil for HTML without CHAPTER-numbered structure
-        // (e.g. Wikipedia articles), in which case the prior offset
-        // stays — leaving article-style HTML to open at the top.
-        let skipOffset = FirstChapterAdvance.detect(in: plainText, after: postFrontMatter) ?? postFrontMatter
+        // 2026-06-11 [DECISION] (Mark — format-parity with the EPUB ruling
+        // a6d892e, SUPERSEDES the 2026-05-27 FirstChapterAdvance step): ALL
+        // prefaces (author AND editorial) are BOOK CONTENT — a gutenberg book
+        // opens at the FIRST REAL PROSE after the PG boilerplate + the in-book
+        // Contents listing, NEVER skipping a preface to Chapter I. Moby HTML now
+        // opens at "ETYMOLOGY." (kept), not "Call me Ishmael." The old
+        // FirstChapterAdvance "skip in-work front-matter -> Chapter 1" step is
+        // REMOVED; in its place, if the skip still sits on a Contents listing,
+        // advance past the listing to the first prose. NO-OP for non-gutenberg
+        // article HTML (Wikipedia): no "Contents" header ahead → stays at the top
+        // (same outcome FirstChapterAdvance gave for non-CHAPTER-structured HTML).
+        let skipOffset = InProseTOCDetector.firstProseAfterContentsListing(
+            in: plainText, at: postFrontMatter,
+            tocTitles: resolvedHeadings.map { $0.title }) ?? postFrontMatter
         // 2026-05-31 (Bug G) — demote the front-matter CONTENTS-listing chapter
         // headings (Moby HTML promoted both the listing entries AND the body
         // chapters → 282 heading units for 147 real chapters). Identified by a

@@ -256,8 +256,13 @@ struct EPUBLibraryImporter {
         //       the merged body heading "CHAPTER I:"), advance past the listing to
         //       the first prose — Dracula → Stoker's preface (~2400), NOT Chapter I.
         //       No-op when not on a Contents listing (guarded by a nearby header).
-        let finalSkip = InProseTOCDetector.firstProseAfterContentsListing(
+        let afterContents = InProseTOCDetector.firstProseAfterContentsListing(
             in: plainText, at: postWalker, tocTitles: tocEntries.map { $0.title }) ?? postWalker
+        // 2026-06-11 (auditor c6) — advance past leading title-page/publisher/
+        // illustration-list apparatus to first real content (illustrated PG
+        // EPUBs). No-op when the landing isn't apparatus (parity with TXT/HTML).
+        let finalSkip = InProseTOCDetector.contentStartAfterPublishingApparatus(
+            in: plainText, at: afterContents) ?? afterContents
 
         let source: String
         if gutenbergStart > 0 {

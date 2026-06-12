@@ -97,8 +97,14 @@ struct TXTLibraryImporter {
         // if the skip still sits on a Contents listing, advance past the listing
         // to the first prose (no-op when not on a listing). TXT has no structural
         // TOC titles, so the listing entries are matched structurally (tocTitles []).
-        let skipOffset = InProseTOCDetector.firstProseAfterContentsListing(
+        let afterContents = InProseTOCDetector.firstProseAfterContentsListing(
             in: plainText, at: postFrontMatter, tocTitles: []) ?? postFrontMatter
+        // 2026-06-11 (auditor c6) — then advance past any leading title-page /
+        // publisher / illustration-list apparatus to the first real content
+        // (illustrated PG editions: P&P → Saintsbury "PREFACE."). No-op when the
+        // landing isn't apparatus (Moby stays on ETYMOLOGY, Dracula on its preface).
+        let skipOffset = InProseTOCDetector.contentStartAfterPublishingApparatus(
+            in: plainText, at: afterContents) ?? afterContents
         let contentEndOffset = boundaries.contentEndOffset ?? 0
         let skipSource: String = {
             if gutenbergStart > 0 { return "gutenberg" }

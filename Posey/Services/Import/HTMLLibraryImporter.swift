@@ -141,9 +141,14 @@ struct HTMLLibraryImporter {
         // advance past the listing to the first prose. NO-OP for non-gutenberg
         // article HTML (Wikipedia): no "Contents" header ahead → stays at the top
         // (same outcome FirstChapterAdvance gave for non-CHAPTER-structured HTML).
-        let skipOffset = InProseTOCDetector.firstProseAfterContentsListing(
+        let afterContents = InProseTOCDetector.firstProseAfterContentsListing(
             in: plainText, at: postFrontMatter,
             tocTitles: resolvedHeadings.map { $0.title }) ?? postFrontMatter
+        // 2026-06-11 (auditor c6) — advance past leading title-page/publisher/
+        // illustration-list apparatus to first real content (no-op for article
+        // HTML + non-apparatus landings).
+        let skipOffset = InProseTOCDetector.contentStartAfterPublishingApparatus(
+            in: plainText, at: afterContents) ?? afterContents
         // 2026-05-31 (Bug G) — demote the front-matter CONTENTS-listing chapter
         // headings (Moby HTML promoted both the listing entries AND the body
         // chapters → 282 heading units for 147 real chapters). Identified by a

@@ -231,6 +231,87 @@ enum InProseTOCDetector {
         return nil
     }
 
+    /// 2026-06-11 (auditor c6 ruling) — advance past a leading run of
+    /// PUBLISHING-APPARATUS / title-page boilerplate to the first real content.
+    /// Runs as the FINAL skip step (after the gutenberg + Contents-listing skip).
+    /// FRAMING (auditor, to remove over-skip risk): "skip POSITIVELY-MATCHED
+    /// boilerplate, STOP at the first non-boilerplate line." It only ACTIVATES if
+    /// the landing line is itself apparatus/caption — otherwise NO-OP (returns
+    /// nil), so a doc already sitting on real content (Moby → "ETYMOLOGY.",
+    /// Dracula → its preface) is never touched. STOP conditions (checked before
+    /// any skip): a recognized CONTENT-HEADING (PREFACE/INTRODUCTION/FOREWORD/
+    /// PROLOGUE/ETYMOLOGY/EXTRACTS/ARGUMENT/LETTER/DEDICATION/CHAPTER/CONTENTS) or
+    /// substantial sentence-shaped prose — so ETYMOLOGY and "Letter 1" are
+    /// STOPPED AT, never past (no content loss). SKIP: publisher/press/printer
+    /// names, addresses, bare years, copyright, dedication, the split title-page
+    /// type, "List of Illustrations" + figure captions. Verified P&P → "PREFACE.",
+    /// Moby → ETYMOLOGY (no-op), Dracula → preface (no-op). Bounded to the leading
+    /// ~90 lines; SAFETY DEFAULT = STOP on any line that doesn't clearly match a
+    /// skip pattern (under-skip = a little boilerplate ≪ over-skip = content loss).
+    static func contentStartAfterPublishingApparatus(in plainText: String, at skipOffset: Int) -> Int? {
+        guard skipOffset >= 0, skipOffset < plainText.count else { return nil }
+        let startIdx = plainText.index(plainText.startIndex, offsetBy: skipOffset)
+        let region = plainText[startIdx...]
+        let lines = region.split(separator: "\n", maxSplits: 90, omittingEmptySubsequences: false)
+        var consumed = 0          // characters walked (offset delta), incl. the "\n"
+        var sawApparatus = false
+        for line in lines {
+            let raw = String(line)
+            let lineLen = raw.count + 1
+            let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if s.isEmpty { consumed += lineLen; continue }
+            // STOP at a real content boundary (checked FIRST → never over-skips).
+            if isContentHeadingLine(s) {
+                return sawApparatus ? skipOffset + consumed : nil
+            }
+            // SKIP positively-matched publishing apparatus / title-page captions.
+            if isPublishingApparatus(s) || isTitlePageCaption(s) {
+                sawApparatus = true; consumed += lineLen; continue
+            }
+            if isApparatusSkipProse(s) {     // substantial prose = real content → STOP
+                return sawApparatus ? skipOffset + consumed : nil
+            }
+            // Split title-page type ("PRIDE." / "and" / "PREJUDICE" / "by") — only
+            // skipped once we're already inside the apparatus block.
+            if sawApparatus && s.count < 40 { consumed += lineLen; continue }
+            // Safety default: anything else → STOP (no-op if we never skipped).
+            return sawApparatus ? skipOffset + consumed : nil
+        }
+        return nil
+    }
+
+    private static func isContentHeadingLine(_ s: String) -> Bool {
+        return s.range(of: #"(?i)^(PREFACE|INTRODUCTION|FOREWORD|PROLOGUE|ETYMOLOGY|EXTRACTS|ARGUMENT|LETTER|DEDICATION|CHAPTER|CONTENTS)\b"#,
+                       options: .regularExpression) != nil
+    }
+
+    private static func isApparatusSkipProse(_ s: String) -> Bool {
+        guard s.count >= 80 else { return false }
+        if s.contains(". ") { return true }
+        if let last = s.last, ".!?”\"".contains(last) { return true }
+        return false
+    }
+
+    private static func isPublishingApparatus(_ s: String) -> Bool {
+        if s.range(of: #"(?i)\b(PUBLISHER|PUBLISHERS|PRESS|PRINTED BY|& ?CO\.|GROSSET|DUNLAP|GEORGE ALLEN|CHISWICK|RUSKIN HOUSE)\b"#, options: .regularExpression) != nil { return true }
+        if s.range(of: #"(?i)(Illustrations? by|Hugh Thomson|by Jane Austen|by Bram Stoker|by Herman Melville)"#, options: .regularExpression) != nil { return true }
+        if s.range(of: #"(?i)^To .{0,160}(acknowledgment|inscribed|gratefully|dedicated)"#, options: .regularExpression) != nil { return true }
+        if s.range(of: #"^\d{3,4}\.?$"#, options: .regularExpression) != nil { return true }
+        if s.range(of: #"(?i)^(Copyright|©)"#, options: .regularExpression) != nil { return true }
+        if s.count < 70, s.range(of: #"(?i)\b(ROAD|STREET|AVENUE|LANE|COURT|NEW YORK|LONDON|CHARING)\b"#, options: .regularExpression) != nil { return true }
+        if s.range(of: #"(?i)^List of Illustrations"#, options: .regularExpression) != nil { return true }
+        return false
+    }
+
+    private static func isTitlePageCaption(_ s: String) -> Bool {
+        guard s.count <= 80 else { return false }
+        if s.range(of: #"(?i)(Chap\.?\s*\d|Page\s*\d|\(Page)"#, options: .regularExpression) != nil { return true }
+        if s.range(of: #"^[“"].{0,70}[”"]\.?$"#, options: .regularExpression) != nil { return true }   // quoted scene caption
+        if s.count < 70, s.range(of: #"\s\d{1,3}$"#, options: .regularExpression) != nil { return true } // caption + page no.
+        if s.hasPrefix("·") || s.hasSuffix("·") { return true }
+        return false
+    }
+
     /// A line that belongs to a Contents listing: a CHAPTER/LETTER/PART/BOOK/
     /// VOLUME heading line, OR a short title-ish line, OR a fuzzy match to a
     /// structural nav title. NOT substantial prose.

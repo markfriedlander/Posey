@@ -53,3 +53,4 @@ docs-internal/
 # Derived active-task pointer, regenerated from MANDATE_QUEUE.md by tools/mandate.sh.
 # Scratch view, not a record — never commit it. Source of truth is the queue.
 MANDATE.md
+build/

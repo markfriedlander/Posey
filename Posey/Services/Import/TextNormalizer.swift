@@ -57,6 +57,7 @@ enum TextNormalizer {
         t = stripWaybackPrintHeaders(t)     // PDF-from-Wayback artifacts
         t = stripAsterismLines(t)           // 2026-05-20 — PG scene-break asterisks
         t = stripIllustrationMarkers(t)     // 2026-06-11 — PG [Illustration: caption] markers
+        t = stripPrintPageNumberList(t)     // 2026-06-12 — print List-of-Illustrations/TOC rows (must precede tab/space collapse)
         // collapseSpacedLetters / collapseSpacedDigits are PDF-glyph-specific
         // (see normalizePDFGlyphArtifacts) — NOT run here: other formats have
         // real text runs and would suffer false collapses on intentional
@@ -426,6 +427,78 @@ enum TextNormalizer {
             out.replaceCharacters(in: m.range, with: caption.isEmpty ? "" : "\n\n" + caption + "\n\n")
         }
         return out as String
+    }
+
+    /// 2026-06-12 — Print "List of Illustrations / List of Figures / Table of
+    /// Contents" tables (AUDITOR/Mark, scope ruling a1). Print-sourced and
+    /// illustrated PG editions embed a front-matter list whose rows are
+    /// `<caption><run of spaces><print page number>` — Pride & Prejudice #1342
+    /// carries ~60 such rows ('"After a short survey"      434', 'Heading to
+    /// Chapter LXI.   472', 'The End   476'). In a REFLOWED document the page
+    /// integers are dead (no print pagination), the captions point at plates a
+    /// plain-text/Gutenberg edition never bundles, and TTS would speak the bare
+    /// integers as junk (c14) — so the whole block is front-matter apparatus,
+    /// dropped entirely like publisher boilerplate.
+    ///
+    /// Detection (Rule 10 — safe to generalize): a CONTIGUOUS RUN of >= 3 rows
+    /// of the `caption␣␣pagenum` shape (blank lines between rows allowed). A run
+    /// of >= 3 right-aligned page-number rows never occurs in real prose — it is
+    /// a fixed-width PRINT-LAYOUT signature — so this is universal-safe, and
+    /// reflow formats (EPUB/HTML) don't produce the pattern at all (no column
+    /// alignment), which is also why the "image-bearing format keeps the list as
+    /// nav" branch of the disposition doesn't arise here: the pattern is absent
+    /// unless the source was fixed-width print text.
+    ///
+    /// The navigable TOC is UNAFFECTED: it is built from the body CHAPTER-heading
+    /// units (see `TXTLibraryImporter` tocEntries ← `.heading` units), NOT from
+    /// this print list; a heading line ("CHAPTER N.") is not a caption+pagenum
+    /// row, so it survives the strip. MUST run before `normalizeTabsAndSpaces`
+    /// (which would collapse the column spaces the pattern keys on). Idempotent.
+    static func stripPrintPageNumberList(_ text: String) -> String {
+        // A row: <non-empty caption ending in a non-space> <2+ spaces/tabs>
+        // <page number>, where the page number is ARABIC (1–4 digits) or ROMAN
+        // (front matter is paginated i, ii, … xxv). The 2+-space column gap plus
+        // the >=3-row run requirement keep the roman branch safe: real prose has
+        // single inter-word spaces, and three consecutive lines each ending in a
+        // space-column + all-roman-letter token effectively never occurs.
+        guard let rowRegex = try? NSRegularExpression(
+            pattern: #"(?i)^\s*\S.*\S[ \t]{2,}(\d{1,4}|[ivxlcdm]{1,8})[ \t]*$"#) else { return text }
+        // A header/column-title line that captions a print list ("List of
+        // Illustrations.", "ILLUSTRATIONS", "List of Figures", "Contents", or the
+        // "PAGE" column header). Only stripped when it is adjacent to a dropped
+        // run, so a real "Contents" body heading (not abutting a page-number run)
+        // is never touched.
+        guard let headerRegex = try? NSRegularExpression(
+            pattern: #"(?i)^\s*(page|(list of\s+)?(illustrations?|figures?|tables?|plates?)|contents)\.?\s*$"#) else { return text }
+        func matches(_ re: NSRegularExpression, _ s: String) -> Bool {
+            re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+        }
+        func isRow(_ s: String) -> Bool { matches(rowRegex, s) }
+        func isHeader(_ s: String) -> Bool { matches(headerRegex, s) }
+        func isBlank(_ s: String) -> Bool { s.trimmingCharacters(in: .whitespaces).isEmpty }
+        let lines = text.components(separatedBy: "\n")
+        var kept: [String] = []
+        var i = 0
+        while i < lines.count {
+            guard isRow(lines[i]) else { kept.append(lines[i]); i += 1; continue }
+            // Extend a run over matching rows separated only by blank lines.
+            var j = i, rowCount = 0, lastRow = i
+            while j < lines.count {
+                if isRow(lines[j]) { rowCount += 1; lastRow = j; j += 1 }
+                else if isBlank(lines[j]) { j += 1 }
+                else { break }
+            }
+            if rowCount >= 3 {
+                // Also absorb the list's own header/column-title lines sitting
+                // just above it (past blank lines) — e.g. "List of Illustrations."
+                // and the "PAGE" column header — so no orphaned apparatus remains.
+                while let last = kept.last, isBlank(last) || isHeader(last) { kept.removeLast() }
+                i = lastRow + 1   // drop the whole print-list run [i ... lastRow]
+            } else {
+                kept.append(lines[i]); i += 1
+            }
+        }
+        return kept.joined(separator: "\n")
     }
 
     // ========== BLOCK 03: LINE-ENDING & WHITESPACE PASSES - END ==========

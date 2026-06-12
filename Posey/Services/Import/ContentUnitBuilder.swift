@@ -43,10 +43,13 @@ enum ContentUnitBuilder {
             // consists of a single line matching the CHAPTER pattern
             // becomes a `.heading` unit with level 1. This drives
             // both heading-styled rendering in the reader and TOC
-            // population in TXTLibraryImporter. Patterns mirror
-            // FirstChapterAdvance — keep them aligned. Other heading
-            // styles (Epilogue, Prologue, Preface, Foreword) included
-            // since they're common Gutenberg structure.
+            // population in TXTLibraryImporter. Other heading styles
+            // (Epilogue, Prologue, Preface, Foreword) included since
+            // they're common Gutenberg structure.
+            // (Was kept aligned with FirstChapterAdvance's CHAPTER
+            // patterns; that detector was removed 2026-06-11 when the
+            // keep-all-prefaces [DECISION] made open-position stop at
+            // first prose instead of advancing to Chapter I.)
             let nsLen = (trimmed as NSString).length
             let fullRange = NSRange(location: 0, length: nsLen)
             var isHeading = Self.txtHeadingRegex.firstMatch(

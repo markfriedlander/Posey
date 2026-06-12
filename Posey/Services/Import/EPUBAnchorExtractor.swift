@@ -80,7 +80,7 @@ enum EPUBAnchorExtractor {
     ///
     /// Idempotent: a sentinel won't be inserted in front of itself.
     static func insertAnchorSentinels(from data: Data) -> Data {
-        guard var html = String(data: data, encoding: .utf8)
+        guard let html = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1) else {
             return data
         }

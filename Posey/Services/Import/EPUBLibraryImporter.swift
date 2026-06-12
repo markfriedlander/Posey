@@ -86,7 +86,12 @@ struct EPUBLibraryImporter {
             tocEntries: parsed.tocEntries
         )
         let boundaries = GutenbergBoundaryDetector.detect(in: parsed.plainText)
-        let contentEndOffset = boundaries.contentEndOffset ?? 0
+        // 2026-06-12 (finding #2) — pull contentEnd back past a trailing publisher
+        // catalog ad (Grosset & Dunlap reprints). No-op when absent. END-mirror of
+        // the c6 publishing-apparatus skip.
+        let rawContentEnd = boundaries.contentEndOffset ?? 0
+        let contentEndOffset = InProseTOCDetector.contentEndBeforePublisherCatalog(
+            in: parsed.plainText, at: rawContentEnd) ?? rawContentEnd
 
         // ── Run display parser at import time, build units.
         let blocks = displayParser.parse(displayText: parsed.displayText)

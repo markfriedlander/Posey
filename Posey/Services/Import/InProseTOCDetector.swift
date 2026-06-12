@@ -280,6 +280,67 @@ enum InProseTOCDetector {
         return nil
     }
 
+    /// 2026-06-12 (finding #2 / dracula c3+c14 — the END-boundary mirror of
+    /// `contentStartAfterPublishingApparatus`): some public-domain reprints —
+    /// notably Grosset & Dunlap editions on Project Gutenberg (Dracula) — append
+    /// a PUBLISHER'S CATALOG ADVERTISEMENT between the work's true ending and the
+    /// `*** END OF THE PROJECT GUTENBERG EBOOK ***` marker. `GutenbergBoundaryDetector`
+    /// sets `contentEndOffset` just before that PG marker, which correctly bounds
+    /// out the license — but the ad ("There's More to Follow!", a list of other
+    /// titles, "GROSSET & DUNLAP, Publishers, NEW YORK") falls INSIDE the readable /
+    /// playback flow, so the reader hits a sales pitch right after the story ends.
+    /// Pull `contentEnd` back to just after the book's true ending.
+    ///
+    /// CATEGORY (Rule 10): a trailing publisher advertisement / "Authors'
+    /// Alphabetical List" appended to a reprint. The reliable, safe boundary is the
+    /// standalone end-of-book marker line ("THE END" / "FINIS") that sits between
+    /// the last prose and the ad. Signals tying the marker to a real ad: a
+    /// distinctive imprint/marketing anchor in the tail window (GROSSET & DUNLAP,
+    /// "There's More to Follow", "Ask for … free list", "wherever books are sold",
+    /// "for a complete catalog", "Authors' Alphabetical List", "by the author of
+    /// this one", "Look on the Other Side of the Wrapper").
+    /// Edge cases: a book whose trailing ad has NO "THE END" marker → NO-OP (we do
+    /// not guess where the prose ends); a book with no trailing ad at all → NO-OP
+    /// (the overwhelming majority — the anchor never matches); a "THE END" that is
+    /// NOT followed by an ad → NO-OP (the marker must precede the anchor).
+    /// SAFETY DEFAULT: return nil (leave `contentEnd` untouched) unless a
+    /// publisher-ad anchor is positively present AND an end-of-book marker precedes
+    /// it. Truncating real ending prose is a far worse harm than a missed ad.
+    static func contentEndBeforePublisherCatalog(in plainText: String, at contentEndOffset: Int) -> Int? {
+        guard contentEndOffset > 0, contentEndOffset <= plainText.count else { return nil }
+        // Tail window: the last ~6000 chars of readable content (an appended
+        // publisher catalog is short and always butts against contentEnd).
+        let windowLen = min(6000, contentEndOffset)
+        let windowBase = contentEndOffset - windowLen
+        let endIdx = plainText.index(plainText.startIndex, offsetBy: contentEndOffset)
+        let startIdx = plainText.index(endIdx, offsetBy: -windowLen)
+        let window = String(plainText[startIdx..<endIdx])
+        // Require a distinctive trailing publisher-ad / catalog anchor in the tail.
+        guard let anchorRange = window.range(
+            of: #"(?i)(GROSSET ?& ?DUNLAP|There[’'`]s More to Follow|Ask for .{0,40}free list|wherever books are sold|for a complete catalog|Authors[’'`]? Alphabetical List|by the author of this one|Look on the Other Side of the Wrapper)"#,
+            options: .regularExpression
+        ) else { return nil }
+        let anchorOff = window.distance(from: window.startIndex, to: anchorRange.lowerBound)
+        // Find the LAST standalone end-of-book marker line ENDING at or before the
+        // ad anchor — that marker is the book's true ending; the ad follows it.
+        var offset = 0
+        var cut: Int? = nil
+        for line in window.split(separator: "\n", omittingEmptySubsequences: false) {
+            let raw = String(line)
+            let lineLen = raw.count + 1   // include the consumed "\n"
+            let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !s.isEmpty,
+               s.range(of: #"(?i)^(THE END|FINIS)\.?$"#, options: .regularExpression) != nil,
+               let r = raw.range(of: s) {
+                let markerEnd = offset + raw.distance(from: raw.startIndex, to: r.upperBound)
+                if markerEnd <= anchorOff { cut = markerEnd }
+            }
+            offset += lineLen
+        }
+        guard let cutOff = cut, cutOff > 0, cutOff < windowLen else { return nil }
+        return windowBase + cutOff
+    }
+
     private static func isContentHeadingLine(_ s: String) -> Bool {
         return s.range(of: #"(?i)^(PREFACE|INTRODUCTION|FOREWORD|PROLOGUE|ETYMOLOGY|EXTRACTS|ARGUMENT|LETTER|DEDICATION|CHAPTER|CONTENTS)\b"#,
                        options: .regularExpression) != nil

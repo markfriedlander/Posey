@@ -158,7 +158,12 @@ struct HTMLLibraryImporter {
         let units = ContentUnitBuilder.demoteDuplicateListingHeadings(
             promotedUnits, skipOffset: skipOffset
         )
-        let contentEndOffset = boundaryResult.contentEndOffset ?? 0
+        // 2026-06-12 (finding #2) — pull contentEnd back past a trailing publisher
+        // catalog ad (Grosset & Dunlap reprints). No-op for article HTML / books
+        // with no trailing ad. END-mirror of the c6 publishing-apparatus skip.
+        let rawContentEnd = boundaryResult.contentEndOffset ?? 0
+        let contentEndOffset = InProseTOCDetector.contentEndBeforePublisherCatalog(
+            in: plainText, at: rawContentEnd) ?? rawContentEnd
         let skipSource: String = {
             if gutenbergStart > 0 { return "gutenberg" }
             if skipOffset > 0   { return "heuristic" }

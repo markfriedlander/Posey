@@ -105,7 +105,12 @@ struct TXTLibraryImporter {
         // landing isn't apparatus (Moby stays on ETYMOLOGY, Dracula on its preface).
         let skipOffset = InProseTOCDetector.contentStartAfterPublishingApparatus(
             in: plainText, at: afterContents) ?? afterContents
-        let contentEndOffset = boundaries.contentEndOffset ?? 0
+        // 2026-06-12 (finding #2) — pull contentEnd back past a trailing publisher
+        // catalog ad (Grosset & Dunlap reprints: Dracula reads "THE END" then a
+        // sales pitch). No-op when there is no such ad. END-mirror of the c6 fix.
+        let rawContentEnd = boundaries.contentEndOffset ?? 0
+        let contentEndOffset = InProseTOCDetector.contentEndBeforePublisherCatalog(
+            in: plainText, at: rawContentEnd) ?? rawContentEnd
         let skipSource: String = {
             if gutenbergStart > 0 { return "gutenberg" }
             if skipOffset > 0   { return "heuristic" }

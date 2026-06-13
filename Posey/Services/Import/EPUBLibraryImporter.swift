@@ -92,6 +92,25 @@ struct EPUBLibraryImporter {
         let rawContentEnd = boundaries.contentEndOffset ?? 0
         let contentEndOffset = InProseTOCDetector.contentEndBeforePublisherCatalog(
             in: parsed.plainText, at: rawContentEnd) ?? rawContentEnd
+        #if DEBUG
+        // 2026-06-13 (#2b probe) — diagnose why contentEndBeforePublisherCatalog
+        // returns nil for EPUB dracula. The function runs on parsed.plainText (NOT
+        // the DB-joined string GET_PLAIN_TEXT serves), so dump the PARSED-space
+        // positions of rawCE / "THE END" / the catalog anchor to see whether the
+        // catalog sits before or after rawCE in parsed-space (settles forward-widen
+        // vs parsed-vs-DB-reconcile). dracula-only; DEBUG-only.
+        if fileName.lowercased().contains("dracula") {
+            let pt = parsed.plainText
+            let n = pt.count
+            func off(_ s: String, _ opts: String.CompareOptions = []) -> Int {
+                pt.range(of: s, options: opts).map { pt.distance(from: pt.startIndex, to: $0.lowerBound) } ?? -1
+            }
+            let lo = max(0, rawContentEnd - 120), hi = min(n, rawContentEnd + 220)
+            let around = String(pt[pt.index(pt.startIndex, offsetBy: lo)..<pt.index(pt.startIndex, offsetBy: hi)])
+            let pulled = InProseTOCDetector.contentEndBeforePublisherCatalog(in: pt, at: rawContentEnd)
+            print("POSEY2B parsedLen=\(n) rawCE=\(rawContentEnd) THE_END@=\(off("THE END")) catalog@=\(off("More to Follow")) grosset@=\(off("GROSSET", .caseInsensitive)) pulled=\(pulled.map(String.init) ?? "nil") around=[\(around.replacingOccurrences(of: "\n", with: "\\n"))]")
+        }
+        #endif
 
         // ── Run display parser at import time, build units.
         let blocks = displayParser.parse(displayText: parsed.displayText)

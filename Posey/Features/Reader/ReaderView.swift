@@ -352,10 +352,16 @@ struct ReaderView: View {
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(60))
                     lastProgrammaticScrollAt = Date()
-                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                    // 2026-06-13 — OPEN scroll pins content-start to the TOP, not
+                    // .center (DEFECT-reader-open-position-anchor): centering put
+                    // a long first unit's head above the fold (P&P preface) /
+                    // scrolled a chapter heading off (illustrated-alice). Re-armed
+                    // before each nudge (scrollToCurrentSentence resets the anchor).
+                    // Orientation re-scrolls below intentionally keep .center.
+                    viewModel.scrollToContentStartOnOpen(with: proxy, animated: false)
                     try? await Task.sleep(for: .milliseconds(180))
                     lastProgrammaticScrollAt = Date()
-                    viewModel.scrollToCurrentSentence(with: proxy, animated: false)
+                    viewModel.scrollToContentStartOnOpen(with: proxy, animated: false)
                     // #12 — segments have populated by now; publish
                     // the resolved unit so the enhancement service's
                     // page lock sees a real currentUnitID.
@@ -4221,6 +4227,19 @@ final class ReaderViewModel: ObservableObject {
         } else {
             action()
         }
+    }
+
+    /// 2026-06-13 (DEFECT-reader-open-position-anchor) — the OPEN/RESUME scroll.
+    /// Pins the landing unit to the TOP of the viewport, not `.center`. Centering
+    /// pushed a long first unit's HEAD above the fold (P&P's preface → opened
+    /// mid-paragraph; illustrated-alice → chapter heading scrolled off). On open
+    /// the reader wants the START of the content visible. Mirrors the existing
+    /// `.top` intent of TOC-tap / page nav (`jumpToTOCEntry` / `jumpToPage`);
+    /// SEARCH (`scrollToSearchMatch`) and live-playback tracking keep their
+    /// contextual `.center` anchor — this is the initial open scroll only.
+    func scrollToContentStartOnOpen(with proxy: ScrollViewProxy, animated: Bool) {
+        nextScrollAnchor = .top
+        scrollToCurrentSentence(with: proxy, animated: animated)
     }
 
     /// c13: the fixed viewport fraction the active line is pinned to (upper

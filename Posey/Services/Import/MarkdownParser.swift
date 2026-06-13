@@ -27,7 +27,16 @@ struct MarkdownParser {
             return ParsedMarkdownDocument(displayText: "", plainText: "", blocks: [])
         }
 
-        let lines = normalizedSource.components(separatedBy: "\n")
+        // 2026-06-13 (apparatus #3 markdown-syntax category) — strip a leading
+        // YAML metadata block (pandoc / Jekyll / Hugo front-matter): a first line
+        // of exactly `---`, terminated by a line of `---` or `...`. Pandoc renders
+        // it as document metadata, NEVER as body — so `title:`/`author:`/`date:`
+        // lines leaking into the prose (md_pandoc-manual front-matter, lines 1-5)
+        // is a fidelity defect. SAFETY: only when line 0 IS the opener AND a close
+        // exists within the first 60 lines — otherwise a doc that legitimately
+        // OPENS with a `---` thematic break is left untouched (no-op).
+        let lines = Self.stripYAMLFrontMatter(
+            normalizedSource.components(separatedBy: "\n"))
         // 2026-06-11 (auditor ruling ii) — collect the labels of link reference
         // definitions we will CONSUME, so cleanInlineMarkdown can unwrap the
         // matching inline reference links ([label] / [text][label]) and NOT
@@ -200,6 +209,21 @@ struct MarkdownParser {
             // a dedicated later pass; until then a rare indented-code example may
             // reflow as prose (documented known-limitation).
             if isLinkReferenceDefinition(line) {
+                flushParagraphBuffer()
+                flushQuoteBuffer()
+                continue
+            }
+            // 2026-06-13 (apparatus #3 markdown-syntax category) — DROP pandoc
+            // fenced-div markers (CommonMark extension): a line of 3+ colons,
+            // optionally followed by an attribute block `{#id .class}` or a bare
+            // class name, opens or closes a `<div>`. The markers carry no readable
+            // text (pandoc emits only the wrapping div) — leaving them in reflows
+            // as literal `::: {#input-formats}` / `:::` prose (md_pandoc-manual,
+            // 58 occurrences). The wrapped CONTENT stays (it's normal markdown).
+            // Indent-tolerant: pandoc nests divs inside list/definition items.
+            // (Definition-list `:   ` markers are a SEPARATE unhandled feature —
+            // documented limitation, not in scope here.)
+            if isFencedDivMarker(line) {
                 flushParagraphBuffer()
                 flushQuoteBuffer()
                 continue
@@ -487,6 +511,37 @@ struct MarkdownParser {
         return (first, second)
     }
 
+    /// 2026-06-13 — Strip a leading YAML metadata block (pandoc §"Metadata
+    /// blocks" / Jekyll / Hugo front-matter). The block is recognized ONLY when
+    /// line 0 is exactly `---` and a closing `---` or `...` line follows within
+    /// the first 60 lines; everything up to and including the close is dropped.
+    /// No close (or line 0 isn't `---`) → returns the input unchanged, so a
+    /// document that genuinely opens with a thematic break is never truncated.
+    private static func stripYAMLFrontMatter(_ lines: [String]) -> [String] {
+        guard let first = lines.first,
+              first.trimmingCharacters(in: .whitespaces) == "---" else { return lines }
+        let cap = min(lines.count, 60)
+        var closeIdx: Int? = nil
+        for i in 1..<cap {
+            let t = lines[i].trimmingCharacters(in: .whitespaces)
+            if t == "---" || t == "..." { closeIdx = i; break }
+        }
+        guard let close = closeIdx else { return lines }
+        return Array(lines[(close + 1)...])
+    }
+
+    /// 2026-06-13 — A pandoc fenced-div marker line: 3+ colons, optionally
+    /// followed by an attribute block `{…}` or a single bare class token, with
+    /// optional DECORATIVE trailing colons (`::: Warning ::::::`). Matches the
+    /// opener (`::: {#input-formats}`, `::: warning`, `::: Warning :::`) and the
+    /// bare close (`:::`). Indent-tolerant. A line with real text after the colons
+    /// (rare) is NOT a marker and is left alone.
+    private func isFencedDivMarker(_ line: String) -> Bool {
+        return line.range(
+            of: #"^\s*:{3,}\s*(\{[^}]*\}|[A-Za-z][\w-]*)?\s*:*\s*$"#,
+            options: .regularExpression) != nil
+    }
+
     private func normalizeSource(_ source: String) -> String {
         // Strip BOM, soft hyphens, ZWSP, and convert NBSP to space before
         // parsing. The Markdown structure is preserved (newlines, headings,
@@ -542,6 +597,18 @@ struct MarkdownParser {
         // above, so it only sees reference-style brackets). Guarded by the
         // consumed-def set so `[1]`/`[sic]` are untouched.
         cleaned = unwrapConsumedRefLinks(cleaned, labels: refLabels)
+
+        // 2026-06-13 (apparatus #3 markdown-syntax category) — strip a TRAILING
+        // pandoc attribute block from a heading/block (`## General options
+        // {.options}` -> `General options`; also `{#id}`, `{.unnumbered}`,
+        // `{key="val"}`, `{.a .b #c}`). md_pandoc-manual has 13 attributed
+        // headings; the `{...}` leaks into the heading text AND its TOC entry.
+        // STRICTLY GUARDED: every space-separated token inside the braces must be
+        // a pandoc attribute (`.class` / `#id` / `key=val`) — so legitimate prose
+        // ending in `{a sentence}` (no `.`/`#`/`=` tokens) is left untouched.
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s*\{\s*(?:[.#][\w-]+|[\w-]+=(?:"[^"]*"|'[^']*'|\S+))(?:\s+(?:[.#][\w-]+|[\w-]+=(?:"[^"]*"|'[^']*'|\S+)))*\s*\}\s*$"#,
+            with: "", options: .regularExpression)
 
         return cleaned
             .replacingOccurrences(of: #"\\([\\`*_{}\[\]()#+\-.!>])"#, with: "$1", options: .regularExpression)

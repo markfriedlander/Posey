@@ -114,9 +114,40 @@ enum GutenbergBoundaryDetector {
         // The `(?im)` flags: case-insensitive + multi-line.
         let startPattern = #"(?im)^\s*\*\s*\*\s*\*\s*START\s+OF\s+(?:THE\s+|THIS\s+)?PROJECT\s+GUTENBERG\s+(?:E-?BOOK|ETEXT|EBOOK\s*™?).*?\*\s*\*\s*\*\s*$"#
         let endPattern   = #"(?im)^\s*\*\s*\*\s*\*\s*END\s+OF\s+(?:THE\s+|THIS\s+)?PROJECT\s+GUTENBERG\s+(?:E-?BOOK|ETEXT|EBOOK\s*™?).*?\*\s*\*\s*\*\s*$"#
+        // 2026-06-13 — Older Gutenberg files (and some modern ones, e.g.
+        // dickinson-poems_12242) print a BYLINE end-line WITHOUT asterisks —
+        // `End of [the/this] Project Gutenberg['s/™] <title>, by <author>` — that
+        // sits a few blank lines BEFORE the `*** END … ***` marker. The asterisk
+        // pattern matches only the starred marker, so contentEnd lands just before
+        // it and the byline (e.g. "End of Project Gutenberg's Poems…, by Emily
+        // Dickinson") is left INSIDE the read-aloud flow (c3/c14 leak). Detect the
+        // byline too and cut at whichever boundary comes FIRST. Distinctive,
+        // line-anchored — does not match ordinary prose.
+        let bylinePattern = #"(?im)^\s*End\s+of\s+(?:the\s+|this\s+)?Project\s+Gutenberg(?:['’]s|\s*™)?\b.*$"#
 
         let startMatchRange = firstMatchRange(of: startPattern, in: plainText)
-        let endMatchRange   = lastMatchRange(of: endPattern,   in: plainText)
+        let asteriskEndRange = lastMatchRange(of: endPattern, in: plainText)
+        let bylineEndRange   = lastMatchRange(of: bylinePattern, in: plainText)
+
+        // Choose the effective end boundary. Default: the asterisk marker.
+        // Prefer the byline when it precedes the asterisk marker within a small
+        // window (the byline-then-marker layout); or, when there is NO asterisk
+        // marker at all, accept the byline only if it sits in the last 15% of the
+        // document (so a stray "End of … Project Gutenberg …" inside body prose
+        // can't truncate a whole book).
+        let endMatchRange: Range<String.Index>? = {
+            guard let byline = bylineEndRange else { return asteriskEndRange }
+            let total = plainText.count
+            let bylineOff = plainText.distance(from: plainText.startIndex, to: byline.lowerBound)
+            if let asterisk = asteriskEndRange {
+                let asteriskOff = plainText.distance(from: plainText.startIndex, to: asterisk.lowerBound)
+                if bylineOff < asteriskOff && (asteriskOff - bylineOff) <= 3000 {
+                    return byline
+                }
+                return asterisk
+            }
+            return bylineOff * 100 > total * 85 ? byline : nil
+        }()
 
         // Order check: if both found, the END marker must come AFTER
         // the START marker. Otherwise something is structurally wrong;

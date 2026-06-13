@@ -248,9 +248,25 @@ struct HTMLLibraryImporter {
         var order = 0
         for h in headings {
             let needle = h.title
-            guard !needle.isEmpty,
+            // 2026-06-13 — Whitespace-FLEXIBLE search. The heading needle is
+            // extracted from HTML where <br>/inline tags collapse to a single
+            // space ("CHAPTER I. The Period"), but the body plainText renders the
+            // same <br> as a NEWLINE ("CHAPTER I.\nThe Period"), so an exact
+            // substring search missed it and the heading was dropped — this is
+            // why tale-of-two-cities surfaced only its 3 (br-less) book-division
+            // headings out of 45 chapters. Match each whitespace run in the
+            // needle against `\s+` so the boundary is newline/space agnostic. A
+            // single-token needle ("Contents") degrades to a plain literal match.
+            let pattern = needle
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .map { NSRegularExpression.escapedPattern(for: $0) }
+                .joined(separator: #"\s+"#)
+            guard !pattern.isEmpty,
                   cursor <= plainText.endIndex,
-                  let range = plainText.range(of: needle, range: cursor..<plainText.endIndex) else {
+                  let range = plainText.range(of: pattern,
+                                              options: .regularExpression,
+                                              range: cursor..<plainText.endIndex) else {
                 continue
             }
             let offset = plainText.distance(from: plainText.startIndex, to: range.lowerBound)

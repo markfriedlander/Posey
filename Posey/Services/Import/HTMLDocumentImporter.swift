@@ -242,7 +242,18 @@ struct HTMLDocumentImporter {
     private func stripHeadingInnerTags(_ s: String) -> String {
         guard let regex = try? NSRegularExpression(pattern: "<[^>]+>") else { return s }
         let range = NSRange(s.startIndex..., in: s)
-        return regex.stringByReplacingMatches(in: s, range: range, withTemplate: "")
+        // 2026-06-13 — Replace tags with a SPACE (not ""), then collapse runs.
+        // A heading like `CHAPTER I.<br>The Period` (tale-of-two-cities — every
+        // one of its 45 chapter headings) must become "CHAPTER I. The Period",
+        // NOT "CHAPTER I.The Period": the empty replacement glued the tokens, and
+        // the title then failed to match the body text (where <br> renders as a
+        // newline), so the heading was dropped in resolveHeadingOffsets. Keeping
+        // the boundary as a space lets the whitespace-flexible body search find
+        // it. No effect on headings without inner tags.
+        let spaced = regex.stringByReplacingMatches(in: s, range: range, withTemplate: " ")
+        return spaced
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func decodeMinimalEntities(_ s: String) -> String {

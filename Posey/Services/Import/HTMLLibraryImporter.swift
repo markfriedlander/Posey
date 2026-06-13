@@ -179,7 +179,14 @@ struct HTMLLibraryImporter {
         let sentences = SentenceIndexer.sentences(for: units)
 
         // ── TOC entries (already resolved above for heading promotion).
-        let tocEntries = resolvedHeadings
+        // 2026-06-13 — Drop nav apparatus harvested as HTML headings (family #3,
+        // HTML half): the Project Gutenberg boilerplate header ("The Project
+        // Gutenberg eBook of …"), the PG license heading, and a bare "Contents"
+        // self-reference all surface as <hN> and leaked into the Contents sheet
+        // (moby-dick.html, tale-of-two-cities, Wikipedia-P&P c5). Filtered ONLY
+        // from the nav TOC — the upstream resolvedHeadings still drive skip /
+        // promotion / demote logic unchanged, so this is a c5-only cleanup.
+        let tocEntries = resolvedHeadings.filter { !Self.isHTMLNavApparatus($0.title) }
 
         let parsedDoc = ParsedDocument(
             id: documentID,
@@ -238,6 +245,27 @@ struct HTMLLibraryImporter {
 
     /// Find each heading's title in plainText sequentially. Unchanged
     /// from the legacy importer — heading titles are content strings
+    /// True when an HTML heading title is nav apparatus no reader navigates to —
+    /// Project Gutenberg boilerplate (the "eBook of …" header + the license
+    /// heading) or a bare "Contents"/"Table of Contents" self-reference.
+    /// Conservative + line-exact on the self-reference so real sections
+    /// ("Table of Contents Generators", a chapter merely containing the word)
+    /// are untouched. Verified zero-false-drop across the HTML corpus.
+    static func isHTMLNavApparatus(_ title: String) -> Bool {
+        let s = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return true }
+        if s.range(of: #"(?i)project\s+gutenberg.{0,25}licen[sc]e"#, options: .regularExpression) != nil {
+            return true
+        }
+        if s.range(of: #"(?i)^the\s+project\s+gutenberg\s+e-?book\b"#, options: .regularExpression) != nil {
+            return true
+        }
+        if s.range(of: #"(?i)^(table\s+of\s+)?contents$"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+
     /// rather than offsets so we have to search.
     private func resolveHeadingOffsets(
         _ headings: [HTMLDocumentImporter.HTMLHeadingEntry],

@@ -506,9 +506,25 @@ extension PDFDocumentImporter {
             running += p.count
             if i < readableTextPages.count - 1 { running += 2 }
         }
+        // 2026-06-13 — Resolve each outline entry to the REAL position of its
+        // heading, not merely the start of its page
+        // (DEFECT-pdf-heading-detection-positioning.md, arxiv/attention case).
+        // The old code stored `pageStartOffsets[pageIndex]` for EVERY entry, so
+        // all entries on one page collapsed to a single offset — e.g. the 5
+        // section headings on the Transformer paper's page 6 (Training, Training
+        // Data, Hardware, Optimizer, Regularization) all shared one anchor and
+        // `jumpToTOCEntry` landed them on the same segment. Search for the
+        // entry's title from a page-anchored, monotonically-advancing cursor (the
+        // same joined-page coordinate space as `pageStartOffsets`), so same-page
+        // headings resolve to distinct, in-order body positions. Unlocated titles
+        // fall back to the page anchor, still kept strictly increasing so they
+        // never re-cluster.
+        let joined = readableTextPages.joined(separator: "\n\n")
+        let totalChars = joined.count
 
         var entries: [PDFTOCEntry] = []
         var order = 0
+        var lastAssigned = -1
         func walk(_ node: PDFOutline, depth: Int) {
             for i in 0..<node.numberOfChildren {
                 guard let child = node.child(at: i) else { continue }
@@ -520,9 +536,20 @@ extension PDFDocumentImporter {
                    pageIndex >= 0,
                    pageIndex < pageStartOffsets.count {
                     order += 1
+                    let floor = max(lastAssigned + 1, pageStartOffsets[pageIndex])
+                    var resolved = min(floor, totalChars)
+                    if floor < totalChars {
+                        let searchStart = joined.index(joined.startIndex, offsetBy: floor)
+                        let region = joined[searchStart...]
+                        if let r = region.range(of: title, options: .caseInsensitive) {
+                            resolved = floor + region.distance(from: region.startIndex, to: r.lowerBound)
+                        }
+                    }
+                    if resolved <= lastAssigned { resolved = min(totalChars, lastAssigned + 1) }
+                    lastAssigned = resolved
                     entries.append(PDFTOCEntry(
                         title: title,
-                        plainTextOffset: pageStartOffsets[pageIndex],
+                        plainTextOffset: resolved,
                         playOrder: order,
                         level: max(1, min(6, depth + 1))
                     ))

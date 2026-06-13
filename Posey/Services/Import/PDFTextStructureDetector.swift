@@ -117,27 +117,83 @@ enum PDFTextStructureDetector {
                              in plainText: String,
                              postTOCOffset: Int) -> [PDFTOCEntry] {
         guard postTOCOffset >= 0, postTOCOffset <= plainText.count else { return [] }
-        let startIndex = plainText.index(plainText.startIndex, offsetBy: postTOCOffset)
-        let body = plainText[startIndex...]
-        var built: [PDFTOCEntry] = []
-        for (index, entry) in entries.enumerated() {
-            // Try the title with its label ("I. Introduction") first, then
-            // fall back to the bare title ("Introduction") since the body
-            // header may not include the outline label.
+        let total = plainText.count
+        guard !entries.isEmpty else { return [] }
+
+        // 2026-06-13 — TOC offset resolution (root-caused in
+        // DEFECT-pdf-heading-detection-positioning.md). The previous resolver
+        // searched for each title from the START of the body every time and
+        // defaulted ANY unlocated title to `postTOCOffset`. Two defects:
+        //  (a) a short or repeated title ("Introduction", "Summary") matched its
+        //      FIRST body occurrence — often a running header or an earlier
+        //      mention — not the chapter it labels, and offsets were not
+        //      monotonic; and
+        //  (b) every unlocated title collapsed onto the single `postTOCOffset`
+        //      anchor, so N chapters shared one offset and `jumpToTOCEntry`
+        //      landed them all on the same segment — "tap-nav can't tell the
+        //      chapters apart" (GEB / arxiv / The-Internet).
+        // Fix: a two-pass resolver that gives EVERY entry a distinct,
+        // order-preserving offset.
+
+        // PASS 1 — sequential, monotonic search. TOC entries are in document
+        // order, so each chapter's heading appears AFTER the previous one. Search
+        // from a cursor that only advances; this resolves a repeated/short title
+        // to its correct in-order occurrence and yields distinct offsets for the
+        // hits. A title not locatable from the cursor stays nil for pass 2.
+        var resolved: [Int?] = []
+        var cursor = postTOCOffset
+        for entry in entries {
+            // Title with its label ("I. Introduction") first, then the bare
+            // title ("Introduction") — the body header may omit the label.
             let bareTitle = entry.title.split(separator: " ", maxSplits: 1).last.map(String.init) ?? entry.title
             let needles = [entry.title, bareTitle]
+            let searchStart = plainText.index(plainText.startIndex, offsetBy: cursor)
+            let region = plainText[searchStart...]
             var found: Int? = nil
-            for needle in needles {
-                guard !needle.isEmpty else { continue }
-                if let r = body.range(of: needle, options: .caseInsensitive) {
-                    found = postTOCOffset + body.distance(from: body.startIndex, to: r.lowerBound)
+            for needle in needles where !needle.isEmpty {
+                if let r = region.range(of: needle, options: .caseInsensitive) {
+                    found = cursor + region.distance(from: region.startIndex, to: r.lowerBound)
                     break
                 }
             }
-            // Fall back to the post-TOC offset if we can't locate the title
-            // — better than dropping the entry entirely.
+            resolved.append(found)
+            if let f = found { cursor = min(total, f + 1) }
+        }
+
+        // PASS 2 — assign final offsets, strictly increasing. Located titles keep
+        // their exact offset; runs of unlocated titles are spread evenly across
+        // the gap up to the NEXT located anchor (or end-of-text), so each gets a
+        // distinct in-region estimate instead of the old shared-anchor cluster.
+        var offsets = [Int](repeating: 0, count: entries.count)
+        var lastAssigned = postTOCOffset - 1
+        var i = 0
+        while i < entries.count {
+            if let f = resolved[i] {
+                offsets[i] = max(f, lastAssigned + 1)
+                lastAssigned = offsets[i]
+                i += 1
+                continue
+            }
+            var j = i
+            while j < entries.count, resolved[j] == nil { j += 1 }
+            let n = j - i
+            let lo = lastAssigned + 1
+            let hi = (j < entries.count) ? max(resolved[j] ?? total, lo + n) : max(total, lo + n)
+            let span = hi - lo
+            for k in 0..<n {
+                var o = lo + (span * k) / n
+                if o <= lastAssigned { o = lastAssigned + 1 }
+                offsets[i + k] = min(total, o)
+                lastAssigned = offsets[i + k]
+            }
+            i = j
+        }
+
+        var built: [PDFTOCEntry] = []
+        for (index, entry) in entries.enumerated() {
+            let clamped = min(total, max(postTOCOffset, offsets[index]))
             built.append(PDFTOCEntry(title: entry.title,
-                                     plainTextOffset: found ?? postTOCOffset,
+                                     plainTextOffset: clamped,
                                      playOrder: index,
                                      level: 1))
         }

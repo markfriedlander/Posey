@@ -185,9 +185,22 @@ struct DOCXDocumentImporter {
             guard h.paragraphIndex >= 0, h.paragraphIndex < paragraphStartOffsets.count else {
                 return nil
             }
+            // 2026-06-13 (DEFECT-docx-italic-underscore-leak / #10) — the
+            // heading/TOC path is separate from the body normalizer, so DOCX
+            // italic/bold runs that the extractor serialized as Markdown emphasis
+            // (`_continued_`, `(_Kept in shorthand._)`) leaked their literal `_`/`*`
+            // into heading + Contents-sheet titles. Strip the emphasis markup, and
+            // DROP a wholly-parenthetical "heading" — a bold aside like "(Kept in
+            // shorthand.)" was wrongly promoted into the TOC; a real heading is
+            // never fully wrapped in parentheses.
+            let cleanedTitle = Self.cleanHeadingTitle(h.title)
+            guard !cleanedTitle.isEmpty,
+                  !(cleanedTitle.hasPrefix("(") && cleanedTitle.hasSuffix(")")) else {
+                return nil
+            }
             let displayOffset = paragraphStartOffsets[h.paragraphIndex]
             let plainOffset = max(0, displayOffset - markerLossPrefix[h.paragraphIndex])
-            return DOCXHeadingEntry(level: h.level, title: h.title, plainTextOffset: plainOffset)
+            return DOCXHeadingEntry(level: h.level, title: cleanedTitle, plainTextOffset: plainOffset)
         }
         return (normalizedDisplay, normalizedPlain, usedImages, docxHeadings, coreTitle)
     }
@@ -211,6 +224,21 @@ struct DOCXDocumentImporter {
 
     private func normalizePlain(_ text: String) -> String {
         TextNormalizer.normalizeUniversal(text)
+    }
+
+    /// 2026-06-13 — Clean a DOCX heading/TOC title. The extractor serializes
+    /// italic/bold runs as Markdown emphasis (`_word_`, `*word*`, `**word**`,
+    /// `__word__`); in the BODY the plain-text normalizer removes it, but the
+    /// heading/TOC path is separate and leaked the literal markup into titles +
+    /// the Contents sheet (DEFECT-docx-italic-underscore-leak). Unwrap each
+    /// emphasis span to its inner text. CATEGORY (Rule 10): any DOCX heading whose
+    /// run carries emphasis; clean titles are untouched (no emphasis → no-op).
+    private static func cleanHeadingTitle(_ s: String) -> String {
+        var t = s
+        for pattern in [#"\*\*([^*]+)\*\*"#, #"__([^_]+)__"#, #"\*([^*]+)\*"#, #"_([^_]+)_"#] {
+            t = t.replacingOccurrences(of: pattern, with: "$1", options: .regularExpression)
+        }
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func stripVisualPageMarkers(from text: String) -> String {

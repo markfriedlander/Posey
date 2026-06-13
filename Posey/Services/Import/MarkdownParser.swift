@@ -511,7 +511,23 @@ struct MarkdownParser {
             (#"_([^_]+)_"#, "$1"),
             (#"!\[([^\]]*)\]\([^)]+\)"#, "$1"),
             (#"\[([^\]]+)\]\([^)]+\)"#, "$1"),
-            (#"<([^>]+)>"#, "$1")
+            // 2026-06-13 (apparatus #3) — embedded raw HTML must NOT leak as prose.
+            // The old catch-all `<([^>]+)>` -> `$1` unwrapped ANY angle-bracket span to
+            // its inner text, so `<p align="center">` rendered as `p align="center"`,
+            // `<img alt="…" src="…">` dumped tag attributes into the body, and
+            // `<!-- toc -->` surfaced as `!-- toc --` (vscode_README / pytorch_README,
+            // phone-confirmed). Replace with three ORDERED rules — genuine CommonMark
+            // autolinks survive, real HTML tags + comments are dropped:
+            //   1. unwrap genuine autolinks (`<https://…>`, `<mailto:…>`, `<a@b.com>`)
+            //      BEFORE the tag-drop, else the tag pattern eats the leading-letter URL;
+            //   2. drop HTML comments entirely (the `!-- … --` leak);
+            //   3. drop the remaining HTML tag-soup (block, inline, badge `<a><img>`).
+            // CATEGORY (Rule 10): any embedded raw HTML in Markdown/DOCX-via-MD; clean
+            // prose is untouched (no `<…>` -> no-op). HTML format has its own tag-aware
+            // parser, so this MD-path fix is the right home for the confirmed MD leaks.
+            (#"<(https?://[^>\s]+|mailto:[^>\s]+|[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})>"#, "$1"),
+            (#"<!--[\s\S]*?-->"#, ""),
+            (#"</?[A-Za-z][^>]*>"#, "")
         ]
 
         for (pattern, template) in replacements {

@@ -210,6 +210,20 @@ enum EPUBAnchorExtractor {
         }
     }
 
+    /// 2026-06-13 — Guarantee a blank line after a heading sentinel's line when
+    /// the chapter body opens with BARE text on the very next line (single `\n`).
+    /// No-op when the heading is already followed by a blank line (the `<p>`-
+    /// wrapped chapters) or by another sentinel — so only the fused case (e.g.
+    /// frankenstein Ch7) is touched. See `extractAnchors` for the full rationale.
+    private static func insertHeadingBodyBoundary(_ text: String) -> String {
+        guard let re = try? NSRegularExpression(
+            pattern: #"(\[\[POSEY_HEADING:[1-6]\]\][^\n]*)\n(?=\S)"#) else { return text }
+        let ns = text as NSString
+        return re.stringByReplacingMatches(
+            in: text, range: NSRange(location: 0, length: ns.length),
+            withTemplate: "$1\n\n")
+    }
+
     /// Scan a plainText string for `[[POSEY_TOC_ANCHOR:…]]` sentinels.
     /// Returns the sentinel-free string and the list of `(fragmentID,
     /// offsetInStrippedText)` pairs.
@@ -219,7 +233,21 @@ enum EPUBAnchorExtractor {
     /// follows the sentinel in the original input, translated to the
     /// stripped output. This matches what callers want: "where in the
     /// final plainText does this fragment land."
-    static func extractAnchors(from input: String) -> ExtractionResult {
+    static func extractAnchors(from rawInput: String) -> ExtractionResult {
+        // 2026-06-13 (DEFECT-heading-merge-absorbs-sentence) — ensure a PARAGRAPH
+        // boundary after a heading whose chapter opens with BARE text (no `<p>`
+        // wrapper) right after `</hN>`. frankenstein Ch7 is `<h2>Chapter 7</h2>On
+        // my return…` → the HTML→text conversion left a SINGLE `\n` between the
+        // heading and its opening sentence, so the downstream block builder
+        // (splits units on `\n\n`) FUSED them and `applyHeadingMarkers` promoted
+        // the whole block as the heading ("Chapter 7: On my return…"). 27
+        // `<p>`-wrapped chapters already carry the `\n\n` and are untouched.
+        // Inserting the break HERE — BEFORE the offset-recording pass below — means
+        // every heading/anchor offset is computed against the corrected text and
+        // stays self-consistent (no offset re-bookkeeping). EPUB/HTML-extraction-
+        // scoped (NOT the shared `applyHeadingMarkers`). The unit-SPLIT effect of
+        // the inserted `\n\n` is phone-verified.
+        let input = insertHeadingBodyBoundary(rawInput)
         // 2026-06-10 — single pass strips BOTH anchor and heading sentinels
         // so all recorded offsets are measured against the SAME final output
         // (heading sentinels would otherwise shift anchor offsets and vice

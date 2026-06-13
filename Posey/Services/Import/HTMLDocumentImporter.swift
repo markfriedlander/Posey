@@ -426,11 +426,23 @@ struct HTMLDocumentImporter {
             }
             let anchorOffset = folded.distance(from: fStart, to: aRange.lowerBound)
             // Survivor? title text already present in this section's lead-in.
+            // 2026-06-13 — whitespace-INSENSITIVE compare. A heading like
+            // tale-of-two-cities' `CHAPTER I.<br>The Period` renders in the body
+            // with a NEWLINE between the tokens while spec.title carries a single
+            // space; the old exact .contains() then failed the survivor test and
+            // RE-INJECTED the heading, emitting it TWICE in the reading flow (TTC
+            // c3/c14 doubled-heading). Collapsing whitespace runs on both sides
+            // makes a heading already present in the body a survivor (no inject);
+            // a genuinely Readability-dropped heading is absent entirely and is
+            // still re-injected (no regression to this function's purpose).
             let backSpan = min(300, anchorOffset - cursorOffset)
             let preStart = folded.index(aRange.lowerBound, offsetBy: -backSpan,
                                         limitedBy: fStart) ?? fStart
-            let isSurvivor = String(folded[preStart..<aRange.lowerBound])
-                .contains(foldPunctuation(spec.title))
+            let leadIn = String(folded[preStart..<aRange.lowerBound])
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            let titleNeedle = foldPunctuation(spec.title)
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            let isSurvivor = leadIn.contains(titleNeedle)
             if !isSurvivor {
                 injections.append((anchorOffset, spec.title + "\n\n"))
             }

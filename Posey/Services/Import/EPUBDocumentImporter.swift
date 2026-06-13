@@ -601,7 +601,24 @@ extension EPUBDocumentImporter {
 
         guard !rawEntries.isEmpty else { return [] }
 
-        return rawEntries.map { raw in
+        return rawEntries
+            // 2026-06-13 — Drop unambiguous nav APPARATUS that the NCX/nav harvests
+            // as entries but no reader would navigate to
+            // (DEFECT-epub-nav-toc-title-extraction / nav-apparatus family). Three
+            // classes, each verified zero-false-drop across the real EPUB corpus
+            // (frankenstein/sherlock/dracula/moby/alice ×2): (1) the Project
+            // Gutenberg license line; (2) a LEVEL≥2 bare enumerator ("I.", "II.",
+            // "1.") — the sub-section numerals nested under a titled chapter (e.g.
+            // sherlock story 1's I./II./III.) that surfaced as bare numerals in the
+            // Contents sheet; a top-level numeral-only chapter is NOT dropped, and a
+            // numeral-PREFIXED title with words ("I. A SCANDAL IN BOHEMIA",
+            // "CHAPTER 7. The Chapel.") is NOT a bare enumerator; (3) "[Pg N]"
+            // page-image markers (alice illustrated edition). Debatable apparatus
+            // (title-page fragments, a "Contents" self-reference, decorative title
+            // bands) is intentionally NOT filtered here — left for the broader
+            // apparatus pass once its scope is settled.
+            .filter { !Self.isNavApparatus(title: $0.title, level: $0.level) }
+            .map { raw in
             // 2026-05-21 — honor the fragment when present. The offset
             // map is now keyed both by file ("alice.xhtml") and by
             // file#fragment ("1342-h-0.htm.xhtml#pgepubid00022"). Try
@@ -628,6 +645,31 @@ extension EPUBDocumentImporter {
                 level: raw.level
             )
         }
+    }
+
+    /// True when a harvested nav title is unambiguous apparatus that no reader
+    /// would navigate to. Conservative — verified zero-false-drop across the real
+    /// EPUB corpus. See the call site in `buildTOCEntries` for the rationale and
+    /// the deliberately-excluded debatable cases.
+    static func isNavApparatus(title: String, level: Int) -> Bool {
+        let s = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return true }
+        // (1) Project Gutenberg license line.
+        if s.range(of: #"(?i)project\s+gutenberg.{0,25}licen[sc]e"#, options: .regularExpression) != nil {
+            return true
+        }
+        // (3) "[Pg N]" / "[Page N]" page-image markers.
+        if s.range(of: #"(?i)^\[\s*p(?:g|age)\s*\d+\s*\]$"#, options: .regularExpression) != nil {
+            return true
+        }
+        // (2) LEVEL≥2 bare enumerator (roman / arabic / single letter, optional
+        // trailing dot) — a sub-section numeral with no title words. Top-level
+        // (level 1) numeral-only chapters are preserved.
+        if level >= 2,
+           s.range(of: #"^(?:[IVXLCDMivxlcdm]+|\d{1,4}|[A-Za-z])\.?$"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
     }
 
     /// Build a TOC by walking the spine and pulling chapter titles from

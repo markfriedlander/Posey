@@ -455,14 +455,18 @@ enum TextNormalizer {
     /// row, so it survives the strip. MUST run before `normalizeTabsAndSpaces`
     /// (which would collapse the column spaces the pattern keys on). Idempotent.
     static func stripPrintPageNumberList(_ text: String) -> String {
-        // A row: <non-empty caption ending in a non-space> <2+ spaces/tabs>
+        // A row: <non-empty caption ending in a non-space> <column gap>
         // <page number>, where the page number is ARABIC (1–4 digits) or ROMAN
-        // (front matter is paginated i, ii, … xxv). The 2+-space column gap plus
-        // the >=3-row run requirement keep the roman branch safe: real prose has
-        // single inter-word spaces, and three consecutive lines each ending in a
-        // space-column + all-roman-letter token effectively never occurs.
+        // (front matter is paginated i, ii, … xxv). The column gap is EITHER 2+
+        // spaces/tabs OR a single TAB. A single tab is a genuine column delimiter
+        // (RTF/DOCX/word-processor contents lists emit `Chapter 1: What is AI?\t10`
+        // — one tab between the entry and its page number; AI-Book.rtf), whereas a
+        // single SPACE is normal prose ("He waited 5"), so the single-tab branch
+        // is added but a single space is NOT. The >=3-row run requirement keeps
+        // both branches safe: three consecutive caption+gap+number lines is a
+        // listing, not prose.
         guard let rowRegex = try? NSRegularExpression(
-            pattern: #"(?i)^\s*\S.*\S[ \t]{2,}(\d{1,4}|[ivxlcdm]{1,8})[ \t]*$"#) else { return text }
+            pattern: #"(?i)^\s*\S.*\S(?:[ \t]{2,}|\t)(\d{1,4}|[ivxlcdm]{1,8})[ \t]*$"#) else { return text }
         // A header/column-title line that captions a print list ("List of
         // Illustrations.", "ILLUSTRATIONS", "List of Figures", "Contents", or the
         // "PAGE" column header). Only stripped when it is adjacent to a dropped

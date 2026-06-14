@@ -85,32 +85,12 @@ struct EPUBLibraryImporter {
             plainText: parsed.plainText,
             tocEntries: parsed.tocEntries
         )
-        let boundaries = GutenbergBoundaryDetector.detect(in: parsed.plainText)
         // 2026-06-12 (finding #2) — pull contentEnd back past a trailing publisher
-        // catalog ad (Grosset & Dunlap reprints). No-op when absent. END-mirror of
-        // the c6 publishing-apparatus skip.
-        let rawContentEnd = boundaries.contentEndOffset ?? 0
-        let contentEndOffset = InProseTOCDetector.contentEndBeforePublisherCatalog(
-            in: parsed.plainText, at: rawContentEnd) ?? rawContentEnd
-        #if DEBUG
-        // 2026-06-13 (#2b probe) — diagnose why contentEndBeforePublisherCatalog
-        // returns nil for EPUB dracula. The function runs on parsed.plainText (NOT
-        // the DB-joined string GET_PLAIN_TEXT serves), so dump the PARSED-space
-        // positions of rawCE / "THE END" / the catalog anchor to see whether the
-        // catalog sits before or after rawCE in parsed-space (settles forward-widen
-        // vs parsed-vs-DB-reconcile). dracula-only; DEBUG-only.
-        if fileName.lowercased().contains("dracula") {
-            let pt = parsed.plainText
-            let n = pt.count
-            func off(_ s: String, _ opts: String.CompareOptions = []) -> Int {
-                pt.range(of: s, options: opts).map { pt.distance(from: pt.startIndex, to: $0.lowerBound) } ?? -1
-            }
-            let lo = max(0, rawContentEnd - 120), hi = min(n, rawContentEnd + 220)
-            let around = String(pt[pt.index(pt.startIndex, offsetBy: lo)..<pt.index(pt.startIndex, offsetBy: hi)])
-            let pulled = InProseTOCDetector.contentEndBeforePublisherCatalog(in: pt, at: rawContentEnd)
-            print("POSEY2B parsedLen=\(n) rawCE=\(rawContentEnd) THE_END@=\(off("THE END")) catalog@=\(off("More to Follow")) grosset@=\(off("GROSSET", .caseInsensitive)) pulled=\(pulled.map(String.init) ?? "nil") around=[\(around.replacingOccurrences(of: "\n", with: "\\n"))]")
-        }
-        #endif
+        // catalog ad (Grosset & Dunlap reprints). 2026-06-14 (#2b fix): this is now
+        // computed AFTER units are built, against the UNIT-JOINED plainText, not
+        // parsed.plainText — see below. (parsed.plainText and the unit-joined/DB
+        // string diverge — dracula 855870 vs 855779 — so a parsed-space offset
+        // resolved one unit too late and leaked "There's More to Follow!".)
 
         // ── Run display parser at import time, build units.
         let blocks = displayParser.parse(displayText: parsed.displayText)
@@ -147,6 +127,22 @@ struct EPUBLibraryImporter {
             to: baseUnits,
             headingMarkersByOffset: headingMarkersByOffset
         )
+
+        // 2026-06-14 (#2b fix) — compute the content-end boundary in the SAME
+        // coordinate space the reader / persister / firstUnit use: the UNIT-JOINED
+        // plainText (prose units joined with "\n\n"). parsed.plainText diverges
+        // from it (EPUB dracula: 855870 vs 855779 — a 91-char gap that accumulates
+        // toward the end), so the OLD parsed-space offset resolved ONE UNIT too late
+        // via firstUnit(atOrAfterPlainTextOffset:) and left the publisher-ad line
+        // "There's More to Follow!" in the read-aloud flow (#2b). Recomputing in
+        // unit space lands the cut on the catalog's unit, which the reader excludes
+        // (contentEndUnitSequence is exclusive). The detector is a no-op on docs
+        // with no trailing catalog, so this is safe across the corpus.
+        let unitJoinedPlainText = units.filter { $0.kind.carriesProseText }
+            .map { $0.text }.joined(separator: "\n\n")
+        let rawContentEnd = GutenbergBoundaryDetector.detect(in: unitJoinedPlainText).contentEndOffset ?? 0
+        let contentEndOffset = InProseTOCDetector.contentEndBeforePublisherCatalog(
+            in: unitJoinedPlainText, at: rawContentEnd) ?? rawContentEnd
 
         // ── Map smart-skip offset to a unit reference.
         let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: computed.skipOffset)?.id

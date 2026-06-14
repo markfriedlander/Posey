@@ -2023,6 +2023,19 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "OPEN_FIRST_IMAGE":
+                // 2026-06-14 (c7) — drive the image-tap viewer. The image
+                // .onTapGesture (6a8fc08) opens the full-screen zoomable sheet by
+                // setting `expandedImageItem`; READER_TAP only toggles chrome and
+                // there's no coord-tap on a physical phone. This posts to an
+                // isolated ReaderView subview that runs the SAME viewer-open path
+                // on the first .image unit with bytes — lets c7's tap-opens-viewer
+                // half be verified on device.
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteOpenFirstImage, object: nil)
+                }
+                return json(["status": "posted"])
+
             case "SET_APPEARANCE":
                 // 2026-05-28 — DEBUG-only verification primitive.
                 // Lets CC verify chrome contrast and other

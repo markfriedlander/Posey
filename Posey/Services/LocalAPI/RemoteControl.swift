@@ -57,6 +57,14 @@ extension Notification.Name {
     /// without needing a synthesized touch event.
     static let remoteReaderToggleChrome = Notification.Name("PoseyRemoteReaderToggleChrome")
 
+    /// No userInfo. ReaderView observes (via an isolated `ImageViewerTrigger`
+    /// subview); resolves the first `.image` unit with real bytes and sets
+    /// `expandedImageItem` — exercising the SAME viewer-open trigger the
+    /// image-tap handler uses (6a8fc08), so the full-screen
+    /// `ExpandedImageSheet`/`ZoomableImageView` (c7) can be verified on device
+    /// without a synthesized touch on the image element.
+    static let remoteOpenFirstImage = Notification.Name("PoseyRemoteOpenFirstImage")
+
     /// `userInfo["storageID"]: String`. AskPoseyView observes; runs
     /// the same closure tapping the anchor row in the thread runs
     /// (cancel in flight, jump reader to anchor offset, dismiss).

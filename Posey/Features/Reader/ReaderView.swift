@@ -506,9 +506,13 @@ struct ReaderView: View {
                     }
                 }
             }
-            .sheet(item: $expandedImageItem) { item in
-                ExpandedImageSheet(imageID: item.id, viewModel: viewModel)
-            }
+            // The full-screen image viewer sheet + its OPEN_FIRST_IMAGE (c7)
+            // antenna-verb observer, bundled into ONE modifier (like
+            // SmartSkipPromptModifier above) so the top-level body chain stays
+            // short enough for the Swift type-checker — adding either inline
+            // overflowed it.
+            .modifier(ExpandedImageModifier(expandedImageItem: $expandedImageItem,
+                                            viewModel: viewModel))
             // Ask Posey modal sheet (M4: shell + echo stub; M5+: live
             // AFM). Item-bound so the view model's lifetime tracks
             // the sheet — `nil` when closed, a fresh instance with
@@ -4637,6 +4641,18 @@ final class ReaderViewModel: ObservableObject {
         return data
     }
 
+    /// First `.image` unit whose imageID resolves to real bytes. Used by the
+    /// `remoteOpenFirstImage` (c7) verification verb to open the same
+    /// full-screen viewer the image-tap handler opens (6a8fc08).
+    func firstImageIDWithBytes() -> String? {
+        for unit in units where unit.kind == .image {
+            if let id = unit.metadata.imageID, imageData(for: id) != nil {
+                return id
+            }
+        }
+        return nil
+    }
+
     // ========== BLOCK VM-IMAGE: IMAGE LOADING - END ==========
 
     // ========== BLOCK VM-UNIT: UNIT-ROW HELPERS - START ==========
@@ -4878,6 +4894,31 @@ final class ReaderViewModel: ObservableObject {
 /// Token passed to `.sheet(item:)` — the imageID is both key and payload.
 struct ExpandedImageItem: Identifiable {
     let id: String   // imageID
+}
+
+/// 2026-06-14 (c7) — the full-screen image-viewer `.sheet` plus the
+/// `remoteOpenFirstImage` antenna-verb observer, bundled into ONE `ViewModifier`
+/// so the top-level ReaderView body chain stays short enough for the Swift
+/// type-checker (its own `body` type-checks independently — attaching the sheet
+/// AND a `.background`/`.onReceive` inline overflowed it). The observer resolves
+/// the first image-with-bytes and sets `expandedImageItem` — the SAME thing the
+/// image `.onTapGesture` (6a8fc08) does — so the tap-opens-viewer half of c7 is
+/// verifiable on a physical phone (where a real touch on the image element can't
+/// be synthesized through the antenna).
+struct ExpandedImageModifier: ViewModifier {
+    @Binding var expandedImageItem: ExpandedImageItem?
+    let viewModel: ReaderViewModel
+    func body(content: Content) -> some View {
+        content
+            .sheet(item: $expandedImageItem) { item in
+                ExpandedImageSheet(imageID: item.id, viewModel: viewModel)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .remoteOpenFirstImage)) { _ in
+                if let imageID = viewModel.firstImageIDWithBytes() {
+                    expandedImageItem = ExpandedImageItem(id: imageID)
+                }
+            }
+    }
 }
 
 private struct ExpandedImageSheet: View {

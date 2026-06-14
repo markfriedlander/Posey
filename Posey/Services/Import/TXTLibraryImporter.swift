@@ -106,11 +106,8 @@ struct TXTLibraryImporter {
         let skipOffset = InProseTOCDetector.contentStartAfterPublishingApparatus(
             in: plainText, at: afterContents) ?? afterContents
         // 2026-06-12 (finding #2) — pull contentEnd back past a trailing publisher
-        // catalog ad (Grosset & Dunlap reprints: Dracula reads "THE END" then a
-        // sales pitch). No-op when there is no such ad. END-mirror of the c6 fix.
-        let rawContentEnd = boundaries.contentEndOffset ?? 0
-        let contentEndOffset = InProseTOCDetector.contentEndBeforePublisherCatalog(
-            in: plainText, at: rawContentEnd) ?? rawContentEnd
+        // catalog ad. 2026-06-14 (#2b parity): computed AFTER units, against the
+        // unit-joined plainText (the space firstUnit/reader use) — see below.
         let skipSource: String = {
             if gutenbergStart > 0 { return "gutenberg" }
             if skipOffset > 0   { return "heuristic" }
@@ -138,6 +135,17 @@ struct TXTLibraryImporter {
         // HARKER'S JOURNAL" → "CHAPTER I: JONATHAN HARKER'S JOURNAL"). Runs
         // before skip/sentence mapping so they see the final unit list.
         let units = ContentUnitBuilder.mergeLabelTitleHeadings(demotedUnits)
+
+        // 2026-06-14 (#2b parity) — compute the content-end boundary in UNIT-JOINED
+        // space (the cumulative space firstUnit/persister/reader use), not the
+        // loaded `plainText`, so the trailing-catalog cut aligns with the cutoff
+        // unit. No-op when the two agree (TXT usually) or there's no catalog;
+        // matches the EPUB/HTML #2b fix for cross-format consistency.
+        let unitJoinedPlainText = units.filter { $0.kind.carriesProseText }
+            .map { $0.text }.joined(separator: "\n\n")
+        let rawContentEnd = GutenbergBoundaryDetector.detect(in: unitJoinedPlainText).contentEndOffset ?? 0
+        let contentEndOffset = InProseTOCDetector.contentEndBeforePublisherCatalog(
+            in: unitJoinedPlainText, at: rawContentEnd) ?? rawContentEnd
 
         // ── Map smart-skip plainText offsets to unit ids.
         let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: skipOffset)?.id

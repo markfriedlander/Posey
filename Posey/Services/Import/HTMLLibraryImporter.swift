@@ -161,9 +161,17 @@ struct HTMLLibraryImporter {
         // 2026-06-12 (finding #2) — pull contentEnd back past a trailing publisher
         // catalog ad (Grosset & Dunlap reprints). No-op for article HTML / books
         // with no trailing ad. END-mirror of the c6 publishing-apparatus skip.
-        let rawContentEnd = boundaryResult.contentEndOffset ?? 0
+        // 2026-06-14 (#2b parity) — compute the END boundary in the UNIT-JOINED
+        // plainText (the cumulative/DB space firstUnit/persister/reader use), not
+        // the parsed `plainText`. The two diverge for NSAttributedString-derived
+        // HTML (same root cause as EPUB dracula's 91-char gap), so a parsed-space
+        // cut resolved one unit too late and could leave the publisher-ad line in
+        // the read-aloud flow. No-op when the strings agree or there's no catalog.
+        let unitJoinedPlainText = units.filter { $0.kind.carriesProseText }
+            .map { $0.text }.joined(separator: "\n\n")
+        let rawContentEnd = GutenbergBoundaryDetector.detect(in: unitJoinedPlainText).contentEndOffset ?? 0
         let contentEndOffset = InProseTOCDetector.contentEndBeforePublisherCatalog(
-            in: plainText, at: rawContentEnd) ?? rawContentEnd
+            in: unitJoinedPlainText, at: rawContentEnd) ?? rawContentEnd
         let skipSource: String = {
             if gutenbergStart > 0 { return "gutenberg" }
             if skipOffset > 0   { return "heuristic" }

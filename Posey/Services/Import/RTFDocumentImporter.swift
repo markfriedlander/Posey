@@ -72,10 +72,17 @@ extension RTFDocumentImporter {
     /// one no-font span; macOS yields per-style spans). The native font
     /// table thus can't be inspected on iOS, so we tokenize RTF directly.
     func loadDocument(fromData data: Data) throws -> RTFParsedDocument {
+        // 2026-06-14 (RTF c3 fidelity fix) — sanitize raw UTF-8 bytes BEFORE
+        // NSAttributedString. Apple's RTF reader silently DROPS a span of text
+        // when an `\ansi` RTF embeds raw UTF-8 bytes instead of the spec's
+        // `\uN`/`\'xx` escapes (the high bytes desync its byte/char counter).
+        // No-op on well-formed RTF (no raw high bytes → returns input
+        // unchanged). See `sanitizeRawUTF8Bytes`.
+        let cleanData = Self.sanitizeRawUTF8Bytes(data)
         let attributed: NSAttributedString
         do {
             attributed = try NSAttributedString(
-                data: data,
+                data: cleanData,
                 options: [.documentType: NSAttributedString.DocumentType.rtf],
                 documentAttributes: nil
             )
@@ -625,3 +632,105 @@ fileprivate enum RTFRawTokenizer {
     }
 }
 // ========== BLOCK 5: RAW RTF TOKENIZER - END ==========
+
+// ========== BLOCK 7: RAW-UTF8 SANITIZER (NSAttributedString pre-pass) - START ==========
+extension RTFDocumentImporter {
+    /// Rewrite every VALID UTF-8 multibyte sequence in the RTF bytes as an RTF
+    /// `\uN?` Unicode escape, so Apple's `NSAttributedString` RTF reader parses
+    /// the document completely.
+    ///
+    /// **Why (Rule 5/10, verified on `rtf_styled-headings.rtf`).** RTF is a
+    /// 7-bit-ASCII format: non-ASCII must be escaped (`\'xx` for the declared
+    /// codepage, `\uN` for Unicode). Some exporters (and re-encoded files)
+    /// instead embed RAW UTF-8 bytes under `\ansi`. Apple's reader does not
+    /// just mojibake those — it DROPS the surrounding run: the fixture's
+    /// "…get recipe for Mina.) I asked the waiter…called “paprika hendl,”…I
+    /// should be able to get it…" collapsed to the broken "…get recipe foe to
+    /// get it…" (a whole sentence gone, "for"+"able"→"foe"). The downstream
+    /// CP1252 mojibake repair can't recover it — the text is gone before it runs.
+    ///
+    /// **Conservative by design.** Only well-formed UTF-8 multibyte sequences
+    /// (lead `0xC0…0xF4` + valid continuations, no overlong/surrogate/over-max)
+    /// are rewritten. A high byte that is NOT valid UTF-8 (e.g. a lone CP1252
+    /// `0x92` curly quote) is left UNTOUCHED, so genuine single-byte-codepage
+    /// RTFs are unaffected. A well-formed RTF has no raw high bytes at all, so
+    /// the function returns its input UNCHANGED (verified byte-identical on the
+    /// corpus's well-formed RTFs: with-image, business-letter, AI Book Collab).
+    ///
+    /// **Category (Rule 10):** any RTF embedding raw UTF-8 — not just this
+    /// fixture. The raw tokenizer (Block 5) and image extractor keep using the
+    /// ORIGINAL bytes: they read via ISO-Latin1 (bijective, never drops) and
+    /// already tolerate this divergence via their ASCII-prefix needle fallback.
+    static func sanitizeRawUTF8Bytes(_ data: Data) -> Data {
+        let bytes = [UInt8](data)
+        // Fast path: no raw high bytes → well-formed RTF, return unchanged.
+        guard bytes.contains(where: { $0 >= 0x80 }) else { return data }
+
+        let n = bytes.count
+        var out = [UInt8]()
+        out.reserveCapacity(n)
+        var i = 0
+        var rewroteAny = false
+        while i < n {
+            let b = bytes[i]
+            if b >= 0x80 {
+                let len = b >= 0xF0 ? 4 : (b >= 0xE0 ? 3 : (b >= 0xC0 ? 2 : 1))
+                if len >= 2, i + len <= n,
+                   let scalar = Self.decodeUTF8Sequence(Array(bytes[i..<(i + len)])) {
+                    Self.appendRTFUnicodeEscape(scalar, into: &out)
+                    rewroteAny = true
+                    i += len
+                    continue
+                }
+            }
+            out.append(b)
+            i += 1
+        }
+        return rewroteAny ? Data(out) : data
+    }
+
+    /// Validate and decode a single 2–4 byte UTF-8 sequence to its scalar.
+    /// Rejects overlong encodings, surrogate codepoints, and >U+10FFFF.
+    private static func decodeUTF8Sequence(_ seq: [UInt8]) -> Unicode.Scalar? {
+        @inline(__always) func cont(_ x: UInt8) -> Bool { x & 0xC0 == 0x80 }
+        let first = seq[0]
+        var cp: UInt32
+        switch seq.count {
+        case 2:
+            guard first & 0xE0 == 0xC0, cont(seq[1]) else { return nil }
+            cp = (UInt32(first & 0x1F) << 6) | UInt32(seq[1] & 0x3F)
+            guard cp >= 0x80 else { return nil }
+        case 3:
+            guard first & 0xF0 == 0xE0, cont(seq[1]), cont(seq[2]) else { return nil }
+            cp = (UInt32(first & 0x0F) << 12) | (UInt32(seq[1] & 0x3F) << 6) | UInt32(seq[2] & 0x3F)
+            guard cp >= 0x800, !(0xD800...0xDFFF).contains(cp) else { return nil }
+        case 4:
+            guard first & 0xF8 == 0xF0, cont(seq[1]), cont(seq[2]), cont(seq[3]) else { return nil }
+            cp = (UInt32(first & 0x07) << 18) | (UInt32(seq[1] & 0x3F) << 12)
+                | (UInt32(seq[2] & 0x3F) << 6) | UInt32(seq[3] & 0x3F)
+            guard cp >= 0x10000, cp <= 0x10FFFF else { return nil }
+        default:
+            return nil
+        }
+        return Unicode.Scalar(cp)
+    }
+
+    /// Emit an RTF `\uN?` escape (signed 16-bit per spec; values > 32767 are
+    /// written negative). Astral scalars become a UTF-16 surrogate pair, each a
+    /// separate `\uN`. The trailing `?` is the `\uc1` fallback char readers skip.
+    private static func appendRTFUnicodeEscape(_ scalar: Unicode.Scalar, into out: inout [UInt8]) {
+        @inline(__always) func emit(_ u16: UInt32) {
+            let signed = u16 <= 0x7FFF ? Int(u16) : Int(u16) - 0x10000
+            out.append(contentsOf: Array("\\u\(signed)?".utf8))
+        }
+        let cp = scalar.value
+        if cp <= 0xFFFF {
+            emit(cp)
+        } else {
+            let v = cp - 0x10000
+            emit(0xD800 + (v >> 10))
+            emit(0xDC00 + (v & 0x3FF))
+        }
+    }
+}
+// ========== BLOCK 7: RAW-UTF8 SANITIZER (NSAttributedString pre-pass) - END ==========

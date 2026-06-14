@@ -361,8 +361,20 @@ extension PDFDocumentImporter {
                 }
             }
             .joined(separator: "\u{000C}")
+        // 2026-06-14 (PDF c14) — strip a TRAILING "Page N of M" page-layout
+        // footer. PDFRunningHeaderDetector catches repeating footers across
+        // MULTIPLE pages, but a SINGLE-page PDF (e.g. a 1-page résumé) has no
+        // repetition to detect, so its lone "Page 1 of 1" leaks to the very end
+        // of the text → spoken by TTS (c14 junk) + visible (c3). Scoped to the
+        // document tail only (after the last page's real content), so multi-page
+        // interior footers stay the detector's job and legit "Page N of M" inside
+        // prose (rare) is untouched. The number-of-pages text is layout, not content.
+        // `\s` (ICU) already matches the form-feed page separator.
+        let trailingPageFooter = #"(?i)\s*Page\s+\d+\s+of\s+\d+\s*$"#
         let preDisplayText = TextNormalizer.stripLineBreakHyphens(joinedDisplay)
+            .replacingOccurrences(of: trailingPageFooter, with: "", options: .regularExpression)
         let prePlainText = readableTextPages.joined(separator: "\n\n")
+            .replacingOccurrences(of: trailingPageFooter, with: "", options: .regularExpression)
 
         // 2026-05-07 (parity #10): collapse whitespace inside any
         // numeric bracketed marker (`[12]`, `[1 2]`, `[1\n2]`,

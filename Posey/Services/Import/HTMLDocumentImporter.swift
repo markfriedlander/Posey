@@ -913,6 +913,20 @@ struct HTMLDocumentImporter {
             // WHOLE category of CS1/CS2 citation-comment diagnostics, not just the
             // two seen in Pride-and-Prejudice (Rule 10 generalization).
             #"(?si)<span[^>]*\bclass\s*=\s*["'][^"']*\bcitation-comment\b[^"']*["'][^>]*>.*?</span\s*>"#,
+            // 2026-06-14 — Wikipedia reference-list BACKLINK markers. Each
+            // reference list item opens with a jump-back-to-citation affordance:
+            //   <span class="mw-cite-backlink"><b><a href="#cite_ref-1">^</a></b></span>
+            // and for multi-use refs the "^ a b c d e …" letter backlinks. It's
+            // pure navigation (never meant to be read), but Readability keeps it,
+            // so the References render "1. ^ Stone, Lawrence (1986)…" / "2. ^ a b c
+            // d e …" — the caret/letters leak into plainText (c3) and get spoken by
+            // TTS (c14: 'caret Stone Lawrence …'). Strip the whole backlink span
+            // (self-contained, no nested <span> — only <b>/<a>/<sup>/<i>), leaving
+            // the <span class="reference-text"> intact. The INLINE [N] citations
+            // (<sup class="reference">…[1]…</sup>) are a DIFFERENT element and are
+            // preserved (they're legitimate readable apparatus, per the c8 ruling).
+            // Rule 10: strips the whole class across any MediaWiki references list.
+            #"(?si)<span[^>]*\bclass\s*=\s*["'][^"']*\bmw-cite-backlink\b[^"']*["'][^>]*>.*?</span\s*>"#,
         ]
         var html = rawHTML
         for pattern in patterns {

@@ -715,12 +715,25 @@ struct ReaderView: View {
             }
         }
         #endif
-        // Tap-to-jump fallback for image / pageBreak / horizontalRule rows that
-        // have no sentence ranges (image rows jump to the first sentence of the
-        // next prose unit — the legacy "tap-the-image-block" behavior).
+        // Tap behavior for non-prose rows (image / pageBreak / horizontalRule),
+        // which carry no sentence ranges:
+        //   • IMAGE rows with real bytes → open the full-screen zoomable viewer
+        //     (ExpandedImageSheet → ZoomableImageView). This trigger was MISSING:
+        //     `.sheet(item: $expandedImageItem)` and ZoomableImageView were fully
+        //     wired, but nothing ever set `expandedImageItem`, and this very tap
+        //     hijacked image taps to JUMP — so the image viewer was dead code and
+        //     there was no way to view an image (2026-06-14, Mark caught it).
+        //   • everything else (pageBreak / hr / image with no bytes) → legacy
+        //     "tap-the-image-block" jump to the first sentence of the next prose unit.
         .contentShape(Rectangle())
         .onTapGesture {
             guard !unit.kind.carriesProseText else { return }
+            if unit.kind == .image,
+               let imageID = unit.metadata.imageID,
+               viewModel.imageData(for: imageID) != nil {
+                expandedImageItem = ExpandedImageItem(id: imageID)
+                return
+            }
             if let firstAfter = viewModel.sentences.first(where: { s in
                 guard let u = viewModel.units.first(where: { $0.id == s.unitID }) else { return false }
                 return u.sequence > unit.sequence

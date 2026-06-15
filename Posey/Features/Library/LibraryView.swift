@@ -600,17 +600,11 @@ final class LibraryViewModel: ObservableObject {
                 return
             }
 
-            let didAccess = url.startAccessingSecurityScopedResource()
-            defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
-
-            switch fileType {
-            case "txt":               _ = try txtLibraryImporter.importDocument(from: url)
-            case "md", "markdown":    _ = try markdownLibraryImporter.importDocument(from: url)
-            case "rtf":               _ = try rtfLibraryImporter.importDocument(from: url)
-            case "docx":              _ = try docxLibraryImporter.importDocument(from: url)
-            default:                  throw LibraryImportError.unsupportedFileType
-            }
-            loadDocuments()
+            // 2026-06-15 (Path A, completing the sweep): the pure-text formats
+            // (TXT/MD/RTF/DOCX) have no main-thread requirement, so they import
+            // off-main via a background task too. "Launch and use, not wait" now
+            // holds for every format. (PDF/HTML/EPUB already returned above.)
+            handleTextFormatImport(url: url, fileType: fileType)
         } catch {
             present(error)
         }
@@ -643,6 +637,34 @@ final class LibraryViewModel: ObservableObject {
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
             do {
                 _ = try await epubLibraryImporter.importDocument(from: url)
+                loadDocuments()
+            } catch {
+                present(error)
+            }
+        }
+    }
+
+    /// 2026-06-15 (Path A — off-main import) — TXT/MD/RTF/DOCX import path.
+    /// These importers are pure Swift (no WebKit / main-thread requirement), so
+    /// the parse + DB write run on a detached background task; only the security-
+    /// scoped URL bracketing and the final `loadDocuments()` touch the main actor.
+    /// Importers stay synchronous (fresh instance built inside the task from the
+    /// Sendable DatabaseManager), so their signatures and tests are untouched.
+    private func handleTextFormatImport(url: URL, fileType: String) {
+        let db = databaseManager
+        Task { @MainActor in
+            let didAccess = url.startAccessingSecurityScopedResource()
+            defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    switch fileType {
+                    case "txt":            _ = try TXTLibraryImporter(databaseManager: db).importDocument(from: url)
+                    case "md", "markdown": _ = try MarkdownLibraryImporter(databaseManager: db).importDocument(from: url)
+                    case "rtf":            _ = try RTFLibraryImporter(databaseManager: db).importDocument(from: url)
+                    case "docx":           _ = try DOCXLibraryImporter(databaseManager: db).importDocument(from: url)
+                    default:               throw LibraryImportError.unsupportedFileType
+                    }
+                }.value
                 loadDocuments()
             } catch {
                 present(error)
@@ -3344,11 +3366,15 @@ extension LibraryViewModel {
                 }
                 doc = try pdfLibraryImporter.persistParsedDocument(parsed, from: tempURL)
             } else {
+                // 2026-06-15 (Path A): pure-text formats parse off-main on a
+                // detached task (no WebKit constraint); HTML/EPUB are async and
+                // hop to main only for their per-chapter WebKit step.
+                let db = databaseManager
                 switch ext {
-                case "txt":             doc = try txtLibraryImporter.importDocument(from: tempURL)
-                case "md", "markdown":  doc = try markdownLibraryImporter.importDocument(from: tempURL)
-                case "rtf":             doc = try rtfLibraryImporter.importDocument(from: tempURL)
-                case "docx":            doc = try docxLibraryImporter.importDocument(from: tempURL)
+                case "txt":             doc = try await Task.detached(priority: .userInitiated) { try TXTLibraryImporter(databaseManager: db).importDocument(from: tempURL) }.value
+                case "md", "markdown":  doc = try await Task.detached(priority: .userInitiated) { try MarkdownLibraryImporter(databaseManager: db).importDocument(from: tempURL) }.value
+                case "rtf":             doc = try await Task.detached(priority: .userInitiated) { try RTFLibraryImporter(databaseManager: db).importDocument(from: tempURL) }.value
+                case "docx":            doc = try await Task.detached(priority: .userInitiated) { try DOCXLibraryImporter(databaseManager: db).importDocument(from: tempURL) }.value
                 case "html", "htm":     doc = try await htmlLibraryImporter.importDocument(from: tempURL)
                 case "epub":            doc = try await epubLibraryImporter.importDocument(from: tempURL)
                 default:                throw LibraryImportError.unsupportedFileType

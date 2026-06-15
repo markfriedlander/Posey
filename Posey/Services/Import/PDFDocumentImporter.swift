@@ -221,6 +221,20 @@ extension PDFDocumentImporter {
                         .filter { !$0.isEmpty }
                         .joined(separator: "\n\n")
                 }
+                // Résumé / CV structured-line page (no \n\n + ALL-CAPS section
+                // headers): reflow into one paragraph per logical line instead
+                // of collapsing the whole page into one wall-of-text unit.
+                // GATED to SHORT documents (≤ 2 pages): the caps-colon header
+                // signal alone also matches incidental book content (GEBen's
+                // BlooP/FlooP pseudocode listings, formal "RULES OF EQUALITY:"
+                // pages), so without a length gate the reflow re-segments a
+                // long book it has no business touching. A book is long; a
+                // résumé/CV/cover-letter/flyer is 1–2 pages — that's the
+                // discriminator. Multi-page CVs are a future extension (needs
+                // more real-doc verification before loosening the gate).
+                if pageCount <= 2, let reflowed = reflowStructuredLineBlobPage(stripped) {
+                    return reflowed
+                }
                 return normalize(stripped)
             }()
 
@@ -876,6 +890,81 @@ extension PDFDocumentImporter {
         t = TextNormalizer.normalizePDFGlyphArtifacts(t)
         t = t.replacingOccurrences(of: #"\n(?!\n)"#, with: " ", options: .regularExpression)
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 2026-06-15 — Résumé / CV "wall of text" fix (Mark-requested). Some
+    /// PDFs (single-spaced résumés, structured one-pagers) come back from
+    /// PDFKit with a newline per VISUAL line but NO blank-line paragraph
+    /// breaks. The normal path (`normalize`) collapses single `\n` → space
+    /// to reflow wrapped BODY prose — correct for books, but it flattens
+    /// such a page into ONE giant prose unit: an unscannable wall of text
+    /// that also reads terribly under TTS. Mark: the résumé should render
+    /// in a more reader-friendly presentation.
+    ///
+    /// When a page is clearly a structured-line document — no `\n\n`
+    /// paragraph structure AND it carries an ALL-CAPS section header ending
+    /// in a colon (e.g. `EDUCATION:`, `SKILLS AND EXPERIENCE:`), a strong
+    /// signal flowing prose never produces — reflow it so each logical line
+    /// becomes its own paragraph (→ its own unit), MERGING only true wrapped
+    /// continuations (a line ending mid-clause whose successor begins
+    /// lowercase). Returns nil for everything else (flowing prose, TOC pages
+    /// handled upstream, anything with `\n\n`) so the established path is
+    /// untouched — the golden harness proves the other corpus PDFs stay
+    /// byte-identical. The IRS-1040 form (no caps-colon headers) is
+    /// deliberately NOT reflowed — accepted as a known limitation (Mark).
+    ///
+    /// SCOPE / edge note (Rule 10): the gate intentionally requires the
+    /// COLON to stay conservative — a colon-less header ("EDUCATION") won't
+    /// trigger. Loosening that risks fragmenting an all-caps-titled prose
+    /// page, so it's left as a future refinement verified against more real
+    /// résumés.
+    private func reflowStructuredLineBlobPage(_ raw: String) -> String? {
+        // Pages that already have paragraph structure use the normal path.
+        if raw.contains("\n\n") { return nil }
+
+        let lines = raw.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard lines.count >= 4 else { return nil }   // too small to be a blob worth splitting
+
+        // Gate: at least one ALL-CAPS, colon-terminated section header.
+        guard lines.contains(where: { Self.isStructuredSectionHeader($0) }) else { return nil }
+
+        var paragraphs: [String] = []
+        for line in lines {
+            if let last = paragraphs.last,
+               !Self.isStructuredSectionHeader(line),
+               Self.isWrappedContinuation(previous: last, next: line) {
+                paragraphs[paragraphs.count - 1] = last + " " + line
+            } else {
+                paragraphs.append(line)
+            }
+        }
+        let cleaned = paragraphs.map { normalize($0) }.filter { !$0.isEmpty }
+        guard cleaned.count >= 2 else { return nil }
+        return cleaned.joined(separator: "\n\n")
+    }
+
+    /// An ALL-CAPS line ending in `:` — e.g. `EDUCATION:`. Conservative
+    /// structured-document signal (see `reflowStructuredLineBlobPage`).
+    private static func isStructuredSectionHeader(_ s: String) -> Bool {
+        guard s.count >= 3, s.count <= 50, s.hasSuffix(":") else { return false }
+        let letters = s.filter { $0.isLetter }
+        guard letters.count >= 2, letters.allSatisfy({ $0.isUppercase }) else { return false }
+        return true
+    }
+
+    /// True when `next` is a wrapped continuation of `previous` (a soft
+    /// line break mid-clause), so they rejoin into one paragraph rather
+    /// than split into two units. Requires the previous line to end on a
+    /// word char or comma (not sentence/clause punctuation) AND the next
+    /// line to begin lowercase — the shape of reflowed body prose, not of
+    /// two discrete résumé entries.
+    private static func isWrappedContinuation(previous: String, next: String) -> Bool {
+        guard let prevLast = previous.last, let nextFirst = next.first else { return false }
+        if ".!?:;".contains(prevLast) { return false }
+        let prevContinues = prevLast.isLowercase || prevLast == ","
+        return prevContinues && nextFirst.isLowercase
     }
 
     // 2026-05-03 (Task 8 — format parity): the PDF importer's local

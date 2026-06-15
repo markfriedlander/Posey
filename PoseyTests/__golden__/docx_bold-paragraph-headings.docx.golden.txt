@@ -1,4 +1,4 @@
-TITLE: Docx Bold Paragraph Headings
+TITLE: CHAPTER XXVII. Mina Harker’s Journal
 FILETYPE: docx
 UNITS: 15
 READER-OPENS-AT-UNIT-INDEX: 0

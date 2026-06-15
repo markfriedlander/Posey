@@ -26,7 +26,7 @@ struct DOCXLibraryImporter {
         let parsed = try textLoader.loadDocument(from: url)
         let contentHash = try? ContentHasher.sha256(of: url)
         let title = TitleExtractor.resolve(
-            contentTitle: parsed.coreTitle,
+            contentTitle: Self.contentTitle(coreTitle: parsed.coreTitle, headings: parsed.headings),
             filename: url.lastPathComponent
         )
         return try importNormalizedDocument(
@@ -45,7 +45,9 @@ struct DOCXLibraryImporter {
         let parsed = try textLoader.loadDocument(fromData: rawData)
         let contentHash = ContentHasher.sha256(rawData)
         let resolved = title.isEmpty
-            ? TitleExtractor.resolve(contentTitle: parsed.coreTitle, filename: fileName)
+            ? TitleExtractor.resolve(
+                contentTitle: Self.contentTitle(coreTitle: parsed.coreTitle, headings: parsed.headings),
+                filename: fileName)
             : title
         return try importNormalizedDocument(
             title: resolved,
@@ -57,6 +59,31 @@ struct DOCXLibraryImporter {
             headings: parsed.headings,
             contentHash: contentHash
         )
+    }
+
+    /// **2026-06-15 — title fallback.** DOCX `<dc:title>` is frequently
+    /// absent (Word only writes it when the author fills in Properties →
+    /// Title). When it is, fall back to the document's first heading —
+    /// the on-page H1 — which is the real title a reader sees, e.g.
+    /// "Tables and Images DOCX". Without this we dropped to the cleaned
+    /// FILENAME, and `TitleExtractor.cleanedFilename`'s Gutenberg
+    /// variant-suffix strip (`-images`/`-cleaned`/`-raw`) over-eagerly
+    /// ate the legitimate trailing word — "docx_tables-and-images" →
+    /// "Docx Tables And". Prefer a level-1 heading; else the first
+    /// heading of any level. Mirrors the MD (`# H1`) / HTML (`<h1>`)
+    /// content-title strategy. Returns nil → caller uses the filename.
+    private static func contentTitle(
+        coreTitle: String?,
+        headings: [DOCXDocumentImporter.DOCXHeadingEntry]
+    ) -> String? {
+        if let core = coreTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !core.isEmpty {
+            return core
+        }
+        if let h1 = headings.first(where: { $0.level == 1 }) {
+            return h1.title
+        }
+        return headings.first?.title
     }
 
     private func importNormalizedDocument(

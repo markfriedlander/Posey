@@ -1,4 +1,4 @@
-TITLE: Proposal Assistant Article Draft
+TITLE: How We Built a GPT-Powered Proposal Assistant That Actually Helps
 FILETYPE: docx
 UNITS: 37
 READER-OPENS-AT-UNIT-INDEX: 0

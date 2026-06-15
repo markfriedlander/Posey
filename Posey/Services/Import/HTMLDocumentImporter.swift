@@ -120,10 +120,29 @@ struct HTMLDocumentImporter {
         // whose title the Readability output lost back into displayText at its
         // body anchor. The returned `headings` is the full ordered list for the
         // downstream title-based TOC + styling resolution.
-        let (displayTextHeadings, headings) = reinjectArticleHeadings(
-            into: displayTextRaw,
-            specs: extractHeadingSpecs(fromHTML: preCleanedHTML)
-        )
+        // 2026-06-15 — Gutenberg book HTML takes the SIMPLE heading path, NOT the
+        // article reinjection path. `reinjectArticleHeadings` exists because
+        // Mozilla Readability DROPS headings from web articles, so each must be
+        // re-found by its prose body-anchor and re-injected (with a forward
+        // cursor). But Gutenberg HTML BYPASSES Readability (isGutenbergHTML above),
+        // so its <hN> headings are already present in displayText — the anchor/
+        // cursor machinery is unnecessary AND fragile here: it collapsed
+        // tale-of-two-cities' 45 chapter <h2>s to 3 (a chapter whose first-prose
+        // anchor wasn't found in forward-cursor order was silently skipped). Use
+        // the plain all-<hN> extractor; downstream resolveHeadingOffsets
+        // (whitespace-flexible) maps each to its body offset and
+        // demoteDuplicateListingHeadings drops any Contents-listing twins.
+        let displayTextHeadings: String
+        let headings: [HTMLHeadingEntry]
+        if isGutenbergHTML {
+            displayTextHeadings = displayTextRaw
+            headings = extractHeadings(fromRawData: workingData)
+        } else {
+            (displayTextHeadings, headings) = reinjectArticleHeadings(
+                into: displayTextRaw,
+                specs: extractHeadingSpecs(fromHTML: preCleanedHTML)
+            )
+        }
         // 2026-06-11 — restore a lede Readability dropped (no-op if it survived).
         let displayTextLede = reinjectDroppedLede(
             into: displayTextHeadings, preCleanedHTML: preCleanedHTML)

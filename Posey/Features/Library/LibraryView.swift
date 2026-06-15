@@ -95,7 +95,7 @@ struct LibraryView: View {
                 }
             }
             .overlay {
-                if viewModel.documents.isEmpty && viewModel.pdfImportStatusMessage == nil {
+                if viewModel.documents.isEmpty && viewModel.importStatusMessage == nil {
                     ContentUnavailableView(
                         "No Documents Yet",
                         systemImage: "text.document",
@@ -131,7 +131,7 @@ struct LibraryView: View {
                     Button("Import File") {
                         isImporting = true
                     }
-                    .disabled(viewModel.pdfImportStatusMessage != nil)
+                    .disabled(viewModel.importStatusMessage != nil)
                     .remoteRegister("library.importTXT") {
                         isImporting = true
                     }
@@ -228,7 +228,7 @@ struct LibraryView: View {
                 viewModel.handleImport(result: result)
             }
             .safeAreaInset(edge: .bottom) {
-                if let message = viewModel.pdfImportStatusMessage {
+                if let message = viewModel.importStatusMessage {
                     importProgressBanner(message: message)
                 }
             }
@@ -401,8 +401,16 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var documents: [Document] = []
     @Published var isShowingError = false
     @Published var errorMessage = ""
-    /// Non-nil while a PDF import is in progress. Drives the progress banner.
-    @Published private(set) var pdfImportStatusMessage: String? = nil
+    /// Non-nil while ANY import is in progress (all 7 formats). Drives the
+    /// non-blocking bottom progress banner. 2026-06-15: generalized from the
+    /// old PDF-only `pdfImportStatusMessage` — with Path A every format imports
+    /// off-main, so this banner is the "belt and suspenders" reassurance that
+    /// the book is being added while the UI stays usable.
+    @Published private(set) var importStatusMessage: String? = nil
+
+    /// In-character copy for the import banner (Mark's line). Wording is easy
+    /// to change here; shown for every format's import.
+    static let importBannerMessage = "Posey is reading ahead\u{2026}"
     /// Whether the local API server is running.
     ///
     /// Defaults to **true** for the duration of development so dev sessions
@@ -615,6 +623,8 @@ final class LibraryViewModel: ObservableObject {
     /// URL access inside the task, error → `present(error)` on main.
     private func handleHTMLImport(url: URL) {
         Task { @MainActor in
+            importStatusMessage = Self.importBannerMessage
+            defer { importStatusMessage = nil }
             let didAccess = url.startAccessingSecurityScopedResource()
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
             do {
@@ -633,6 +643,8 @@ final class LibraryViewModel: ObservableObject {
     /// step), so the UI stays responsive while a large EPUB imports.
     private func handleEPUBImport(url: URL) {
         Task { @MainActor in
+            importStatusMessage = Self.importBannerMessage
+            defer { importStatusMessage = nil }
             let didAccess = url.startAccessingSecurityScopedResource()
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
             do {
@@ -653,6 +665,8 @@ final class LibraryViewModel: ObservableObject {
     private func handleTextFormatImport(url: URL, fileType: String) {
         let db = databaseManager
         Task { @MainActor in
+            importStatusMessage = Self.importBannerMessage
+            defer { importStatusMessage = nil }
             let didAccess = url.startAccessingSecurityScopedResource()
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
             do {
@@ -688,7 +702,7 @@ extension LibraryViewModel {
     /// Phase 2 (DB write) returns to the main actor.
     private func handlePDFImport(url: URL) {
         let didAccess = url.startAccessingSecurityScopedResource()
-        pdfImportStatusMessage = "Importing PDF\u{2026}"
+        importStatusMessage = Self.importBannerMessage
 
         // Capture the importer as a value — PDFLibraryImporter is a struct,
         // but we only use it for the DB write (main actor), not in the Task.
@@ -699,7 +713,7 @@ extension LibraryViewModel {
             }
             defer {
                 if didAccess { url.stopAccessingSecurityScopedResource() }
-                pdfImportStatusMessage = nil
+                importStatusMessage = nil
             }
             do {
                 // 2026-05-16 (B8) — Reject binary-misnamed-as-PDF
@@ -707,7 +721,7 @@ extension LibraryViewModel {
                 try FormatPrecheck.checkPDF(url: url)
                 let parsed = try await parsePDFOffMainThread(url: url) { [weak self] message in
                     Task { @MainActor [weak self] in
-                        self?.pdfImportStatusMessage = message
+                        self?.importStatusMessage = message
                     }
                 }
                 _ = try pdfLibraryImporter.persistParsedDocument(parsed, from: url)
@@ -3334,6 +3348,39 @@ extension LibraryViewModel {
 
     // MARK: — Import handler
 
+    #if DEBUG
+    /// DEBUG-only responsiveness probe (Path A verification, 2026-06-15). Runs a
+    /// ~30ms heartbeat on the MainActor; if the main thread is blocked, the
+    /// heartbeat's resumption is delayed and we record the overshoot. The max
+    /// overshoot over an import ≈ the longest momentary UI freeze during it.
+    /// Off-main import (Path A) → small stalls (~tens of ms, the per-chapter
+    /// WebKit hop). Old on-main import → stall ≈ whole import (seconds). Lets the
+    /// antenna self-report responsiveness from ONE import call — no external
+    /// polling/hammering. Compiled out of production.
+    @MainActor
+    final class MainThreadStallProbe {
+        private(set) var maxStallMs: Double = 0
+        private var task: Task<Void, Never>?
+        private let intervalNs: UInt64 = 30_000_000  // 30ms heartbeat
+
+        func start() {
+            task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                var last = DispatchTime.now().uptimeNanoseconds
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: self.intervalNs)
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    let elapsedMs = Double(now &- last) / 1_000_000
+                    let stallMs = elapsedMs - Double(self.intervalNs) / 1_000_000
+                    if stallMs > self.maxStallMs { self.maxStallMs = stallMs }
+                    last = now
+                }
+            }
+        }
+        func stop() { task?.cancel(); task = nil }
+    }
+    #endif
+
     func apiImport(filename: String, data: Data, overwrite: Bool = false) async -> String {
         let cleanFilename = LibraryViewModel.sanitizeFilename(filename)
         let ext = (cleanFilename as NSString).pathExtension.lowercased()
@@ -3348,6 +3395,14 @@ extension LibraryViewModel {
             for d in stale { deleteDocument(d) }
         }
         do {
+            importStatusMessage = Self.importBannerMessage
+            defer { importStatusMessage = nil }
+            #if DEBUG
+            let stallProbe = MainThreadStallProbe()
+            stallProbe.start()
+            defer { stallProbe.stop() }
+            let probeStart = DispatchTime.now().uptimeNanoseconds
+            #endif
             let tempURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(cleanFilename)
             try data.write(to: tempURL)
@@ -3359,10 +3414,8 @@ extension LibraryViewModel {
                 // import path. Catches PNG/PDF/random-bytes misnamed
                 // as .pdf via the API.
                 try FormatPrecheck.checkPDF(url: tempURL)
-                pdfImportStatusMessage = "API: Importing \(cleanFilename)\u{2026}"
-                defer { pdfImportStatusMessage = nil }
                 let parsed = try await parsePDFOffMainThread(url: tempURL) { [weak self] msg in
-                    Task { @MainActor [weak self] in self?.pdfImportStatusMessage = msg }
+                    Task { @MainActor [weak self] in self?.importStatusMessage = msg }
                 }
                 doc = try pdfLibraryImporter.persistParsedDocument(parsed, from: tempURL)
             } else {
@@ -3381,9 +3434,15 @@ extension LibraryViewModel {
                 }
             }
             loadDocuments()
-            return json(["success": true, "id": doc.id.uuidString,
+            var resp: [String: Any] = ["success": true, "id": doc.id.uuidString,
                          "title": doc.title, "fileType": doc.fileType,
-                         "characterCount": doc.characterCount])
+                         "characterCount": doc.characterCount]
+            #if DEBUG
+            stallProbe.stop()
+            resp["importMs"] = Int((Double(DispatchTime.now().uptimeNanoseconds &- probeStart) / 1_000_000).rounded())
+            resp["mainThreadMaxStallMs"] = Int(stallProbe.maxStallMs.rounded())
+            #endif
+            return json(resp)
         } catch {
             return json(["success": false, "error": error.localizedDescription])
         }

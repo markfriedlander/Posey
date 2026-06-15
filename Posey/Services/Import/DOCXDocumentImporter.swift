@@ -451,6 +451,19 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
     /// Captured imageIDs in document order (one per emitted marker).
     private(set) var usedImageIDs: [String] = []
 
+    // ── Table state (2026-06-15). DOCX tables (`<w:tbl>`) previously had no
+    // grouping: each cell's `<w:p>` flushed as a loose top-level paragraph, so a
+    // grid became a meaningless run of fragments (docx_tables-and-images:
+    // "Chapter","Words","Notes","78","real prose"…). We now capture the row/cell
+    // structure and emit ONE coherent block (rows = lines, cells joined " | "),
+    // which is readable + searchable. (Image rasterization of the table — Mark's
+    // table-as-image plan — layers on top of this captured structure next.)
+    private var tableDepth = 0
+    private var tableRows: [[String]] = []
+    private var currentRow: [String] = []
+    private var cellParagraphs: [String] = []
+    private var insideCell = false
+
     private init(imagePool: [String: PageImageRecord]) {
         self.imagePool = imagePool
     }
@@ -504,6 +517,20 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
             insideInstrText = true
             currentInstrText = ""
             return
+        }
+
+        // ── Table structure. `matches` is an exact local-name check, so "tbl"
+        // won't catch "tblPr"/"tblGrid", "tc" won't catch "tcPr", "tr" won't
+        // catch "trPr". Nested tables increment tableDepth; we assemble only when
+        // it returns to 0 (a nested table's cells fold into the outer cell).
+        if matches(elementName, suffix: "tbl") {
+            if tableDepth == 0 { tableRows = []; currentRow = [] }
+            tableDepth += 1
+            return
+        }
+        if tableDepth > 0 {
+            if matches(elementName, suffix: "tr") { currentRow = []; return }
+            if matches(elementName, suffix: "tc") { cellParagraphs = []; insideCell = true; return }
         }
 
         if matches(elementName, suffix: "t") {
@@ -613,8 +640,46 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
             currentParagraph.append("\n")
             return
         }
+        // ── Table assembly (close tags).
+        if tableDepth > 0, matches(elementName, suffix: "tc") {
+            currentRow.append(cellParagraphs.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines))
+            cellParagraphs = []
+            insideCell = false
+            return
+        }
+        if tableDepth > 0, matches(elementName, suffix: "tr") {
+            tableRows.append(currentRow)
+            currentRow = []
+            return
+        }
+        if matches(elementName, suffix: "tbl") {
+            tableDepth = max(0, tableDepth - 1)
+            if tableDepth == 0 {
+                // One coherent block: rows = lines, cells joined by " | ".
+                // Readable + searchable now; the table-as-image step rasterizes
+                // from this same captured structure.
+                let rendered = tableRows
+                    .map { $0.joined(separator: " | ") }
+                    .joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rendered.isEmpty { paragraphs.append(rendered) }
+                tableRows = []
+                currentRow = []
+            }
+            return
+        }
+
         if matches(elementName, suffix: "p") {
             let paragraph = currentParagraph.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Inside a table cell: collect into the cell, not the top-level
+            // paragraph list, and skip heading detection (cells are data).
+            if insideCell {
+                if !paragraph.isEmpty { cellParagraphs.append(paragraph) }
+                currentParagraph = ""
+                currentHeadingLevel = nil
+                currentIsListItem = false
+                return
+            }
             if !paragraph.isEmpty {
                 // Prepend a bullet marker for list-item paragraphs.
                 // Skip the marker on heading-styled list items (rare

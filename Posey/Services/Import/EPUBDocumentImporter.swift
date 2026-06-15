@@ -83,24 +83,28 @@ struct EPUBDocumentImporter {
 
 extension EPUBDocumentImporter {
 
-    func loadDocument(from url: URL) throws -> ParsedEPUBDocument {
+    // 2026-06-15 (Path A — off-main import): the EPUB load chain is now `async`
+    // because chapter HTML parsing (`htmlImporter.loadText`) hops to the main
+    // actor for its one WebKit-bound step. The body otherwise runs off-main, so
+    // importing a large EPUB no longer freezes the UI. Output is byte-identical.
+    func loadDocument(from url: URL) async throws -> ParsedEPUBDocument {
         let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
         if isDirectory {
-            return try loadDocumentFromDirectory(url)
+            return try await loadDocumentFromDirectory(url)
         } else {
             let data = try Data(contentsOf: url)
-            return try loadDocument(fromData: data)
+            return try await loadDocument(fromData: data)
         }
     }
 
-    func loadDocument(fromData data: Data) throws -> ParsedEPUBDocument {
+    func loadDocument(fromData data: Data) async throws -> ParsedEPUBDocument {
         let archive: ZIPArchive
         do {
             archive = try ZIPArchive(data: data)
         } catch {
             throw ImportError.unreadableDocument
         }
-        return try loadDocument(
+        return try await loadDocument(
             containerXMLLoader: {
                 do { return try archive.entryData(named: "META-INF/container.xml") }
                 catch { throw ImportError.unreadableDocument }
@@ -113,11 +117,11 @@ extension EPUBDocumentImporter {
         )
     }
 
-    private func loadDocumentFromDirectory(_ baseURL: URL) throws -> ParsedEPUBDocument {
+    private func loadDocumentFromDirectory(_ baseURL: URL) async throws -> ParsedEPUBDocument {
         func read(_ path: String) throws -> Data {
             try Data(contentsOf: baseURL.appendingPathComponent(path))
         }
-        return try loadDocument(
+        return try await loadDocument(
             containerXMLLoader: {
                 do { return try read("META-INF/container.xml") }
                 catch { throw ImportError.unreadableDocument }
@@ -142,7 +146,7 @@ extension EPUBDocumentImporter {
         containerXMLLoader: () throws -> Data,
         packageXMLLoader: (String) throws -> Data,
         entryLoader: (String) -> Data?
-    ) throws -> ParsedEPUBDocument {
+    ) async throws -> ParsedEPUBDocument {
 
         let containerXML  = try containerXMLLoader()
         let packagePath   = try EPUBContainerParser.packageDocumentPath(from: containerXML)
@@ -255,7 +259,7 @@ extension EPUBDocumentImporter {
                 entryLoader: entryLoader
             )
 
-            guard let chapterText = try? htmlImporter.loadText(fromData: processedData)
+            guard let chapterText = try? await htmlImporter.loadText(fromData: processedData)
             else { continue }
             // `chapterText` still carries the anchor sentinels. Strip
             // them and record per-anchor offsets relative to the

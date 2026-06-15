@@ -69,12 +69,11 @@ final class FormatNormalizationParityTests: XCTestCase {
         XCTAssertFalse(parsed.plainText.contains("_Mem._"))
     }
 
-    @MainActor
-    func testHTMLImporterStripsUnderscoreItalics() throws {
+    func testHTMLImporterStripsUnderscoreItalics() async throws {
         // HTML's loadText is ALSO the per-chapter text path EPUB uses, so this
-        // covers EPUB's text normalization too.
+        // covers EPUB's text normalization too. loadText is now async (Path A).
         let html = "<html><body><p>A note. _Mem._ to self.</p></body></html>"
-        let out = try HTMLDocumentImporter().loadText(fromData: Data(html.utf8))
+        let out = try await HTMLDocumentImporter().loadText(fromData: Data(html.utf8))
         XCTAssertTrue(out.contains("Mem."))
         XCTAssertFalse(out.contains("_Mem._"))
     }

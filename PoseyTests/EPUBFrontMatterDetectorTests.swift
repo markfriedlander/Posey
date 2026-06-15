@@ -145,7 +145,7 @@ final class EPUBImportFrontMatterIntegrationTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempDir)
     }
 
-    func testIAStyleEPUBStripsFrontMatterFromExtractedText() throws {
+    func testIAStyleEPUBStripsFrontMatterFromExtractedText() async throws {
         // Task 4 #5 (2026-05-03): front matter is now STRIPPED from
         // extracted plainText entirely (was: kept-with-skip-offset).
         // Contract:
@@ -164,7 +164,7 @@ final class EPUBImportFrontMatterIntegrationTests: XCTestCase {
         try writePage(filename: "page_1.html", title: "Page 1",
                       body: "<p>And continues. " + String(repeating: "y ", count: 500) + "</p>")
 
-        let parsed = try EPUBDocumentImporter().loadDocument(from: tempDir)
+        let parsed = try await EPUBDocumentImporter().loadDocument(from: tempDir)
 
         XCTAssertFalse(
             parsed.plainText.contains("Internet Archive"),
@@ -181,7 +181,7 @@ final class EPUBImportFrontMatterIntegrationTests: XCTestCase {
         XCTAssertEqual(parsed.tocEntries.first?.title, "Page 0")
     }
 
-    func testNonIAEPUBHasZeroSkipOffset() throws {
+    func testNonIAEPUBHasZeroSkipOffset() async throws {
         // EPUB with no front matter — skip offset must remain 0.
         try writeContainerXML()
         try writePackageOPF(spineHrefs: ["chapter_1.html", "chapter_2.html"])
@@ -192,7 +192,7 @@ final class EPUBImportFrontMatterIntegrationTests: XCTestCase {
         try writePage(filename: "chapter_2.html", title: "Chapter 2",
                       body: "<p>And continues.</p>")
 
-        let parsed = try EPUBDocumentImporter().loadDocument(from: tempDir)
+        let parsed = try await EPUBDocumentImporter().loadDocument(from: tempDir)
         XCTAssertEqual(parsed.playbackSkipUntilOffset, 0,
                        "Non-IA EPUBs must keep skip offset at 0")
     }

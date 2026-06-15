@@ -2,10 +2,10 @@ import XCTest
 @testable import Posey
 
 final class EPUBDocumentImporterTests: XCTestCase {
-    func testLoadDocumentExtractsReadableTextAndTitleFromEPUB() throws {
+    func testLoadDocumentExtractsReadableTextAndTitleFromEPUB() async throws {
         let fixtureURL = TestFixtureLoader.url(named: "StructuredSample", fileExtension: "epub")
 
-        let parsed = try EPUBDocumentImporter().loadDocument(from: fixtureURL)
+        let parsed = try await EPUBDocumentImporter().loadDocument(from: fixtureURL)
 
         XCTAssertEqual(parsed.title, "Structured Sample EPUB")
         XCTAssertTrue(parsed.plainText.contains("Serious Reading"))
@@ -13,10 +13,15 @@ final class EPUBDocumentImporterTests: XCTestCase {
         XCTAssertTrue(parsed.plainText.contains("Closing thought: readers need structure to stay oriented."))
     }
 
-    func testLoadDocumentRejectsUnreadableEPUBData() throws {
+    func testLoadDocumentRejectsUnreadableEPUBData() async throws {
         let invalidData = Data("not-an-epub".utf8)
 
-        XCTAssertThrowsError(try EPUBDocumentImporter().loadDocument(fromData: invalidData)) { error in
+        // loadDocument is now async (Path A); XCTAssertThrowsError can't take an
+        // async call, so assert via do/catch.
+        do {
+            _ = try await EPUBDocumentImporter().loadDocument(fromData: invalidData)
+            XCTFail("expected unreadableDocument")
+        } catch {
             XCTAssertEqual(error as? EPUBDocumentImporter.ImportError, .unreadableDocument)
         }
     }

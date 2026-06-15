@@ -1,0 +1,26 @@
+TITLE: Scanned Toc Test
+FILETYPE: pdf
+UNITS: 20
+READER-OPENS-AT-UNIT-INDEX: 9
+READER-STOPS-AT-UNIT-INDEX: 20 (no trim)
+----
+#0010  page_break{p0} | 
+#0020  prose | Table of Contents
+#0030  prose | Chapter I: The Salt Marsh ... 2
+#0040  prose | Chapter II: The Tidal Clock ... 3
+#0050  prose | Chapter III: The Drowned Bell ... 4
+#0060  prose | Chapter IV: The Far Shore ... 5
+#0070  prose | Chapter V: The Reed Cutters :... 6
+#0080  prose | Chapter VI: The Long Frost ... 7
+#0090  page_break{p1} | 
+#0100  prose | Chapter I: The Salt Marsh The marsh kept its own hours. At dawn the water lay flat and metal-grey, and by noon the channels had filled and emptied twice over, indifferent to anyone who tried to read them. Elen had learned not to trust the surface. What looked like solid ground at low tide would swallow a boot to the knee an hour later, and the only honest map was the one she carried in her feet. She walked the same line every morning, counting the reed-clumps, and the marsh let her pass because she had stopped pretending to own it.  <<<< READER OPENS HERE
+#0110  page_break{p2} | 
+#0120  prose | Chapter II: The Tidal Clock Her grandfather had built the clock from brass and stubbornness. It did not tell the hour; it told the water. A single hand crept around a face marked not with numbers but with the names of the channels, and when the hand pointed to the Drowned Bell you had perhaps twenty minutes before the crossing closed. Elen wound it each night by feel, in the dark, the way she had been taught, and the slow tick of it was the last sound she heard before sleep and the first she listened for on waking.
+#0130  page_break{p3} | 
+#0140  prose | Chapter III: The Drowned Bell No one living had heard the bell ring above the water. It sat in the deepest of the channels, green with weed, and on the stillest nights the tide drew a low note from it that travelled along the mud and into the soles of your feet before it ever reached your ears. The villagers said it rang for the drowned. Elen thought it rang for the careless, which in the marsh came to nearly the same thing, and she had never once crossed at the Bell without first standing a moment to listen.
+#0150  page_break{p4} | 
+#0160  prose | Chapter IV: The Far Shore The far shore was a rumour for most of her childhood — a smudge of darker grey on the worst days, gone entirely on the good ones. She reached it once, at the lowest tide of the lowest year, walking a line her grandfather had only ever described and never dared. The ground there was firm and strange and smelled of nothing she knew. She did not stay. The tide does not wait for wonder, and the honest map in her feet was already counting her back toward the marsh she understood.
+#0170  page_break{p5} | 
+#0180  prose | Chapter V: The Reed Cutters They came in the autumn, a family of them, and worked the far beds with curved blades that had not changed shape in three hundred years. Elen watched them from the high ground and learned the way they read the water without seeming to look at it at all. The eldest never spoke to her, but once, at the turn of the tide, he raised a hand — not a greeting, a warning — and she stepped back from the channel an instant before it filled. She did not forget the debt, and she never learned his name.
+#0190  page_break{p6} | 
+#0200  prose | Chapter VI: The Long Frost The winter the channels froze was the winter the marsh stopped being a map and became a single white field, and Elen understood for the first time how much of her knowledge depended on the water moving. She walked out onto the ice because she could, because no tide could reach her, and she stood in the middle of the frozen estuary and felt, for once, that she had nowhere she urgently needed to be. The thaw, when it came, rearranged every channel she knew, and she began learning the marsh again from the start.

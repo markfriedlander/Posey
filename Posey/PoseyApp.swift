@@ -240,11 +240,11 @@ private extension PoseyApp {
         case .epub:
             switch preload.source {
             case .url(let url):
-                _ = try EPUBLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
+                _ = try await EPUBLibraryImporter(databaseManager: databaseManager).importDocument(from: url)
             case .inlineBase64(let b64):
                 guard let data = Data(base64Encoded: b64) else { return }
                 let title = preload.title ?? defaultTitle
-                _ = try EPUBLibraryImporter(databaseManager: databaseManager).importDocument(
+                _ = try await EPUBLibraryImporter(databaseManager: databaseManager).importDocument(
                     title: title, fileName: preload.fileName ?? "\(title).epub", rawData: data)
             }
 

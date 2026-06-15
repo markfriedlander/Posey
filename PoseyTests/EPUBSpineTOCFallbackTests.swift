@@ -34,7 +34,7 @@ final class EPUBSpineTOCFallbackTests: XCTestCase {
     /// hocr-to-epub-style: empty nav + NCX, many spine pages with only
     /// `<title>Page N</title>` populated. We expect the synthesised TOC
     /// to have one entry per spine item, each titled "Page N".
-    func testEmptyNavAndNCXFallsBackToSpineEntries() throws {
+    func testEmptyNavAndNCXFallsBackToSpineEntries() async throws {
         try writeContainerXML()
         try writePackageOPF(
             spineHrefs: ["page_1.xhtml", "page_2.xhtml", "page_3.xhtml"],
@@ -49,7 +49,7 @@ final class EPUBSpineTOCFallbackTests: XCTestCase {
         try writePage(filename: "page_2.xhtml", title: "Page 2", body: "Second page body.")
         try writePage(filename: "page_3.xhtml", title: "Page 3", body: "Third page body.")
 
-        let parsed = try EPUBDocumentImporter().loadDocument(from: tempDir)
+        let parsed = try await EPUBDocumentImporter().loadDocument(from: tempDir)
 
         XCTAssertEqual(parsed.tocEntries.count, 3,
                        "Expected one synthesised entry per spine item.")
@@ -68,7 +68,7 @@ final class EPUBSpineTOCFallbackTests: XCTestCase {
 
     /// Spine items with real `<h1>` headings should use those over
     /// the `<title>` fallback.
-    func testHeadingsBeatTitleFallback() throws {
+    func testHeadingsBeatTitleFallback() async throws {
         try writeContainerXML()
         try writePackageOPF(
             spineHrefs: ["one.xhtml", "two.xhtml"],
@@ -90,14 +90,14 @@ final class EPUBSpineTOCFallbackTests: XCTestCase {
             body: "<h1>The Golden Apple</h1><p>Body.</p>"
         )
 
-        let parsed = try EPUBDocumentImporter().loadDocument(from: tempDir)
+        let parsed = try await EPUBDocumentImporter().loadDocument(from: tempDir)
         XCTAssertEqual(parsed.tocEntries.map { $0.title },
                        ["The Eye in the Pyramid", "The Golden Apple"])
     }
 
     /// Mid-priority fallback: filename stem when neither heading nor
     /// title yields anything meaningful.
-    func testFilenameStemFallsBack() throws {
+    func testFilenameStemFallsBack() async throws {
         try writeContainerXML()
         try writePackageOPF(
             spineHrefs: ["the_introduction.xhtml"],
@@ -111,14 +111,14 @@ final class EPUBSpineTOCFallbackTests: XCTestCase {
         // Title and headings both empty → fall back to stem.
         try writePage(filename: "the_introduction.xhtml", title: "", body: "Body.")
 
-        let parsed = try EPUBDocumentImporter().loadDocument(from: tempDir)
+        let parsed = try await EPUBDocumentImporter().loadDocument(from: tempDir)
         XCTAssertEqual(parsed.tocEntries.count, 1)
         XCTAssertEqual(parsed.tocEntries.first?.title, "the introduction")
     }
 
     /// When the EPUB DOES have a populated nav, we use it — fallback
     /// must NOT override an existing TOC.
-    func testPopulatedNavWinsOverFallback() throws {
+    func testPopulatedNavWinsOverFallback() async throws {
         try writeContainerXML()
         try writePackageOPF(
             spineHrefs: ["c1.xhtml", "c2.xhtml"],
@@ -135,7 +135,7 @@ final class EPUBSpineTOCFallbackTests: XCTestCase {
         try writePage(filename: "c2.xhtml", title: "Page 2",
                       body: "<h1>Should Not Appear</h1>Two.")
 
-        let parsed = try EPUBDocumentImporter().loadDocument(from: tempDir)
+        let parsed = try await EPUBDocumentImporter().loadDocument(from: tempDir)
         XCTAssertEqual(parsed.tocEntries.map { $0.title },
                        ["Real Chapter One", "Real Chapter Two"],
                        "Fallback must not override a populated nav")

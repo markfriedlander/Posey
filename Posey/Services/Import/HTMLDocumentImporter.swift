@@ -114,7 +114,7 @@ struct HTMLDocumentImporter {
         }
 
         let (markedData, images) = extractInlineImages(from: workingData, baseDirectory: baseDirectory)
-        let displayTextRaw = try loadText(fromData: markedData)
+        let displayTextRaw = try await loadText(fromData: markedData)
         // 2026-06-05 — re-establish headings Readability dropped. Source every
         // article heading from preCleanedHTML (all present there) and inject any
         // whose title the Readability output lost back into displayText at its
@@ -516,9 +516,9 @@ struct HTMLDocumentImporter {
         return missing.joined(separator: "\n\n") + "\n\n" + displayText
     }
 
-    func loadText(from url: URL) throws -> String {
+    func loadText(from url: URL) async throws -> String {
         let data = try Data(contentsOf: url)
-        return try loadText(fromData: data)
+        return try await loadText(fromData: data)
     }
 
     /// 2026-05-22 — Async data-based entry point that runs the
@@ -555,7 +555,7 @@ struct HTMLDocumentImporter {
         } else {
             workingData = data
         }
-        let textRaw = try loadText(fromData: workingData)
+        let textRaw = try await loadText(fromData: workingData)
         let headings = extractHeadings(fromRawData: workingData)
         // 2026-06-11 — restore a lede Readability dropped (no-op if it survived);
         // parity with the url-based loadDocument path.
@@ -569,10 +569,39 @@ struct HTMLDocumentImporter {
     /// NSAttributedString HTML parsing uses WebKit internally under UIKit and
     /// must be called on the main thread. This method asserts that requirement
     /// so violations surface immediately rather than as subtle threading bugs.
-    func loadText(fromData data: Data) throws -> String {
-        #if canImport(UIKit)
-        dispatchPrecondition(condition: .onQueue(.main))
-        #endif
+    /// The ONLY main-thread-bound step of HTML/EPUB extraction. NSAttributedString's
+    /// HTML document type uses WebKit internally, which hard-requires the main
+    /// thread. Isolated to the main actor here (Path A, 2026-06-15) so every other
+    /// part of import runs off-main and the UI never freezes while adding a book.
+    ///
+    /// Explicit UTF-8 (2026-05-06): without it, NSAttributedString HTML parsing
+    /// defaults to Windows-1252 on charset-less HTML, misreading UTF-8 multi-byte
+    /// sequences (em-dash 0xE2 0x80 0x94) as Latin-1 → mojibake ("â€""). Every
+    /// path that reaches here already went through String(data:encoding:.utf8).
+    @MainActor
+    private static func renderHTMLOnMain(_ data: Data) throws -> NSAttributedString {
+        do {
+            return try NSAttributedString(
+                data: data,
+                options: [
+                    .documentType: NSAttributedString.DocumentType.html,
+                    .characterEncoding: NSNumber(value: String.Encoding.utf8.rawValue)
+                ],
+                documentAttributes: nil
+            )
+        } catch {
+            throw ImportError.unreadableDocument
+        }
+    }
+
+    // 2026-06-15 (Path A — off-main import): now `async`. The whole import
+    // pipeline runs off the main thread so adding a book never freezes the
+    // UI; this function hops to the main actor for ONLY the one WebKit-bound
+    // step (NSAttributedString, in `renderHTMLOnMain`). The previous
+    // `dispatchPrecondition(.onQueue(.main))` is gone — it was correct when
+    // the whole call ran on main, but now the main-thread requirement is
+    // scoped to just the renderer call. Output is byte-identical.
+    func loadText(fromData data: Data) async throws -> String {
 
         // 2026-05-20 — Strip Project Gutenberg's `<p class="asterism">`
         // scene-break blocks BEFORE list-marker / paragraph-marker /
@@ -609,30 +638,9 @@ struct HTMLDocumentImporter {
         // encoding pipeline intact.
         let markedData = injectParagraphMarkers(listMarkedData)
 
-        let attributedString: NSAttributedString
-        do {
-            // 2026-05-06 — Explicit UTF-8 character encoding. Without
-            // this, NSAttributedString HTML parsing defaults to
-            // Windows-1252 when the HTML has no `<meta charset>`
-            // declaration, causing UTF-8 multi-byte sequences (e.g.
-            // em-dash 0xE2 0x80 0x94) to be misread as Latin-1 and
-            // surface as mojibake like "â€"" in the rendered text.
-            // The Field Notes on Estuaries article exhibited this:
-            // "the surface â€" the sailboats" instead of "the surface
-            // — the sailboats". Forcing UTF-8 fixes it because every
-            // path that loads HTML data above goes through
-            // String(data:encoding: .utf8) first.
-            attributedString = try NSAttributedString(
-                data: markedData,
-                options: [
-                    .documentType: NSAttributedString.DocumentType.html,
-                    .characterEncoding: NSNumber(value: String.Encoding.utf8.rawValue)
-                ],
-                documentAttributes: nil
-            )
-        } catch {
-            throw ImportError.unreadableDocument
-        }
+        // 2026-06-15 (Path A) — the sole main-thread-bound step, hopped to the
+        // main actor in `renderHTMLOnMain`. Everything around it runs off-main.
+        let attributedString = try await Self.renderHTMLOnMain(markedData)
 
         let rawText = attributedString.string
             .replacingOccurrences(of: paragraphSentinel, with: "\n")

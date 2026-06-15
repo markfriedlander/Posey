@@ -30,9 +30,13 @@ struct EPUBLibraryImporter {
         self.databaseManager = databaseManager
     }
 
-    func importDocument(from url: URL) throws -> Document {
+    // 2026-06-15 (Path A — off-main import): `async` so the EPUB parse (which
+    // hops to the main actor only for the per-chapter WebKit step) runs off the
+    // main thread. Callers `await`; called from a @MainActor context the body
+    // runs off-main automatically. Output byte-identical.
+    func importDocument(from url: URL) async throws -> Document {
         try FormatPrecheck.checkEPUB(url: url)
-        let parsed = try importer.loadDocument(from: url)
+        let parsed = try await importer.loadDocument(from: url)
         let contentHash = try? ContentHasher.sha256(of: url)
         let title = TitleExtractor.resolve(
             contentTitle: parsed.title,
@@ -47,8 +51,8 @@ struct EPUBLibraryImporter {
         )
     }
 
-    func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "epub") throws -> Document {
-        let parsed = try importer.loadDocument(fromData: rawData)
+    func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "epub") async throws -> Document {
+        let parsed = try await importer.loadDocument(fromData: rawData)
         let contentHash = ContentHasher.sha256(rawData)
         let resolved = TitleExtractor.resolve(
             contentTitle: parsed.title ?? (title.isEmpty ? nil : title),

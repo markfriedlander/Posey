@@ -1,0 +1,43 @@
+TITLE: Proposal Assistant Article Draft
+FILETYPE: docx
+UNITS: 37
+READER-OPENS-AT-UNIT-INDEX: 0
+READER-STOPS-AT-UNIT-INDEX: 37 (no trim)
+----
+#0010  heading(L1) | How We Built a GPT-Powered Proposal Assistant That Actually Helps  <<<< READER OPENS HERE
+#0020  prose | Co-authored by Mark Friedlander & ChatGPT
+#0030  heading(L2) | Introduction: A Real Problem, A New Kind of Partner
+#0040  prose | Not long ago, a colleague of mine — we’ll call her Jordan — reached out with a familiar frustration. She was juggling an ever-growing number of complex proposal requests, many of which felt like déjà vu: the same questions worded slightly differently, the same answers rewritten again and again. Time was being lost, not to creativity or strategy, but to redundancy and reactivity.
+#0050  prose | I wanted to help. But instead of building a traditional app, I decided to try something different: what if we could teach an AI assistant to learn from her past proposals, ask smart questions about new ones, and help her draft consistent, accurate responses — all without writing a single line of code?
+#0060  prose | With the help of ChatGPT — not just as a tool, but as a creative partner — that’s exactly what we built.
+#0070  heading(L2) | What We Built (And Why It Works)
+#0080  prose | The assistant we created is prompt-driven, memory-aware, and human-centered. It lives inside ChatGPT, and it's designed to do just a few things really well:
+#0090  prose | - Parse new RFPs using a shared prompt framework\n- Reference a structured memory of past proposals\n- Ask only for what’s missing\n- Draft responses that sound like Jordan, not like a robot
+#0100  prose | This isn’t some enterprise AI system or SaaS platform. It’s a lean, purpose-built assistant designed in real-time, with real feedback, for a real person. And because of how it was built — with generalizable architecture and zero custom code — it could work for almost anyone.
+#0110  heading(L2) | How the Assistant Actually Works
+#0120  prose | This assistant may feel like a smart, responsive collaborator — but under the hood, it’s built from surprisingly simple components.
+#0130  prose | At the core is a shared JSON memory file — a structured list of past questions and answers pulled from real proposals. Each entry includes the original question, a redacted and reusable answer, and sometimes additional metadata (like tags, tone, or formatting notes).
+#0140  prose | Why JSON?
+#0150  prose | We chose JSON as our memory format for a few key reasons:\n- It’s human-readable: You can open it in any text editor.\n- It’s language-model-friendly: GPT understands it natively and can search, summarize, or pattern-match it with ease.\n- It’s infinitely expandable: As we learned more about what Jordan needed, we added new fields, updated formats, or removed unhelpful entries — all without rewriting a schema or spinning up a database.\n- It requires no infrastructure: No server, no database, no engineering team. Just one well-organized file.
+#0160  prose | This flexibility turned out to be a huge asset. At the beginning, we weren’t even sure what kind of data we’d need. But JSON let us grow and adapt the assistant’s “memory” organically — evolving it alongside real-world feedback from Jordan without breaking anything.
+#0170  prose | Prompt-Driven Design
+#0180  prose | The assistant doesn’t run on code. It runs on prompts — natural language instructions we carefully crafted to guide GPT’s behavior. Think of it like a mission briefing:
+#0190  prose | - Who it is (an assistant helping write proposals)\n- What it knows (the JSON file)\n- How it should speak (in Jordan’s voice)\n- What to ask for (only missing info)\n- What to avoid (repetition, filler language, guesswork)
+#0200  prose | This “system prompt” is where the assistant’s personality, tone, and intelligence all come together. And because it’s editable, we can fine-tune its behavior over time without touching any tech stack.
+#0210  prose | A Lightweight Workflow
+#0220  prose | Here’s how the process works, end to end:\n1. Jordan receives a new RFP.\n2. We (or the assistant) extract the questions.\n3. The assistant compares those to its memory.\n4. It fills in any answers it already knows.\n5. For anything missing, it asks Jordan directly — clearly and concisely.\n6. It compiles a full draft, ready for review.
+#0230  prose | All of this happens inside ChatGPT, using plain language and lightweight files. No apps. No platforms. No maintenance.
+#0240  prose | Just one person, one assistant, and a shared pile of good answers.
+#0250  heading(L2) | Why This Matters
+#0260  prose | The world is full of knowledge workers drowning in repetitive writing tasks — proposals, grant applications, client onboarding forms, internal reports. And while large companies can afford enterprise automation tools, individuals and small teams often can’t.
+#0270  prose | What we proved here is that it’s possible to build something meaningful, flexible, and even a little bit delightful using only off-the-shelf AI and human ingenuity. No APIs, no infrastructure, no custom software — just a collaborative setup inside a subscription-based tool (ChatGPT) that’s already broadly available.
+#0280  prose | Even modest improvements — say, saving 10–20% of the time spent on a proposal — can mean hours of regained productivity. For solo professionals or small teams, that’s the difference between staying afloat and getting ahead.
+#0290  prose | And this isn’t just about proposals. Tools like this could just as easily support legal drafting, where vetted language is swapped in and out of complex contracts — a task I once spent countless hours doing as a practicing lawyer. If I’d had an assistant like this back then — one that knew my safe language library and could assemble a first draft — it would have been a game changer.
+#0300  prose | Just clarity, structure, and a willingness to iterate.
+#0310  heading(L2) | What’s Next
+#0320  prose | We’re about to introduce version 1.0 to Jordan — the real user. From here, we’ll refine the assistant further based on her real-world experience. We’ll also explore:
+#0330  prose | - Scaling the memory dataset efficiently\n- Teaching others how to build similar assistants\n- Packaging this as a repeatable model for AI-human tools
+#0340  prose | This article is the first in a series about building small-but-mighty assistants with GPT. If you’re curious, we’ll be writing more soon — about how we designed the prompt system, how we handle redaction, and how AI like ChatGPT is evolving from a content generator into a true collaborator.
+#0350  heading(L2) | Co-authored, for real
+#0360  prose | This article wasn’t written about an AI project. It was written with AI. Every paragraph, title, and phrasing choice was developed collaboratively between me (Mark) and ChatGPT, working side by side.
+#0370  prose | Because that’s what this project is all about: humans and AI building tools together — thoughtfully, creatively, and with just enough chaos to keep it interesting.

@@ -591,6 +591,15 @@ final class LibraryViewModel: ObservableObject {
                 return
             }
 
+            // 2026-06-15 (Path A — off-main import): EPUB now imports through
+            // its own async task like HTML/PDF. Its parse runs off the main
+            // thread, hopping to main only for the per-chapter WebKit step, so
+            // adding a large EPUB no longer freezes the UI.
+            if fileType == "epub" {
+                handleEPUBImport(url: url)
+                return
+            }
+
             let didAccess = url.startAccessingSecurityScopedResource()
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
 
@@ -599,7 +608,6 @@ final class LibraryViewModel: ObservableObject {
             case "md", "markdown":    _ = try markdownLibraryImporter.importDocument(from: url)
             case "rtf":               _ = try rtfLibraryImporter.importDocument(from: url)
             case "docx":              _ = try docxLibraryImporter.importDocument(from: url)
-            case "epub":              _ = try epubLibraryImporter.importDocument(from: url)
             default:                  throw LibraryImportError.unsupportedFileType
             }
             loadDocuments()
@@ -617,6 +625,24 @@ final class LibraryViewModel: ObservableObject {
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
             do {
                 _ = try await htmlLibraryImporter.importDocument(from: url)
+                loadDocuments()
+            } catch {
+                present(error)
+            }
+        }
+    }
+
+    /// 2026-06-15 (Path A — off-main import) — EPUB async import path. Mirrors
+    /// `handleHTMLImport`: own Task, security-scoped URL access managed in the
+    /// async context. `EPUBLibraryImporter.importDocument` is now `async` and
+    /// runs off-main (hopping to main only for the per-chapter NSAttributedString
+    /// step), so the UI stays responsive while a large EPUB imports.
+    private func handleEPUBImport(url: URL) {
+        Task { @MainActor in
+            let didAccess = url.startAccessingSecurityScopedResource()
+            defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+            do {
+                _ = try await epubLibraryImporter.importDocument(from: url)
                 loadDocuments()
             } catch {
                 present(error)
@@ -3324,7 +3350,7 @@ extension LibraryViewModel {
                 case "rtf":             doc = try rtfLibraryImporter.importDocument(from: tempURL)
                 case "docx":            doc = try docxLibraryImporter.importDocument(from: tempURL)
                 case "html", "htm":     doc = try await htmlLibraryImporter.importDocument(from: tempURL)
-                case "epub":            doc = try epubLibraryImporter.importDocument(from: tempURL)
+                case "epub":            doc = try await epubLibraryImporter.importDocument(from: tempURL)
                 default:                throw LibraryImportError.unsupportedFileType
                 }
             }

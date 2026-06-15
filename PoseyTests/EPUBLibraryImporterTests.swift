@@ -2,7 +2,7 @@ import XCTest
 @testable import Posey
 
 final class EPUBLibraryImporterTests: XCTestCase {
-    func testImportStoresEPUBAsReadableDocument() throws {
+    func testImportStoresEPUBAsReadableDocument() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("posey.sqlite")
@@ -10,7 +10,7 @@ final class EPUBLibraryImporterTests: XCTestCase {
         let importer = EPUBLibraryImporter(databaseManager: manager)
         let fixtureURL = TestFixtureLoader.url(named: "StructuredSample", fileExtension: "epub")
 
-        let document = try importer.importDocument(from: fixtureURL)
+        let document = try await importer.importDocument(from: fixtureURL)
         let storedDocument = try XCTUnwrap(try manager.documents().first)
 
         XCTAssertEqual(document.id, storedDocument.id)

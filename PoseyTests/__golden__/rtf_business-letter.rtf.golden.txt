@@ -1,0 +1,11 @@
+TITLE: Rtf Business Letter
+FILETYPE: rtf
+UNITS: 5
+READER-OPENS-AT-UNIT-INDEX: 0
+READER-STOPS-AT-UNIT-INDEX: 5 (no trim)
+----
+#0010  prose | Dear Ms. Bennet,  <<<< READER OPENS HERE
+#0020  prose | Thank you for your correspondence regarding the Netherfield lease. Mr. Bingley has confirmed his intention to take possession before Michaelmas, and looks forward to making the acquaintance of your family at the assembly.
+#0030  prose | Please find the particulars enclosed. We remain at your service.
+#0040  prose | Yours faithfully,
+#0050  prose | Wm. Lucas, Esq.

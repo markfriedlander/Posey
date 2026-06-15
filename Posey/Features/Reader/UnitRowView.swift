@@ -103,6 +103,14 @@ struct UnitRowView: View {
     /// store. Returns nil if loading fails.
     let imageDataProvider: (String) -> Data?
 
+    /// 2026-06-15 — true when this unit owns the CURRENT search match.
+    /// For `.table` / `.image` units (rendered as an image, with their
+    /// searchable text behind it) the per-sentence text highlight can't
+    /// show, so the row draws an accent border around the image instead —
+    /// "search hit inside the table → highlight the table" (Mark).
+    /// Defaulted so non-search call sites/previews need not pass it.
+    var isSearchMatchUnit: Bool = false
+
     /// URL scheme used by the sentence-link tap shape. Parsed by
     /// `ReaderView`'s `.environment(\.openURL, …)` action handler.
     /// Format: `posey-sentence://<sentence-uuid>`.
@@ -545,6 +553,7 @@ struct UnitRowView: View {
             }
         }
         .padding(.vertical, 8)
+        .modifier(SearchMatchImageHighlight(active: isSearchMatchUnit))
     }
 
     // MARK: - Table (rendered as image)
@@ -573,6 +582,7 @@ struct UnitRowView: View {
             }
         }
         .padding(.vertical, 8)
+        .modifier(SearchMatchImageHighlight(active: isSearchMatchUnit))
     }
 
     // MARK: - Page break
@@ -832,3 +842,34 @@ struct ProseUnitTextView: UIViewRepresentable {
 }
 
 // ========== BLOCK 02: PROSE UNIT TEXT VIEW - END ==========
+
+// ========== BLOCK 03: SEARCH-MATCH IMAGE HIGHLIGHT - START ==========
+
+/// 2026-06-15 — Visual highlight for a search hit that lands in an
+/// image-backed unit (`.table` / `.image`). The searchable text sits
+/// BEHIND the rendered image, so the normal per-sentence text highlight
+/// can't show "where" the match is. Instead, draw an accent rounded
+/// border + soft glow around the whole image so the user can see the
+/// table/figure IS the hit (Mark, 2026-06-15: "search hits inside the
+/// image/table should highlight the table"). Inert when `active` is
+/// false (the common case) — zero visual change to non-matched rows.
+private struct SearchMatchImageHighlight: ViewModifier {
+    let active: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if active {
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color.accentColor, lineWidth: 3)
+                        .padding(.horizontal, 2)
+                        .padding(.vertical, 4)
+                }
+            }
+            .shadow(color: active ? Color.accentColor.opacity(0.55) : .clear,
+                    radius: active ? 8 : 0)
+            .animation(.easeInOut(duration: 0.2), value: active)
+    }
+}
+
+// ========== BLOCK 03: SEARCH-MATCH IMAGE HIGHLIGHT - END ==========

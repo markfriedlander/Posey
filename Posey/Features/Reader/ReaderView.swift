@@ -706,6 +706,7 @@ struct ReaderView: View {
             onTapNote: { openAnnotationFromGlyph(unit: unit, kind: .note) },
             bodyFontSize: viewModel.fontSize,
             imageDataProvider: { viewModel.imageData(for: $0) },
+            isSearchMatchUnit: viewModel.isSearchActive && viewModel.currentSearchMatchUnitID == unit.id,
             onActiveLine: { tv, range in viewModel.setActiveProseLine(tv, range) }
         )
         .padding(.horizontal, 14)
@@ -4126,6 +4127,20 @@ final class ReaderViewModel: ObservableObject {
         guard let pos = currentSearchMatchPosition,
               searchMatchIndices.indices.contains(pos) else { return false }
         return segment.id == searchMatchIndices[pos]
+    }
+
+    /// 2026-06-15 — The unit that owns the CURRENT search match (Mark's
+    /// "search hit inside a table/image should highlight the table"). For
+    /// a `.table` / `.image` unit the per-sentence text highlight can't
+    /// show — the searchable text sits behind the rendered image — so the
+    /// renderer flags the whole image instead. Returns the owning unit id
+    /// of the current match segment, or nil when there's no active match.
+    var currentSearchMatchUnitID: UUID? {
+        guard let pos = currentSearchMatchPosition,
+              searchMatchIndices.indices.contains(pos) else { return nil }
+        let idx = searchMatchIndices[pos]
+        guard sentences.indices.contains(idx) else { return nil }
+        return sentences[idx].unitID
     }
 
     // Step 9 — isSearchMatch(block:) + isCurrentSearchMatch(block:)

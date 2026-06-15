@@ -79,8 +79,9 @@ struct HTMLDocumentImporter {
         // a bare "http" / "html" line leaks into the reading text right before
         // every code block (c3 fidelity defect). Remove the header div; keep the
         // <pre><code> body. Shared pre-clean, not an mdn special-case.
-        let preCleanedHTML = Self.stripCodeExampleHeaders(
-            from: Self.stripWikipediaChrome(rawHTML: rawHTML))
+        let preCleanedHTML = Self.stripGutenbergImageScanLinks(
+            from: Self.stripCodeExampleHeaders(
+                from: Self.stripWikipediaChrome(rawHTML: rawHTML)))
         // 2026-05-31 (ingestion audit, Bug D) — BYPASS Readability for Project
         // Gutenberg HTML books. Readability is for web articles (it strips
         // nav/sidebar/infobox chrome — essential for Wikipedia). But it treats
@@ -109,6 +110,15 @@ struct HTMLDocumentImporter {
         let workingData: Data
         if let cleanedHTML, let cleanedData = cleanedHTML.data(using: .utf8) {
             workingData = cleanedData
+        } else if isGutenbergHTML, let preData = preCleanedHTML.data(using: .utf8) {
+            // Gutenberg bypasses Readability but must still receive the shared
+            // pre-clean strips — notably `stripGutenbergImageScanLinks` (the
+            // "Original" scan-link apparatus). The other strips (Wikipedia
+            // chrome, code-example headers) are no-ops on a PG book, and the
+            // boilerplate the gutenberg skip-chain relies on is untouched, so
+            // this only removes the apparatus and is safe. (Same UTF-8
+            // round-trip the Readability branch above already uses.)
+            workingData = preData
         } else {
             workingData = data
         }
@@ -563,11 +573,15 @@ struct HTMLDocumentImporter {
         // a bare "http" / "html" line leaks into the reading text right before
         // every code block (c3 fidelity defect). Remove the header div; keep the
         // <pre><code> body. Shared pre-clean, not an mdn special-case.
-        let preCleanedHTML = Self.stripCodeExampleHeaders(
-            from: Self.stripWikipediaChrome(rawHTML: rawHTML))
+        let preCleanedHTML = Self.stripGutenbergImageScanLinks(
+            from: Self.stripCodeExampleHeaders(
+                from: Self.stripWikipediaChrome(rawHTML: rawHTML)))
         let cleanedHTML = await ReadabilityExtractor.extractArticleHTML(
             rawHTML: preCleanedHTML, baseURL: nil
         )
+        // NOTE: this rawData path has no Gutenberg-bypass — it always runs
+        // Readability, which already receives the scan-link-stripped
+        // `preCleanedHTML`, so the strip is applied via `cleanedHTML`.
         let workingData: Data
         if let cleanedHTML, let cleanedData = cleanedHTML.data(using: .utf8) {
             workingData = cleanedData
@@ -975,6 +989,32 @@ struct HTMLDocumentImporter {
     /// only thing inside it); the `<pre><code>` body that follows is untouched.
     /// Also strips a lone `<span class="language-name">…</span>` as a fallback
     /// for sites that don't wrap it in an `example-header` div.
+    /// 2026-06-15 — Strip Project Gutenberg "view original scan" apparatus
+    /// links. Illustrated PG HTML books place, next to each plate, an anchor
+    /// to the full-resolution scanned page whose visible text is just
+    /// "Original": `<a href="images/0403.jpg"><i>Original</i></a>`. The
+    /// extractor pulls that "Original" as body text and fuses it onto the
+    /// adjacent unit — polluting prose across the whole book AND, where a
+    /// scan-link sits just before a chapter `<h2>`, gluing onto the heading
+    /// ("Original\nCHAPTER IV.\nCongratulatory") so heading detection misses
+    /// it. tale-of-two-cities had 16 such links; #4/#20 were the visible
+    /// symptom (Bug #1 tail), but the pollution was document-wide.
+    ///
+    /// Scope (Rule 10): match ONLY an anchor whose href ends in an image
+    /// extension AND whose inner text (ignoring inline tags like `<i>`) is
+    /// exactly "Original" — the precise PG scan-link shape. A real content
+    /// link with body text "Original" pointing at an image is implausible in
+    /// a book; verified no-op on every other corpus HTML (only ToTC matches).
+    static func stripGutenbergImageScanLinks(from rawHTML: String) -> String {
+        let pattern = #"(?si)<a\b[^>]*\bhref\s*=\s*["'][^"']*\.(?:jpe?g|png|gif)["'][^>]*>(?:\s|<[^>]*>)*Original(?:\s|</[^>]*>)*</a\s*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return rawHTML }
+        return regex.stringByReplacingMatches(
+            in: rawHTML,
+            range: NSRange(rawHTML.startIndex..., in: rawHTML),
+            withTemplate: ""
+        )
+    }
+
     static func stripCodeExampleHeaders(from rawHTML: String) -> String {
         var html = rawHTML
         let patterns = [

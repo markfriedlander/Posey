@@ -666,6 +666,7 @@ struct ReaderView: View {
             case .listItem: kindLabel = "bullet"
             case .blockquote: kindLabel = "quote"
             case .image: kindLabel = "visualPlaceholder"
+            case .table: kindLabel = "table"
             case .pageBreak: kindLabel = "pageBreak"
             case .horizontalRule: kindLabel = "horizontalRule"
             case .code: kindLabel = "code"
@@ -731,6 +732,15 @@ struct ReaderView: View {
         //     "tap-the-image-block" jump to the first sentence of the next prose unit.
         .contentShape(Rectangle())
         .onTapGesture {
+            // `.table` renders as an image (2026-06-15) and is carriesProseText,
+            // so it would hit the prose early-return below — handle it FIRST so
+            // tapping a table opens the zoomable viewer like an image.
+            if unit.kind == .table,
+               let imageID = unit.metadata.imageID,
+               viewModel.imageData(for: imageID) != nil {
+                expandedImageItem = ExpandedImageItem(id: imageID)
+                return
+            }
             guard !unit.kind.carriesProseText else { return }
             if unit.kind == .image,
                let imageID = unit.metadata.imageID,

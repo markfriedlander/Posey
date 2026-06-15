@@ -162,6 +162,8 @@ struct UnitRowView: View {
                 listItemRow
             case .image:
                 imageRow
+            case .table:
+                tableRow
             case .pageBreak:
                 pageBreakRow
             case .horizontalRule:
@@ -540,6 +542,34 @@ struct UnitRowView: View {
                     .foregroundStyle(Color.primary.opacity(0.7))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Table (rendered as image)
+
+    /// 2026-06-15 — A DOCX table rasterized to an image (`ContentUnitKind.table`).
+    /// Renders the PNG like `imageRow` (tap-to-zoom is wired in ReaderView's
+    /// per-row `.onTapGesture`), but does NOT show `unit.text` as a caption —
+    /// that text is the pipe-delimited searchable representation kept for
+    /// search / RAG / TTS, not something to print under the image. If the
+    /// image is missing (rasterize failed / old import), fall back to showing
+    /// the text monospaced so the table content is never lost.
+    private var tableRow: some View {
+        VStack(alignment: .center, spacing: 8) {
+            if let imageID = unit.metadata.imageID,
+               let data = imageDataProvider(imageID),
+               let uiImage = UIImage(data: data) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity)
+            } else if !unit.text.isEmpty {
+                Text(unit.text)
+                    .font(.system(size: bodyFontSize * 0.9, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
             }
         }
         .padding(.vertical, 8)

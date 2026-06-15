@@ -1818,7 +1818,7 @@ extension DatabaseManager {
             switch unit.kind {
             case .pageBreak:
                 awaitingPageStart = true
-            case .prose, .heading, .blockquote, .listItem, .code:
+            case .prose, .heading, .blockquote, .listItem, .code, .table:
                 if awaitingPageStart {
                     if emittedProse { runningOffset += sepLen }
                     boundaries.append(runningOffset)

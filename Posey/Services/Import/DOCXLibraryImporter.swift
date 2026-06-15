@@ -37,6 +37,7 @@ struct DOCXLibraryImporter {
             plainText: parsed.plainText,
             images: parsed.images,
             headings: parsed.headings,
+            tables: parsed.tables,
             contentHash: contentHash
         )
     }
@@ -57,6 +58,7 @@ struct DOCXLibraryImporter {
             plainText: parsed.plainText,
             images: parsed.images,
             headings: parsed.headings,
+            tables: parsed.tables,
             contentHash: contentHash
         )
     }
@@ -86,6 +88,48 @@ struct DOCXLibraryImporter {
         return headings.first?.title
     }
 
+    /// **2026-06-15 — table-as-image.** For each captured table, find the
+    /// single built unit whose text equals the table's rendered text and
+    /// flip it from `.prose` to `.table`, attaching the rasterized PNG via
+    /// `metadata.imageID`. The renderer then draws the image (tap-to-zoom)
+    /// while the text stays for search / RAG / TTS (`ContentUnitKind.table`).
+    ///
+    /// Matched by exact text equality: the table text is one whole unit
+    /// (the importer emits it as one `\n\n`-delimited paragraph with `" | "`
+    /// cells and `\n` rows) and is highly distinctive, so a false match is
+    /// effectively impossible. Each table is consumed once (a later
+    /// identical table matches the next unmatched unit). If no unit matches
+    /// (e.g. the table text got split or normalized differently), the table
+    /// silently stays a text unit — graceful degradation, never a crash.
+    private static func applyTableImages(
+        to units: [ContentUnit],
+        tables: [(text: String, imageID: String)]
+    ) -> [ContentUnit] {
+        guard !tables.isEmpty else { return units }
+        func key(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var remaining = tables.map { (text: key($0.text), imageID: $0.imageID) }
+        return units.map { unit in
+            let unitKey = key(unit.text)
+            guard unit.kind == .prose, !remaining.isEmpty,
+                  let idx = remaining.firstIndex(where: { $0.text == unitKey }) else {
+                return unit
+            }
+            let imageID = remaining.remove(at: idx).imageID
+            var metadata = unit.metadata
+            metadata.imageID = imageID
+            return ContentUnit(
+                id: unit.id,
+                documentID: unit.documentID,
+                sequence: unit.sequence,
+                kind: .table,
+                text: unit.text,
+                metadata: metadata,
+                revision: unit.revision,
+                sourceTier: unit.sourceTier
+            )
+        }
+    }
+
     private func importNormalizedDocument(
         title: String,
         fileName: String,
@@ -94,6 +138,7 @@ struct DOCXLibraryImporter {
         plainText: String,
         images: [PageImageRecord],
         headings: [DOCXDocumentImporter.DOCXHeadingEntry],
+        tables: [(text: String, imageID: String)],
         contentHash: String?
     ) throws -> Document {
         let existingDocument = try databaseManager.existingDocument(
@@ -127,10 +172,16 @@ struct DOCXLibraryImporter {
             },
             uniquingKeysWith: { first, _ in first }
         )
-        let units = ContentUnitBuilder.applyHeadingMarkers(
+        var units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,
             headingMarkersByOffset: headingMarkersByOffset
         )
+        // ── Table-as-image (2026-06-15): flip the prose unit carrying each
+        // captured table's text to `.table`, attaching the rasterized PNG's
+        // imageID. Done BEFORE sentence indexing — but `.table` is
+        // carriesProseText, so it still gets sentences (searchable + TTS).
+        // Text is unchanged, so offsets / skip / TOC are unaffected.
+        units = Self.applyTableImages(to: units, tables: tables)
 
         // ── Smart-skip: heading-based TOCSkipDetector.
         let tocSkipOffset = TOCSkipDetector.skipOffset(

@@ -57,11 +57,32 @@ enum ContentUnitKind: String, Equatable, Hashable, Sendable {
     /// the handle that makes it possible without touching the parser again.
     case code = "code"
 
+    /// 2026-06-15 — A table rasterized to an image for DISPLAY, while its
+    /// joined-row text is RETAINED for search / RAG / meaning.
+    /// `metadata.imageID` references the rendered PNG in the side-store;
+    /// the renderer (`UnitRowView`) draws that image (with the same
+    /// tap-to-zoom as `.image`) instead of the raw pipe-delimited text.
+    /// `text` is the searchable representation
+    /// (`"Header A | Header B\nrow1a | row1b…"`).
+    ///
+    /// **carriesProseText is intentionally `true`:** the table behaves
+    /// exactly like prose for everything text-related — it joins into the
+    /// derived plainText (so offsets / notes / anchors stay stable), it is
+    /// indexed for search and Ask Posey RAG, and TTS currently READS its
+    /// text. The only two behaviors that diverge from prose are localized
+    /// to the renderer (draw the image) — the kind is the handle for that.
+    /// A future refinement (NEXT.md) makes the TTS playback head SKIP
+    /// table units (like it sails past an `.image`) while KEEPING them
+    /// searchable; that needs a playback-path change, not a flag flip here
+    /// — flipping carriesProseText to false would also drop the table out
+    /// of search, because search rides the same sentence list TTS does.
+    case table = "table"
+
     /// True iff this kind carries prose-style text that TTS should
     /// read aloud and that contributes to search / RAG retrieval.
     var carriesProseText: Bool {
         switch self {
-        case .prose, .heading, .blockquote, .listItem, .code:
+        case .prose, .heading, .blockquote, .listItem, .code, .table:
             return true
         case .image, .pageBreak, .horizontalRule:
             return false

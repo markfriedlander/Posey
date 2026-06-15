@@ -58,12 +58,12 @@ struct DOCXDocumentImporter {
         let plainTextOffset: Int
     }
 
-    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry], coreTitle: String?) {
+    func loadDocument(from url: URL) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry], coreTitle: String?, tables: [(text: String, imageID: String)]) {
         let data = try Data(contentsOf: url)
         return try loadDocument(fromData: data)
     }
 
-    func loadDocument(fromData data: Data) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry], coreTitle: String?) {
+    func loadDocument(fromData data: Data) throws -> (displayText: String, plainText: String, images: [PageImageRecord], headings: [DOCXHeadingEntry], coreTitle: String?, tables: [(text: String, imageID: String)]) {
         let archive = try archive(from: data)
         let documentXML = try archive.entryData(named: "word/document.xml")
         // **Bundle 2a — DOCX `<dc:title>` extraction.** The
@@ -123,8 +123,23 @@ struct DOCXDocumentImporter {
 
         // Filter image pool to only those actually emitted (some
         // .docx archives include unused images).
-        let usedImages = extracted.usedImageIDs.compactMap { id -> PageImageRecord? in
+        var usedImages = extracted.usedImageIDs.compactMap { id -> PageImageRecord? in
             imagePool.values.first(where: { $0.imageID == id })
+        }
+
+        // ── Table-as-image (2026-06-15). Rasterize each captured table to a
+        // PNG and pair it with the NORMALIZED rendered text. The library
+        // importer matches that text against the built unit and flips the
+        // unit to `.table` (image display + retained searchable text). The
+        // text stays in displayText/plainText untouched, so offsets / search
+        // / RAG are byte-identical to the text-only behavior; if rasterizing
+        // fails (or UIKit is unavailable) the table simply stays a text unit.
+        var tableImages: [(text: String, imageID: String)] = []
+        for table in extracted.tables {
+            guard let png = DOCXTableRasterizer.render(rows: table.rows) else { continue }
+            let record = PageImageRecord(imageID: UUID().uuidString, data: png)
+            usedImages.append(record)
+            tableImages.append((text: TextNormalizer.normalizeUniversal(table.renderedText), imageID: record.imageID))
         }
 
         // 2026-05-06 — Heading → TOC offset mapping. The extractor
@@ -202,7 +217,7 @@ struct DOCXDocumentImporter {
             let plainOffset = max(0, displayOffset - markerLossPrefix[h.paragraphIndex])
             return DOCXHeadingEntry(level: h.level, title: cleanedTitle, plainTextOffset: plainOffset)
         }
-        return (normalizedDisplay, normalizedPlain, usedImages, docxHeadings, coreTitle)
+        return (normalizedDisplay, normalizedPlain, usedImages, docxHeadings, coreTitle, tableImages)
     }
 // ========== BLOCK 02: ENTRY POINTS - END ==========
 
@@ -337,10 +352,20 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
         let paragraphIndex: Int
     }
 
+    /// 2026-06-15 — a captured `<w:tbl>`: the structured rows (for the
+    /// rasterizer) plus the exact `renderedText` that was appended to
+    /// `paragraphs` (so the library importer can find the built unit
+    /// carrying it and flip that unit to `.table`).
+    struct TableData {
+        let rows: [[String]]
+        let renderedText: String
+    }
+
     struct Result {
         let displayText: String
         let usedImageIDs: [String]
         let headings: [Heading]
+        let tables: [TableData]
     }
 
     static func extract(from data: Data, imagePool: [String: PageImageRecord]) throws -> Result {
@@ -409,7 +434,8 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
         return Result(
             displayText: extractor.paragraphs.joined(separator: "\n\n"),
             usedImageIDs: extractor.usedImageIDs,
-            headings: finalHeadings
+            headings: finalHeadings,
+            tables: extractor.tables
         )
     }
 
@@ -463,6 +489,8 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
     private var currentRow: [String] = []
     private var cellParagraphs: [String] = []
     private var insideCell = false
+    /// Completed top-level tables, captured for the table-as-image pass.
+    private(set) var tables: [TableData] = []
 
     private init(imagePool: [String: PageImageRecord]) {
         self.imagePool = imagePool
@@ -657,12 +685,20 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
             if tableDepth == 0 {
                 // One coherent block: rows = lines, cells joined by " | ".
                 // Readable + searchable now; the table-as-image step rasterizes
-                // from this same captured structure.
+                // from this SAME captured structure (`capturedRows`).
+                let capturedRows = tableRows
                 let rendered = tableRows
                     .map { $0.joined(separator: " | ") }
                     .joined(separator: "\n")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !rendered.isEmpty { paragraphs.append(rendered) }
+                if !rendered.isEmpty {
+                    paragraphs.append(rendered)
+                    // Side-list for the rasterizer: the unit carrying THIS exact
+                    // text gets its kind flipped to `.table` (image display) by the
+                    // library importer, matched by `renderedText`. The text stays
+                    // in displayText/plainText, so offsets/search are unchanged.
+                    tables.append(TableData(rows: capturedRows, renderedText: rendered))
+                }
                 tableRows = []
                 currentRow = []
             }

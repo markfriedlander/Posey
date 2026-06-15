@@ -6,7 +6,7 @@ READER-STOPS-AT-UNIT-INDEX: 6 (no trim)
 ----
 #0010  heading(L1) | Tables and Images DOCX  <<<< READER OPENS HERE
 #0020  prose | How these papers have been placed in sequence will be made manifest in the reading of them. All needless matters have been eliminated, so that a history almost at variance with the possibilities of later-day belief may stand forth as simple fact. There is throughout no statement of past things wherein memory may err, for all the records chosen are exactly contemporary, given from the standpoints and within the range of knowledge of those who made them.
-#0030  prose | Chapter | Words | Notes\nCHAPTER XXVII. Mina Harker’s Journal | 78 | real prose\nCHAPTER I | 521 | real prose\nCHAPTER II | 590 | real prose
+#0030  table img:<UUID> | Chapter | Words | Notes\nCHAPTER XXVII. Mina Harker’s Journal | 78 | real prose\nCHAPTER I | 521 | real prose\nCHAPTER II | 590 | real prose
 #0040  prose | DRACULA
 #0050  image img:<UUID> | Image
 #0060  prose | JONATHAN HARKER’S JOURNAL

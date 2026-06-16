@@ -153,40 +153,49 @@ final class PlaybackPreferences {
     /// playback: pause for them, or skip past them with a brief
     /// announcement. Replaces the implicit "pause if Motion is on"
     /// rule from the M8 design.
-    enum ImageHandling: String, CaseIterable, Equatable {
-        /// Playback stops at each image; the image displays inline
-        /// and a Continue affordance appears. User taps to resume.
-        case pauseAtImages = "pause"
-        /// Playback continues past images uninterrupted; a brief
-        /// "Image — tap to view" announcement plays. Image still
-        /// visible inline.
-        case skipImages    = "skip"
+    /// 2026-06-15 — renamed `ImageHandling` → `VisualHandling` (Mark): one
+    /// setting now governs ALL visual blocks during playback — inline images
+    /// AND tables (DOCX tables are rendered as an image but carry their text).
+    /// rawValues + the UserDefaults key are unchanged so existing user
+    /// settings persist. Tables mirror images: in `.pauseAtVisuals` the
+    /// reader pauses at the visual (and a table's rows are then read on
+    /// resume); in `.skipVisuals` a brief "Image."/"Table." announcement
+    /// plays and the block's content is glided past.
+    enum VisualHandling: String, CaseIterable, Equatable {
+        /// Playback stops at each image/table; it displays inline and a
+        /// Continue affordance appears. User taps to resume (a table's rows
+        /// are read on resume).
+        case pauseAtVisuals = "pause"
+        /// Playback continues past images/tables uninterrupted; a brief
+        /// "Image."/"Table." announcement plays so the listener knows a
+        /// visual is there. Still visible inline.
+        case skipVisuals    = "skip"
 
         var displayName: String {
             switch self {
-            case .pauseAtImages: return "Pause at images"
-            case .skipImages:    return "Skip images"
+            case .pauseAtVisuals: return "Pause at images & tables"
+            case .skipVisuals:    return "Skip images & tables"
             }
         }
 
         var description: String {
             switch self {
-            case .pauseAtImages:
-                return "Playback stops at each image. Tap Continue to resume."
-            case .skipImages:
-                return "Playback continues past images without stopping. The image is still visible inline."
+            case .pauseAtVisuals:
+                return "Playback stops at each image or table. Tap Continue to resume (a table is read aloud on resume)."
+            case .skipVisuals:
+                return "Playback continues past images and tables without stopping; a brief spoken cue marks each. They stay visible inline."
             }
         }
     }
 
-    /// Current image-handling preference. Defaults to `.pauseAtImages`
+    /// Current visual-handling preference. Defaults to `.pauseAtVisuals`
     /// — the safer choice for serious reading where users want to
     /// notice the visual content rather than be carried past it.
-    var imageHandling: ImageHandling {
+    var visualHandling: VisualHandling {
         get {
             guard let raw = UserDefaults.standard.string(forKey: "posey.reader.imageHandling"),
-                  let value = ImageHandling(rawValue: raw) else {
-                return .pauseAtImages
+                  let value = VisualHandling(rawValue: raw) else {
+                return .pauseAtVisuals
             }
             return value
         }

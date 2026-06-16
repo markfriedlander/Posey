@@ -75,6 +75,18 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
     /// Next segment index to feed into the synthesizer window.
     private var nextEnqueueIndex: Int = 0
 
+    /// 2026-06-15 — Segment indices the playback head GLIDES PAST without
+    /// speaking (Mark's "move the head to the other side of the table like
+    /// an image"). DOCX `.table` units are rendered as an image but keep
+    /// their text as sentences so search / Ask-Posey still find them; those
+    /// sentence/segment indices are listed here so TTS skips them while the
+    /// index space (used by read-along highlight + search) stays intact.
+    /// The head advances from the segment before the table straight to the
+    /// first segment after it. Empty for the common case. Set by the
+    /// ReaderViewModel at content-load (same pattern as
+    /// `pageBreakPauseSentenceIndices`).
+    var skipSegmentIndices: Set<Int> = []
+
     private var simulatedSegments: [TextSegment] = []
     private var simulatedTimer: Timer?
     private var audioSessionObservers: [NSObjectProtocol] = []
@@ -142,6 +154,18 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
 
     func restart(segments: [TextSegment], startingAt startIndex: Int) {
         playInternal(segments: segments, startingAt: startIndex, shouldResumeIfPaused: false)
+    }
+
+    /// Smallest index `>= from` that is in-bounds and NOT skipped — the next
+    /// segment the head may actually speak. nil when the rest are all skipped
+    /// (or out of range). Drives the glide-past-table behavior.
+    private func firstPlayable(from index: Int) -> Int? {
+        var i = max(0, index)
+        while i < activeSegments.count {
+            if !skipSegmentIndices.contains(i) { return i }
+            i += 1
+        }
+        return nil
     }
 
     func pause() {
@@ -226,7 +250,16 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         stopSynthesizer()
         invalidateSimulatedTimer()
 
-        let boundedIndex = min(max(startIndex, 0), segments.count - 1)
+        let requested = min(max(startIndex, 0), segments.count - 1)
+        // Snap forward past any skipped (table) segments so we never START
+        // the head on a unit we mean to glide past. If nothing from here on
+        // is playable (e.g. a doc that is only a table), finish cleanly
+        // rather than sit in `.playing` with an empty queue.
+        guard let boundedIndex = firstPlayable(from: requested) else {
+            currentSentenceIndex = requested
+            state = .finished
+            return
+        }
         currentSentenceIndex = boundedIndex
 
         switch mode {
@@ -241,12 +274,14 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         }
     }
 
-    /// Fills the synthesizer queue with up to windowSize utterances starting at startIndex.
+    /// Fills the synthesizer queue with up to windowSize utterances starting
+    /// at startIndex, GLIDING PAST any skipped (table) segments.
     private func enqueueWindow(startingAt startIndex: Int) {
         nextEnqueueIndex = startIndex
-        let endIndex = min(startIndex + Self.windowSize, activeSegments.count)
-        for index in startIndex..<endIndex {
-            enqueueOneSegment(at: index)
+        var enqueued = 0
+        while enqueued < Self.windowSize, let index = firstPlayable(from: nextEnqueueIndex) {
+            enqueueOneSegment(at: index)   // sets nextEnqueueIndex = index + 1
+            enqueued += 1
         }
     }
 
@@ -372,8 +407,9 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
             state = .finished
             return
         }
-        let nextIndex = currentSentenceIndex + 1
-        if simulatedSegments.indices.contains(nextIndex) {
+        // Glide past skipped (table) segments here too, so simulated/DEBUG
+        // playback matches the system path.
+        if let nextIndex = firstPlayable(from: currentSentenceIndex + 1) {
             self.currentSentenceIndex = nextIndex
         } else {
             invalidateSimulatedTimer()
@@ -509,9 +545,10 @@ extension SpeechPlaybackService: AVSpeechSynthesizerDelegate {
         let utteranceID = ObjectIdentifier(utterance)
         Task { @MainActor in
             self.sentenceIndicesByUtteranceID.removeValue(forKey: utteranceID)
-            // Extend the sliding window: enqueue one more segment if available.
-            if self.nextEnqueueIndex < self.activeSegments.count {
-                self.enqueueOneSegment(at: self.nextEnqueueIndex)
+            // Extend the sliding window: enqueue one more PLAYABLE segment
+            // (gliding past skipped/table segments) if available.
+            if let index = self.firstPlayable(from: self.nextEnqueueIndex) {
+                self.enqueueOneSegment(at: index)
             } else if self.sentenceIndicesByUtteranceID.isEmpty {
                 // No more to enqueue and all tracked utterances are done.
                 self.state = .finished

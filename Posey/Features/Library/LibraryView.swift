@@ -2787,8 +2787,8 @@ extension LibraryViewModel {
                     return #"{"error":"Usage: SET_IMAGE_HANDLING:<pause|skip>"}"#
                 }
                 await MainActor.run {
-                    PlaybackPreferences.shared.imageHandling =
-                        (raw == "skip") ? .skipImages : .pauseAtImages
+                    PlaybackPreferences.shared.visualHandling =
+                        (raw == "skip") ? .skipVisuals : .pauseAtVisuals
                 }
                 return json(["status": "posted", "imageHandling": raw])
 

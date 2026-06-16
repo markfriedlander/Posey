@@ -2192,16 +2192,16 @@ private struct ReaderPreferencesSheet: View {
                             .accessibilityIdentifier("preferences.fontSize")
                     }
 
-                    Picker("Images during playback",
-                           selection: $viewModel.imageHandling) {
-                        ForEach(PlaybackPreferences.ImageHandling.allCases, id: \.self) { mode in
+                    Picker("Images & tables during playback",
+                           selection: $viewModel.visualHandling) {
+                        ForEach(PlaybackPreferences.VisualHandling.allCases, id: \.self) { mode in
                             Text(mode.displayName).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("preferences.imageHandling")
 
-                    Text(viewModel.imageHandling.description)
+                    Text(viewModel.visualHandling.description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {
@@ -2937,10 +2937,10 @@ final class ReaderViewModel: ObservableObject {
     /// the prior implicit pause-when-Motion-on rule. didSet writes
     /// through to PlaybackPreferences and re-applies the visual-block
     /// policy so the change takes effect immediately mid-read.
-    @Published var imageHandling: PlaybackPreferences.ImageHandling
-        = PlaybackPreferences.shared.imageHandling {
+    @Published var visualHandling: PlaybackPreferences.VisualHandling
+        = PlaybackPreferences.shared.visualHandling {
         didSet {
-            PlaybackPreferences.shared.imageHandling = imageHandling
+            PlaybackPreferences.shared.visualHandling = visualHandling
             applyVisualBlockMotionPolicy()
         }
     }
@@ -3331,6 +3331,11 @@ final class ReaderViewModel: ObservableObject {
     /// imageHandling preference (.pauseAtImages vs .skipImages).
     private var visualPauseUnitIDsBySentenceIndex: [Int: UUID] = [:]
     private var visualPauseActiveUnitIDsBySentenceIndex: [Int: UUID] = [:]
+    // 2026-06-15 — table visual-block maps (set at content-load; applied by
+    // applyVisualBlockMotionPolicy per the unified `visualHandling` pref).
+    private var tableSegmentIndices: Set<Int> = []
+    private var tablePauseUnitIDsBySentenceIndex: [Int: UUID] = [:]
+    private var tableAnnounceSentenceIndices: Set<Int> = []
     @Published private(set) var focusedUnitID: UUID? = nil
     private var acknowledgedVisualUnitIDs: Set<UUID> = []
     private var cancellables: Set<AnyCancellable> = []
@@ -3392,6 +3397,19 @@ final class ReaderViewModel: ObservableObject {
         /// page (first prose sentence after a `pageBreak` unit).
         /// Playback applies a brief preUtteranceDelay to each.
         let pageBreakPauseSentenceIndices: Set<Int>
+        /// 2026-06-15 — Segment/sentence indices whose owning unit is a
+        /// `.table` (rendered as an image). TTS glides PAST these — the head
+        /// moves to the other side of the table like it does an image —
+        /// while they stay in the segments array so search + read-along
+        /// indexing are unaffected. Passed to `SpeechPlaybackService` as
+        /// `skipSegmentIndices` (skip mode only).
+        let tableSegmentIndices: Set<Int>
+        /// First sentence index of each table → table unit id. In pause mode,
+        /// playback pauses here (table visible) and reads the rows on resume.
+        let tablePauseUnitIDsBySentenceIndex: [Int: UUID]
+        /// First sentence after each table run — the "Table." spoken cue
+        /// attaches here in skip mode (mirrors the image "Image." cue).
+        let tableAnnounceSentenceIndices: Set<Int>
         /// 2026-05-27 — Each unit's offset in the FULL (pre-skip)
         /// plainText. Used by `annotationFlags(for:)` to map a unit
         /// to its plainText range so notes (anchored to full-plainText
@@ -3565,6 +3583,41 @@ final class ReaderViewModel: ObservableObject {
             }
         }
 
+        // 2026-06-15 — Table visual-block maps (tables mirror images during
+        // playback, governed by the unified `visualHandling` preference).
+        // `filteredSentences` is parallel to `segments`, so its index IS the
+        // segment index.
+        //   • tableSegmentIndices         — ALL table sentences. In skip mode
+        //     these are glided past (kept in `segments` for search/highlight).
+        //   • tablePauseUnitIDsBySentenceIndex — first sentence of each table
+        //     run → table unit id. In pause mode playback pauses here (table
+        //     visible); resuming reads the rows.
+        //   • tableAnnounceSentenceIndices — first sentence AFTER each table
+        //     run. In skip mode a spoken "Table." cue attaches here (the table
+        //     sentences themselves are skipped, so the cue rides the next
+        //     prose, exactly like the image "Image." cue).
+        let tableUnitIDs = Set(filteredUnits.filter { $0.kind == .table }.map(\.id))
+        var tableSegmentIndices: Set<Int> = []
+        var tablePauseUnitIDsBySentenceIndex: [Int: UUID] = [:]
+        var tableAnnounceSentenceIndices: Set<Int> = []
+        if !tableUnitIDs.isEmpty {
+            var prevUnitID: UUID? = nil
+            var prevIsTable = false
+            for (i, sentence) in filteredSentences.enumerated() {
+                let isTable = tableUnitIDs.contains(sentence.unitID)
+                if isTable {
+                    tableSegmentIndices.insert(i)
+                    if sentence.unitID != prevUnitID {          // first sentence of this table
+                        tablePauseUnitIDsBySentenceIndex[i] = sentence.unitID
+                    }
+                } else if prevIsTable {                          // first sentence after a table
+                    tableAnnounceSentenceIndices.insert(i)
+                }
+                prevUnitID = sentence.unitID
+                prevIsTable = isTable
+            }
+        }
+
         // Suppress unused-parameter warnings on the bridge fields.
         _ = skipGlobalOffset
         _ = endGlobalOffset
@@ -3576,6 +3629,9 @@ final class ReaderViewModel: ObservableObject {
             sentences: filteredSentences,
             visualPauseUnitIDsBySentenceIndex: visualPauseUnitIDsBySentenceIndex,
             pageBreakPauseSentenceIndices: pageBreakPauseSentenceIndices,
+            tableSegmentIndices: tableSegmentIndices,
+            tablePauseUnitIDsBySentenceIndex: tablePauseUnitIDsBySentenceIndex,
+            tableAnnounceSentenceIndices: tableAnnounceSentenceIndices,
             fullPlainTextOffsetByUnitID: cumulativeOffsetByUnitID
         )
     }
@@ -3663,6 +3719,9 @@ final class ReaderViewModel: ObservableObject {
                 sentences: [],
                 visualPauseUnitIDsBySentenceIndex: [:],
                 pageBreakPauseSentenceIndices: [],
+                tableSegmentIndices: [],
+                tablePauseUnitIDsBySentenceIndex: [:],
+                tableAnnounceSentenceIndices: [],
                 fullPlainTextOffsetByUnitID: [:]
             )
         }
@@ -3701,6 +3760,12 @@ final class ReaderViewModel: ObservableObject {
         // sentence indices that follow a page break so it can apply
         // a brief preUtteranceDelay to each.
         self.playbackService.pageBreakPauseSentenceIndices = computed.pageBreakPauseSentenceIndices
+        // Store the table visual-block maps; the actual skip/pause/announce
+        // wiring is applied by applyVisualBlockMotionPolicy() (below) based on
+        // the `visualHandling` preference — not unconditionally here.
+        self.tableSegmentIndices = computed.tableSegmentIndices
+        self.tablePauseUnitIDsBySentenceIndex = computed.tablePauseUnitIDsBySentenceIndex
+        self.tableAnnounceSentenceIndices = computed.tableAnnounceSentenceIndices
         var byUnit: [UUID: [Sentence]] = [:]
         for sentence in computed.sentences {
             byUnit[sentence.unitID, default: []].append(sentence)
@@ -4498,17 +4563,31 @@ final class ReaderViewModel: ObservableObject {
         // Step 9 — units flavor only. .skipImages → empty active map
         // + per-image announcement. .pauseAtImages → active map mirrors
         // the raw map; playback service stays silent at the image.
-        switch imageHandling {
-        case .skipImages:
+        switch visualHandling {
+        case .skipVisuals:
+            // No pause. Each image boundary speaks "Image."; each table's
+            // trailing boundary speaks "Table." and the table's own sentences
+            // are glided past (skipSegmentIndices).
             visualPauseActiveUnitIDsBySentenceIndex = [:]
             var announcements: [Int: String] = [:]
             for (sentenceIndex, _) in visualPauseUnitIDsBySentenceIndex {
                 announcements[sentenceIndex] = "Image."
             }
+            for sentenceIndex in tableAnnounceSentenceIndices {
+                announcements[sentenceIndex] = "Table."
+            }
             playbackService.visualAnnouncementText = announcements
-        case .pauseAtImages:
-            visualPauseActiveUnitIDsBySentenceIndex = visualPauseUnitIDsBySentenceIndex
+            playbackService.skipSegmentIndices = tableSegmentIndices
+        case .pauseAtVisuals:
+            // Pause at each image boundary AND at the first sentence of each
+            // table (table visible; its rows are read on resume → no skip).
+            var active = visualPauseUnitIDsBySentenceIndex
+            for (sentenceIndex, unitID) in tablePauseUnitIDsBySentenceIndex {
+                active[sentenceIndex] = unitID
+            }
+            visualPauseActiveUnitIDsBySentenceIndex = active
             playbackService.visualAnnouncementText = [:]
+            playbackService.skipSegmentIndices = []
         }
     }
 

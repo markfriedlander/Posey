@@ -693,11 +693,30 @@ private final class WordDocumentXMLExtractor: NSObject, XMLParserDelegate {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !rendered.isEmpty {
                     paragraphs.append(rendered)
-                    // Side-list for the rasterizer: the unit carrying THIS exact
-                    // text gets its kind flipped to `.table` (image display) by the
-                    // library importer, matched by `renderedText`. The text stays
-                    // in displayText/plainText, so offsets/search are unchanged.
-                    tables.append(TableData(rows: capturedRows, renderedText: rendered))
+                    // 2026-06-15 — only rasterize GENUINELY TABULAR tables. Word
+                    // authors routinely abuse a single-cell (or single-column)
+                    // `<w:tbl>` as a text frame / callout box / pull-quote / sidebar
+                    // (e.g. the ISES bid-tracker intro box: 1 gridCol, borderless,
+                    // shaded — just framed prose). Rasterizing those turns reflowable
+                    // text into a fixed-width PICTURE, which reads worse and can't
+                    // reflow. A real table needs ≥2 columns for the column
+                    // relationship to carry meaning; below that it's prose. We gate
+                    // on the captured cell structure (max cells in any row), NOT on
+                    // `<w:tblGrid>` (merged/ragged real tables under-report gridCols).
+                    // The TEXT is appended above UNCHANGED either way, so
+                    // displayText/plainText/offsets/search are byte-identical — only
+                    // the `.prose`→`.table` image flip is suppressed for non-tabular
+                    // boxes. Verified: 3-col synthetic fixture + multi-col xISES
+                    // proposal stay images (no golden regression); the 6 bid-tracker
+                    // single-column callout boxes fall back to prose.
+                    let maxColumns = capturedRows.map(\.count).max() ?? 0
+                    if maxColumns >= 2 {
+                        // Side-list for the rasterizer: the unit carrying THIS exact
+                        // text gets its kind flipped to `.table` (image display) by the
+                        // library importer, matched by `renderedText`. The text stays
+                        // in displayText/plainText, so offsets/search are unchanged.
+                        tables.append(TableData(rows: capturedRows, renderedText: rendered))
+                    }
                 }
                 tableRows = []
                 currentRow = []

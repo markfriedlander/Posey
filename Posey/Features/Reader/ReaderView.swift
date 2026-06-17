@@ -1058,70 +1058,29 @@ struct ReaderView: View {
             // existing transport HStack — no collision with
             // Previous / Play / Next / Restart spacing.
             #if POSEY_ENABLE_ASK_POSEY
-            if AskPoseyAvailability.isAvailable {
-                // 2026-05-04 — Quick-actions menu replaces the
-                // single-tap Button. Surfaces the four scoped
-                // actions immediately on tap rather than dropping
-                // the user into a free-text composer (which buries
-                // the structured options behind a second tap on
-                // the in-sheet sparkle icon). Each menu item opens
-                // the sheet AND starts the corresponding action.
-                //
-                // 2026-05-05 — When background enhancement (chunking
-                // + AFM metadata extraction) is in flight for this
-                // document, surface a "Still learning…" hint at the
-                // top of the menu and overlay a circular progress
-                // ring on the sparkle icon. The ring is unified
-                // across both stages — see IndexingTracker
-                // .unifiedProgress(for:) and HISTORY 2026-05-05.
-                Menu {
-                    if let progress = indexingTracker
-                        .unifiedProgress(for: viewModel.document.id) {
-                        let pct = Int((progress * 100).rounded())
-                        Section {
-                            Text("Still learning this document — \(pct)%")
-                        }
-                    }
-                    Button {
-                        explainAction()
-                    } label: {
-                        Label("Explain this passage", systemImage: "text.bubble")
-                    }
-                    Button {
-                        defineAction()
-                    } label: {
-                        Label("Define a term", systemImage: "character.book.closed")
-                    }
-                    Button {
-                        findRelatedAction()
-                    } label: {
-                        Label("Find related passages", systemImage: "magnifyingglass")
-                    }
-                    Button {
-                        askSpecificAction()
-                    } label: {
-                        Label("Ask something specific", systemImage: "ellipsis.bubble")
-                    }
-                } label: {
-                    SparkleWithProgressRing(
-                        tint: chromeTint,
-                        progress: indexingTracker.unifiedProgress(for: viewModel.document.id)
-                    )
-                }
-                .accessibilityLabel("Ask Posey")
-                // remoteRegister for the existing top-level id —
-                // opens the sheet plainly (same as "Ask something
-                // specific"). Each menu item also registers under
-                // its own id so autonomous tests can fire the
-                // specific action without needing to navigate the
-                // popover menu.
-                .remoteRegister("reader.askPosey") {
-                    askSpecificAction()
-                }
-                .remoteRegister("reader.askPosey.explain", action: { explainAction() })
-                .remoteRegister("reader.askPosey.define", action: { defineAction() })
-                .remoteRegister("reader.askPosey.findRelated", action: { findRelatedAction() })
-                .remoteRegister("reader.askPosey.askSpecific", action: { askSpecificAction() })
+            // 2026-06-17 — readiness affordance (Option B). The old four-template
+            // Menu was an AFM-only quick-actions surface; the release answer path
+            // is MLX-only and free-form, so the template menu is gone (Mark:
+            // "no submenu regardless of how you activate Ask Posey"). The glyph
+            // now opens the chat directly when ready, and otherwise shows an
+            // in-character "reading ahead / upgrading" hint with a progress ring.
+            //
+            // Visibility keys on `isSetUp` (Nomic + an MLX model present), NOT
+            // `isUnlocked`/`isAvailable` — so during an embedder swap the sparkle
+            // STAYS and reports "upgrading…" instead of vanishing (the "where did
+            // Ask Posey go?" gap). When Ask Posey isn't set up at all, there's no
+            // glyph — the Preferences on-ramp is the path.
+            if AskPoseyAvailability.isSetUp {
+                AskPoseyReaderGlyph(
+                    documentID: viewModel.document.id,
+                    tint: chromeTint,
+                    onOpen: { askSpecificAction() },
+                    indexingTracker: indexingTracker
+                )
+                // `reader.askPosey` + `reader.askPosey.askSpecific` test hooks are
+                // registered INSIDE the glyph (on its stable root) so they survive
+                // the readiness branch swaps. The legacy template hooks
+                // (explain/define/findRelated) are retired with the template menu.
 
                 Spacer(minLength: 24)
             }

@@ -1192,6 +1192,25 @@ private extension AskPoseyView {
             .background(.thinMaterial)
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("askPosey.indexingNotice")
+        } else if indexingTracker.isReReading(docID) {
+            // 2026-06-17 — RAPTOR "re-reading" status (post-embedding, non-
+            // blocking). The chat is fully usable; this just tells the reader,
+            // in character, that big-picture answers are still sharpening as the
+            // summary tree builds. Copy in `PoseyStatusCopy`.
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                // Rotates through all the re-reading variants (same mechanism as
+                // the thinking phrases) while the notice is on screen.
+                RotatingStatusText(phrases: PoseyStatusCopy.reReading)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.thinMaterial)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("askPosey.reReadingNotice")
         }
     }
 

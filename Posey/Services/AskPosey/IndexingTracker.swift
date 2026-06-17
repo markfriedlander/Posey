@@ -28,6 +28,14 @@ final class IndexingTracker: ObservableObject {
     /// document's progress.
     @Published private(set) var indexingDocumentIDs: Set<UUID> = []
 
+    /// Documents whose RAPTOR summary tree is currently building — the
+    /// "re-reading for the big picture" state that runs AFTER embedding
+    /// completes (so a doc here has already passed `isIndexing == false`).
+    /// Non-blocking: Ask Posey is already openable; this only drives the
+    /// "still deepening" status copy. Set on `RaptorTreeService.didStart`,
+    /// cleared on `.didBuild`. (2026-06-17)
+    @Published private(set) var reReadingDocumentIDs: Set<UUID> = []
+
     /// Same shape as the pre-8f struct so view code that destructures
     /// the optional doesn't break.
     struct IndexingProgress: Equatable, Sendable {
@@ -52,6 +60,15 @@ final class IndexingTracker: ObservableObject {
         notificationCenter.publisher(for: UnitEmbeddingService.didCompleteNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] note in self?.handleComplete(note) }
+            .store(in: &cancellables)
+        // RAPTOR re-reading status (post-embedding, non-blocking).
+        notificationCenter.publisher(for: RaptorTreeService.didStartNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleRaptorStart(note) }
+            .store(in: &cancellables)
+        notificationCenter.publisher(for: RaptorTreeService.didBuildNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleRaptorBuild(note) }
             .store(in: &cancellables)
     }
 
@@ -78,6 +95,14 @@ final class IndexingTracker: ObservableObject {
         return indexingProgress[documentID]?.fraction
     }
 
+    /// True while this document's RAPTOR summary tree is building (the
+    /// post-embedding "re-reading for the big picture" deepening). Distinct
+    /// from `isIndexing`: a doc can be done indexing (openable) yet still
+    /// re-reading. (2026-06-17)
+    func isReReading(_ documentID: UUID) -> Bool {
+        return reReadingDocumentIDs.contains(documentID)
+    }
+
     // MARK: - Notification handlers
 
     private func handleStart(_ note: Notification) {
@@ -102,6 +127,16 @@ final class IndexingTracker: ObservableObject {
         guard let id = note.userInfo?[UnitEmbeddingService.documentIDKey] as? UUID else { return }
         indexingProgress.removeValue(forKey: id)
         indexingDocumentIDs.remove(id)
+    }
+
+    private func handleRaptorStart(_ note: Notification) {
+        guard let id = note.userInfo?[RaptorTreeService.documentIDKey] as? UUID else { return }
+        reReadingDocumentIDs.insert(id)
+    }
+
+    private func handleRaptorBuild(_ note: Notification) {
+        guard let id = note.userInfo?[RaptorTreeService.documentIDKey] as? UUID else { return }
+        reReadingDocumentIDs.remove(id)
     }
 }
 

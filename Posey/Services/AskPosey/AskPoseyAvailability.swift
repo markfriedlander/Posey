@@ -103,6 +103,22 @@ public struct AskPoseyAvailability {
         nomicProvisioned && hasDownloadedMLXModel && !EmbeddingBackend.isSwapInProgress
     }
 
+    /// Whether Ask Posey is *set up* on this device — Nomic provisioned AND ≥1
+    /// MLX model downloaded — REGARDLESS of an in-flight swap. The difference
+    /// from `isUnlocked`: `isSetUp` stays true *during* an embedder swap, when
+    /// `isUnlocked` is temporarily false.
+    ///
+    /// 2026-06-17 — the reader Ask Posey affordance keys its *visibility* on
+    /// this (not `isUnlocked`), so that during a swap the sparkle stays put and
+    /// shows an "upgrading…" status instead of *vanishing* (the "where did Ask
+    /// Posey go?" gap the swap-lock opened). Whether it can be *opened* is a
+    /// separate, finer check (`isUnlocked` + the document being done indexing).
+    /// When Ask Posey isn't set up at all (`isSetUp == false`), there's no
+    /// sparkle — the Preferences on-ramp is the path.
+    public static var isSetUp: Bool {
+        nomicProvisioned && hasDownloadedMLXModel
+    }
+
     /// Persisted once the user has successfully provisioned the Nomic
     /// embedder (set by `EmbedderMigrationCoordinator` on a completed switch
     /// to `.nomic`). Sticky: it stays true even if the user later switches the

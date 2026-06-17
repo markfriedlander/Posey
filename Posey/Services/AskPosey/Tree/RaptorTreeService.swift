@@ -79,6 +79,13 @@ actor RaptorTreeService {
     static let documentIDKey = "posey.raptor.documentID"
     static let summaryNodeCountKey = "posey.raptor.summaryNodeCount"
 
+    /// Posted on the main thread when a REAL build begins for a document —
+    /// i.e. AFM is available, the leaf-count threshold is met, and clustering
+    /// is about to run (not for the cheap no-op cases). userInfo: `documentID`.
+    /// Drives the reader's "re-reading for the big picture" status. The paired
+    /// `didBuildNotification` ends that status. (2026-06-17)
+    static let didStartNotification = Notification.Name("posey.raptor.didStart")
+
     // MARK: State
 
     private var databaseManager: DatabaseManager?
@@ -217,6 +224,14 @@ actor RaptorTreeService {
             return
         }
 
+        // Committed to a real build now (AFM present, threshold met). Announce
+        // the start so the reader can show "re-reading for the big picture".
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: Self.didStartNotification, object: nil,
+                userInfo: [Self.documentIDKey: documentID])
+        }
+
         let slice = Array(leaves.prefix(Self.maxLeavesForBuild))
         let inputNodes = slice.map {
             RaptorTreeBuilder.InputNode(
@@ -230,10 +245,11 @@ actor RaptorTreeService {
         let summaryNodes = await builder.buildLayer(
             layer: 1, nodes: inputNodes, documentText: docText, config: config)
 
-        if cancelled.contains(documentID) { cancelled.remove(documentID); return }
+        if cancelled.contains(documentID) { await postDidBuild(documentID, count: 0); cancelled.remove(documentID); return }
         guard !summaryNodes.isEmpty else {
             dbgLog("RaptorTreeService: %@ produced 0 summary nodes (k=%d, leaves=%d)",
                    documentID.uuidString, k, slice.count)
+            await postDidBuild(documentID, count: 0)   // clear the "re-reading" status
             return
         }
 
@@ -267,17 +283,25 @@ actor RaptorTreeService {
         } catch {
             dbgLog("RaptorTreeService: store failed for %@: %@",
                    documentID.uuidString, String(describing: error))
+            await postDidBuild(documentID, count: 0)   // clear the "re-reading" status
             return
         }
 
         let storedCount = summariesToStore.count
         dbgLog("RaptorTreeService: built %d summary node(s) for %@ (k=%d, leaves=%d)",
                storedCount, documentID.uuidString, k, slice.count)
+        await postDidBuild(documentID, count: storedCount)
+    }
+
+    /// Post the terminal `didBuildNotification` on the main thread. Always
+    /// follows a `didStartNotification` (on success OR post-start failure), so
+    /// any "re-reading…" status the start raised is reliably cleared.
+    private func postDidBuild(_ documentID: UUID, count: Int) async {
         await MainActor.run {
             NotificationCenter.default.post(
                 name: Self.didBuildNotification, object: nil,
                 userInfo: [Self.documentIDKey: documentID,
-                           Self.summaryNodeCountKey: storedCount])
+                           Self.summaryNodeCountKey: count])
         }
     }
 

@@ -76,6 +76,25 @@ enum ModelCatalog {
             ?? selected
     }
 
+    /// Ensure the persisted selection is a usable (downloaded MLX) model. If it
+    /// already is, no-op. Otherwise select the first downloaded MLX model, so the
+    /// active answer model the user SEES (picker radio, `@AppStorage`-bound) and
+    /// the one `answerModel()` actually uses stay in sync. Called on a completed
+    /// download and at launch detection. Returns the id it selected, or nil if it
+    /// left the selection unchanged. Never overrides an already-usable choice.
+    @discardableResult
+    static func ensureUsableSelection() -> String? {
+        let current = current()
+        if current.source == .mlx, MLXModelDownloader.shared.isModelDownloaded(current.id) {
+            return nil
+        }
+        guard let firstMLX = all.first(where: {
+            $0.source == .mlx && MLXModelDownloader.shared.isModelDownloaded($0.id)
+        }) else { return nil }
+        UserDefaults.standard.set(firstMLX.id, forKey: defaultsKey)
+        return firstMLX.id
+    }
+
     /// The model that runs background **`@Generable` tasks** — intent
     /// classification and query expansion (RAPTOR summaries + metadata call
     /// AFM directly). 2026-05-31: prefer AFM, whose guided generation forces

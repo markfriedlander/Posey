@@ -351,11 +351,10 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     }
 
     fileprivate func modelDirectory(for modelID: String) -> URL {
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        return cacheDir
-            .appendingPathComponent("huggingface", isDirectory: true)
-            .appendingPathComponent("models", isDirectory: true)
-            .appendingPathComponent(modelID, isDirectory: true)
+        // 2026-06-16 — models now live in the shared App Group container
+        // (`SharedModelStore`) instead of purgeable Caches. Same
+        // `huggingface/models/<id>` layout, just a different root.
+        SharedModelStore.mlxModelDir(modelID)
     }
 
     // MARK: - Completion Notification
@@ -364,6 +363,25 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     private func notifyModelDownloadComplete(modelID: String) {
         dbgLog("MLX-DL: Model %@ fully downloaded; posting .mlxModelDidDownload", modelID)
         MLXModelDownloader.shared.markModelAsDownloadedFromBackground(modelID: modelID)
+        // 2026-06-16 — register this app's claim in the shared-store manifest so
+        // a sibling app (Hal) deleting the model later only frees the files when
+        // no app still claims it. `id` IS the repo path for MLX models.
+        let cfg = ModelCatalog.all.first { $0.id == modelID }
+        let sizeBytes = cfg?.sizeGB.map { Int64($0 * 1_073_741_824) }
+        SharedModelStore.claim(modelID: modelID, repo: cfg?.repoID, sizeBytes: sizeBytes)
+        // 2026-06-16 — auto-select the just-downloaded model when no usable MLX
+        // model is selected yet (the picker still shows AFM/unselected). Makes
+        // the model ACTIVE immediately — lights up the picker radio (selection is
+        // `@AppStorage`-bound) AND makes the selection match what `answerModel()`
+        // already falls through to. Only fills an EMPTY selection — never
+        // overrides a model the user explicitly chose.
+        let current = ModelCatalog.current()
+        let hasUsableSelection = current.source == .mlx
+            && MLXModelDownloader.shared.isModelDownloaded(current.id)
+        if !hasUsableSelection {
+            UserDefaults.standard.set(modelID, forKey: ModelCatalog.defaultsKey)
+            dbgLog("MLX-DL: auto-selected %@ as the active answer model (no prior MLX selection).", modelID)
+        }
         NotificationCenter.default.post(name: .mlxModelDidDownload, object: nil, userInfo: ["modelID": modelID])
     }
 
@@ -675,11 +693,8 @@ final class MLXModelDownloader: ObservableObject {
     }
 
     private func modelPath(for modelID: String) -> URL {
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        return cacheDir
-            .appendingPathComponent("huggingface", isDirectory: true)
-            .appendingPathComponent("models", isDirectory: true)
-            .appendingPathComponent(modelID, isDirectory: true)
+        // 2026-06-16 — shared App Group container (see modelDirectory).
+        SharedModelStore.mlxModelDir(modelID)
     }
 
     // MARK: - Download Queue
@@ -802,7 +817,9 @@ final class MLXModelDownloader: ObservableObject {
     @Published var isCacheCalculating: Bool = false
 
     private var hubCacheDirectory: URL {
-        URL.cachesDirectory.appending(path: "huggingface")
+        // 2026-06-16 — shared App Group container root (cache-size display +
+        // cleanup), matching the relocated model store.
+        SharedModelStore.huggingFaceRoot
     }
 
     // MARK: - UI Convenience Accessors
@@ -854,6 +871,14 @@ final class MLXModelDownloader: ObservableObject {
                     self.downloadedModelIDs = validIDs
                 }
 
+                // 2026-06-16 — if models are present but no usable MLX model is
+                // selected (e.g. downloaded under a build before auto-select
+                // existed, or the selected model was deleted), activate the first
+                // available one so the picker + answer engine agree at launch.
+                if let selected = ModelCatalog.ensureUsableSelection() {
+                    dbgLog("MLX-DETECTION: auto-selected %@ as the active answer model.", selected)
+                }
+
                 dbgLog("MLX-DETECTION: init complete — %d models ready", self.downloadStates.count)
             }
 
@@ -865,6 +890,11 @@ final class MLXModelDownloader: ObservableObject {
     // MARK: - Multi-Model Download Management
 
     private nonisolated func checkAvailableSpace(forModelSizeGB sizeGB: Double, modelDisplayName: String) -> String? {
+        // Free space is a VOLUME property; the App Group container and Caches
+        // sit on the same physical volume, so measure Caches — which always
+        // exists. (The container's `Models/` subdir may not exist until the
+        // first download, and a volume-capacity query on a non-existent path
+        // fails → "storage couldn't be determined." 2026-06-16 bug fix.)
         let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         guard let values = try? cachesURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
               let availableBytes = values.volumeAvailableCapacityForImportantUsage else {
@@ -1086,8 +1116,14 @@ final class MLXModelDownloader: ObservableObject {
 
     func deleteModel(modelID: String) async {
         let expectedPath = modelPath(for: modelID)
+        // 2026-06-16 — release this app's manifest claim first. The files are
+        // only physically removed when NO sibling app (Hal) still claims them
+        // (sole participant today → always true). When a sibling still claims
+        // it, the model is kept on disk and merely dropped from THIS app's list
+        // via the `else` branch below.
+        let safeToDelete = SharedModelStore.releaseClaim(modelID: modelID)
 
-        if FileManager.default.fileExists(atPath: expectedPath.path) {
+        if safeToDelete && FileManager.default.fileExists(atPath: expectedPath.path) {
             do {
                 try FileManager.default.removeItem(at: expectedPath)
                 dbgLog("MLX-DL: Model deleted from %@", expectedPath.path)

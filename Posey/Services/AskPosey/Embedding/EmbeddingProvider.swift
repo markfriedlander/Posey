@@ -346,7 +346,13 @@ final class EmbeddingProvider: @unchecked Sendable {
         var loaded: NomicBert.ModelBundle?
         Task.detached {
             do {
-                loaded = try await NomicBert.loadModelBundle(from: repoID)
+                // 2026-06-16 — download/load the Nomic asset into the shared App
+                // Group container (not purgeable Caches), so it survives storage
+                // pressure and the Posey app family shares one copy.
+                loaded = try await NomicBert.loadModelBundle(
+                    from: repoID,
+                    downloadBase: SharedModelStore.huggingFaceRoot
+                )
             } catch {
                 // Leave loaded nil; allow retry next call.
             }

@@ -28,6 +28,15 @@ struct AskPoseyPreferencesSection: View {
     @ObservedObject private var migration = EmbedderMigrationCoordinator.shared
     @ObservedObject private var indexingTracker = IndexingTracker.sharedForChat
 
+    // 2026-06-17 — Spoiler firewall (Layer 0). The preferences sheet is only
+    // hosted inside the reader (ReaderView), so a document is always in scope;
+    // this is the per-document spoiler toggle's second home (the first is the
+    // in-chat quick toggle). Carries the fuller explanation of the implications.
+    let documentID: UUID
+    let database: DatabaseManager
+    /// Loaded from `documents.spoiler_protection` on appear; mirrors the DB.
+    @State private var spoilerProtectionOn: Bool = true
+
     /// Tapped (or antenna-driven) "Browse Model Library". The navigation
     /// state + `.navigationDestination` live on the host
     /// (`ReaderPreferencesSheet`), not here: this section can be below the
@@ -57,6 +66,7 @@ struct AskPoseyPreferencesSection: View {
             if AskPoseyAvailability.isSetUp {
                 statusRow
                 unlockedRows
+                spoilerRow
             } else {
                 invitationRow
             }
@@ -69,6 +79,36 @@ struct AskPoseyPreferencesSection: View {
                 Text("A private, fully offline reading companion. Free — it just needs a one-time download to set up.")
             }
         }
+        .onAppear {
+            spoilerProtectionOn = (try? database.spoilerProtectionEnabled(for: documentID)) ?? true
+        }
+    }
+
+    // MARK: - Spoiler protection (per-document, Layer 0)
+
+    /// The per-document spoiler toggle's Preferences home — same setting the
+    /// in-chat quick toggle flips, with the fuller explanation of what it does
+    /// and the honest buyer-beware caveat (on-device AI; a slip is possible).
+    @ViewBuilder
+    private var spoilerRow: some View {
+        Toggle(isOn: Binding(
+            get: { spoilerProtectionOn },
+            set: { newValue in
+                spoilerProtectionOn = newValue
+                try? database.setSpoilerProtection(newValue, for: documentID)
+            }
+        )) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Spoiler protection")
+                Text(spoilerProtectionOn
+                     ? "Posey has read the whole book but won't reveal events past where you are. She's an on-device AI doing her best, so a slip is possible."
+                     : "Posey will answer freely, including events you haven't reached yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityIdentifier("preferences.askPosey.spoilerProtection")
     }
 
     // MARK: - Status row (app-wide readiness)

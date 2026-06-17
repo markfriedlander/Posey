@@ -519,13 +519,19 @@ extension DatabaseManager {
 
     func upsertReadingPosition(_ position: ReadingPosition) throws {
         dbLock.lock(); defer { dbLock.unlock() }
+        // furthest_character_offset tracks the MAX-ever offset (spoiler line),
+        // distinct from character_offset (current). On insert it starts at the
+        // current offset; on conflict it only ever grows — max(existing, new) —
+        // so scrolling BACK never lowers the spoiler line. See the schema note
+        // and ASK_POSEY_V1_RELEASE_PLAN.md § 🔒 (Layer 0).
         let sql = """
-        INSERT INTO reading_positions (document_id, updated_at, character_offset, sentence_index)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO reading_positions (document_id, updated_at, character_offset, sentence_index, furthest_character_offset)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(document_id) DO UPDATE SET
             updated_at = excluded.updated_at,
             character_offset = excluded.character_offset,
-            sentence_index = excluded.sentence_index;
+            sentence_index = excluded.sentence_index,
+            furthest_character_offset = MAX(furthest_character_offset, excluded.character_offset);
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -534,12 +540,59 @@ extension DatabaseManager {
         sqlite3_bind_double(statement, 2, position.updatedAt.timeIntervalSince1970)
         sqlite3_bind_int64(statement, 3, sqlite3_int64(position.characterOffset))
         sqlite3_bind_int64(statement, 4, sqlite3_int64(position.sentenceIndex))
+        sqlite3_bind_int64(statement, 5, sqlite3_int64(position.characterOffset))
 
         try step(statement)
+    }
+
+    /// The reader's furthest-ever character offset for a document — the spoiler
+    /// line. Used by the spoiler firewall's prompt (Layer 1) and catcher
+    /// (Layer 2). Falls back to the current offset / 0 when no row exists yet.
+    func furthestReadOffset(for documentID: UUID) throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = """
+        SELECT MAX(furthest_character_offset, character_offset)
+        FROM reading_positions WHERE document_id = ? LIMIT 1;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(statement, 0))
     }
 }
 
 // ========== BLOCK 03: READING POSITIONS - END ==========
+
+// ========== BLOCK 03b: SPOILER PROTECTION - START ==========
+
+extension DatabaseManager {
+    /// Per-document spoiler-firewall toggle. DEFAULT ON for every document
+    /// (the catcher no-ops on non-narrative content, so default-on is cheap).
+    /// Read by the prompt builder (Layer 1) and the catcher (Layer 2); flipped
+    /// from the chat quick toggle and Preferences → Ask Posey. § 🔒.
+    func spoilerProtectionEnabled(for documentID: UUID) throws -> Bool {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = "SELECT spoiler_protection FROM documents WHERE id = ? LIMIT 1;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return true }
+        return sqlite3_column_int64(statement, 0) != 0
+    }
+
+    func setSpoilerProtection(_ enabled: Bool, for documentID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = "UPDATE documents SET spoiler_protection = ? WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, enabled ? 1 : 0)
+        try bind(documentID.uuidString, at: 2, for: statement)
+        try step(statement)
+    }
+}
+
+// ========== BLOCK 03b: SPOILER PROTECTION - END ==========
 
 // ========== BLOCK 04: NOTES - START ==========
 
@@ -1190,6 +1243,13 @@ extension DatabaseManager {
         try addColumnIfNeeded(table: "documents", column: "metadata_extracted_at", definition: "REAL NOT NULL DEFAULT 0")
         try addColumnIfNeeded(table: "documents", column: "metadata_detected_non_english", definition: "INTEGER NOT NULL DEFAULT 0")
 
+        // 2026-06-17 — Spoiler firewall (Layer 0). Per-document toggle, DEFAULT
+        // ON for every document (Mark: err on caution; the catcher no-ops on
+        // non-narrative content anyway, so default-on is cheap for RFPs/docs).
+        // User-disableable from two places: the Ask Posey chat quick toggle and
+        // Preferences → Ask Posey. See ASK_POSEY_V1_RELEASE_PLAN.md § 🔒.
+        try addColumnIfNeeded(table: "documents", column: "spoiler_protection", definition: "INTEGER NOT NULL DEFAULT 1")
+
         try execute("""
             CREATE TABLE IF NOT EXISTS reading_positions (
                 document_id TEXT PRIMARY KEY NOT NULL,
@@ -1199,6 +1259,15 @@ extension DatabaseManager {
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
             """)
+
+        // 2026-06-17 — Spoiler firewall (Layer 0). The reader's MAX-ever
+        // character offset, distinct from `character_offset` (current/last).
+        // A re-reader who scrolls BACK must not be falsely deflected on content
+        // they've already passed ("but I read that!"), so the spoiler line is
+        // the furthest point ever reached, updated to max(existing, new) on each
+        // upsert. Back-fills from the current offset for pre-migration rows.
+        try addColumnIfNeeded(table: "reading_positions", column: "furthest_character_offset", definition: "INTEGER NOT NULL DEFAULT 0")
+        try execute("UPDATE reading_positions SET furthest_character_offset = character_offset WHERE furthest_character_offset < character_offset;")
 
         try execute("""
             CREATE TABLE IF NOT EXISTS notes (

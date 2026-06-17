@@ -2079,6 +2079,8 @@ private struct ReaderPreferencesSheet: View {
                 // correctly. This section is the active-model row + the
                 // "Browse Model Library" link (Hal's settings convention).
                 AskPoseyPreferencesSection(
+                    documentID: viewModel.document.id,
+                    database: viewModel.databaseManager,
                     onBrowseModelLibrary: { showModelLibrary = true },
                     onGetStarted: { showAskPoseyOnboarding = true }
                 )

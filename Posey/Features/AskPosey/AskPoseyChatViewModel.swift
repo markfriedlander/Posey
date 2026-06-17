@@ -102,6 +102,12 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// extracted yet (no notice shown until we know).
     @Published var documentDetectedNonEnglish: Bool = false
 
+    /// 2026-06-17 — Spoiler firewall (Layer 0). Per-document toggle, loaded on
+    /// init from `documents.spoiler_protection` (default ON). The chat quick
+    /// toggle flips it; the prompt builder (Layer 1) and catcher (Layer 2)
+    /// consult it. Mirrors the DB column — `toggleSpoilerProtection()` persists.
+    @Published var spoilerProtectionEnabled: Bool = true
+
     /// Structured bibliographic metadata loaded from the `metadata_*`
     /// columns (populated by `DocumentMetadataExtractor` at import). Passed
     /// into the prompt builder so "who wrote this / when" answer from clean
@@ -401,6 +407,12 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
             self.documentYear = (meta.year?.isEmpty == false) ? meta.year : nil
         }
 
+        // Spoiler firewall (Layer 0) — load the per-document toggle. Default ON
+        // when the column read fails (defensive: protection-by-default).
+        if let db = databaseManager {
+            self.spoilerProtectionEnabled = (try? db.spoilerProtectionEnabled(for: documentID)) ?? true
+        }
+
         // Kick off history load. UI shows isLoadingHistory until
         // this completes; on a fresh-document open it returns
         // immediately so no flash.
@@ -428,6 +440,16 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
                 await self?.loadHistory()
             }
         }
+    }
+
+    /// Spoiler firewall (Layer 0) — flip the per-document toggle and persist it
+    /// to `documents.spoiler_protection`. Driven by the chat quick toggle. The
+    /// in-memory flag is the source of truth for the in-flight request; the DB
+    /// write makes it stick across opens and is read by the Preferences toggle.
+    func toggleSpoilerProtection() {
+        let next = !spoilerProtectionEnabled
+        spoilerProtectionEnabled = next
+        try? databaseManager?.setSpoilerProtection(next, for: documentID)
     }
 
     deinit {

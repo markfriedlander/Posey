@@ -379,6 +379,9 @@ struct AskPoseyView: View {
             .navigationTitle(navigationTitleText)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    spoilerToggleMenu
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
                         viewModel.cancelInFlight()
@@ -1107,6 +1110,42 @@ private extension AskPoseyView {
     /// Focus the composer for free-text input.
     func focusComposer() {
         composerFocused = true
+    }
+
+    /// Spoiler firewall (Layer 0) — the in-chat quick toggle. A leading
+    /// toolbar control so the reader can flip protection mid-conversation
+    /// without digging into Preferences. Uses a Menu (not a bare button) so
+    /// the state + a one-line "what this does" caption are visible; the
+    /// Preferences → Ask Posey row carries the fuller explanation. The shield
+    /// glyph reflects state at a glance: filled = protecting, slashed = off.
+    @ViewBuilder
+    var spoilerToggleMenu: some View {
+        let on = viewModel.spoilerProtectionEnabled
+        Menu {
+            Section("Spoiler protection") {
+                Button {
+                    viewModel.toggleSpoilerProtection()
+                } label: {
+                    Label(on ? "Turn off for this book" : "Turn on for this book",
+                          systemImage: on ? "shield.slash" : "shield.lefthalf.filled")
+                }
+                Text(on
+                     ? "I've read the whole thing, but I won't give away anything past where you are."
+                     : "I'll answer freely — including things you haven't reached yet.")
+            }
+        } label: {
+            Image(systemName: on ? "shield.lefthalf.filled" : "shield.slash")
+                .font(.body)
+                .foregroundStyle(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(on ? "Spoiler protection on" : "Spoiler protection off")
+        .accessibilityHint("Controls whether Posey reveals events past your reading position.")
+        .accessibilityIdentifier("askPosey.spoilerToggle")
+        .remoteRegister("askPosey.spoilerToggle") {
+            viewModel.toggleSpoilerProtection()
+        }
     }
 
     var composer: some View {

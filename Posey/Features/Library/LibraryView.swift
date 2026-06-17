@@ -2633,6 +2633,23 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted", "target": targetID])
 
+            case "SCROLL_PREFS_TO_ASK_POSEY":
+                // 2026-06-17 — Scroll an already-open prefs sheet's FORM to the
+                // Ask Posey section (its status row + Model row), WITHOUT pushing
+                // the Model Library screen. SCROLL_PREFS_TO_LLM was repurposed in
+                // the 2026-05-29 reorg to push the catalog, so it can't be used to
+                // verify the in-form Ask Posey section. This reuses the existing
+                // `.remoteScrollPrefsToLLM` handler (scrolls to the
+                // "preferences.askPosey.section" anchor) and nothing else.
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteScrollPrefsToLLM,
+                        object: nil,
+                        userInfo: ["target": "preferences.askPosey.section"]
+                    )
+                }
+                return json(["status": "posted", "target": "preferences.askPosey.section"])
+
             case "OPEN_MODEL_LIBRARY":
                 // Push the AskPoseyModelLibraryView from an open prefs
                 // sheet (prefs reorg 2026-05-29). Use after

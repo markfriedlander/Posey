@@ -1751,6 +1751,14 @@ extension AskPoseyChatViewModel {
                 // RAG wasn't even attempted, so no signal to give).
                 let lowConfidence = !chunks.isEmpty
                     && self.lastRetrievalTopRelevance < HybridRetriever.confidenceFloor
+                // Spoiler firewall (Layer 1) — pass the per-doc toggle + the
+                // reader's furthest-read offset (the spoiler line). Fold the
+                // invocation offset in via max() so a position the reader just
+                // reached but hasn't persisted yet still counts. Off → nil, no
+                // spoiler framing in the prompt at all.
+                let spoilerActive = self.spoilerProtectionEnabled
+                let storedFurthest = (try? self.databaseManager?.furthestReadOffset(for: self.documentID)) ?? nil
+                let furthestOffset = max(storedFurthest ?? 0, self.invocationReadingOffset ?? 0)
                 let inputs = AskPoseyPromptInputs(
                     intent: intent,
                     anchor: self.anchor,
@@ -1765,7 +1773,9 @@ extension AskPoseyChatViewModel {
                     documentPlainText: self.documentPlainText,
                     documentAuthors: self.documentAuthors,
                     documentYear: self.documentYear,
-                    structuredKnowledge: self.injectedStructuredKnowledge
+                    structuredKnowledge: self.injectedStructuredKnowledge,
+                    spoilerProtectionActive: spoilerActive,
+                    readerFurthestOffset: spoilerActive ? furthestOffset : nil
                 )
 
                 do {

@@ -536,7 +536,12 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
                     documentChunks: [],
                     currentQuestion: inputs.currentQuestion,
                     documentTitle: inputs.documentTitle,
-                    documentPlainText: inputs.documentPlainText
+                    documentPlainText: inputs.documentPlainText,
+                    // Preserve the spoiler firewall (Layer 1) across the
+                    // context-overflow strip — dropping it here would leak on
+                    // exactly the long-document case the firewall most matters.
+                    spoilerProtectionActive: inputs.spoilerProtectionActive,
+                    readerFurthestOffset: inputs.readerFurthestOffset
                 )
                 let strippedOutput = AskPoseyPromptBuilder.build(strippedInputs, budget: budget)
                 do {

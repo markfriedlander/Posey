@@ -178,6 +178,20 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
     /// would retrieve the relevant generated+verified summary here.
     let structuredKnowledge: String?
 
+    /// 2026-06-17 — Spoiler firewall (Layer 1). When true, the builder prepends
+    /// a generative "knowing companion" framing to the instructions and renders
+    /// a reader-position block: Posey has read the WHOLE book (full RAG, she
+    /// sees it all) but must never state a plot-concrete narrative event that
+    /// occurs AFTER the reader's furthest-read position. The position is the
+    /// SPOILER LINE, enforced on her OUTPUT — she may tease/foreshadow, never
+    /// reveal. The catcher (Layer 2) is the real guard; this is delight + the
+    /// first line of defense. Off → no spoiler framing at all (legacy prompt).
+    let spoilerProtectionActive: Bool
+    /// The reader's furthest-ever character offset in `documentPlainText` — the
+    /// spoiler line. nil when protection is off or no position is known yet
+    /// (fresh open at offset 0 still passes 0, which means "beginning").
+    let readerFurthestOffset: Int?
+
     init(
         intent: AskPoseyIntent,
         anchor: AskPoseyAnchor?,
@@ -192,7 +206,9 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         documentPlainText: String? = nil,
         documentAuthors: [String]? = nil,
         documentYear: String? = nil,
-        structuredKnowledge: String? = nil
+        structuredKnowledge: String? = nil,
+        spoilerProtectionActive: Bool = false,
+        readerFurthestOffset: Int? = nil
     ) {
         self.intent = intent
         self.anchor = anchor
@@ -208,6 +224,8 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         self.documentAuthors = documentAuthors
         self.documentYear = documentYear
         self.structuredKnowledge = structuredKnowledge
+        self.spoilerProtectionActive = spoilerProtectionActive
+        self.readerFurthestOffset = readerFurthestOffset
     }
 }
 
@@ -553,6 +571,79 @@ nonisolated enum AskPoseyPromptBuilder {
         }
     }
 
+    /// 2026-06-17 — Spoiler firewall (Layer 1). The generative "knowing
+    /// companion" framing, prepended to the instructions when protection is
+    /// active. GENERATIVE, not a list of prohibitions — this is where Posey's
+    /// character lives (she's read it all and delights in not spoiling it). The
+    /// catcher (Layer 2) is the deterministic backstop; this primes the model
+    /// to withhold by personality, which produces far better-feeling deflections
+    /// than a post-hoc redaction alone. Definition of "spoiler" matches Layer 2:
+    /// a plot-concrete NARRATIVE EVENT first occurring AFTER the reading
+    /// position — never themes, facts, or non-narrative content (Heather's RFP
+    /// case answers fully because a deadline isn't a narrative event).
+    static let spoilerFirewallInstructions: String = """
+    SPOILER FIREWALL — you are the reader's knowing companion.
+
+    You have read this ENTIRE book. The reader has NOT — they are partway \
+    through, and their furthest point is given below as READING POSITION. Your \
+    delight is being the friend who knows everything and gives nothing away.
+
+    - You MAY foreshadow, tease, build anticipation, and react to where they \
+    are ("oh, just wait", "you have no idea what's coming yet"). That charm is \
+    the whole point — be a companion, not a wall.
+    - You must NEVER state, confirm, describe, or strongly imply a plot-concrete \
+    NARRATIVE EVENT — something that HAPPENS in the story (a death, a betrayal, \
+    a reveal, a reunion, a twist, who does what to whom) — that first occurs \
+    AFTER the reading position. Not directly, not "hypothetically", not as a \
+    hint specific enough to give it away.
+    - If asked directly what happens later, DEFLECT IN CHARACTER: coy, warm, \
+    turning the question into anticipation. Never a flat "I can't tell you."
+    - This restriction is ONLY about narrative events past the reading position. \
+    Themes, ideas, definitions, who a character IS when introduced, and anything \
+    AT OR BEFORE the reading position are all fair game — answer those fully and \
+    generously. When in doubt about whether something is past the line, lean to \
+    discretion and deflect with personality.
+    """
+
+    /// 2026-06-17 — Spoiler firewall (Layer 1). Render the READING POSITION
+    /// block: the spoiler line as a concrete landmark the model can reason
+    /// against — a rough percentage through the book plus the trailing text the
+    /// reader has actually reached (their last-read passage). Returns nil when
+    /// there's no usable plainText (the block would be meaningless). A nil/0
+    /// offset renders "the very beginning", which correctly tells the model to
+    /// withhold nearly everything.
+    static func renderReadingPositionBlock(plainText: String?, furthestOffset: Int?) -> String? {
+        guard let plainText, !plainText.isEmpty else { return nil }
+        let total = plainText.count
+        let raw = max(0, min(furthestOffset ?? 0, total))
+        let pct = total > 0 ? Int((Double(raw) / Double(total) * 100).rounded()) : 0
+
+        // Trailing snippet: up to ~320 chars ending at the furthest offset —
+        // the last thing the reader has read, a concrete content boundary. Use
+        // String index arithmetic (offsets are character counts into plainText).
+        let snippetChars = 320
+        let endIdx = plainText.index(plainText.startIndex, offsetBy: raw)
+        let startOffset = max(0, raw - snippetChars)
+        let startIdx = plainText.index(plainText.startIndex, offsetBy: startOffset)
+        let snippet = plainText[startIdx..<endIdx]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " ")
+
+        let landmark: String
+        if raw <= 0 || snippet.isEmpty {
+            landmark = "The reader is at the very beginning — they have read almost nothing yet."
+        } else {
+            landmark = "The reader is about \(pct)% of the way through. The furthest thing they have read ends here:\n\"…\(snippet)\""
+        }
+
+        return """
+        #=== BEGIN READING_POSITION ===#
+        \(landmark)
+        Anything that HAPPENS after this point in the story is a spoiler. Do not reveal it. Tease if you like; never tell.
+        #=== END READING_POSITION ===#
+        """
+    }
+
     /// Build the prompt from inputs and a budget.
     static func build(
         _ inputs: AskPoseyPromptInputs,
@@ -616,10 +707,19 @@ nonisolated enum AskPoseyPromptBuilder {
             // CC-tuning can disable a model's Layer-1 without editing the
             // catalog text; users never see this control.
             let layer1Enabled = ModelSettingsStore.shared.isLayerOnePromptEnabled(for: activeModel)
+            var base = proseInstructions
             if layer1Enabled, let layer1 = activeModel.layerOnePrompt, !layer1.isEmpty {
-                return layer1 + "\n\n" + proseInstructions
+                base = layer1 + "\n\n" + proseInstructions
             }
-            return proseInstructions
+            // 2026-06-17 — Spoiler firewall (Layer 1). Prepend the knowing-
+            // companion framing so the spoiler discipline is the FIRST thing
+            // the model reads, ahead of the universal answer rules. Only when
+            // protection is active for this document; otherwise the legacy
+            // prompt is untouched.
+            if inputs.spoilerProtectionActive {
+                return spoilerFirewallInstructions + "\n\n" + base
+            }
+            return base
         }()
         breakdown.system = AskPoseyTokenEstimator.tokens(in: instructions)
 
@@ -801,6 +901,18 @@ nonisolated enum AskPoseyPromptBuilder {
             #=== END RETRIEVAL_NOTE ===#
             """
             sections.append(guardBlock)
+        }
+        // 2026-06-17 — Spoiler firewall (Layer 1). The READING POSITION block —
+        // the spoiler line as a concrete landmark (percentage + the last thing
+        // the reader has read). Placed right before the user question so
+        // transformer recency bias keeps the boundary salient while the model
+        // composes its answer. Rendered only when protection is active and a
+        // position is known.
+        if inputs.spoilerProtectionActive,
+           let positionBlock = renderReadingPositionBlock(
+               plainText: inputs.documentPlainText,
+               furthestOffset: inputs.readerFurthestOffset) {
+            sections.append(positionBlock)
         }
         sections.append(userBlock)
 

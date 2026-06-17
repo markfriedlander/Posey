@@ -91,6 +91,11 @@ struct ReaderProgressEstimate: Equatable {
 /// surfaced via the accessibility label.
 struct ReaderProgressMeter: View {
     @ObservedObject var viewModel: ReaderViewModel
+    /// 2026-06-17 — drives the floating "reading ahead…" status pill that
+    /// mirrors the time-left label on the opposite (leading) side while this
+    /// document is still embedding. Replaces the old top-center indexing banner
+    /// (Mark: a floating low-key pill opposite the time-left, same quiet visual).
+    @ObservedObject var indexingTracker: IndexingTracker
 
     private var estimate: ReaderProgressEstimate {
         let segs = viewModel.segments
@@ -113,35 +118,18 @@ struct ReaderProgressMeter: View {
     var body: some View {
         let snap = estimate
         HStack {
+            // Leading: floating "reading ahead…" status, only while this
+            // document is still embedding. Mirrors the time-left pill on the
+            // opposite side in the same quiet visual; persists when chrome fades.
+            readingAheadPill
             Spacer()
+            // Trailing: the ambient "time remaining" label.
+            // 2026-05-22 — .primary at 0.85 (was .secondary, drowned by prose).
+            // 2026-05-28 (N4) — opaque Capsule pill so it reads over any text.
             Text(snap.label)
                 .font(.caption2)
-                // 2026-05-22 — Was .secondary (~0.6 opacity) which
-                // got visually drowned by body text scrolling past
-                // beneath the safe-area inset. .primary at 0.85
-                // gives a clearly readable label without changing
-                // the meter's quiet typography or layout.
                 .foregroundStyle(.primary.opacity(0.85))
-                // 2026-05-28 (N4) — Mark: add an opaque pill
-                // background behind the remaining-time label so it
-                // reads clearly regardless of what document text
-                // is scrolling past underneath. Was a bare Text on
-                // top of body prose; legibility depended on the
-                // chars that happened to be behind it. Capsule
-                // with `Color(.systemBackground)` is truly opaque
-                // (not Material) and adapts to light/dark via the
-                // system colorScheme. Subtle border keeps the pill
-                // distinct from the page edge in either mode.
-                .padding(.vertical, 3)
-                .padding(.horizontal, 8)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Color(.systemBackground))
-                        .overlay(
-                            Capsule(style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
-                        )
-                )
+                .statusPill()
                 .accessibilityIdentifier("reader.progressMeter.label")
         }
         .padding(.horizontal, 18)
@@ -149,5 +137,47 @@ struct ReaderProgressMeter: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Reading progress: \(Int(snap.fraction * 100)) percent. \(snap.label).")
     }
+
+    /// In-character "reading ahead — N%" pill, shown only while this document's
+    /// embedding is in flight. Rotates through the variants (same mechanism as
+    /// the thinking phrases); the `%` updates live from `unifiedProgress`.
+    @ViewBuilder
+    private var readingAheadPill: some View {
+        if let frac = indexingTracker.unifiedProgress(for: viewModel.document.id) {
+            let pct = Int((frac * 100).rounded())
+            let phrases = PoseyStatusCopy.readingAhead.map { PoseyStatusCopy.filled($0, pct: pct) }
+            RotatingStatusText(phrases: phrases, font: .caption2, color: .primary.opacity(0.85))
+                .statusPill()
+                .accessibilityIdentifier("reader.indexingPill")
+                .transition(.opacity)
+        }
+    }
 }
+
+// ========== BLOCK 03: STATUS PILL STYLE - START ==========
+
+/// The shared low-key capsule treatment used by BOTH the time-left label and
+/// the reading-ahead status pill, so they read as a matched pair on opposite
+/// sides of the bottom row. Truly-opaque `systemBackground` fill (not Material)
+/// + faint border, adaptive to light/dark.
+private struct StatusPillStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(.vertical, 3)
+            .padding(.horizontal, 8)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color(.systemBackground))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                    )
+            )
+    }
+}
+
+private extension View {
+    func statusPill() -> some View { modifier(StatusPillStyle()) }
+}
+// ========== BLOCK 03: STATUS PILL STYLE - END ==========
 // ========== BLOCK 02: VIEW - END ==========

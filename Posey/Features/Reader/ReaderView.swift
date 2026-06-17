@@ -255,7 +255,7 @@ struct ReaderView: View {
             // reading area, below the (overlay) chrome strip. Quiet
             // typography so it never pulls focus from the document.
             .safeAreaInset(edge: .bottom) {
-                ReaderProgressMeter(viewModel: viewModel)
+                ReaderProgressMeter(viewModel: viewModel, indexingTracker: indexingTracker)
             }
             // 2026-05-04 — Mini-player. When chrome auto-fades during
             // playback, the play/pause button alone stays visible so
@@ -312,17 +312,11 @@ struct ReaderView: View {
                     .background(.thinMaterial)
                 }
             }
-            // Ask Posey indexing banner. Visible at the top center
-            // while this document's embedding index is being built in
-            // the background. Hidden entirely when AFM is unavailable
-            // on this device — per spec, no degraded affordance, no
-            // upsell. This is the user-visible signal that "Posey is
-            // doing something" during the multi-second embedding
-            // pass that previously made big imports (Illuminatus,
-            // 1.6M chars / ~3,300 chunks) look frozen.
-            .overlay(alignment: .top) {
-                indexingBannerView
-            }
+            // 2026-06-17 — The top-center "Posey is reading ahead…" banner moved
+            // to a floating low-key pill on the bottom-left, mirroring the
+            // time-left label (Mark: less intrusive to reading). See
+            // `ReaderProgressMeter.readingAheadPill`. The old `indexingBannerView`
+            // + its helpers are retired below.
             // Initial-load overlay. Big documents (Illuminatus,
             // 1.6M chars / ~5–10s NLTokenizer pass) need feedback
             // the moment the reader appears so the navigation push
@@ -758,64 +752,6 @@ struct ReaderView: View {
         }
     }
 
-    /// "Indexing this document…" pill at the top of the reader.
-    /// Visible while the document's embedding index is being built in
-    /// the background. Per `ask_posey_spec.md` resolved decision 5,
-    /// the banner is hidden ENTIRELY when AFM is unavailable on this
-    /// device — no greyed-out state, no informational text. The
-    /// embedding index work itself still happens (it's useful for
-    /// future semantic search regardless of AFM), but the user-facing
-    /// surface is silent.
-    @ViewBuilder
-    private var indexingBannerView: some View {
-        #if POSEY_ENABLE_ASK_POSEY
-        if AskPoseyAvailability.isAvailable,
-           indexingTracker.isIndexing(viewModel.document.id) {
-            let progress = indexingTracker.indexingProgress[viewModel.document.id]
-            HStack(spacing: 10) {
-                // Always show an animated indicator. When we have a
-                // determinate progress fraction, use a small circular
-                // progress ring so the user can SEE forward motion;
-                // otherwise (very small docs that complete before the
-                // first 50-chunk batch posts) fall back to the
-                // indeterminate spinner.
-                if let progress {
-                    ProgressView(value: progress.fraction)
-                        .progressViewStyle(.circular)
-                        .scaleEffect(0.7)
-                } else {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .scaleEffect(0.7)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(indexingBannerPrimaryText(progress: progress))
-                        .font(.footnote)
-                        .foregroundStyle(.primary.opacity(0.85))
-                    if let progress {
-                        Text(indexingBannerCountText(progress: progress))
-                            .font(.caption2)
-                            .monospacedDigit()
-                            .foregroundStyle(.primary.opacity(0.55))
-                    }
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(.thinMaterial, in: Capsule())
-            .padding(.top, 12)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(indexingBannerAccessibilityLabel(progress: progress))
-            .accessibilityIdentifier("reader.indexingBanner")
-            .transition(.opacity.combined(with: .move(edge: .top)))
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25),
-                       value: indexingTracker.indexingDocumentIDs)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25),
-                       value: progress)
-        }
-        #endif
-    }
-
     /// Full-screen loading affordance that covers the reader while
     /// segmentation + display block parsing run on the background
     /// queue. Uses `.background` with the system background color so
@@ -854,43 +790,6 @@ struct ReaderView: View {
         .accessibilityLabel("Opening document \(viewModel.document.title)")
         .accessibilityIdentifier("reader.openingOverlay")
         .transition(.opacity)
-    }
-
-    #if POSEY_ENABLE_ASK_POSEY
-    private func indexingBannerPrimaryText(
-        progress: IndexingTracker.IndexingProgress?
-    ) -> String {
-        // Even with progress data we keep the primary line stable
-        // ("Indexing this document…") rather than rewriting it on every
-        // batch. The count line beneath provides the live signal.
-        // Stable wording reduces visual noise during fast indexing.
-        return "Indexing this document…"
-    }
-
-    private func indexingBannerCountText(
-        progress: IndexingTracker.IndexingProgress
-    ) -> String {
-        let processed = Self.formattedChunkCount(progress.processed)
-        let total = Self.formattedChunkCount(progress.total)
-        return "\(processed) of \(total) sections"
-    }
-
-    private func indexingBannerAccessibilityLabel(
-        progress: IndexingTracker.IndexingProgress?
-    ) -> String {
-        if let progress {
-            let pct = Int((progress.fraction * 100).rounded())
-            return "Indexing this document for Ask Posey, \(pct) percent complete"
-        }
-        return "Indexing this document for Ask Posey"
-    }
-    #endif
-
-    private static func formattedChunkCount(_ value: Int) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        formatter.groupingSeparator = ","
-        return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
     /// 2026-05-04 — Mini-player visibility: only when chrome is

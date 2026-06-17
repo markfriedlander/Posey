@@ -1143,6 +1143,22 @@ extension LibraryViewModel {
                 }
                 return json(["status": "ok", "documentID": id.uuidString, "spoilerProtection": on])
 
+            case "SET_READING_POSITION":
+                // 2026-06-17 — Spoiler firewall test support. FORCE the reading
+                // position (current + furthest) to an exact offset so the A/B
+                // probes can set the spoiler line precisely (the furthest offset
+                // is otherwise max()-sticky). Usage: SET_READING_POSITION:<doc>:<offset>
+                let parts = (arg ?? "").split(separator: ":", maxSplits: 1).map(String.init)
+                guard parts.count == 2, let id = UUID(uuidString: parts[0]), let off = Int(parts[1]) else {
+                    return #"{"error":"Usage: SET_READING_POSITION:<doc-id>:<offset>"}"#
+                }
+                do {
+                    try databaseManager.forceReadingPosition(off, for: id)
+                } catch {
+                    return #"{"error":"Failed to set reading position: \#(error)"}"#
+                }
+                return json(["status": "ok", "documentID": id.uuidString, "offset": off])
+
             case "REINDEX_DOCUMENT":
                 // 2026-05-23 — Step 8f: rewired to the new
                 // unit-anchored chunker. Atomically rebuilds the
@@ -3568,6 +3584,27 @@ extension LibraryViewModel {
             return #"{"error":"Document not found"}"#
         }
 
+        // 2026-06-17 — Spoiler firewall (Layer 2) DETECTION PROBE. When
+        // `catcherProbeText` is present, skip generation entirely and run the
+        // catcher's detect() on the supplied text against this document at the
+        // given `readingOffset`. This validates the catcher's core pipeline
+        // deterministically (Layer 1 is strong enough that real drafts rarely
+        // leak, so the backstop can't be exercised through the normal path).
+        if let probeText = body["catcherProbeText"] as? String,
+           !probeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let off = (body["readingOffset"] as? Int) ?? 0
+            let result = await SpoilerCatcher(database: databaseManager).probe(
+                answer: probeText, documentID: docID, furthestOffset: off)
+            return json([
+                "probe": true,
+                "engine": result.engine.rawValue,
+                "furthestOffset": result.furthestOffset,
+                "caught": result.caughtSpoiler,
+                "flaggedCount": result.flagged.count,
+                "flagged": result.flagged.map { ["sentence": $0.sentence, "earliestOffset": $0.earliestOffset] }
+            ])
+        }
+
         // Build anchor based on scope. Default: passage scope when
         // anchor info is supplied; document scope when not.
         let anchor: AskPoseyAnchor?
@@ -3702,6 +3739,7 @@ extension LibraryViewModel {
                 "protected": true,
                 "engine": catch_.engine.rawValue,
                 "caught": catch_.caughtSpoiler,
+                "furthestOffset": catch_.furthestOffset,
                 "flaggedCount": catch_.flagged.count,
                 "flagged": catch_.flagged.map { ["sentence": $0.sentence, "earliestOffset": $0.earliestOffset] }
             ]

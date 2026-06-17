@@ -79,6 +79,10 @@ final class SpoilerCatcher {
         let safeAnswer: String
         /// Which engine judged this pass — recorded for the A/B test.
         let engine: Engine
+        /// The spoiler line this pass enforced (reader's furthest offset). Echoed
+        /// to the /ask diagnostics so an A/B sweep can confirm which line a given
+        /// probe ran against (early vs late) without guessing.
+        let furthestOffset: Int
         var caughtSpoiler: Bool { !flagged.isEmpty }
     }
 
@@ -119,7 +123,7 @@ final class SpoilerCatcher {
             engine: engine
         )
         guard !flagged.isEmpty else {
-            return CatchResult(flagged: [], safeAnswer: answer, engine: engine)
+            return CatchResult(flagged: [], safeAnswer: answer, engine: engine, furthestOffset: furthestOffset)
         }
 
         // Regenerate in character, then verify the rewrite didn't re-leak.
@@ -132,7 +136,24 @@ final class SpoilerCatcher {
             engine: engine
         )
         let safe = recheck.isEmpty ? rewritten : Self.fallbackDeflection
-        return CatchResult(flagged: flagged, safeAnswer: safe, engine: engine)
+        return CatchResult(flagged: flagged, safeAnswer: safe, engine: engine, furthestOffset: furthestOffset)
+    }
+
+    /// TEST/diagnostic only — run DETECTION (no regeneration) on a supplied
+    /// candidate answer and report what it flags. Because Layer 1 is strong
+    /// enough that real drafts rarely leak, this is how the catcher's core
+    /// pipeline (earliest-occurrence → position gate → judge) is validated
+    /// deterministically: feed it a known leak at an early line (expect flag),
+    /// at a late line (expect none), and a non-narrative fact (expect none).
+    /// Driven by the /ask `catcherProbeText` field.
+    func probe(answer: String, documentID: UUID, furthestOffset: Int) async -> CatchResult {
+        let engine = Self.engine
+        let ctx = buildLocatorContext(documentID: documentID)
+        let flagged = await detect(
+            answer: answer, documentID: documentID,
+            furthestOffset: furthestOffset, ctx: ctx, engine: engine
+        )
+        return CatchResult(flagged: flagged, safeAnswer: answer, engine: engine, furthestOffset: furthestOffset)
     }
 
     // ===== BLOCK 02: PUBLIC ENTRY - END =====

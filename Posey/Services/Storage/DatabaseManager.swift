@@ -545,6 +545,31 @@ extension DatabaseManager {
         try step(statement)
     }
 
+    /// TEST/diagnostic only — FORCE the reading position (both current and
+    /// furthest) to an exact offset, overriding the normal max()-only growth of
+    /// furthest. The spoiler firewall's furthest offset is otherwise sticky-high
+    /// (by design, so a re-reader isn't deflected), which makes the "early line"
+    /// A/B probes impossible to set up without this. Driven by the antenna
+    /// SET_READING_POSITION verb; never called from the reading UI.
+    func forceReadingPosition(_ offset: Int, for documentID: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = """
+        INSERT INTO reading_positions (document_id, updated_at, character_offset, sentence_index, furthest_character_offset)
+        VALUES (?, ?, ?, 0, ?)
+        ON CONFLICT(document_id) DO UPDATE SET
+            updated_at = excluded.updated_at,
+            character_offset = excluded.character_offset,
+            furthest_character_offset = excluded.furthest_character_offset;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        sqlite3_bind_double(statement, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(statement, 3, sqlite3_int64(offset))
+        sqlite3_bind_int64(statement, 4, sqlite3_int64(offset))
+        try step(statement)
+    }
+
     /// The reader's furthest-ever character offset for a document — the spoiler
     /// line. Used by the spoiler firewall's prompt (Layer 1) and catcher
     /// (Layer 2). Falls back to the current offset / 0 when no row exists yet.

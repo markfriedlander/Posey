@@ -30,7 +30,10 @@ struct AskPoseyView: View {
     /// opens Ask Posey on a doc that's still building its embedding
     /// index. Spec: `ask_posey_spec.md` "indexing-indicator" surface.
     /// M7: in-sheet UX for the M2 work.
-    @StateObject private var indexingTracker = IndexingTracker()
+    // 2026-06-17 — shared app-lifetime tracker (see ReaderView): a fresh
+    // instance per sheet-open misses the in-flight didStart, so the indexing /
+    // re-reading notices could lag in or not appear.
+    @ObservedObject private var indexingTracker = IndexingTracker.sharedForChat
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

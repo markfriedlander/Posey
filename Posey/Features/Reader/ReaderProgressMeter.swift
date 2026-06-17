@@ -145,8 +145,12 @@ struct ReaderProgressMeter: View {
     private var readingAheadPill: some View {
         if let frac = indexingTracker.unifiedProgress(for: viewModel.document.id) {
             let pct = Int((frac * 100).rounded())
-            let phrases = PoseyStatusCopy.readingAhead.map { PoseyStatusCopy.filled($0, pct: pct) }
-            RotatingStatusText(phrases: phrases, font: .caption2, color: .primary.opacity(0.85))
+            // Terse variants sized for this narrow slot (the long ones are for
+            // the sparkle popover). One line, only a gentle shrink as a safety
+            // net so the text reads at full size like the time-left label.
+            let phrases = PoseyStatusCopy.readingAheadShort.map { PoseyStatusCopy.filled($0, pct: pct) }
+            RotatingStatusText(phrases: phrases, font: .caption2, color: .primary.opacity(0.85),
+                               lineLimit: 1, minimumScaleFactor: 0.9)
                 .statusPill()
                 .accessibilityIdentifier("reader.indexingPill")
                 .transition(.opacity)

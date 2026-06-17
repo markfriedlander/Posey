@@ -128,6 +128,12 @@ struct PoseyApp: App {
                     // the user.
                     EmbeddingProvider.shared.warmUp()
 
+                    // 2026-06-17 — Touch the shared indexing tracker at launch so
+                    // it's listening for didStart/didProgress BEFORE any reindex/
+                    // embed can begin — otherwise the reader's reading-ahead pill
+                    // could miss the start of an in-flight pass.
+                    _ = IndexingTracker.sharedForChat
+
                     // 2026-06-17 — Resume an interrupted embedder swap (Rule 3).
                     // If the app died or was backgrounded while a backend swap
                     // was building the target column, the persisted swap marker

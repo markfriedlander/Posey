@@ -18,11 +18,18 @@ struct RotatingStatusText: View {
 
     /// The phrases to cycle. Already `%PCT%`-filled by the caller if needed.
     let phrases: [String]
-    /// Seconds each phrase stays before the next. Default matches the thinking
-    /// bubble (long enough to read, short enough to see a few).
-    var rotationSeconds: Double = 3.0
+    /// Seconds each phrase stays before the next. These are AMBIENT statuses you
+    /// read next to (not a thinking-spinner), so the cadence is deliberately
+    /// slow — a fast cycle is twitchy and distracting (Mark, 2026-06-17).
+    var rotationSeconds: Double = 20.0
     var font: Font = .footnote
     var color: Color = .secondary
+    /// When set (e.g. 1 for the bottom pill), the text is constrained to that
+    /// many lines and auto-shrinks to fit rather than wrapping — keeps the pill
+    /// tidy/single-line like the time-left label while still showing the full
+    /// in-character variant.
+    var lineLimit: Int? = nil
+    var minimumScaleFactor: CGFloat = 1.0
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var index: Int = 0
@@ -31,6 +38,8 @@ struct RotatingStatusText: View {
         Text(phrases.isEmpty ? "" : phrases[min(index, phrases.count - 1)])
             .font(font)
             .foregroundStyle(color)
+            .lineLimit(lineLimit)
+            .minimumScaleFactor(minimumScaleFactor)
             .id(index)               // fresh transition per change
             .transition(.opacity)
             .onAppear {

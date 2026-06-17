@@ -17,7 +17,13 @@ struct ReaderView: View {
     /// Owned by ReaderView so the banner survives across renders;
     /// LibraryView creates its own instance for the eventual library
     /// row indicator (not in v1).
-    @StateObject private var indexingTracker = IndexingTracker()
+    // 2026-06-17 — Use the SHARED app-lifetime tracker, not a fresh instance.
+    // A per-reader IndexingTracker is created when the document opens, so it
+    // MISSES the `didStart` that already fired for an in-flight reindex/embed and
+    // only catches up on the next `didProgress` (~5s at Nomic speed) — which made
+    // the reading-ahead pill flicker in late / not appear. The shared instance
+    // persists across reader opens and already holds the current in-flight state.
+    @ObservedObject private var indexingTracker = IndexingTracker.sharedForChat
     @Environment(\.scenePhase) private var scenePhase
     /// M9 landscape polish hook. iPhone rotation flips
     /// `verticalSizeClass`: portrait → .regular, landscape → .compact.

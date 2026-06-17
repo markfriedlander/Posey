@@ -33,6 +33,19 @@ enum PoseyStatusCopy {
         "Cramming. %PCT% deep. I'll be unbearable soon.",
     ]
 
+    /// SHORT "reading ahead" variants for the bottom status PILL, which sits in
+    /// a narrow slot next to the time-left label and must fit ONE line at full
+    /// size (the long `readingAhead` variants are for the roomy sparkle popover).
+    /// Keep these terse — roughly time-left length (Mark, 2026-06-17).
+    static let readingAheadShort: [String] = [
+        "Reading ahead — %PCT%",
+        "Catching up — %PCT%",
+        "Doing my homework — %PCT%",
+        "Skimming ahead — %PCT%",
+        "Cramming — %PCT%",
+        "Studying up — %PCT%",
+    ]
+
     /// Embeddings complete — chat opens. No percent.
     static let ready: [String] = [
         "Read it. Ask me anything.",

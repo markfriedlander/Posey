@@ -238,23 +238,37 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
             dbgLog("MLX-DL: Cancelled %d stale in-flight task(s) for %@", cancelledCount, modelID)
         }
 
-        // Fetch the file list from the HF tree API.
+        // Fetch the file list (with HF sizes) from the tree API.
         let allFiles = try await fetchRepoFileList(repoID: repoID)
-        let mlxFiles = allFiles.filter { Self.matchesMLXPattern($0) }
+        let mlxFiles = allFiles.filter { Self.matchesMLXPattern($0.path) }
         if mlxFiles.isEmpty {
             dbgLog("MLX-DL: No MLX-compatible files in %@; aborting", repoID)
             throw NSError(domain: "BackgroundDownloadCoordinator", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "No MLX-compatible files found in repository \(repoID)."
             ])
         }
+        let mlxFilenames = mlxFiles.map { $0.path }
         dbgLog("MLX-DL: Found %d MLX files for %@", mlxFiles.count, modelID)
 
         let modelDir = modelDirectory(for: modelID)
         try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
 
-        bytesExpectedByModel[modelID] = 0
+        // 2026-06-17 — FIXED progress total. Sum the HF file sizes NOW so the
+        // denominator is known from byte 0; the % climbs monotonically instead
+        // of lurching as each task reports its expected size. Fall back to the
+        // legacy dynamic accumulation only if HF gave us no sizes (total ≤ 0).
+        let fixedTotal = mlxFiles.reduce(Int64(0)) { $0 + $1.size }
+        if fixedTotal > 0 {
+            bytesExpectedByModel[modelID] = fixedTotal
+            modelsWithFixedExpected.insert(modelID)
+            dbgLog("MLX-DL: fixed total for %@ = %lld bytes (%d files)", modelID, fixedTotal, mlxFiles.count)
+        } else {
+            bytesExpectedByModel[modelID] = 0
+            modelsWithFixedExpected.remove(modelID)
+            dbgLog("MLX-DL: no HF sizes for %@; falling back to dynamic expected", modelID)
+        }
         bytesWrittenByModel[modelID] = 0
-        filesPendingByModel[modelID] = Set(mlxFiles)
+        filesPendingByModel[modelID] = Set(mlxFilenames)
 
         let appActive = await MainActor.run { UIApplication.shared.applicationState == .active }
         let chosenSession = appActive ? foregroundSession : backgroundSession
@@ -263,11 +277,18 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
                chosenKind == .foreground ? "FOREGROUND" : "BACKGROUND",
                appActive ? "active" : "inactive/background")
 
-        for filename in mlxFiles {
+        for file in mlxFiles {
+            let filename = file.path
             let targetURL = modelDir.appendingPathComponent(filename)
             if let existingSize = try? FileManager.default.attributesOfItem(atPath: targetURL.path)[.size] as? Int64,
                existingSize > 0 {
                 dbgLog("MLX-DL: %@ already present (%lld bytes); skipping", filename, existingSize)
+                // Count the already-present bytes toward the fixed total so the
+                // bar reflects real completion (skipped files never report via a
+                // download task).
+                if modelsWithFixedExpected.contains(modelID) {
+                    bytesWrittenByModel[modelID, default: 0] += existingSize
+                }
                 var pending = filesPendingByModel[modelID] ?? []
                 pending.remove(filename)
                 filesPendingByModel[modelID] = pending
@@ -298,6 +319,10 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     @Published var bytesWrittenByModel: [String: Int64] = [:]
     @Published var bytesExpectedByModel: [String: Int64] = [:]
     private var filesPendingByModel: [String: Set<String>] = [:]
+    /// Models whose `bytesExpectedByModel` is a FIXED total summed from HF file
+    /// sizes (2026-06-17). For these, `didWriteData` must NOT mutate the
+    /// expected total — that's what made the progress % lurch.
+    private var modelsWithFixedExpected: Set<String> = []
 
     func progress(for modelID: String) -> Double {
         let expected = bytesExpectedByModel[modelID] ?? 0
@@ -315,7 +340,12 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     // GET https://huggingface.co/api/models/<repo>/tree/main
     // Returns a JSON array of {"type": "file"|"directory", "path": "...", "size": Int}
     // PUBLIC endpoint — no auth required.
-    private func fetchRepoFileList(repoID: String) async throws -> [String] {
+    /// (path, size) per file in the repo. The `size` is the HF tree API's byte
+    /// count — used to compute a FIXED download total up front (2026-06-17 fix),
+    /// so the progress denominator is known from the start instead of being
+    /// accumulated as tasks report (which made the % lurch — 99%→2%→… — badly
+    /// for many-file repos like Qwen's 10-file multimodal build).
+    private func fetchRepoFileList(repoID: String) async throws -> [(path: String, size: Int64)] {
         guard let url = URL(string: "https://huggingface.co/api/models/\(repoID)/tree/main") else {
             throw NSError(domain: "BackgroundDownloadCoordinator", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "Bad repo ID: \(repoID)"
@@ -336,7 +366,7 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
             let size: Int64?
         }
         let entries = try JSONDecoder().decode([TreeEntry].self, from: data)
-        return entries.filter { $0.type == "file" }.map { $0.path }
+        return entries.filter { $0.type == "file" }.map { ($0.path, $0.size ?? 0) }
     }
 
     // MARK: - Pattern Matching
@@ -431,7 +461,12 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
             self.bytesWrittenByTask[key] = totalBytesWritten
             self.bytesWrittenByModel[context.modelID, default: 0] += delta
 
-            if totalBytesExpectedToWrite > 0 {
+            // 2026-06-17 — only accumulate the expected total dynamically when we
+            // DON'T already have a fixed total from the HF sizes. With a fixed
+            // total, the denominator is constant and the % climbs smoothly; the
+            // old per-task accumulation is what made it lurch.
+            if totalBytesExpectedToWrite > 0,
+               !self.modelsWithFixedExpected.contains(context.modelID) {
                 let prevExpected = self.bytesExpectedByTask[key] ?? 0
                 let expectedDelta = totalBytesExpectedToWrite - prevExpected
                 if expectedDelta != 0 {

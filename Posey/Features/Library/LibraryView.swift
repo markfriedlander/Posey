@@ -1105,6 +1105,41 @@ extension LibraryViewModel {
                 }
                 return json(["status": "cancel-requested"])
 
+            case "DOWNLOAD_MODEL":
+                // 2026-06-17 — headless model download (test/diagnostic) so the
+                // progress fix + on/off reliability can be verified without UI
+                // taps. Usage: DOWNLOAD_MODEL:<modelID> (full repo path).
+                guard let id = arg, let cfg = ModelCatalog.model(id: id) else {
+                    return #"{"error":"Usage: DOWNLOAD_MODEL:<known-model-id>"}"#
+                }
+                await MLXModelDownloader.shared.startDownload(
+                    modelID: cfg.id, repoID: cfg.repoID ?? cfg.id, sizeGB: cfg.sizeGB)
+                return json(["status": "download-started", "modelID": cfg.id])
+
+            case "DELETE_MODEL":
+                guard let id = arg, ModelCatalog.model(id: id) != nil else {
+                    return #"{"error":"Usage: DELETE_MODEL:<known-model-id>"}"#
+                }
+                await MLXModelDownloader.shared.deleteModel(modelID: id)
+                return json(["status": "deleted", "modelID": id])
+
+            case "MODEL_DOWNLOAD_STATE":
+                guard let id = arg else {
+                    return #"{"error":"Usage: MODEL_DOWNLOAD_STATE:<model-id>"}"#
+                }
+                let snap = await MainActor.run { () -> [String: Any] in
+                    let st = MLXModelDownloader.shared.downloadStates[id]
+                    return [
+                        "modelID": id,
+                        "isDownloaded": MLXModelDownloader.shared.isModelDownloaded(id),
+                        "isDownloading": st?.isDownloading ?? false,
+                        "progress": st?.progress ?? 0,
+                        "message": st?.message ?? "",
+                        "error": st?.error ?? ""
+                    ]
+                }
+                return json(snap)
+
             case "SET_SPOILER_CATCHER_ENGINE":
                 // 2026-06-17 — Spoiler firewall (Layer 2) A/B test. Picks which
                 // engine judges narrative-event-ness: "mlx" (the answer model)

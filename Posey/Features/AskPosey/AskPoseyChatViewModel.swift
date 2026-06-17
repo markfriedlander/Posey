@@ -108,6 +108,12 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// consult it. Mirrors the DB column — `toggleSpoilerProtection()` persists.
     @Published var spoilerProtectionEnabled: Bool = true
 
+    /// 2026-06-17 — Spoiler firewall (Layer 2). Result of the catcher's pass on
+    /// the most recent answer (nil when protection was off or no send has run).
+    /// Surfaced through the local-API `/ask` payload so the A/B catcher test can
+    /// measure leak rates (caughtSpoiler + flaggedCount + engine) headlessly.
+    @Published private(set) var lastSpoilerCatch: SpoilerCatcher.CatchResult?
+
     /// Structured bibliographic metadata loaded from the `metadata_*`
     /// columns (populated by `DocumentMetadataExtractor` at import). Passed
     /// into the prompt builder so "who wrote this / when" answer from clean
@@ -1786,10 +1792,33 @@ extension AskPoseyChatViewModel {
                             self?.applyStreamingSnapshot(snapshot, to: placeholderID)
                         }
                     )
+                    // Spoiler firewall (Layer 2) — the post-generation catcher.
+                    // Runs only when protection is active for this doc; live
+                    // streaming was suppressed (the thinking indicator stayed up)
+                    // precisely so a leak can't flash on screen before this
+                    // verifies + rewrites the full answer. Off → original text.
+                    var overrideText: String? = nil
+                    self.lastSpoilerCatch = nil
+                    if spoilerActive, let db = self.databaseManager {
+                        let result = await SpoilerCatcher(database: db).process(
+                            answer: metadata.finalText,
+                            question: trimmedInput,
+                            documentID: self.documentID,
+                            furthestOffset: furthestOffset,
+                            plainText: self.documentPlainText
+                        )
+                        if result.caughtSpoiler {
+                            dbgLog("SpoilerCatcher[%@]: caught %d spoiler sentence(s); rewrote answer",
+                                   result.engine.rawValue as NSString, result.flagged.count)
+                        }
+                        self.lastSpoilerCatch = result
+                        overrideText = result.safeAnswer
+                    }
                     self.finalizeAssistantTurn(
                         metadata: metadata,
                         placeholderID: placeholderID,
-                        intent: intent
+                        intent: intent,
+                        overrideFinalText: overrideText
                     )
                 } catch is CancellationError {
                     // User dismissed — strip the placeholder and bail.
@@ -1807,6 +1836,13 @@ extension AskPoseyChatViewModel {
     /// Snapshot callback target. Updates the placeholder bubble's
     /// content in place. Called on the main actor by the streamer.
     func applyStreamingSnapshot(_ snapshot: String, to placeholderID: UUID) {
+        // Spoiler firewall (Layer 2) — when protection is active for this doc we
+        // must NOT reveal partial tokens: a spoiler could flash on screen before
+        // the post-gen catcher gets to verify the full answer. Suppress live
+        // updates so the placeholder keeps showing the thinking indicator; the
+        // checked (and possibly rewritten) answer appears all at once at
+        // finalize. Off → normal live streaming, unchanged.
+        if spoilerProtectionEnabled { return }
         guard let index = messages.firstIndex(where: { $0.id == placeholderID }) else { return }
         messages[index].content = snapshot
         // Keep `isStreaming = true` until finalize swaps it.
@@ -1820,7 +1856,12 @@ extension AskPoseyChatViewModel {
     func finalizeAssistantTurn(
         metadata: AskPoseyResponseMetadata,
         placeholderID: UUID,
-        intent: AskPoseyIntent
+        intent: AskPoseyIntent,
+        // Spoiler firewall (Layer 2) — when non-nil, this catcher-approved text
+        // (the original draft if clean, an in-character rewrite if a spoiler was
+        // caught) replaces `metadata.finalText` as the answer shown + persisted.
+        // It still flows through the normal preamble-strip / dedupe pipeline.
+        overrideFinalText: String? = nil
     ) {
         // Task 2 — embedding-based citation attribution. Always runs
         // on every answer. AFM does not emit citations; the model's
@@ -1847,7 +1888,7 @@ extension AskPoseyChatViewModel {
             // heuristic catches the worst case: when a list of
             // comma-separated phrases contains duplicates, collapse
             // the duplicates while preserving order.
-            let depolished = AskPoseyPromptBuilder.stripPolishPreamble(metadata.finalText)
+            let depolished = AskPoseyPromptBuilder.stripPolishPreamble(overrideFinalText ?? metadata.finalText)
             let commaDeduped = AskPoseyPromptBuilder.dedupeRepeatedListItems(depolished)
             let stripped = AskPoseyPromptBuilder.dedupeNumberedListItems(commaDeduped)
             // 2026-05-23 — Step 8f: citation attribution used to be

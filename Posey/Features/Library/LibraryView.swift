@@ -1105,6 +1105,44 @@ extension LibraryViewModel {
                 }
                 return json(["status": "cancel-requested"])
 
+            case "SET_SPOILER_CATCHER_ENGINE":
+                // 2026-06-17 — Spoiler firewall (Layer 2) A/B test. Picks which
+                // engine judges narrative-event-ness: "mlx" (the answer model)
+                // or "afm". Persisted; the catcher reads it on every pass. Lets
+                // the A/B sweep run the SAME probes under each engine and
+                // compare leak rates. Usage: SET_SPOILER_CATCHER_ENGINE:<mlx|afm>
+                let raw = (arg ?? "").lowercased().trimmingCharacters(in: .whitespaces)
+                guard let engine = await MainActor.run(body: { () -> SpoilerCatcher.Engine? in
+                    guard let e = SpoilerCatcher.Engine(rawValue: raw) else { return nil }
+                    SpoilerCatcher.engine = e
+                    return e
+                }) else {
+                    return #"{"error":"Usage: SET_SPOILER_CATCHER_ENGINE:<mlx|afm>"}"#
+                }
+                return json(["status": "ok", "engine": engine.rawValue])
+
+            case "GET_SPOILER_CATCHER_ENGINE":
+                let engine = await MainActor.run { SpoilerCatcher.engine.rawValue }
+                return json(["engine": engine])
+
+            case "SET_SPOILER_PROTECTION":
+                // 2026-06-17 — Spoiler firewall (Layer 0). Flip a document's
+                // per-doc protection flag from the antenna (for verification —
+                // ask the same question protected vs not).
+                // Usage: SET_SPOILER_PROTECTION:<doc-id>:<on|off>
+                let parts = (arg ?? "").split(separator: ":", maxSplits: 1).map(String.init)
+                guard parts.count == 2, let id = UUID(uuidString: parts[0]) else {
+                    return #"{"error":"Usage: SET_SPOILER_PROTECTION:<doc-id>:<on|off>"}"#
+                }
+                let want = parts[1].lowercased()
+                let on = (want == "on" || want == "true" || want == "1" || want == "yes")
+                do {
+                    try databaseManager.setSpoilerProtection(on, for: id)
+                } catch {
+                    return #"{"error":"Failed to set spoiler protection: \#(error)"}"#
+                }
+                return json(["status": "ok", "documentID": id.uuidString, "spoilerProtection": on])
+
             case "REINDEX_DOCUMENT":
                 // 2026-05-23 — Step 8f: rewired to the new
                 // unit-anchored chunker. Atomically rebuilds the
@@ -3588,11 +3626,19 @@ extension LibraryViewModel {
         let summarizationModeStr = (body["summarizationMode"] as? String)?.lowercased()
         let useSummarizedSTM = (summarizationModeStr == "pairwise")
 
+        // 2026-06-17 — Spoiler firewall verification. Optional `readingOffset`
+        // body field sets the reader's position (the spoiler line) precisely,
+        // independent of scope, so the A/B catcher probes can sweep a document:
+        // ask the same plot question with the line set early (expect deflect)
+        // vs late (expect reveal). Falls back to the anchor offset when absent.
+        let readingOffset = body["readingOffset"] as? Int
+
         let viewModel = AskPoseyChatViewModel(
             documentID: docID,
             documentPlainText: document.plainText,
             documentTitle: document.title,
             anchor: anchor,
+            invocationReadingOffset: readingOffset,
             initialScrollAnchorStorageID: mostRecentAnchorID,
             classifier: classifier,
             streamer: streamer,
@@ -3649,6 +3695,18 @@ extension LibraryViewModel {
         }
         if let intent = viewModel.lastIntent {
             payload["intent"] = intent.rawValue
+        }
+        // Spoiler firewall (Layer 2) diagnostics for the A/B catcher test.
+        if let catch_ = viewModel.lastSpoilerCatch {
+            payload["spoiler"] = [
+                "protected": true,
+                "engine": catch_.engine.rawValue,
+                "caught": catch_.caughtSpoiler,
+                "flaggedCount": catch_.flagged.count,
+                "flagged": catch_.flagged.map { ["sentence": $0.sentence, "earliestOffset": $0.earliestOffset] }
+            ]
+        } else {
+            payload["spoiler"] = ["protected": false]
         }
         if let metadata = viewModel.lastMetadata {
             payload["promptTokens"] = metadata.promptTokenTotal

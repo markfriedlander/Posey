@@ -14,17 +14,17 @@ import SwiftUI
 /// than from within an already-presented sheet, so they no longer dismiss
 /// the outer sheet (the limitation documented in commit `9e51ecd`).
 ///
-/// Three sections, top to bottom:
+/// Two sections, top to bottom:
 ///   1. **Language Model** — the approved-model accordion catalog
 ///      (`AskPoseyModelRow`): voice tag → description → performance grid →
 ///      reading scorecard → license, with a single status-dot language, an
 ///      explicit gated Download button, and Select/Delete.
-///   2. **Search breadth** — the retrieval-strictness picker (how widely
-///      Ask Posey searches the document). Lives here because it's an
-///      Ask Posey retrieval knob and Hal's convention keeps all AI/model
-///      tuning on the Model Library screen.
-///   3. **Embedding Model** — the embedding-backend picker + migration
+///   2. **Embedding Model** — the embedding-backend picker + migration
 ///      progress.
+///
+/// (The former "Search breadth" retrieval-strictness picker was removed
+/// 2026-06-17 — it was a placebo the retrieval gate never read. Per-document
+/// retrieval tuning will return as a doc-type-driven default; see NEXT.md.)
 ///
 /// Only the approved set (`ModelCatalog.all`) is surfaced; the HuggingFace
 /// community catalog machinery in `ModelCatalogService` exists but is not
@@ -59,13 +59,9 @@ struct AskPoseyModelLibraryView: View {
     /// `remoteExpandAskPoseyModel` antenna notification.
     @State private var expandedModelID: String?
 
-    /// Retrieval strictness draft, synced to `PlaybackPreferences`.
-    @State private var draftStrictness: PlaybackPreferences.RetrievalStrictness = .balanced
-
     var body: some View {
         Form {
             llmSection
-            searchBreadthSection
             embedderSection
         }
         .navigationTitle("Model Library")
@@ -74,9 +70,6 @@ struct AskPoseyModelLibraryView: View {
             // Reconcile download state against disk so downloaded models
             // report correctly the moment the screen opens (Hal parity).
             ModelCatalogService.shared.refreshDownloadStates()
-        }
-        .onAppear {
-            draftStrictness = PlaybackPreferences.shared.retrievalStrictness
         }
         .onReceive(NotificationCenter.default.publisher(for: .remoteExpandAskPoseyModel)) { note in
             if let id = note.userInfo?["modelID"] as? String {
@@ -155,28 +148,13 @@ struct AskPoseyModelLibraryView: View {
         }
     }
 
-    // MARK: - Search breadth section (retrieval strictness)
-
-    @ViewBuilder
-    private var searchBreadthSection: some View {
-        Section {
-            Picker("How Posey Searches", selection: $draftStrictness) {
-                ForEach(PlaybackPreferences.RetrievalStrictness.allCases, id: \.self) { s in
-                    Text(s.displayName).tag(s)
-                }
-            }
-            .pickerStyle(.segmented)
-            .accessibilityIdentifier("preferences.retrievalStrictness")
-            .onChange(of: draftStrictness) { _, newValue in
-                PlaybackPreferences.shared.retrievalStrictness = newValue
-            }
-            Text(draftStrictness.description)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } header: {
-            Label("Search Breadth", systemImage: "magnifyingglass")
-        }
-    }
+    // 2026-06-17 — "Search breadth" (RetrievalStrictness picker) REMOVED here.
+    // It was a placebo: the weak-retrieval gate (`isWeakRetrieval`) reads a
+    // hardcoded RRF floor and never consulted `retrievalStrictness`; the
+    // broad/balanced/precise cosine thresholds were abandoned in May when the
+    // gate moved to RRF cross-retriever agreement. Per-document retrieval tuning
+    // will be REBUILT as a doc-type-driven default (see NEXT.md). The
+    // `RetrievalStrictness` enum + pref stay dormant (no storage migration).
 
     // MARK: - Embedding Model section
 

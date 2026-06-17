@@ -104,7 +104,26 @@ final class EmbeddingProvider: @unchecked Sendable {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return nil }
 
-        switch EmbeddingBackend.current() {
+        // Route by PURPOSE so a swap never mismatches query- vs document-space:
+        //  • .query    → the ACTIVE (read) backend, `current()`. A query vector
+        //    is cosine-compared against the stored column the retriever reads
+        //    (the active backend's), so it MUST be produced in that same space.
+        //  • .document → the WRITE backend, `writeBackend()` (the swap target
+        //    during a swap), so newly-stored vectors land in the column being
+        //    built.
+        // Outside a swap the two coincide. Without this split, a query issued
+        // mid-swap would be embedded in the half-built target's space (e.g.
+        // 512-dim NL) and compared against the active backend's vectors (e.g.
+        // 768-dim Nomic) — a dimension mismatch that silently kills the semantic
+        // pass. (Ask Posey is locked during swaps, so this is latent in the UI,
+        // but the headless /ask path and correctness both demand the right space.)
+        let backend: EmbeddingBackend
+        switch purpose {
+        case .query:    backend = EmbeddingBackend.current()
+        case .document: backend = EmbeddingBackend.writeBackend()
+        }
+
+        switch backend {
         case .nlContextual:
             return embedNLContextual(cleaned)
         case .nomic:
@@ -119,10 +138,13 @@ final class EmbeddingProvider: @unchecked Sendable {
         return embed(text, as: .document)
     }
 
-    /// True if the currently active backend is loaded and ready.
+    /// True if the backend that NEW embeddings are produced in (`writeBackend()`
+    /// — the swap target during a swap, else the active backend) is loaded and
+    /// ready. The coordinator's wait-for-load gate reads this, so during a swap
+    /// it correctly reports the TARGET's load state.
     nonisolated var isLoaded: Bool {
         lock.lock(); defer { lock.unlock() }
-        switch EmbeddingBackend.current() {
+        switch EmbeddingBackend.writeBackend() {
         case .nlContextual: return nlContextualModel != nil
         case .nomic:        return nomicBundle != nil
         }
@@ -139,7 +161,10 @@ final class EmbeddingProvider: @unchecked Sendable {
     nonisolated func warmUp() {
         Task.detached { [weak self] in
             guard let self = self else { return }
-            switch EmbeddingBackend.current() {
+            // Warm the WRITE backend (swap target during a swap, else active) so
+            // a resumed swap loads its target model at launch, and normal launch
+            // warms the active backend as before.
+            switch EmbeddingBackend.writeBackend() {
             case .nlContextual: self.ensureNLContextualLoadedBlocking()
             case .nomic:        self.ensureNomicLoadedBlocking()
             }

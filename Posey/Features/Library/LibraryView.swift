@@ -1076,9 +1076,20 @@ extension LibraryViewModel {
 
             case "GET_EMBEDDING_PROVIDER":
                 // 2026-05-27 — rewired. Reports current backend + migration phase.
+                // 2026-06-17 — per-backend-column swap visibility: `current` is
+                // the ACTIVE (read) backend (flipped only at swap completion);
+                // `swapTarget` is the backend a swap is building (nil if none);
+                // `swapInProgress` drives the Ask Posey lock; `askPoseyUnlocked`
+                // is the resulting reader-surface gate.
                 let current = EmbeddingBackend.current().rawValue
                 let phase = await MainActor.run { String(describing: EmbedderMigrationCoordinator.shared.currentPhase) }
-                return json(["current": current, "phase": phase])
+                return json([
+                    "current": current,
+                    "phase": phase,
+                    "swapInProgress": EmbeddingBackend.isSwapInProgress,
+                    "swapTarget": EmbeddingBackend.swapTarget()?.rawValue ?? "",
+                    "askPoseyUnlocked": AskPoseyAvailability.isUnlocked
+                ])
 
             case "CANCEL_EMBEDDING_MIGRATION":
                 // 2026-05-28 — cancellation surface for mid-flight Nomic

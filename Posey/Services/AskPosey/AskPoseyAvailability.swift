@@ -88,11 +88,19 @@ public struct AskPoseyAvailability {
     }
 
     /// The runtime unlock condition: Nomic provisioned AND ≥1 MLX model
-    /// downloaded. Cheap, synchronous, isolation-free (UserDefaults + the
-    /// non-isolated downloader + the static catalog), so SwiftUI can read it
-    /// directly when deciding reader-chrome visibility.
+    /// downloaded AND no embedder swap in flight. Cheap, synchronous,
+    /// isolation-free (UserDefaults + the non-isolated downloader + the static
+    /// catalog), so SwiftUI can read it directly when deciding reader-chrome
+    /// visibility.
+    ///
+    /// `!isSwapInProgress` (2026-06-17 — Rule 2 of the embedder-swap design):
+    /// while a backend swap is building the target column, the reader surfaces
+    /// hide so no query races the half-built column. The active backend's column
+    /// stays complete and readable throughout — the lock is what lets the swap
+    /// be non-destructive without ever needing two backends loaded for querying.
+    /// Re-unlocks automatically when the swap completes and clears its marker.
     public static var isUnlocked: Bool {
-        nomicProvisioned && hasDownloadedMLXModel
+        nomicProvisioned && hasDownloadedMLXModel && !EmbeddingBackend.isSwapInProgress
     }
 
     /// Persisted once the user has successfully provisioned the Nomic

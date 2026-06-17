@@ -1531,6 +1531,35 @@ extension DatabaseManager {
             ON unit_embedding_chunks(document_id) WHERE embedding IS NULL;
             """)
 
+        // 2026-06-17 — PER-BACKEND VECTOR COLUMNS (embedder-swap final design).
+        // Each backend owns a permanent BLOB column so BOTH vector sets coexist:
+        //   embedding_nl     — NLContextual, 512-dim
+        //   embedding_nomic  — Nomic Embed Text v1.5, 768-dim
+        // A swap fills the TARGET column (NULL rows only) while the other stays
+        // intact (Rule 1, no destructive NULL-all); the active-backend flag
+        // (`EmbeddingBackend.defaultsKey`) tells the retriever which column to
+        // read. Keep-both payoff: removing a backend is a free revert — flip the
+        // flag back, no re-embed (Rule: keep both sets).
+        //
+        // The legacy single `embedding` column held whatever backend was active
+        // when written. ONE-TIME, NON-DESTRUCTIVE copy: move that data into the
+        // active backend's column. Idempotent + clobber-safe by construction —
+        // copies only where the legacy cell is non-NULL AND the target cell is
+        // still NULL, so re-running on later launches matches nothing and a
+        // freshly-written active-column vector is never overwritten by stale
+        // legacy data. (On a phone already migrated to Nomic, this lands the
+        // completed Nomic set in embedding_nomic and leaves embedding_nl empty —
+        // the prior destructive swap already discarded the NL vectors; keep-both
+        // applies to future swaps, not retroactively.)
+        try addColumnIfNeeded(table: "unit_embedding_chunks", column: "embedding_nl", definition: "BLOB")
+        try addColumnIfNeeded(table: "unit_embedding_chunks", column: "embedding_nomic", definition: "BLOB")
+        let activeVectorColumn = EmbeddingBackend.current().vectorColumn
+        try execute("""
+            UPDATE unit_embedding_chunks
+            SET \(activeVectorColumn) = embedding
+            WHERE embedding IS NOT NULL AND \(activeVectorColumn) IS NULL;
+            """)
+
         // FTS5 mirror over unit_embedding_chunks.text — gives BM25
         // and lexical search "for free" on the same rows that hold
         // semantic embeddings. Contentless external-content shape:
@@ -2902,10 +2931,13 @@ extension DatabaseManager {
             try step(del)
 
             if !chunks.isEmpty {
+                // Vectors land in the WRITE backend's column (swap target during
+                // a swap, else active). The legacy `embedding` column is frozen.
+                let writeCol = EmbeddingBackend.writeBackend().vectorColumn
                 let sql = """
                     INSERT OR REPLACE INTO unit_embedding_chunks
                         (id, document_id, chunk_index, start_unit_id, start_intra_offset,
-                         end_unit_id, end_intra_offset, text, embedding)
+                         end_unit_id, end_intra_offset, text, \(writeCol))
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """
                 let ins = try prepareStatement(sql: sql)
@@ -2953,12 +2985,15 @@ extension DatabaseManager {
             try step(deleteStmt)
 
             if !chunks.isEmpty {
+                // Vectors land in the WRITE backend's column (swap target during
+                // a swap, else active). The legacy `embedding` column is frozen.
+                let writeCol = EmbeddingBackend.writeBackend().vectorColumn
                 let insertSQL = """
                     INSERT INTO unit_embedding_chunks
                         (id, document_id, chunk_index,
                          start_unit_id, start_intra_offset,
                          end_unit_id, end_intra_offset,
-                         text, embedding)
+                         text, \(writeCol))
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """
                 let insertStmt = try prepareStatement(sql: insertSQL)
@@ -2994,9 +3029,16 @@ extension DatabaseManager {
     /// Update just the embedding for a single chunk. Used by the
     /// migration coordinator's re-embed loop. Passing nil for
     /// `embedding` clears the vector (e.g. on switch + wipe).
-    func updateUnitEmbeddingChunkEmbedding(id: UUID, embedding: [Double]?) throws {
+    func updateUnitEmbeddingChunkEmbedding(
+        id: UUID,
+        embedding: [Double]?,
+        backend: EmbeddingBackend = EmbeddingBackend.writeBackend()
+    ) throws {
         dbLock.lock(); defer { dbLock.unlock() }
-        let sql = "UPDATE unit_embedding_chunks SET embedding = ? WHERE id = ?;"
+        // Writes the WRITE backend's column (swap target during a swap, else
+        // active). The coordinator passes the target explicitly; normal indexing
+        // (`UnitEmbeddingService`) takes the default = active backend.
+        let sql = "UPDATE unit_embedding_chunks SET \(backend.vectorColumn) = ? WHERE id = ?;"
         let stmt = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(stmt) }
         if let emb = embedding {
@@ -3010,9 +3052,12 @@ extension DatabaseManager {
         try step(stmt)
     }
 
-    /// Set `embedding = NULL` for every chunk in the table. Used by
-    /// `EmbedderMigrationCoordinator` at swap time; the re-embed
-    /// loop walks NULL rows back to filled-in.
+    /// DEPRECATED (2026-06-17 — per-backend columns). Operated on the legacy
+    /// single `embedding` column, which is now frozen and unused. The
+    /// non-destructive swap design never wipes a backend's column, so nothing
+    /// calls this anymore. Kept only so any out-of-tree reference still
+    /// compiles; do not use.
+    @available(*, deprecated, message: "Per-backend columns make wipe-on-swap obsolete; the legacy `embedding` column is frozen.")
     func nullAllUnitEmbeddingChunkEmbeddings() throws {
         dbLock.lock(); defer { dbLock.unlock() }
         try execute("UPDATE unit_embedding_chunks SET embedding = NULL;")
@@ -3028,10 +3073,14 @@ extension DatabaseManager {
     }
     func unitEmbeddingChunksNeedingEmbedding(
         for documentID: UUID? = nil,
-        limit: Int? = nil
+        limit: Int? = nil,
+        backend: EmbeddingBackend = EmbeddingBackend.writeBackend()
     ) throws -> [UnitEmbeddingChunkNeedingEmbedding] {
         dbLock.lock(); defer { dbLock.unlock() }
-        var sql = "SELECT id, text FROM unit_embedding_chunks WHERE embedding IS NULL"
+        // Rows still NULL in the WRITE backend's column — the ones a (re)embed
+        // pass must fill. Default = active backend (normal indexing); the swap
+        // coordinator passes its target.
+        var sql = "SELECT id, text FROM unit_embedding_chunks WHERE \(backend.vectorColumn) IS NULL"
         if documentID != nil { sql += " AND document_id = ?" }
         sql += " ORDER BY document_id, chunk_index"
         if let limit = limit { sql += " LIMIT \(limit)" }
@@ -3056,10 +3105,12 @@ extension DatabaseManager {
     /// Count of unit_embedding_chunks rows currently lacking an
     /// embedding. Used by the migration UI to report progress as
     /// `(total - needing) / total`.
-    func unitEmbeddingChunkNullCount() throws -> Int {
+    func unitEmbeddingChunkNullCount(
+        backend: EmbeddingBackend = EmbeddingBackend.writeBackend()
+    ) throws -> Int {
         dbLock.lock(); defer { dbLock.unlock() }
         let stmt = try prepareStatement(
-            sql: "SELECT COUNT(*) FROM unit_embedding_chunks WHERE embedding IS NULL;"
+            sql: "SELECT COUNT(*) FROM unit_embedding_chunks WHERE \(backend.vectorColumn) IS NULL;"
         )
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
@@ -3073,9 +3124,12 @@ extension DatabaseManager {
     /// enough indexed material to bother building a summary tree.
     func embeddedLeafChunkCount(for documentID: UUID) throws -> Int {
         dbLock.lock(); defer { dbLock.unlock() }
+        // Active backend's column — RAPTOR clusters over the vectors the
+        // retriever actually reads.
+        let activeVectorColumn = EmbeddingBackend.current().vectorColumn
         let stmt = try prepareStatement(sql: """
             SELECT COUNT(*) FROM unit_embedding_chunks
-            WHERE document_id = ? AND embedding IS NOT NULL AND chunk_index < ?;
+            WHERE document_id = ? AND \(activeVectorColumn) IS NOT NULL AND chunk_index < ?;
             """)
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
@@ -3106,11 +3160,18 @@ extension DatabaseManager {
     /// hybrid retriever — Swift-side cosine over every row's vector.
     func unitEmbeddingChunks(for documentID: UUID) throws -> [StoredUnitEmbeddingChunk] {
         dbLock.lock(); defer { dbLock.unlock() }
+        // Read the ACTIVE backend's column (`current()`), never `writeBackend()`:
+        // during a swap the active column is the complete one; the target column
+        // is half-built and Ask Posey is locked anyway. `.embedding` on the
+        // returned struct therefore always carries the active backend's vector,
+        // so every downstream consumer (HybridRetriever, RAPTOR) is correct with
+        // no change. Column name is from the fixed `EmbeddingBackend` enum.
+        let activeVectorColumn = EmbeddingBackend.current().vectorColumn
         let sql = """
             SELECT id, chunk_index,
                    start_unit_id, start_intra_offset,
                    end_unit_id, end_intra_offset,
-                   text, embedding
+                   text, \(activeVectorColumn)
             FROM unit_embedding_chunks
             WHERE document_id = ?
             ORDER BY chunk_index;

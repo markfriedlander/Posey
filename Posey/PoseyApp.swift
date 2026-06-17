@@ -127,6 +127,14 @@ struct PoseyApp: App {
                     // pattern keeps the asset download invisible to
                     // the user.
                     EmbeddingProvider.shared.warmUp()
+
+                    // 2026-06-17 — Resume an interrupted embedder swap (Rule 3).
+                    // If the app died or was backgrounded while a backend swap
+                    // was building the target column, the persisted swap marker
+                    // is still set: re-enter the swap, continue filling the
+                    // still-NULL target rows, and stay locked until complete.
+                    // No-op when no swap is pending.
+                    EmbedderMigrationCoordinator.shared.resumeInterruptedSwapIfNeeded(database: manager)
                 } catch {
                     databaseErrorMessage = error.localizedDescription
                 }

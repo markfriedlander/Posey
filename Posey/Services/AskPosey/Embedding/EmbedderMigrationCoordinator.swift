@@ -131,128 +131,138 @@ final class EmbedderMigrationCoordinator: ObservableObject {
         to target: EmbeddingBackend,
         database: DatabaseManager
     ) async {
-        // Phase 1 — Switch the flag + LOAD the target backend BEFORE
-        // touching any stored embedding. (D6 fix, 2026-05-31 — Rule 9A port
-        // of Hal's wait-for-isLoaded gate; full diff in
-        // docs-internal/EMBEDDER-MIGRATION-D6-HAL-DIFF-2026-05-31.md.)
+        // PER-BACKEND-COLUMN SWAP (2026-06-17 — Mark's final design). Replaces
+        // the destructive flip-then-wipe-then-refill flow. The invariants:
         //
-        // The defect this replaces: the old order wiped every embedding to
-        // NULL, flipped the backend, then raced the re-embed loop against a
-        // still-downloading Nomic asset — `embed()` returned nil for every
-        // chunk (warmUp had already set `nomicLoadAttempted`, so the per-chunk
-        // load short-circuited instead of waiting), 128 nils tripped the
-        // perma-nil guard → `.error`, and the store was left fully
-        // semantic-dark (backend = nomic, every row NULL, retrieval silently
-        // BM25-only). Reproduced live on the phone during the item-5 switch.
+        //   Rule 1 — never destroy the old set. We BUILD the target backend's
+        //     own column (NULL rows only); the active backend's column stays
+        //     fully intact. No `nullAll`. The retriever keeps reading the active
+        //     (complete) column the whole time.
+        //   Rule 2 — Ask Posey unreachable until the new set is 100% ready. The
+        //     swap marker (set below) drives `AskPoseyAvailability.isSwapInProgress`,
+        //     so the reader surfaces hide for the whole window — no query races
+        //     the half-built column, and we never need two backends loaded for
+        //     querying.
+        //   Rule 3 — resume an interrupted swap. The marker persists in
+        //     UserDefaults; `resumeInterruptedSwapIfNeeded` re-enters this path
+        //     at launch and continues filling still-NULL target rows.
         //
-        // Hal's invariant: NEVER run the re-embed loop against an unloaded
-        // model, and NEVER destroy the old embeddings until the new backend is
-        // proven loadable. So: flip the flag, warm-load the target (first-time
-        // Nomic downloads ~522 MB implicitly inside the load), and WAIT for
-        // `isLoaded` BEFORE wiping. On timeout / cancel / load failure, revert
-        // the flag and leave every embedding intact → prior working state
-        // preserved, zero semantic-dark window.
+        // The active-backend flag (`defaultsKey`) flips ONLY at completion
+        // ("flip the pointer"), so a crash / cancel / load-failure mid-swap
+        // leaves the prior working state perfectly intact: active backend
+        // unchanged, both columns intact, marker cleared (or left for resume).
+        //
+        // Decoupling that makes this work: setting the swap marker makes
+        // `EmbeddingBackend.writeBackend()` resolve to `target`, so the provider
+        // embeds in the target space and `isLoaded` reports the target's load
+        // state — WITHOUT moving the active/read pointer. (D6 invariant kept:
+        // never run the embed loop against an unloaded model; never destroy the
+        // old vectors until the new backend is proven loadable.)
 
         if Task.isCancelled {
             await MainActor.run { self.publish(.cancelled) }
             return
         }
 
-        let previousBackend = EmbeddingBackend.current()
+        // Mark the swap in flight: locks Ask Posey AND routes new embeds to the
+        // target space. Persisted → resumes at next launch if interrupted.
+        EmbeddingBackend.beginSwapMarker(target: target)
         await MainActor.run { self.publish(.switching) }
-        UserDefaults.standard.set(target.rawValue, forKey: EmbeddingBackend.defaultsKey)
 
-        // Warm-load the now-active backend off-main. NLContextual is
-        // OS-built-in (loads near-instantly); Nomic's first-time load performs
-        // the HuggingFace fetch itself.
+        // Warm-load the TARGET off-main (warmUp now keys on writeBackend == target).
+        // NLContextual is OS-built-in; Nomic's first-time load performs the
+        // ~522 MB HuggingFace fetch. We touch NO stored vector until the target
+        // is proven loadable.
         EmbeddingProvider.shared.warmUp()
 
-        // Wait for the bundle to be ready. Generous + cancellable because the
-        // first-time Nomic switch includes the ~522 MB download on this path
-        // (Hal's 60s cap assumes a pre-downloaded model — disk load only). A
-        // timeout or cancel reverts the flag so we stay on the prior working
-        // backend and NEVER reach the wipe.
+        // Wait for the target bundle to be ready. Generous + cancellable (the
+        // first-time Nomic switch includes the download on this path). On
+        // timeout / cancel: clear the marker (writeBackend reverts to the active
+        // backend), leave EVERY vector intact, never reach the build loop.
         let loadDeadline = Date().addingTimeInterval(target == .nlContextual ? 60 : 600)
         while !EmbeddingProvider.shared.isLoaded {
             if Task.isCancelled {
-                UserDefaults.standard.set(previousBackend.rawValue, forKey: EmbeddingBackend.defaultsKey)
+                EmbeddingBackend.clearSwapMarker()
                 await MainActor.run { self.publish(.cancelled) }
                 return
             }
             if Date() > loadDeadline {
-                UserDefaults.standard.set(previousBackend.rawValue, forKey: EmbeddingBackend.defaultsKey)
+                let stayingOn = EmbeddingBackend.current().rawValue
+                EmbeddingBackend.clearSwapMarker()
                 await MainActor.run {
                     self.publish(.error(
-                        "\(target.rawValue) didn't finish loading in time. No embeddings were changed — still using \(previousBackend.rawValue). Check your connection and try again."
+                        "\(target.rawValue) didn't finish loading in time. No embeddings were changed — still using \(stayingOn). Check your connection and try again."
                     ))
                 }
                 return
             }
-            // Surface a real loading/downloading phase. No fine-grained
-            // progress hook exists on the swift-embeddings load path, so the
-            // fraction is indeterminate (the UI renders a spinner/indeterminate
-            // bar for .downloading). Wiring HuggingFace's progress reporter in
-            // is a future polish.
             await MainActor.run {
                 self.publish(.downloading(modelID: target.rawValue, progressFraction: 0))
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
 
-        // Phase 2 — Bundle is loaded. NOW it is safe to wipe. Atomic NULL of
-        // every row in one statement.
-        await MainActor.run { self.publish(.switching) }
-        do {
-            try database.nullAllUnitEmbeddingChunkEmbeddings()
-        } catch {
-            let msg = error.localizedDescription
-            await MainActor.run {
-                self.publish(.error("Failed to clear stale embeddings: \(msg)"))
-            }
-            return
+        // Target loaded — BUILD its column (NULL rows only). No wipe.
+        guard let reEmbedded = await reEmbedTargetNullRows(target: target, database: database) else {
+            return   // terminal phase published + marker handled inside
         }
 
-        if Task.isCancelled {
-            await MainActor.run { self.publish(.cancelled) }
-            return
-        }
+        // COMPLETION — flip the pointer. Set active = target FIRST (reads move to
+        // the now-complete target column), THEN clear the marker (unlock). After
+        // both, current() == writeBackend() == target and isSwapInProgress == false.
+        UserDefaults.standard.set(target.rawValue, forKey: EmbeddingBackend.defaultsKey)
+        EmbeddingBackend.clearSwapMarker()
 
-        // Phase 3 — Re-embed every NULL row under the new (loaded) backend.
-        await reEmbedAllNullRows(database: database)
-
-        // 2026-05-31 — Ask Posey unlock signal. A successful switch to Nomic
-        // (the bundle actually loaded — `isLoaded` guards against a failed
-        // download falsely unlocking) marks Nomic provisioned. Sticky: drives
-        // `AskPoseyAvailability.isUnlocked` and persists even if the user later
-        // switches the active embedder back to NLContextual.
-        if target == .nomic, EmbeddingProvider.shared.isLoaded {
+        // Ask Posey unlock signal — a completed Nomic build marks it provisioned
+        // (sticky; persists even if the user later reverts the active embedder).
+        if target == .nomic {
             AskPoseyAvailability.markNomicProvisioned()
         }
+
+        await MainActor.run { self.publish(.done(reEmbedded: reEmbedded)) }
     }
 
-    /// Walk every chunk with `embedding IS NULL` and fill it in
-    /// using the active backend (which by now is `target`). Posts
-    /// `.migrating(processed, total)` updates as it goes. On any
-    /// failure for a single row, the row is skipped (left NULL)
-    /// and the migration continues — the next swap or re-run can
-    /// pick it up. The final phase reflects only the count
-    /// successfully re-embedded.
-    nonisolated private func reEmbedAllNullRows(database: DatabaseManager) async {
+    /// Resume an interrupted swap at launch (Rule 3). If a swap marker is set
+    /// (the app died or was backgrounded mid-swap), re-enter the swap for that
+    /// target — `runSwitch` warm-loads it and continues filling its still-NULL
+    /// rows from where it left off, staying locked until complete. No-op when no
+    /// swap is pending. Idempotent: `beginSwitch`'s in-flight guard prevents a
+    /// double run if a swap is already active this launch.
+    func resumeInterruptedSwapIfNeeded(database: DatabaseManager) {
+        guard let target = EmbeddingBackend.swapTarget() else { return }
+        beginSwitch(to: target, database: database)
+    }
+
+    /// Fill every row whose TARGET backend column is NULL, embedding under the
+    /// target backend (which `writeBackend()` now resolves to, so the provider
+    /// produces target-space vectors). Posts `.migrating(processed, total)` as
+    /// it goes. A single-row failure leaves that row NULL and continues — a
+    /// later resume/run picks it up. Re-fetches the NULL set each batch, so
+    /// rows imported MID-SWAP (their target column NULL) are drained too.
+    ///
+    /// Returns the count embedded on SUCCESS (the caller then flips the pointer
+    /// + publishes `.done`), or `nil` on early termination (cancel/error — this
+    /// method has already published the terminal phase AND cleared the swap
+    /// marker, so the caller just returns).
+    nonisolated private func reEmbedTargetNullRows(
+        target: EmbeddingBackend,
+        database: DatabaseManager
+    ) async -> Int? {
         let total: Int
         do {
-            total = try database.unitEmbeddingChunkNullCount()
+            total = try database.unitEmbeddingChunkNullCount(backend: target)
         } catch {
+            EmbeddingBackend.clearSwapMarker()
             let msg = error.localizedDescription
             await MainActor.run {
                 self.publish(.error("Failed to count chunks: \(msg)"))
             }
-            return
+            return nil
         }
 
-        guard total > 0 else {
-            await MainActor.run { self.publish(.done(reEmbedded: 0)) }
-            return
-        }
+        // Target column already complete (e.g. a resume that finished, or a
+        // no-op re-target). Caller flips the pointer + publishes .done.
+        guard total > 0 else { return 0 }
 
         await MainActor.run { self.publish(.migrating(processed: 0, total: total)) }
 
@@ -276,19 +286,21 @@ final class EmbedderMigrationCoordinator: ObservableObject {
 
         while true {
             if Task.isCancelled {
+                EmbeddingBackend.clearSwapMarker()
                 await MainActor.run { self.publish(.cancelled) }
-                return
+                return nil
             }
 
             let batch: [DatabaseManager.UnitEmbeddingChunkNeedingEmbedding]
             do {
-                batch = try database.unitEmbeddingChunksNeedingEmbedding(limit: batchSize)
+                batch = try database.unitEmbeddingChunksNeedingEmbedding(limit: batchSize, backend: target)
             } catch {
+                EmbeddingBackend.clearSwapMarker()
                 let msg = error.localizedDescription
                 await MainActor.run {
                     self.publish(.error("Failed to fetch chunk batch: \(msg)"))
                 }
-                return
+                return nil
             }
             if batch.isEmpty { break }
 
@@ -304,8 +316,9 @@ final class EmbedderMigrationCoordinator: ObservableObject {
             var batchSuccesses = 0
             for row in batch {
                 if Task.isCancelled {
+                    EmbeddingBackend.clearSwapMarker()
                     await MainActor.run { self.publish(.cancelled) }
-                    return
+                    return nil
                 }
                 // Global serial lane — embedder migration re-embeds the whole
                 // library; route each embed through the one lane so it
@@ -318,7 +331,7 @@ final class EmbedderMigrationCoordinator: ObservableObject {
                 processed += 1
                 if let vector {
                     do {
-                        try database.updateUnitEmbeddingChunkEmbedding(id: row.id, embedding: vector)
+                        try database.updateUnitEmbeddingChunkEmbedding(id: row.id, embedding: vector, backend: target)
                         successfullyEmbedded += 1
                         batchSuccesses += 1
                     } catch {
@@ -339,20 +352,21 @@ final class EmbedderMigrationCoordinator: ObservableObject {
             if batchSuccesses == 0 {
                 consecutiveZeroSuccessBatches += 1
                 if consecutiveZeroSuccessBatches >= maxZeroSuccessBatches {
+                    EmbeddingBackend.clearSwapMarker()
                     await MainActor.run {
                         self.publish(.error(
                             "Embedder returned nil for \(maxZeroSuccessBatches * batchSize) consecutive chunks. The model may still be downloading. Try again in a moment."
                         ))
                     }
-                    return
+                    return nil
                 }
             } else {
                 consecutiveZeroSuccessBatches = 0
             }
         }
 
-        let finalCount = successfullyEmbedded
-        await MainActor.run { self.publish(.done(reEmbedded: finalCount)) }
+        // Target column fully built — caller flips the pointer + publishes .done.
+        return successfullyEmbedded
     }
 }
 

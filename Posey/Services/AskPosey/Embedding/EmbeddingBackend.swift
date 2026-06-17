@@ -57,6 +57,53 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
     /// NLContextual rather than re-crash on the same backend.
     nonisolated static let crashGuardKey = "askPosey.embeddingBackend.loadInFlight"
 
+    // MARK: - Backend swap markers (2026-06-17 — per-backend columns)
+
+    /// Key holding the `rawValue` of the backend a swap is currently
+    /// filling, or absent when no swap is in flight. Persisted so an
+    /// interrupted swap RESUMES on the next launch (Rule 3). Distinct
+    /// from `defaultsKey`: `defaultsKey` is the ACTIVE backend the
+    /// retriever reads (only flipped at swap COMPLETION); this is the
+    /// in-flight TARGET being built. While this is set, Ask Posey is
+    /// locked (`AskPoseyAvailability.isUnlocked` gains `&& !isSwapInProgress`).
+    nonisolated static let swapTargetKey = "askPosey.embeddingBackend.swapTarget"
+
+    /// The backend a swap is currently building, or nil if none. Reading
+    /// this is how launch-resume detects an interrupted swap.
+    nonisolated static func swapTarget() -> EmbeddingBackend? {
+        guard let raw = UserDefaults.standard.string(forKey: swapTargetKey) else { return nil }
+        return EmbeddingBackend(rawValue: raw)
+    }
+
+    /// True while a swap is building the target backend's column. The
+    /// active backend (and its complete column) stays readable throughout;
+    /// only the reader-facing Ask Posey surfaces are gated off during this
+    /// window so no query races a half-built column.
+    nonisolated static var isSwapInProgress: Bool {
+        UserDefaults.standard.string(forKey: swapTargetKey) != nil
+    }
+
+    nonisolated static func beginSwapMarker(target: EmbeddingBackend) {
+        UserDefaults.standard.set(target.rawValue, forKey: swapTargetKey)
+    }
+
+    nonisolated static func clearSwapMarker() {
+        UserDefaults.standard.removeObject(forKey: swapTargetKey)
+    }
+
+    /// The backend that NEW embeddings are produced in and written to — the
+    /// swap TARGET while a swap is building (so fresh vectors land in the
+    /// column being filled), otherwise the active backend. Decoupled from
+    /// `current()` on purpose: `current()` is the backend the RETRIEVER reads
+    /// (the complete column, only flipped at swap completion), while this is
+    /// the backend `EmbeddingProvider` embeds with. During a swap the two
+    /// differ — reads stay on the old complete column, writes fill the new one
+    /// — which is exactly what lets the swap be non-destructive (Rule 1) and
+    /// keeps retrieval correct without ever reading a half-built column.
+    nonisolated static func writeBackend() -> EmbeddingBackend {
+        return swapTarget() ?? current()
+    }
+
     /// Resolved active backend, honoring the crash guard. Reads
     /// `defaultsKey` on each call; cheap. Call
     /// `applyCrashGuardAtLaunch()` once at startup before any
@@ -120,6 +167,19 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
         switch self {
         case .nlContextual: return 512
         case .nomic:        return 768
+        }
+    }
+
+    /// The `unit_embedding_chunks` BLOB column that stores THIS backend's
+    /// vectors. Each backend owns a permanent column so both vector sets
+    /// coexist — a swap fills the target's column without destroying the
+    /// other, and removing a backend is a free revert (flip the active flag,
+    /// no re-embed). The name is from this fixed enum (never user input), so
+    /// interpolating it into SQL is safe.
+    nonisolated var vectorColumn: String {
+        switch self {
+        case .nlContextual: return "embedding_nl"
+        case .nomic:        return "embedding_nomic"
         }
     }
 

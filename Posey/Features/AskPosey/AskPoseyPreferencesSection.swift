@@ -22,6 +22,12 @@ struct AskPoseyPreferencesSection: View {
     @AppStorage(ModelCatalog.defaultsKey)
     private var selectedModelID: String = ModelCatalog.appleFoundation.id
 
+    // 2026-06-17 — live state for the "Ask Posey — Ready / Upgrading / Reading
+    // ahead" status row. The app-wide view of readiness when you're NOT in a
+    // reader (the slim remnant of the Status-section idea).
+    @ObservedObject private var migration = EmbedderMigrationCoordinator.shared
+    @ObservedObject private var indexingTracker = IndexingTracker.sharedForChat
+
     /// Tapped (or antenna-driven) "Browse Model Library". The navigation
     /// state + `.navigationDestination` live on the host
     /// (`ReaderPreferencesSheet`), not here: this section can be below the
@@ -45,7 +51,11 @@ struct AskPoseyPreferencesSection: View {
 
     var body: some View {
         Section {
-            if AskPoseyAvailability.isUnlocked {
+            // Key on isSetUp (has models), NOT isUnlocked — so a doc indexing
+            // or an embedder swap (both make isUnlocked false) shows the live
+            // status + settings, not the "Set Up" invitation.
+            if AskPoseyAvailability.isSetUp {
+                statusRow
                 unlockedRows
             } else {
                 invitationRow
@@ -53,12 +63,55 @@ struct AskPoseyPreferencesSection: View {
         } header: {
             Label("Ask Posey", systemImage: "sparkles")
         } footer: {
-            if AskPoseyAvailability.isUnlocked {
+            if AskPoseyAvailability.isSetUp {
                 Text("Choose which on-device model writes Ask Posey's answers, how widely it searches, and which embedder powers retrieval.")
             } else {
                 Text("A private, fully offline reading companion. Free — it just needs a one-time download to set up.")
             }
         }
+    }
+
+    // MARK: - Status row (app-wide readiness)
+
+    /// One honest line: is Ask Posey ready right now, and if not, what's it
+    /// doing? A colored dot + short status — reader-serving, not a dashboard.
+    private var statusRow: some View {
+        let s = status
+        return HStack(spacing: 10) {
+            Circle()
+                .fill(s.tint)
+                .frame(width: 8, height: 8)
+            Text(s.text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+        }
+        .frame(minHeight: 28)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Ask Posey status: \(s.text)")
+        .accessibilityIdentifier("preferences.askPosey.status")
+    }
+
+    /// Derived readiness: swap in flight → upgrading; any document embedding →
+    /// reading ahead; RAPTOR building → deepening; otherwise ready. Green when
+    /// usable now, orange while it's working toward ready.
+    private var status: (text: String, tint: Color) {
+        switch migration.currentPhase {
+        case .migrating(let processed, let total):
+            let pct = total > 0 ? Int((Double(processed) / Double(total) * 100).rounded()) : 0
+            return ("Upgrading — \(pct)%", .orange)
+        case .switching, .downloading:
+            return ("Upgrading…", .orange)
+        case .idle, .done, .cancelled, .error:
+            break
+        }
+        if let p = indexingTracker.indexingProgress.values.first(where: { $0.total > 0 }) {
+            return ("Reading ahead — \(Int((p.fraction * 100).rounded()))%", .orange)
+        }
+        if !indexingTracker.reReadingDocumentIDs.isEmpty {
+            return ("Ready — still deepening in the background", .green)
+        }
+        return ("Ready", .green)
     }
 
     // MARK: - Locked: the invitation on-ramp

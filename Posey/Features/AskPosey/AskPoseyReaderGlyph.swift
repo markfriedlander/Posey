@@ -72,6 +72,18 @@ struct AskPoseyReaderGlyph: View {
                     .remoteRegister("reader.askPosey") { onOpen() }
                     .remoteRegister("reader.askPosey.askSpecific") { onOpen() }
             )
+            // Advance the variant seed on the same slow cadence as the pill so
+            // the popover hint CYCLES through all the variants over time rather
+            // than freezing on the one it first rolled (a system Menu can't host
+            // its own timer; this drives it from the glyph instead). Runs while
+            // the glyph is mounted; cancels when the reader closes.
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(20))
+                    if Task.isCancelled { return }
+                    variantSeed &+= 1
+                }
+            }
     }
 
     @ViewBuilder

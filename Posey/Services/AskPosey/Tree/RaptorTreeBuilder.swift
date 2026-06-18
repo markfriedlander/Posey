@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationModels)
-import FoundationModels
-#endif
 
 // ========== BLOCK 01: RAPTOR TREE BUILDER - START ==========
 
@@ -28,8 +25,9 @@ public struct RaptorSummaryNode: Sendable {
 }
 
 /// Builds one layer of the RAPTOR tree: cluster the input nodes (cosine
-/// k-means), summarize each cluster with the **active model** (AFM by
-/// default), and **verify every summary against its own source** before it
+/// k-means), summarize each cluster with the **active model** (the downloaded
+/// MLX model when present, else AFM — via `ModelCatalog.answerModel()`), and
+/// **verify every summary against its own source** before it
 /// is allowed into the pool. Verification is first-class and non-optional:
 /// a hallucinated summary in the retrieval pool produces a confidently-wrong
 /// answer with the same fluency as a correct one, so each summary's
@@ -188,48 +186,53 @@ public actor RaptorTreeBuilder {
         return out
     }
 
-    // MARK: - Summarization (active model; AFM guided generation)
+    // MARK: - Summarization (active model via LLMService: MLX-first, AFM fallback)
 
-    #if canImport(FoundationModels)
+    /// Summarize a cluster's concatenated source into a faithful ~80–130 word
+    /// abstract, using the ACTIVE model (`ModelCatalog.answerModel()` → the
+    /// downloaded MLX model when present, else AFM). Free-text + trim; the caller
+    /// verifies the result (cosine + entity grounding), so output hygiene is
+    /// backstopped and `@Generable`'s only real benefit here (a clean single
+    /// string) isn't needed.
+    ///
+    /// **Why route through `answerModel()` (2026-06-18, Mark).** RAPTOR was the
+    /// lone summarizer still hardcoded to AFM via `@Generable`; AFM refused
+    /// benign literary/poetry passages as "sensitive content" (Dickinson), and
+    /// silently summarizing an MLX-for-privacy user's document through AFM (→
+    /// possibly Apple PCC) contradicted the 2026-05-29 privacy decision that
+    /// moved conversation summaries to the active model. Now:
+    ///   - MLX users → private, on-device summaries, no AFM content refusals;
+    ///   - no-MLX users → AFM, so RAPTOR still works pre-model-download.
     private func summarize(source: String) async -> String? {
-        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-            let model = SystemLanguageModel.default
-            guard model.availability == .available else { return nil }
-            let instructions = """
-            You summarize a group of related passages from a book or document \
-            so a reading companion can find them later. Write a faithful, \
-            concise summary of what the passages actually say — the characters, \
-            events, topics, and arguments present in them. Never invent details \
-            not in the passages. Do not editorialize or add interpretation.
-            """
-            let session = LanguageModelSession(model: model, instructions: instructions)
-            do {
-                let response = try await session.respond(
-                    to: "Passages:\n\n\(source)",
-                    generating: ClusterSummaryPayload.self
-                )
-                let s = response.content.summary.trimmingCharacters(in: .whitespacesAndNewlines)
-                return s.isEmpty ? nil : s
-            } catch {
-                dbgLog("RaptorTreeBuilder: AFM summarize failed: %@", "\(error)")
-                return nil
-            }
+        let model = ModelCatalog.answerModel()
+        let instructions = """
+        You summarize a group of related passages from a book or document so a \
+        reading companion can find them later. Write a faithful, concise summary \
+        (about 80–130 words) of what the passages actually say — the characters, \
+        events, topics, and arguments present in them. Never invent details not \
+        in the passages. Do not editorialize or add interpretation. Output only \
+        the summary itself, with no preamble or labels.
+        """
+        let messages: [ChatMessage] = [
+            ChatMessage(role: .system, content: instructions),
+            ChatMessage(role: .user, content: "Passages:\n\n\(source)")
+        ]
+        var accumulated = ""
+        do {
+            let stream = LLMService.shared.streamChat(
+                messages: messages,
+                model: model,
+                options: LLMGenerationOptions(temperature: 0.2)
+            )
+            for try await snapshot in stream { accumulated = snapshot }
+        } catch {
+            dbgLog("RaptorTreeBuilder: summarize failed (model=%@): %@",
+                   model.id as NSString, "\(error)")
+            return nil
         }
-        return nil
+        let s = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : s
     }
-    #else
-    private func summarize(source: String) async -> String? { nil }
-    #endif
 }
 
-#if canImport(FoundationModels)
-/// Guided-generation payload — forces AFM to return a clean summary string
-/// (free-text summarization on AFM rambles or refuses; @Generable doesn't).
-@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
-@Generable
-struct ClusterSummaryPayload: Sendable {
-    @Guide(description: "A faithful, concise summary (about 80-130 words) of what this group of passages is about — the characters, events, topics, and arguments actually present. Only what the passages say; invent nothing; no editorializing.")
-    let summary: String
-}
-#endif
 // ========== BLOCK 01: RAPTOR TREE BUILDER - END ==========

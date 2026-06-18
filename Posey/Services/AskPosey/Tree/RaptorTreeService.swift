@@ -161,10 +161,11 @@ actor RaptorTreeService {
             return
         }
         // 2026-06-18 — route bootstrap rebuilds through the single document
-        // queue (embed is a no-op for these already-embedded docs; the tree
-        // then builds in the same serial slot) so a launch sweep of N docs
-        // can't fan out heavy work — it drains one document at a time.
-        for id in candidates { await DocumentIndexingQueue.shared.enqueue(id) }
+        // queue's RAPTOR (tier-2) lane: these docs are already embedded, so they
+        // skip the embed pass and just need a tree. The queue drains them one at
+        // a time, after any pending embeds — so a launch sweep of N docs can't
+        // fan out heavy work AND new imports still embed first.
+        for id in candidates { await DocumentIndexingQueue.shared.enqueueRaptorOnly(id) }
         dbgLog("RaptorTreeService: bootstrap enqueued %d document(s)", candidates.count)
     }
 

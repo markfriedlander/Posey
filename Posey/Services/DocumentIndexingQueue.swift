@@ -2,29 +2,38 @@ import Foundation
 
 // ========== BLOCK 01: DOCUMENT INDEXER SEAM - START ==========
 
-/// The per-document indexing work that `DocumentIndexingQueue` serializes.
+/// Which pass of the pipeline a document is in. Embedding (tier 1) makes a
+/// document Ask-able; RAPTOR (tier 2) is the lower-priority "improves in the
+/// background" deepening.
+enum DocumentIndexingPhase: Sendable {
+    case embedding
+    case raptor
+}
+
+/// The per-document indexing work that `DocumentIndexingQueue` serializes,
+/// split into the two passes so the queue can run ALL embeddings before ANY
+/// RAPTOR (see the queue's two-priority model below).
 ///
-/// **Why a seam.** Production wires this to the real pipeline — build chunks +
-/// embed every leaf (`UnitEmbeddingService`) then build the summary tree
-/// (`RaptorTreeService`). Tests inject a fake to prove the queue's ordering and
-/// one-at-a-time guarantee WITHOUT a database or any model, so the central
-/// safety property is verifiable entirely off-device.
+/// **Why a seam.** Production wires this to the real pipeline — `embed` builds
+/// chunks + embeds every leaf (`UnitEmbeddingService`), `buildRaptor` builds the
+/// summary tree (`RaptorTreeService`). Tests inject a fake to prove the queue's
+/// ordering and one-at-a-time guarantee WITHOUT a database or any model, so the
+/// central safety property is verifiable entirely off-device.
 ///
-/// **Contract.** `indexDocument` MUST run the document's WHOLE pipeline and
-/// return only when that document is fully indexed (or cancelled). That return
-/// is what makes "one document fully done before the next starts" real — the
-/// queue awaits it before popping the next ID.
+/// **Contract.** Each method MUST run its pass to completion and return only
+/// when done (or cancelled). The queue awaits that return before moving on, so
+/// only one pass of one document runs at any instant.
 ///
-/// **Cooperative cancellation.** The implementation MUST honor `Task`
-/// cancellation: check `Task.isCancelled` at fine granularity (every chunk /
-/// between summaries) and return promptly when asked. The escape switch and
-/// per-document cancel both work by cancelling the in-flight `Task`, so a halt
-/// only lands as fast as the implementation checks — fine-grained checks are
-/// what let a halt land in ~1–2s even under sustained load (the specific
-/// failure of the antenna `RESET_ALL` during the 2026-06-17 incident was that
-/// it had no fast cooperative-cancel path and waited on the pegged phone).
+/// **Cooperative cancellation.** Implementations MUST honor `Task` cancellation:
+/// check `Task.isCancelled` at fine granularity (every chunk / between
+/// summaries) and return promptly. The escape switch and per-document cancel
+/// both work by cancelling the in-flight `Task`, so a halt only lands as fast as
+/// the implementation checks — fine-grained checks are what let a halt land in
+/// ~1–2s even under sustained load (the antenna `RESET_ALL` failure during the
+/// 2026-06-17 incident was that it had no fast cooperative-cancel path).
 protocol DocumentIndexer: Sendable {
-    func indexDocument(_ documentID: UUID) async
+    func embed(_ documentID: UUID) async
+    func buildRaptor(_ documentID: UUID) async
 }
 
 // ========== BLOCK 01: DOCUMENT INDEXER SEAM - END ==========
@@ -41,50 +50,58 @@ protocol DocumentIndexer: Sendable {
 /// chunk-by-chunk, and it has no admission control. On 2026-06-17 a three-book
 /// batch import poured ~5,000 embed ops + RAPTOR through the lane back-to-back
 /// and the phone overheated to unusable. The lane's guarantee is "one op at a
-/// time," never "okay to dump 5,000 ops." This queue adds the missing layer:
-/// it admits **exactly ONE document at a time** and runs that document's entire
-/// pipeline (extract → embed → RAPTOR) to completion before the next document
-/// starts — so no operator action (antenna or file-picker, 1 doc or 10) can
-/// stack work on the device. `HeavyWorkLane` stays underneath as
-/// defense-in-depth; this queue is the primary admission gate.
+/// time," never "okay to dump 5,000 ops." This queue is the missing admission
+/// layer: **exactly one document-pass runs at a time**, so no operator action
+/// (antenna or file-picker, 1 doc or 10) can stack work on the device.
+/// `HeavyWorkLane` stays underneath as defense-in-depth.
 ///
-/// **State model.** Mirrors `RaptorTreeService` / `PDFEnhancementService`
-/// deliberately (same idiom): a FIFO `queue`, a `currentDocumentID`, a
-/// `cancelled` set, and a `draining` re-entrancy guard. The one addition is
-/// `currentJob` — the `Task` running the in-flight document — held so the
-/// escape switch / per-doc cancel can cancel it and halt mid-document.
+/// **Two-priority model (2026-06-18, Mark).** To get the user the best
+/// experience fastest while respecting hardware, work runs in two tiers, both
+/// drained one-document-at-a-time through this single gate:
+///   1. **Embedding (high priority)** — embed every document, in received
+///      order, so each becomes Ask-able as soon as ITS embedding finishes. The
+///      whole library is usable before any deepening starts.
+///   2. **RAPTOR (low priority)** — only once the embed lane is empty, build
+///      summary trees for documents that lack one, in received order.
+/// A document imported mid-RAPTOR joins the embed lane and is picked up at the
+/// next document boundary (we never interrupt a pass mid-document), so embedding
+/// always preempts deepening. This is purely a reordering — still exactly one
+/// heavy pass at a time, so the thermal/no-saturation guarantee is unchanged.
 ///
-/// **Not yet wired (increment 1a).** This actor and its proof tests land first,
-/// unwired, changing no runtime behavior. Increment 1b injects the live indexer
-/// (awaitable embed + RAPTOR) and reroutes the importer enqueue call-sites
-/// through `enqueue`. Pillar 2 (thermal pacing) lives inside the live indexer's
-/// per-chunk loop; Pillar 4 (queue-aware status) reads `snapshot()`.
+/// **State model.** Two FIFO lanes (`embedQueue` / `raptorQueue`), a
+/// `currentDocumentID` + `currentPhase`, a `cancelled` set, a `draining`
+/// re-entrancy guard, and `currentJob` (the in-flight `Task`, held so the escape
+/// switch / per-doc cancel can halt it mid-pass).
 actor DocumentIndexingQueue {
 
     // MARK: Shared instance
 
     /// App-wide singleton. Configured once at launch via `configure(indexer:)`.
-    /// Before configuration `enqueue` runs each document as an instant no-op
-    /// (nothing to index without a wired pipeline), so it is always safe to
-    /// call.
+    /// Before configuration, enqueued work runs as an instant no-op (nothing to
+    /// index without a wired pipeline), so it is always safe to call.
     static let shared = DocumentIndexingQueue()
 
     // MARK: Injected work
 
     private var indexer: DocumentIndexer?
 
-    // MARK: State (mirrors RaptorTreeService / PDFEnhancementService)
+    // MARK: State
 
-    /// FIFO of document IDs awaiting full indexing.
-    private var queue: [UUID] = []
-    /// The document currently indexing, or nil if idle.
+    /// Tier-1 FIFO: documents awaiting embedding (high priority).
+    private var embedQueue: [UUID] = []
+    /// Tier-2 FIFO: documents awaiting a RAPTOR build (low priority).
+    private var raptorQueue: [UUID] = []
+    /// The document currently being worked, or nil if idle.
     private var currentDocumentID: UUID?
-    /// IDs cancelled (per-doc delete / escape switch) — checked before work.
+    /// The pass the current document is in.
+    private var currentPhase: DocumentIndexingPhase?
+    /// IDs cancelled (per-doc delete / escape switch) — checked before work and
+    /// before scheduling the RAPTOR follow-up.
     private var cancelled: Set<UUID> = []
     /// True while `drainQueue` is iterating — only one drain loop at a time.
     private var draining = false
-    /// The `Task` running the in-flight document's pipeline. Cancelled by the
-    /// escape switch / per-doc cancel so a halt lands fast even mid-document.
+    /// The `Task` running the in-flight pass. Cancelled by the escape switch /
+    /// per-doc cancel so a halt lands fast even mid-pass.
     private var currentJob: Task<Void, Never>?
 
     /// Internal (not private) so `@testable` unit tests can construct a fresh,
@@ -101,84 +118,127 @@ actor DocumentIndexingQueue {
 
     // MARK: Public API
 
-    /// Enqueue a document for full background indexing. Idempotent — an ID
-    /// already queued or in flight is skipped. The work runs strictly after
-    /// every document ahead of it has fully finished.
+    /// Enqueue a document for indexing, starting at the EMBED pass (tier 1).
+    /// Idempotent. A pending RAPTOR for the same document is superseded — a
+    /// (re-)embed rebuilds the chunks, so its tree must be rebuilt afterward.
     func enqueue(_ documentID: UUID) {
-        if currentDocumentID == documentID || queue.contains(documentID) { return }
         cancelled.remove(documentID)
-        queue.append(documentID)
-        dbgLog("DocumentIndexingQueue: enqueued %@ (queue=%d)",
-               documentID.uuidString, queue.count)
+        raptorQueue.removeAll { $0 == documentID }   // re-embed supersedes a pending tree
+        if currentDocumentID == documentID && currentPhase == .embedding { return }
+        if embedQueue.contains(documentID) { return }
+        embedQueue.append(documentID)
+        dbgLog("DocumentIndexingQueue: enqueued(embed) %@ (embed=%d raptor=%d)",
+               documentID.uuidString, embedQueue.count, raptorQueue.count)
         Task { await drainQueue() }
     }
 
-    /// Cancel any queued or in-flight indexing for one document (document
-    /// delete). If it is the in-flight document, its `Task` is cancelled so it
-    /// stops promptly; queued entries are simply removed.
+    /// Enqueue a document directly into the RAPTOR pass (tier 2) — for the
+    /// on-launch sweep of documents that are already embedded but have no tree
+    /// yet. Skips the redundant embed no-op. Idempotent.
+    func enqueueRaptorOnly(_ documentID: UUID) {
+        cancelled.remove(documentID)
+        if currentDocumentID == documentID && currentPhase == .raptor { return }
+        if raptorQueue.contains(documentID) || embedQueue.contains(documentID) { return }
+        raptorQueue.append(documentID)
+        dbgLog("DocumentIndexingQueue: enqueued(raptor) %@ (embed=%d raptor=%d)",
+               documentID.uuidString, embedQueue.count, raptorQueue.count)
+        Task { await drainQueue() }
+    }
+
+    /// Cancel any queued or in-flight work for one document (document delete).
+    /// If it is the in-flight document, its `Task` is cancelled so it stops
+    /// promptly; queued entries (either lane) are removed.
     func cancel(_ documentID: UUID) {
         cancelled.insert(documentID)
-        queue.removeAll { $0 == documentID }
+        embedQueue.removeAll { $0 == documentID }
+        raptorQueue.removeAll { $0 == documentID }
         if currentDocumentID == documentID { currentJob?.cancel() }
         dbgLog("DocumentIndexingQueue: cancelled %@", documentID.uuidString)
     }
 
     /// THE ESCAPE SWITCH. Halt all background indexing immediately: cancel the
     /// in-flight document's `Task` (stops heavy work within a fine-grained
-    /// cancellation check — ~1–2s even under load) and clear the queue.
+    /// cancellation check — ~1–2s even under load) and clear BOTH lanes.
     ///
     /// Returns every affected document ID (the in-flight one plus everything
-    /// queued) so the caller can discard each document's partial index state
-    /// and mark it "needs indexing," then re-index them later through THIS same
-    /// safe queue. By design this does NOT auto-resume — the device is hot when
-    /// the user taps it, so re-indexing waits for the caller (once thermal is
-    /// nominal again, or on a deliberate tap). Document text is untouched
-    /// (written atomically at import, before any indexing), so only the index
-    /// is expunged; documents remain fully readable.
+    /// queued in either lane) so the caller can discard partial index state and
+    /// re-index later through THIS same safe queue. By design it does NOT
+    /// auto-resume — the device is hot when the user taps it. Document text is
+    /// untouched (written atomically at import), so only the index is expunged.
     @discardableResult
     func expungeAll() -> [UUID] {
         var affected: [UUID] = []
         if let current = currentDocumentID { affected.append(current) }
-        affected.append(contentsOf: queue)
+        affected.append(contentsOf: embedQueue)
+        affected.append(contentsOf: raptorQueue)
+        var seen = Set<UUID>()
+        affected = affected.filter { seen.insert($0).inserted }   // dedupe, keep order
         for id in affected { cancelled.insert(id) }
-        queue.removeAll()
+        embedQueue.removeAll()
+        raptorQueue.removeAll()
         currentJob?.cancel()
         dbgLog("DocumentIndexingQueue: EXPUNGE — halted + cleared %d document(s)",
                affected.count)
         return affected
     }
 
-    /// Ordered snapshot for the queue-aware status surface (Pillar 4) and
-    /// diagnostics: the document currently indexing (if any) followed by the
-    /// queued IDs in the exact order they will run.
-    func snapshot() -> (current: UUID?, queue: [UUID]) {
-        (currentDocumentID, queue)
+    /// Ordered snapshot for the queue-aware status surface (Pillar 4 / library
+    /// indicators) and diagnostics: the document currently working and its pass,
+    /// plus both lanes in the exact order they will run.
+    func snapshot() -> (current: UUID?, phase: DocumentIndexingPhase?,
+                        embedQueue: [UUID], raptorQueue: [UUID]) {
+        (currentDocumentID, currentPhase, embedQueue, raptorQueue)
     }
 
     // MARK: Drain loop
 
-    /// Pop documents off the queue and fully index each, one at a time.
-    /// Re-entrant-safe via `draining`. The in-flight document runs in its own
-    /// `Task` (`currentJob`) so a cancel/expunge can stop it mid-document while
-    /// this loop is suspended on `await job.value`.
+    /// Run document-passes one at a time, embed lane fully before raptor lane.
+    /// Re-entrant-safe via `draining`. The in-flight pass runs in its own `Task`
+    /// (`currentJob`) so a cancel/expunge can stop it mid-pass while this loop is
+    /// suspended on `await job.value`.
     private func drainQueue() async {
         if draining { return }
         draining = true
         defer { draining = false }
 
-        while !queue.isEmpty {
-            let next = queue.removeFirst()
-            if cancelled.contains(next) { cancelled.remove(next); continue }
-            currentDocumentID = next
+        while !embedQueue.isEmpty || !raptorQueue.isEmpty {
+            // Embedding always outranks RAPTOR — a newly imported document
+            // (embed lane) preempts pending deepening at this boundary.
+            let id: UUID
+            let phase: DocumentIndexingPhase
+            if !embedQueue.isEmpty {
+                id = embedQueue.removeFirst(); phase = .embedding
+            } else {
+                id = raptorQueue.removeFirst(); phase = .raptor
+            }
+            if cancelled.contains(id) { cancelled.remove(id); continue }
+
+            currentDocumentID = id
+            currentPhase = phase
+            dbgLog("DocumentIndexingQueue: RUN %@ %@ (embed=%d raptor=%d)",
+                   phase == .embedding ? "embed" : "raptor",
+                   id.uuidString, embedQueue.count, raptorQueue.count)
             let work = indexer
             let job = Task {
-                if let work { await work.indexDocument(next) }
+                if let work {
+                    switch phase {
+                    case .embedding: await work.embed(id)
+                    case .raptor:    await work.buildRaptor(id)
+                    }
+                }
             }
             currentJob = job
             await job.value
             currentJob = nil
             currentDocumentID = nil
-            cancelled.remove(next)
+            currentPhase = nil
+
+            // After a successful EMBED, schedule this document's RAPTOR pass
+            // (low priority) — unless it was cancelled mid-embed.
+            if phase == .embedding && !cancelled.contains(id) {
+                raptorQueue.append(id)
+            }
+            cancelled.remove(id)
         }
     }
 }
@@ -188,27 +248,22 @@ actor DocumentIndexingQueue {
 
 // ========== BLOCK 03: LIVE DOCUMENT INDEXER - START ==========
 
-/// Production `DocumentIndexer`: runs one document's full pipeline — embed
-/// every leaf to completion, then build its RAPTOR summary tree — entirely
-/// inside the queue's single serial slot, so the next document does not start
-/// until this one is fully indexed. Wired at launch via
-/// `DocumentIndexingQueue.shared.configure(indexer:)`.
-///
-/// This is the seam that moves embed→RAPTOR sequencing OUT of
-/// `UnitEmbeddingService.fillEmbeddings`' fire-and-forget defer (where doc A's
-/// RAPTOR could overlap doc B's embed) and INTO one ordered, serialized job.
+/// Production `DocumentIndexer`: `embed` runs the chunk-build + leaf embedding
+/// (`UnitEmbeddingService.indexAndWait`); `buildRaptor` runs the summary-tree
+/// build (`RaptorTreeService.build`). The queue owns the ordering (all embeds
+/// before any RAPTOR), so neither method triggers the other — this is what
+/// moved embed→RAPTOR sequencing out of `fillEmbeddings`' fire-and-forget defer.
 struct LiveDocumentIndexer: DocumentIndexer {
     let databaseManager: DatabaseManager
 
-    func indexDocument(_ documentID: UUID) async {
-        // 1. Chunk + embed every leaf, awaiting completion. Cooperatively
-        //    cancellable at batch + chunk granularity (escape switch).
+    func embed(_ documentID: UUID) async {
         await UnitEmbeddingService.shared.indexAndWait(
             documentID: documentID, databaseManager: databaseManager)
-        // 2. Build the summary tree in the SAME slot. Skipped if the escape
-        //    switch already cancelled us; RaptorTreeService also self-gates on
-        //    AFM + minimum leaf count, so this is a cheap no-op when unmet.
+    }
+
+    func buildRaptor(_ documentID: UUID) async {
         if Task.isCancelled { return }
+        // Self-gates on AFM + minimum leaf count, so a cheap no-op when unmet.
         await RaptorTreeService.shared.build(documentID)
     }
 }

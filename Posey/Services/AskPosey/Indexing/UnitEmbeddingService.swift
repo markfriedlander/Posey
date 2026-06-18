@@ -81,6 +81,23 @@ actor UnitEmbeddingService {
     /// threaded so all writes funnel through the same handle.
     func enqueueIndexing(documentID: UUID,
                          databaseManager: DatabaseManager) async {
+        // 2026-06-18 — route into the single document-level serial queue so
+        // concurrent imports can never stack heavy work on the device (the
+        // 2026-06-17 thermal incident). The queue runs `indexAndWait` (below)
+        // then RAPTOR for ONE document at a time. `databaseManager` is kept for
+        // call-site compatibility; the queue uses the shared instance wired
+        // into its `LiveDocumentIndexer` at launch.
+        await DocumentIndexingQueue.shared.enqueue(documentID)
+    }
+
+    /// The awaitable embedding worker the `DocumentIndexingQueue` runs inside a
+    /// document's serial slot. Builds the chunk set then embeds every leaf to
+    /// completion, returning only when the fill finishes (or is cancelled).
+    /// NOT for importers to call directly — they go through `enqueueIndexing`
+    /// → the queue. Honors `Task` cancellation (the escape switch) at batch +
+    /// chunk granularity inside `fillEmbeddings`.
+    func indexAndWait(documentID: UUID,
+                      databaseManager: DatabaseManager) async {
         // Snapshot units. This is a synchronous SQL read; the
         // DatabaseManager is currently main-actor-bound but the
         // actor hop is implicit at the call site.
@@ -151,12 +168,11 @@ actor UnitEmbeddingService {
             )
         }
 
-        // Drop the in-flight marker if any, then start the embed
-        // fill. The fill is its own actor-isolated method so a
-        // second enqueue won't double-start it.
-        if inFlight.contains(documentID) { return }
-        inFlight.insert(documentID)
-        Task { await self.fillEmbeddings(for: documentID, totalChunks: totalChunks, databaseManager: databaseManager) }
+        // Fill embeddings INLINE, awaiting completion — the queue serializes,
+        // so exactly one fill runs at a time and `processedSoFar` is no longer
+        // shared across concurrent fills (fixes the clobbered-counter bug that
+        // showed "0% then 3%" during the 2026-06-17 incident).
+        await fillEmbeddings(for: documentID, totalChunks: totalChunks, databaseManager: databaseManager)
     }
 
     // MARK: - Embedding fill loop
@@ -194,14 +210,14 @@ actor UnitEmbeddingService {
                     ]
                 )
             }
-            // 2026-06-08 (audit fix #2) — production trigger for the RAPTOR
-            // summary tree. Leaves are embedded and retrievable NOW; the
-            // tree builds in the background and joins the same retrieval
-            // pool when ready ("usable now, improves in background").
-            // RaptorTreeService self-gates on AFM availability + a minimum
-            // leaf count, so this is a cheap no-op for small docs or
-            // AFM-less devices. Re-firing on a re-index correctly rebuilds.
-            Task { await RaptorTreeService.shared.enqueue(documentID) }
+            // 2026-06-18 — RAPTOR is no longer triggered here. The
+            // DocumentIndexingQueue's LiveDocumentIndexer builds the summary
+            // tree right after this embed completes, INSIDE the same document's
+            // serial slot, so embed+RAPTOR for one document finish before the
+            // next document starts (this was a fire-and-forget `enqueue` that
+            // let doc A's RAPTOR overlap doc B's embed — part of the 2026-06-17
+            // interleaving). RaptorTreeService still self-gates on AFM + a
+            // minimum leaf count, so the build stays a cheap no-op when unmet.
         }
 
         let batchSize = 32
@@ -214,6 +230,9 @@ actor UnitEmbeddingService {
         processedSoFar = 0
 
         while true {
+            // Cooperative cancellation (escape switch / per-doc cancel): the
+            // queue cancels the in-flight document's Task; bail promptly.
+            if Task.isCancelled { return }
             let batch: [DatabaseManager.UnitEmbeddingChunkNeedingEmbedding]
             do {
                 // 2026-06-12 (Mark — background document processing must NEVER
@@ -251,6 +270,7 @@ actor UnitEmbeddingService {
             // actor's context directly. SQLite serializes internally.
             var successesThisBatch = 0
             for row in batch {
+                if Task.isCancelled { return }
                 // Global serial lane — chunk embedding is heavy background
                 // compute. Routing each embed through the lane (instead of a
                 // free Task.detached) makes it serialize app-wide with OCR /

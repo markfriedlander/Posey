@@ -184,3 +184,33 @@ actor DocumentIndexingQueue {
 }
 
 // ========== BLOCK 02: DOCUMENT INDEXING QUEUE - END ==========
+
+
+// ========== BLOCK 03: LIVE DOCUMENT INDEXER - START ==========
+
+/// Production `DocumentIndexer`: runs one document's full pipeline — embed
+/// every leaf to completion, then build its RAPTOR summary tree — entirely
+/// inside the queue's single serial slot, so the next document does not start
+/// until this one is fully indexed. Wired at launch via
+/// `DocumentIndexingQueue.shared.configure(indexer:)`.
+///
+/// This is the seam that moves embed→RAPTOR sequencing OUT of
+/// `UnitEmbeddingService.fillEmbeddings`' fire-and-forget defer (where doc A's
+/// RAPTOR could overlap doc B's embed) and INTO one ordered, serialized job.
+struct LiveDocumentIndexer: DocumentIndexer {
+    let databaseManager: DatabaseManager
+
+    func indexDocument(_ documentID: UUID) async {
+        // 1. Chunk + embed every leaf, awaiting completion. Cooperatively
+        //    cancellable at batch + chunk granularity (escape switch).
+        await UnitEmbeddingService.shared.indexAndWait(
+            documentID: documentID, databaseManager: databaseManager)
+        // 2. Build the summary tree in the SAME slot. Skipped if the escape
+        //    switch already cancelled us; RaptorTreeService also self-gates on
+        //    AFM + minimum leaf count, so this is a cheap no-op when unmet.
+        if Task.isCancelled { return }
+        await RaptorTreeService.shared.build(documentID)
+    }
+}
+
+// ========== BLOCK 03: LIVE DOCUMENT INDEXER - END ==========

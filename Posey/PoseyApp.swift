@@ -97,6 +97,12 @@ struct PoseyApp: App {
                     } else {
                         manager = try DatabaseManager(resetIfExists: launchConfiguration.shouldResetDatabase)
                     }
+                    // 2026-06-18 — configure the document-level serial gate
+                    // BEFORE preload OR any launch bootstrap can enqueue, so all
+                    // background indexing (embed + RAPTOR) routes through this
+                    // one queue and concurrent work can never stack on-device.
+                    await DocumentIndexingQueue.shared.configure(
+                        indexer: LiveDocumentIndexer(databaseManager: manager))
                     if let preload = launchConfiguration.preload {
                         try await executePreload(preload, databaseManager: manager)
                     }

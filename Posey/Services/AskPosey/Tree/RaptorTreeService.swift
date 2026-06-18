@@ -160,13 +160,29 @@ actor RaptorTreeService {
             dbgLog("RaptorTreeService: bootstrap query failed: %@", String(describing: error))
             return
         }
-        for id in candidates { enqueue(id) }
+        // 2026-06-18 — route bootstrap rebuilds through the single document
+        // queue (embed is a no-op for these already-embedded docs; the tree
+        // then builds in the same serial slot) so a launch sweep of N docs
+        // can't fan out heavy work — it drains one document at a time.
+        for id in candidates { await DocumentIndexingQueue.shared.enqueue(id) }
         dbgLog("RaptorTreeService: bootstrap enqueued %d document(s)", candidates.count)
     }
 
     /// Snapshot of in-memory queue state for diagnostics (antenna verb).
     func snapshot() -> (queue: [UUID], current: UUID?, cancelled: [UUID]) {
         (queue, currentDocumentID, Array(cancelled))
+    }
+
+    /// Build the summary tree for ONE document and return when done — the
+    /// awaitable entry the `DocumentIndexingQueue`'s `LiveDocumentIndexer`
+    /// calls inside a document's serial slot, right after its leaves finish
+    /// embedding. Self-gates exactly like the old fire-and-forget path (AFM
+    /// availability, minimum leaf count) so it is a cheap no-op when those
+    /// aren't met, and honors `Task` cancellation inside `buildTree`.
+    /// (2026-06-18 — replaces the `enqueue` → internal-drain path for the
+    /// production pipeline; the document queue now owns embed→RAPTOR ordering.)
+    func build(_ documentID: UUID) async {
+        await buildTree(for: documentID)
     }
 
     // MARK: Drain loop
@@ -258,6 +274,7 @@ actor RaptorTreeService {
         var toStore: [StoredUnitEmbeddingChunk] = []
         toStore.reserveCapacity(summaryNodes.count)
         for (i, node) in summaryNodes.enumerated() {
+            if Task.isCancelled { return }
             let text = node.text
             // Global serial lane — embedding a RAPTOR summary is heavy
             // background compute; serialize app-wide (was a free Task.detached).

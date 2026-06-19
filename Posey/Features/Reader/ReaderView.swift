@@ -43,6 +43,10 @@ struct ReaderView: View {
     /// page background. Mark caught it. Drive the tint off
     /// `colorScheme` so chrome inverts cleanly with the user's mode.
     @Environment(\.colorScheme) private var colorScheme
+    /// 2026-06-18 — top-chrome redesign: the Back action moved out of the system
+    /// nav bar into the custom fading cluster (Row B), so the reader drives the
+    /// pop itself.
+    @Environment(\.dismiss) private var dismiss
     private let isTestMode: Bool
     @State private var isShowingNotesSheet = false
     @State private var isShowingPreferencesSheet = false
@@ -199,8 +203,15 @@ struct ReaderView: View {
                 }
                 revealChrome()
             })
-            .navigationTitle(viewModel.document.title)
-            .navigationBarTitleDisplayMode(.inline)
+            // 2026-06-18 — top-chrome redesign: the title + back now live in the
+            // custom fading cluster (`topChromeCluster`), so hide the system nav
+            // bar entirely.
+            .toolbar(.hidden, for: .navigationBar)
+            // Hiding the nav bar disables UIKit's interactive edge-swipe-back
+            // (confirmed on device, Mark 2026-06-18). This shim re-enables it by
+            // giving the pop gesture a delegate that allows the swipe whenever
+            // there's a screen to pop back to. (Mark requires edge-swipe kept.)
+            .background(InteractivePopGestureEnabler())
             // Centering strategy:
             //   • Bottom transport and top chrome BOTH float as overlays —
             //     they don't claim layout space.
@@ -236,17 +247,12 @@ struct ReaderView: View {
                     .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
                 }
             }
-            .overlay(alignment: .topTrailing) {
+            .overlay(alignment: .top) {
                 if !viewModel.isSearchActive {
-                    HStack {
-                        Spacer()
-                        topControls
-                    }
-                    .padding(.top, 12)
-                    .padding(.trailing, 12)
-                    .opacity(isChromeVisible ? 1 : 0)
-                    .allowsHitTesting(isChromeVisible)
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
+                    topChromeCluster
+                        .opacity(isChromeVisible ? 1 : 0)
+                        .allowsHitTesting(isChromeVisible)
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
                 }
             }
             .overlay(alignment: .bottom) {
@@ -875,81 +881,94 @@ struct ReaderView: View {
         }
     }
 
-    private var topControls: some View {
-        // Mark's spec (2026-05-26): Settings leftmost, Search middle,
-        // Notes rightmost — most-frequently-used action closest to the
-        // thumb. TOC (optional) sits between Settings and Search so
-        // the trio's relative order stays intact.
-        HStack(spacing: 10) {
-            Button {
-                revealChrome()
-                isShowingPreferencesSheet = true
-            } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.headline)
-                    .foregroundStyle(chromeTint)
-                    .frame(width: 44, height: 44)
-            }
-            .remoteRegister("reader.preferences") {
-                revealChrome()
-                isShowingPreferencesSheet = true
-            }
-            .accessibilityLabel("Reader preferences")
+    // MARK: - Top chrome cluster (2026-06-18 redesign)
 
-            if !viewModel.visibleTOCEntries.isEmpty {
-                Button {
-                    revealChrome()
-                    isShowingTOCSheet = true
-                } label: {
-                    Image(systemName: "list.bullet.indent")
-                        .font(.headline)
-                        .foregroundStyle(chromeTint)
-                        .frame(width: 44, height: 44)
+    /// The redesigned top chrome: ONE pill with TWO rows (Mark, 2026-06-18) that
+    /// fades with the rest of the chrome (title + back now fade too, unlike the
+    /// old system nav bar) and is sized + centered to BOOKEND the bottom controls
+    /// — same full-width `.ultraThinMaterial` Capsule, same horizontal insets.
+    /// **Row A = Title only** (centered, shrink-to-fit ~0.7 → truncate). **Row B
+    /// = Back · TOC · Notes · Search · Preferences** (Mark's order), spread like
+    /// the bottom transport row.
+    private var topChromeCluster: some View {
+        VStack(spacing: 8) {
+            // Row A — title, centered, shrink-to-fit then truncate.
+            Text(viewModel.document.title)
+                .font(.headline.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .truncationMode(.tail)
+                .foregroundStyle(chromeTint)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("reader.title")
+
+            // Row B — the five controls, spread across the pill.
+            HStack(spacing: 0) {
+                chromeGlyphButton(system: "chevron.left",
+                                  label: "Back to library", hook: "reader.back") {
+                    dismiss()
                 }
-                .remoteRegister("reader.toc") {
-                    revealChrome()
+                Spacer(minLength: 8)
+                // TOC keeps a CONSTANT position — greyed + disabled when the
+                // document has no entries (Mark: grey-out is enough, no tooltip).
+                chromeGlyphButton(system: "list.bullet.indent",
+                                  label: "Table of contents", hook: "reader.toc",
+                                  enabled: !viewModel.visibleTOCEntries.isEmpty) {
                     isShowingTOCSheet = true
                 }
-                .accessibilityLabel("Table of contents")
+                Spacer(minLength: 8)
+                chromeGlyphButton(system: "note.text",
+                                  label: "Notes", hook: "reader.notes") {
+                    viewModel.prepareForNotesEntry()
+                    isShowingNotesSheet = true
+                }
+                Spacer(minLength: 8)
+                chromeGlyphButton(system: "magnifyingglass",
+                                  label: "Search in document", hook: "reader.search") {
+                    viewModel.isSearchActive = true
+                    chromeFadeTask?.cancel()
+                }
+                Spacer(minLength: 8)
+                chromeGlyphButton(system: "slider.horizontal.3",
+                                  label: "Reader preferences", hook: "reader.preferences") {
+                    isShowingPreferencesSheet = true
+                }
             }
-
-            Button {
-                revealChrome()
-                viewModel.isSearchActive = true
-                chromeFadeTask?.cancel()
-            } label: {
-                Image(systemName: "magnifyingglass")
-                    .font(.headline)
-                    .foregroundStyle(chromeTint)
-                    .frame(width: 44, height: 44)
-            }
-            .remoteRegister("reader.search") {
-                revealChrome()
-                viewModel.isSearchActive = true
-                chromeFadeTask?.cancel()
-            }
-            .accessibilityLabel("Search in document")
-
-            Button {
-                revealChrome()
-                viewModel.prepareForNotesEntry()
-                isShowingNotesSheet = true
-            } label: {
-                Image(systemName: "note.text")
-                    .font(.headline)
-                    .foregroundStyle(chromeTint)
-                    .frame(width: 44, height: 44)
-            }
-            .remoteRegister("reader.notes") {
-                revealChrome()
-                viewModel.prepareForNotesEntry()
-                isShowingNotesSheet = true
-            }
-            .accessibilityLabel("Notes")
+            .frame(maxWidth: .infinity)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 12)
         .background(.ultraThinMaterial, in: Capsule())
+        .padding(.horizontal)
+        .padding(.top, 6)
+    }
+
+    /// One Row-B glyph button. Reveals chrome, runs `action`, and registers the
+    /// same effect on the antenna `hook` so device verification + the remote
+    /// driver both work. When `enabled` is false (only TOC, when the doc has no
+    /// entries) it greys out and ignores taps but keeps its slot, so the row's
+    /// positions stay constant.
+    private func chromeGlyphButton(system: String, label: String, hook: String,
+                                   enabled: Bool = true,
+                                   action: @escaping () -> Void) -> some View {
+        Button {
+            guard enabled else { return }
+            revealChrome()
+            action()
+        } label: {
+            Image(systemName: system)
+                .font(.headline)
+                .foregroundStyle(enabled ? chromeTint : chromeSecondaryTint.opacity(0.5))
+                .frame(width: 44, height: 44)
+        }
+        .disabled(!enabled)
+        .remoteRegister(hook) {
+            guard enabled else { return }
+            revealChrome()
+            action()
+        }
+        .accessibilityLabel(label)
     }
 
     private var controls: some View {
@@ -5267,3 +5286,57 @@ private struct TOCSheet: View {
 }
 
 // ========== BLOCK P3: TABLE OF CONTENTS SHEET - END ==========
+
+// ========== BLOCK SW: EDGE-SWIPE-BACK SHIM - START ==========
+
+#if canImport(UIKit)
+/// Re-enables the interactive edge-swipe-back gesture for a view whose host has
+/// hidden the navigation bar. Hiding the bar makes UIKit disable
+/// `interactivePopGestureRecognizer`; this finds the enclosing
+/// `UINavigationController` and installs a lightweight delegate that permits the
+/// swipe whenever there's a screen to pop back to. Only the *should-begin* veto
+/// is overridden — the gesture's action target (UIKit's transition driver) is
+/// untouched, so the pop still animates normally. (2026-06-18, reader
+/// top-chrome redesign — Mark requires edge-swipe kept.)
+private struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIViewController(context: Context) -> UIViewController {
+        Proxy(coordinator: context.coordinator)
+    }
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        weak var navigationController: UINavigationController?
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            (navigationController?.viewControllers.count ?? 0) > 1
+        }
+    }
+
+    final class Proxy: UIViewController {
+        private let coordinator: Coordinator
+        init(coordinator: Coordinator) {
+            self.coordinator = coordinator
+            super.init(nibName: nil, bundle: nil)
+            view.isUserInteractionEnabled = false   // stay transparent to touches
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            installIfPossible()
+        }
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            installIfPossible()   // nav controller is reliably resolvable by now
+        }
+        private func installIfPossible() {
+            guard let nav = navigationController else { return }
+            coordinator.navigationController = nav
+            nav.interactivePopGestureRecognizer?.isEnabled = true
+            nav.interactivePopGestureRecognizer?.delegate = coordinator
+        }
+    }
+}
+#endif
+
+// ========== BLOCK SW: EDGE-SWIPE-BACK SHIM - END ==========

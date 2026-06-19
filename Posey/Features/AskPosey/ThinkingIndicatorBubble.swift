@@ -86,21 +86,14 @@ struct ThinkingIndicatorBubble: View {
                 .transition(.opacity)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        // 2026-05-05 — Use a tinted-fill bubble so the indicator is
-        // legibly visible on both light and dark sheet backgrounds.
-        // The previous .thinMaterial bubble + .secondary text rendered
-        // as a barely-visible blob in dark mode (Mark caught the
-        // empty-circle look in his phone screenshot).
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(.tint.opacity(0.10))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(.tint.opacity(0.25), lineWidth: 0.5)
-        )
+        .padding(.vertical, 6)
+        // 2026-06-19 (Mark) — NO bubble. This is Posey THINKING, so it
+        // belongs on her side and should read like her prose, not like a
+        // user message. The old tint-fill bubble shared the user-bubble
+        // color family and read as another message *from* the user
+        // ("Pulling that thread…" looked like a question you sent). Now
+        // it's a pulsing dot + quiet phrase, left-aligned at the thread
+        // margin like the answer that's about to replace it.
         .task {
             // Rotate while this view is on screen. Cancels naturally
             // when the bubble is replaced by the streaming response

@@ -1126,6 +1126,26 @@ extension LibraryViewModel {
                     "contextWindow": model.contextWindow
                 ])
 
+            case "SET_PROMPT_VARIANT":
+                // 2026-06-19 — A/B prompt-rebalance tuning. Flip the
+                // process-global active prose variant the live chat view
+                // model reads when it builds inputs. `current` = the
+                // untouched control; `rebalanced` = control + the substance
+                // accelerator spliced before the HARD RULES. In-memory only
+                // (an app relaunch resets to `current`). Held constant for a
+                // whole conversation thread — clear the conversation between
+                // arms; never toggle mid-thread.
+                guard let raw = arg?.lowercased(),
+                      let variant = AskPoseyPromptVariant(rawValue: raw) else {
+                    return #"{"error":"Usage: SET_PROMPT_VARIANT:current|rebalanced"}"#
+                }
+                await MainActor.run { AskPoseyPromptVariant.active = variant }
+                return json(["status": "set", "promptVariant": variant.rawValue])
+
+            case "GET_PROMPT_VARIANT":
+                let active = await MainActor.run { AskPoseyPromptVariant.active }
+                return json(["promptVariant": active.rawValue])
+
             case "SET_QUERY_EXPANSION":
                 // SET_QUERY_EXPANSION:on|off — production gate for the
                 // LLM query-expansion lever (default OFF; value unproven on

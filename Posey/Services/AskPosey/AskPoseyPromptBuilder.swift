@@ -101,10 +101,38 @@ nonisolated struct AskPoseyPromptDroppedSection: Sendable, Equatable {
 /// these inputs and the budget — no implicit context, no global state.
 /// Every byte the model sees was either passed in here or generated
 /// from these fields.
+/// 2026-06-19 — Prompt-rebalance A/B flag (answer-quality tuning).
+/// The proseInstructions system block is ~80% prohibitions ("never
+/// fabricate", "never recommend", …) with no positive instruction to
+/// be concrete when the text DOES support an answer — so careful models
+/// hedge into vagueness. `.rebalanced` splices a bounded "substance
+/// accelerator" before the HARD RULES; `.current` is the untouched
+/// control. Held constant across an entire conversation thread (the
+/// variant shapes the answer, and that answer becomes STM for the next
+/// turn — toggling mid-thread confounds the comparison). Default
+/// `.current` so production behavior is unchanged until a variant proves
+/// out and is promoted. Mirrors the lifecycle of the old `noIntent` flag.
+nonisolated enum AskPoseyPromptVariant: String, Sendable, CaseIterable {
+    case current
+    case rebalanced
+
+    /// 2026-06-19 — process-global active variant for the A/B tuning round.
+    /// IN-MEMORY ONLY (deliberately NOT persisted): an app relaunch always
+    /// resets to `.current`, so a crash or a forgotten reset can never leave
+    /// production silently running a test variant. Flipped via the antenna
+    /// `SET_PROMPT_VARIANT` command; read by the live chat view model when it
+    /// builds prompt inputs. MainActor-isolated — both the write (command
+    /// handler) and the read (VM `send()`) run on the main actor.
+    @MainActor static var active: AskPoseyPromptVariant = .current
+}
+
 nonisolated struct AskPoseyPromptInputs: Sendable {
     /// Classified intent for the current question. Affects surrounding
     /// window sizing and the imperative framing in the system block.
     let intent: AskPoseyIntent
+    /// 2026-06-19 — which prose-instruction variant to build. See
+    /// `AskPoseyPromptVariant`. Default `.current` (untouched control).
+    let promptVariant: AskPoseyPromptVariant
     /// Anchor passage at invocation. Required for passage-scoped
     /// invocation (M5); document-scoped (M6) may pass `nil` and the
     /// builder degrades the anchor section gracefully.
@@ -194,6 +222,7 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
 
     init(
         intent: AskPoseyIntent,
+        promptVariant: AskPoseyPromptVariant = .current,
         anchor: AskPoseyAnchor?,
         surroundingContext: String?,
         conversationHistory: [AskPoseyMessage],
@@ -211,6 +240,7 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         readerFurthestOffset: Int? = nil
     ) {
         self.intent = intent
+        self.promptVariant = promptVariant
         self.anchor = anchor
         self.surroundingContext = surroundingContext
         self.conversationHistory = conversationHistory
@@ -522,6 +552,48 @@ nonisolated enum AskPoseyPromptBuilder {
     lists only when the question is structurally asking for one.
     """
 
+    /// 2026-06-19 — Prompt-rebalance "substance accelerator". The eight
+    /// HARD RULES above are all PROHIBITIONS; nothing tells the model to
+    /// be concrete when the excerpts DO support an answer, so careful
+    /// models retreat into vagueness ("the document covers various
+    /// topics") even when the text plainly answers. This block adds the
+    /// missing positive instruction. It is deliberately SELF-BOUNDED —
+    /// every sentence is conditioned on "when the text supports it" — so
+    /// it cannot be read as license to invent; the no-fabrication floor
+    /// (rules 1–3) is untouched and still wins on any conflict. Spliced
+    /// in ONLY for the `.rebalanced` variant, immediately before the
+    /// HARD RULES, so the model reads "be useful" and "be honest" as one
+    /// balanced instruction rather than honesty alone.
+    static let substanceAccelerator: String = """
+    **WHEN THE TEXT SUPPORTS AN ANSWER, BE SUBSTANTIVE.** Not-fabricating \
+    is not the same as being vague. When the excerpts answer the \
+    question, answer it — directly and concretely. Name what the text \
+    names, state what it states, draw the connection the text draws. \
+    Lead with the answer, in the text's own specifics; don't bury it \
+    under caveats or retreat to "the document covers various topics" \
+    when the excerpts plainly answer. The rules below keep you honest \
+    when the text is silent; this keeps you useful when the text \
+    speaks. Both, always — never trade one for the other.
+    """
+
+    /// 2026-06-19 — `.rebalanced` prose variant. Derived, not duplicated:
+    /// the control `proseInstructions` stays byte-for-byte untouched (an
+    /// auditor must be able to see the control didn't change), and the
+    /// substance accelerator is spliced in immediately before the
+    /// "**HARD RULES" marker. If the marker ever moves/renames, this
+    /// fails loudly in DEBUG and degrades to the control in Release
+    /// rather than shipping a malformed prompt.
+    static let proseInstructionsRebalanced: String = {
+        let marker = "**HARD RULES"
+        guard let range = proseInstructions.range(of: marker) else {
+            assertionFailure("proseInstructions '**HARD RULES' marker not found; rebalanced variant cannot splice")
+            return proseInstructions
+        }
+        return proseInstructions.replacingCharacters(
+            in: range.lowerBound..<range.lowerBound,
+            with: substanceAccelerator + "\n\n")
+    }()
+
     /// 2026-05-14 — DEBUG-only assertion that runs once, at first
     /// access of `proseInstructions`. Fires loudly if the prose has
     /// grown past `AskPoseyTokenBudget.proseInstructionsBudgetTokens`,
@@ -541,6 +613,12 @@ nonisolated enum AskPoseyPromptBuilder {
         let pct = (actual * 100) / max(1, budget)
         NSLog("AskPoseyPromptBuilder.proseInstructions: %d / %d tokens (%d%% of budget)",
               actual, budget, pct)
+        // 2026-06-19 — also report the `.rebalanced` variant; the substance
+        // accelerator adds tokens and must not silently blow the same budget.
+        let rebalanced = AskPoseyTokenEstimator.tokens(in: proseInstructionsRebalanced)
+        let rPct = (rebalanced * 100) / max(1, budget)
+        NSLog("AskPoseyPromptBuilder.proseInstructionsRebalanced: %d / %d tokens (%d%% of budget)",
+              rebalanced, budget, rPct)
         #endif
         assert(
             actual <= budget,
@@ -551,6 +629,14 @@ nonisolated enum AskPoseyPromptBuilder {
             AskPoseyTokenBudget.proseInstructionsBudgetTokens \
             intentionally (with a HISTORY note). Bloat here starved \
             RAG/STM/summary in May 2026 — do not let it happen again.
+            """
+        )
+        assert(
+            AskPoseyTokenEstimator.tokens(in: proseInstructionsRebalanced) <= budget,
+            """
+            AskPoseyPromptBuilder.proseInstructionsRebalanced exceeds the \
+            \(budget)-token prose budget. Tighten the substance accelerator \
+            or raise the budget intentionally (with a HISTORY note).
             """
         )
         return true
@@ -707,9 +793,16 @@ nonisolated enum AskPoseyPromptBuilder {
             // CC-tuning can disable a model's Layer-1 without editing the
             // catalog text; users never see this control.
             let layer1Enabled = ModelSettingsStore.shared.isLayerOnePromptEnabled(for: activeModel)
-            var base = proseInstructions
+            // 2026-06-19 — A/B prompt-rebalance: `.rebalanced` splices the
+            // substance accelerator before the HARD RULES; `.current` is
+            // the untouched control. Default `.current` → production
+            // behavior unchanged until a variant is promoted.
+            let prose = inputs.promptVariant == .rebalanced
+                ? proseInstructionsRebalanced
+                : proseInstructions
+            var base = prose
             if layer1Enabled, let layer1 = activeModel.layerOnePrompt, !layer1.isEmpty {
-                base = layer1 + "\n\n" + proseInstructions
+                base = layer1 + "\n\n" + prose
             }
             // 2026-06-17 — Spoiler firewall (Layer 1). Prepend the knowing-
             // companion framing so the spoiler discipline is the FIRST thing

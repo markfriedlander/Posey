@@ -460,6 +460,11 @@ final class AskPoseyService: AskPoseyStreaming, AskPoseySummarizing {
                 dbgLog("AskPosey: grounded call exceeded context window — retrying with droppables stripped")
                 let strippedInputs = AskPoseyPromptInputs(
                     intent: inputs.intent,
+                    // 2026-06-19 — preserve the A/B prompt variant across the
+                    // context-overflow strip; dropping it here would silently
+                    // answer the retry under `.current` even when the call
+                    // began under `.rebalanced`, confounding the comparison.
+                    promptVariant: inputs.promptVariant,
                     anchor: inputs.anchor,
                     surroundingContext: inputs.surroundingContext,
                     conversationHistory: [],

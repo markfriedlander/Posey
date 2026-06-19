@@ -1701,6 +1701,11 @@ extension AskPoseyChatViewModel {
                 let furthestOffset = max(storedFurthest ?? 0, self.invocationReadingOffset ?? 0)
                 let inputs = AskPoseyPromptInputs(
                     intent: intent,
+                    // 2026-06-19 — A/B prompt-rebalance: read the process-global
+                    // active variant (flipped by the SET_PROMPT_VARIANT antenna
+                    // command). Default `.current` → production unchanged. Held
+                    // constant for the whole thread; we never toggle mid-thread.
+                    promptVariant: AskPoseyPromptVariant.active,
                     anchor: self.anchor,
                     surroundingContext: self.surroundingContext(for: intent),
                     conversationHistory: self.historyForPromptBuilder,

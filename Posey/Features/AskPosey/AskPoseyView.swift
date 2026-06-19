@@ -1126,9 +1126,11 @@ private extension AskPoseyView {
                     Label(on ? "Turn off for this book" : "Turn on for this book",
                           systemImage: on ? "shield.slash" : "shield.lefthalf.filled")
                 }
+                // 2026-06-19 (Mark) — shortened; the longer copy truncated
+                // mid-word in the menu ("…but I won't g…").
                 Text(on
-                     ? "I've read the whole thing, but I won't give away anything past where you are."
-                     : "I'll answer freely — including things you haven't reached yet.")
+                     ? "Won't reveal anything past where you've read."
+                     : "Answers freely, including what's ahead of you.")
             }
         } label: {
             Image(systemName: on ? "shield.lefthalf.filled" : "shield.slash")

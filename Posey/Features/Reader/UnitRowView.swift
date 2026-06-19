@@ -73,6 +73,11 @@ struct UnitRowView: View {
     /// affordance the legacy renderer had per-row.
     let hasNote: Bool
     let hasBookmark: Bool
+    /// 2026-06-19 (Mark) — true when an Ask Posey conversation is anchored in
+    /// this unit's range. A conversation is a located annotation like a note
+    /// or bookmark, so it earns its own margin glyph; tapping it opens that
+    /// conversation.
+    let hasConversation: Bool
 
     /// 2026-05-28 — Identity-bump for the annotation cache. The VM
     /// bumps `unitAnnotationVersion` whenever it invalidates the
@@ -92,6 +97,9 @@ struct UnitRowView: View {
     /// the TTS or highlight paths.
     let onTapBookmark: (() -> Void)?
     let onTapNote: (() -> Void)?
+    /// 2026-06-19 — fired when the user taps the conversation glyph; ReaderView
+    /// opens the Ask Posey sheet on that anchored conversation.
+    let onTapConversation: (() -> Void)?
 
     /// User-controlled body font size. Threaded down so the row
     /// scales with reader preferences.
@@ -392,7 +400,7 @@ struct UnitRowView: View {
         // strip. Real fix: bump opacity + use accent color (matches
         // the highlight band Mark just approved) + nudge inward so
         // the chrome strip doesn't sit on top of them.
-        if hasNote || hasBookmark {
+        if hasNote || hasBookmark || hasConversation {
             // 2026-05-27 — glyphs were rendering at bodyFontSize*0.6/0.65 with
             // .secondary tint, which on the device made them visible but
             // not glanceable. Bumped to 0.85 + .primary opacity 0.7, with
@@ -438,6 +446,22 @@ struct UnitRowView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open note")
+                }
+                if hasConversation {
+                    Button {
+                        onTapConversation?()
+                    } label: {
+                        // Distinct from bookmark.fill / square.and.pencil — a
+                        // speech bubble reads as "a conversation lives here".
+                        Image(systemName: "bubble.left.and.text.bubble.right.fill")
+                            .font(.system(size: bodyFontSize * 0.95))
+                            .foregroundStyle(Color.accentColor.opacity(0.85))
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 6)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open conversation")
                 }
             }
             .padding(.top, 6)

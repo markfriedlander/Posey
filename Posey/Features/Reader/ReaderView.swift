@@ -534,6 +534,9 @@ struct ReaderView: View {
                     // the unified Saved Annotations list so it
                     // surfaces in the Notes sheet on next open.
                     viewModel.rebuildSavedAnnotations()
+                    // 2026-06-19 — and refresh the reader margin glyphs so a
+                    // newly-started conversation drops its glyph.
+                    viewModel.invalidateUnitAnnotationCache()
                 }
             ) { chatVM in
                 AskPoseyView(
@@ -708,9 +711,11 @@ struct ReaderView: View {
             readingStyle: viewModel.readingStyle,
             hasNote: annotations.hasNote,
             hasBookmark: annotations.hasBookmark,
+            hasConversation: annotations.hasConversation,
             annotationVersion: annotationVersion,
             onTapBookmark: { openAnnotationFromGlyph(unit: unit, kind: .bookmark) },
             onTapNote: { openAnnotationFromGlyph(unit: unit, kind: .note) },
+            onTapConversation: { openConversationFromGlyph(unit: unit) },
             bodyFontSize: viewModel.fontSize,
             imageDataProvider: { viewModel.imageData(for: $0) },
             isSearchMatchUnit: viewModel.isSearchActive && viewModel.currentSearchMatchUnitID == unit.id,
@@ -880,6 +885,22 @@ struct ReaderView: View {
                 userInfo: ["entryID": entryID]
             )
         }
+    }
+
+    /// 2026-06-19 — tap the conversation margin glyph → open the Ask Posey
+    /// sheet on the conversation anchored in this unit. Finds the anchor row
+    /// whose offset falls in the unit's range and passes its storage id as the
+    /// initial scroll anchor, so the sheet loads the existing conversation and
+    /// lands on it (no new anchor is appended).
+    private func openConversationFromGlyph(unit: ContentUnit) {
+        let range = viewModel.plainTextRange(for: unit)
+        let rows = (try? viewModel.databaseManager.askPoseyAnchorRows(for: viewModel.document.id)) ?? []
+        let match = rows.first { row in
+            guard let off = row.anchorOffset else { return false }
+            return off >= range.lowerBound && off < range.upperBound
+        }
+        revealChrome()
+        openAskPosey(initialAnchorStorageID: match?.id)
     }
 
     // MARK: - Top chrome cluster (2026-06-18 redesign)
@@ -4656,7 +4677,14 @@ final class ReaderViewModel: ObservableObject {
     /// `[unitStart, unitEnd)` in the joined plainText coordinate
     /// space. Cached on the VM so the per-row recompute stays
     /// cheap; cache invalidated on note insert/delete.
-    private var unitAnnotationCache: [UUID: (hasNote: Bool, hasBookmark: Bool)] = [:]
+    private var unitAnnotationCache: [UUID: (hasNote: Bool, hasBookmark: Bool, hasConversation: Bool)] = [:]
+
+    /// 2026-06-19 — Ask Posey conversation anchor offsets for this document,
+    /// lazily loaded (nil = not yet loaded) and intersected per-unit in
+    /// `annotationFlags` so a conversation drops a margin glyph like a note or
+    /// bookmark. Cleared by `invalidateUnitAnnotationCache` so a new
+    /// conversation surfaces its glyph on the next pass.
+    private var conversationAnchorOffsets: [Int]?
 
     /// 2026-05-27 — Each unit's offset in the FULL (pre-skip) plainText.
     /// Populated by loadContent from LoadedContent.fullPlainTextOffsetByUnitID.
@@ -4669,6 +4697,7 @@ final class ReaderViewModel: ObservableObject {
     struct UnitAnnotationFlags {
         let hasNote: Bool
         let hasBookmark: Bool
+        let hasConversation: Bool
     }
 
     /// Public accessor (called from ReaderView's ForEach). Builds the
@@ -4677,7 +4706,14 @@ final class ReaderViewModel: ObservableObject {
     /// cache.
     func annotationFlags(for unit: ContentUnit) -> UnitAnnotationFlags {
         if let cached = unitAnnotationCache[unit.id] {
-            return UnitAnnotationFlags(hasNote: cached.hasNote, hasBookmark: cached.hasBookmark)
+            return UnitAnnotationFlags(hasNote: cached.hasNote, hasBookmark: cached.hasBookmark, hasConversation: cached.hasConversation)
+        }
+        // 2026-06-19 — lazily load this doc's conversation anchor offsets once.
+        // Anchors live in ask_posey_conversations (one row per invocation);
+        // each carries the reading offset where the conversation began.
+        if conversationAnchorOffsets == nil {
+            conversationAnchorOffsets = ((try? databaseManager.askPoseyAnchorRows(for: document.id)) ?? [])
+                .compactMap { $0.anchorOffset }
         }
         // 2026-05-27 — use the full-plainText offset map instead of
         // walking-and-accumulating cursor on the filtered units. Notes
@@ -4691,9 +4727,9 @@ final class ReaderViewModel: ObservableObject {
         guard let foundStart = fullPlainTextOffsetByUnitID[unit.id], unit.kind.carriesProseText else {
             // Non-prose units (image, pageBreak, horizontalRule) can't
             // carry annotations directly. Cache + return empty.
-            let flags = (hasNote: false, hasBookmark: false)
+            let flags = (hasNote: false, hasBookmark: false, hasConversation: false)
             unitAnnotationCache[unit.id] = flags
-            return UnitAnnotationFlags(hasNote: false, hasBookmark: false)
+            return UnitAnnotationFlags(hasNote: false, hasBookmark: false, hasConversation: false)
         }
         let foundEnd = foundStart + unit.text.count
         // Intersect notes against the unit's range.
@@ -4706,15 +4742,22 @@ final class ReaderViewModel: ObservableObject {
             }
             if hasNote && hasBookmark { break }
         }
-        let flags = (hasNote: hasNote, hasBookmark: hasBookmark)
+        // Intersect Ask Posey conversation anchors against the unit's range.
+        let hasConversation = (conversationAnchorOffsets ?? [])
+            .contains { $0 >= foundStart && $0 < foundEnd }
+        let flags = (hasNote: hasNote, hasBookmark: hasBookmark, hasConversation: hasConversation)
         unitAnnotationCache[unit.id] = flags
-        return UnitAnnotationFlags(hasNote: hasNote, hasBookmark: hasBookmark)
+        return UnitAnnotationFlags(hasNote: hasNote, hasBookmark: hasBookmark, hasConversation: hasConversation)
     }
 
     /// Invalidate the unit-annotation cache. Called after a note
-    /// insert / delete so the next row redraw sees fresh flags.
+    /// insert / delete OR a conversation anchor change so the next row
+    /// redraw sees fresh flags.
     func invalidateUnitAnnotationCache() {
         unitAnnotationCache.removeAll(keepingCapacity: true)
+        // 2026-06-19 — also drop the conversation-anchor snapshot so a newly
+        // created conversation's glyph appears on the next pass.
+        conversationAnchorOffsets = nil
         // Bump the Published version so the SwiftUI ForEach body
         // re-runs annotationFlags(for:) on every visible unit.
         unitAnnotationVersion &+= 1

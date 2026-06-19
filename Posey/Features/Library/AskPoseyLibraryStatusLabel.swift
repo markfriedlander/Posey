@@ -9,10 +9,17 @@ import Combine
 /// about each book.
 ///
 /// **Dot** (reuses the model-picker's green-dot language the user already
-/// knows): **grey** once imported but not yet answerable; **green** the moment
-/// Ask Posey can actually answer about this book (its leaves are embedded). The
-/// **text** keeps explaining "how ready she is" past that point (e.g. green +
-/// "Studying up…" while RAPTOR deepens in the background).
+/// knows): the dot color tracks ONE thing — answerability. **Grey** while the
+/// book is not yet answerable (importing / embedding / queued / cooling before
+/// its first embed completes); **green** the moment Ask Posey can actually
+/// answer about it (its leaves are embedded), and it STAYS green through every
+/// later phase (deepening, cooling-down) because answering still works. The
+/// **text** is independent — it explains the current activity. (Decoupling the
+/// two fixed a bug where "Cooling down" forced a grey dot on an already-
+/// answerable book, misreading as "not ready"; Mark, 2026-06-18.)
+///
+/// **Layout:** text leads, dot TRAILS (flush-right), so the eye always lands on
+/// one fixed point at the end of the row (Mark, 2026-06-18).
 ///
 /// **States:**
 ///   - not set up  → grey · "Ask Posey not yet available"
@@ -36,37 +43,40 @@ struct AskPoseyLibraryStatusLabel: View {
     /// session-only set; refreshed when indexing state changes.
     @State private var isAnswerable = false
 
-    private struct Status {
-        let text: String
-        let isGreen: Bool
-    }
-
-    private func resolve() -> Status {
+    /// The status TEXT for the current phase. Dot color is computed separately
+    /// from `isAnswerable` (see `body`) — text and color are intentionally
+    /// decoupled.
+    private func resolveText() -> String {
         if !AskPoseyAvailability.isSetUp {
-            return Status(text: "Ask Posey not yet available", isGreen: false)
+            return "Ask Posey not yet available"
         }
         // Cooling-down outranks "Reading ahead": when the device is hot the
         // in-flight doc's indexing is deliberately paced, so say so rather than
         // letting a frozen percentage read as broken.
         if tracker.isCoolingDown(documentID) {
-            return Status(text: "Cooling down", isGreen: false)
+            return "Cooling down"
         }
         if tracker.isIndexing(documentID) {
             let pct = Int(((tracker.unifiedProgress(for: documentID) ?? 0) * 100).rounded())
-            return Status(text: "Reading ahead — \(pct)%", isGreen: false)
+            return "Reading ahead — \(pct)%"
         }
         // Waiting in the embed lane behind another document — show its place in
         // line so a slow-to-start card reads as queued, not stuck.
         if let position = tracker.queuePosition(documentID) {
-            return Status(text: "Queued #\(position)", isGreen: false)
+            return "Queued #\(position)"
         }
         if tracker.isReReading(documentID) {
-            return Status(text: "Studying up…", isGreen: true)
+            // Per-step % so "Studying up" reads as progress, not an indefinite
+            // spinner (Mark, 2026-06-18) — mirrors "Reading ahead — N%".
+            if let frac = tracker.reReadingFraction(documentID) {
+                return "Studying up — \(Int((frac * 100).rounded()))%"
+            }
+            return "Studying up…"
         }
         if isAnswerable {
-            return Status(text: "Ready", isGreen: true)
+            return "Ready"
         }
-        return Status(text: "Preparing…", isGreen: false)
+        return "Preparing…"
     }
 
     private func refreshAnswerable() {
@@ -75,19 +85,21 @@ struct AskPoseyLibraryStatusLabel: View {
     }
 
     var body: some View {
-        let status = resolve()
+        let text = resolveText()
+        // Dot color = answerability ONLY. Text leads, dot trails (flush-right)
+        // so the eye lands on one fixed point at the row's end.
         HStack(spacing: 5) {
-            Circle()
-                .fill(status.isGreen ? Color.green : Color.secondary.opacity(0.55))
-                .frame(width: 7, height: 7)
-            Text(status.text)
+            Text(text)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            Circle()
+                .fill(isAnswerable ? Color.green : Color.secondary.opacity(0.55))
+                .frame(width: 7, height: 7)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Ask Posey: \(status.text)")
+        .accessibilityLabel("Ask Posey: \(text)")
         .task(id: documentID) { refreshAnswerable() }
         // Re-check "answerable" whenever indexing state changes — e.g. the
         // moment a doc's embedding completes, it flips grey "Reading ahead" →

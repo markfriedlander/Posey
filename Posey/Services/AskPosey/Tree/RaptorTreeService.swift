@@ -86,6 +86,14 @@ actor RaptorTreeService {
     /// `didBuildNotification` ends that status. (2026-06-17)
     static let didStartNotification = Notification.Name("posey.raptor.didStart")
 
+    /// Posted on the main thread after each cluster of a build is summarized +
+    /// verified — the "Studying up — N%" progress signal (mirrors the embed
+    /// loop's `didProgress`). userInfo: `documentID`, `processedClusters` (Int),
+    /// `totalClusters` (Int). (2026-06-18)
+    static let didProgressNotification = Notification.Name("posey.raptor.didProgress")
+    static let processedClustersKey = "posey.raptor.processedClusters"
+    static let totalClustersKey = "posey.raptor.totalClusters"
+
     // MARK: State
 
     private var databaseManager: DatabaseManager?
@@ -259,8 +267,21 @@ actor RaptorTreeService {
 
         let builder = RaptorTreeBuilder()
         let config = RaptorTreeBuilder.Config(clusterCount: k)
+        // Per-cluster progress → "Studying up — N%" on the library card. The
+        // summarize+verify loop dominates the build time, so cluster progress is
+        // the honest signal (the short summary-embed loop afterward rides at the
+        // tail). documentID is a Sendable value, safe to capture.
         let summaryNodes = await builder.buildLayer(
-            layer: 1, nodes: inputNodes, documentText: docText, config: config)
+            layer: 1, nodes: inputNodes, documentText: docText, config: config,
+            progress: { done, total in
+                Task { @MainActor in
+                    NotificationCenter.default.post(
+                        name: Self.didProgressNotification, object: nil,
+                        userInfo: [Self.documentIDKey: documentID,
+                                   Self.processedClustersKey: done,
+                                   Self.totalClustersKey: total])
+                }
+            })
 
         if cancelled.contains(documentID) { await postDidBuild(documentID, count: 0); cancelled.remove(documentID); return }
         guard !summaryNodes.isEmpty else {

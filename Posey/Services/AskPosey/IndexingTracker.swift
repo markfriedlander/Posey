@@ -36,6 +36,12 @@ final class IndexingTracker: ObservableObject {
     /// cleared on `.didBuild`. (2026-06-17)
     @Published private(set) var reReadingDocumentIDs: Set<UUID> = []
 
+    /// RAPTOR build progress (clusters summarized / total) per document, for the
+    /// "Studying up — N%" label. Present only while a build is in flight; set to
+    /// 0 on `didStart`, updated on `didProgress`, removed on `didBuild`.
+    /// (2026-06-18)
+    @Published private(set) var reReadingProgress: [UUID: Double] = [:]
+
     /// Main-actor mirror of `DocumentIndexingQueue`'s embed lane (Pillar 4b):
     /// document → 1-based position among the documents WAITING to be embedded
     /// (the in-flight document is excluded — it's "Reading ahead", not queued).
@@ -83,6 +89,10 @@ final class IndexingTracker: ObservableObject {
         notificationCenter.publisher(for: RaptorTreeService.didStartNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] note in self?.handleRaptorStart(note) }
+            .store(in: &cancellables)
+        notificationCenter.publisher(for: RaptorTreeService.didProgressNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleRaptorProgress(note) }
             .store(in: &cancellables)
         notificationCenter.publisher(for: RaptorTreeService.didBuildNotification)
             .receive(on: RunLoop.main)
@@ -143,6 +153,12 @@ final class IndexingTracker: ObservableObject {
         return reReadingDocumentIDs.contains(documentID)
     }
 
+    /// RAPTOR build progress (0…1) for the "Studying up — N%" label, or nil if
+    /// no build is in flight (or it hasn't reported a cluster yet).
+    func reReadingFraction(_ documentID: UUID) -> Double? {
+        return reReadingProgress[documentID]
+    }
+
     /// 1-based position of a document among those WAITING to be embedded, or nil
     /// if it is not waiting (idle, in-flight, or already embedded). Drives the
     /// library card's "Queued #k". (Pillar 4b)
@@ -187,11 +203,21 @@ final class IndexingTracker: ObservableObject {
     private func handleRaptorStart(_ note: Notification) {
         guard let id = note.userInfo?[RaptorTreeService.documentIDKey] as? UUID else { return }
         reReadingDocumentIDs.insert(id)
+        reReadingProgress[id] = 0   // "Studying up — 0%" until the first cluster reports
+    }
+
+    private func handleRaptorProgress(_ note: Notification) {
+        guard let id = note.userInfo?[RaptorTreeService.documentIDKey] as? UUID,
+              let done = note.userInfo?[RaptorTreeService.processedClustersKey] as? Int,
+              let total = note.userInfo?[RaptorTreeService.totalClustersKey] as? Int,
+              total > 0 else { return }
+        reReadingProgress[id] = Double(done) / Double(total)
     }
 
     private func handleRaptorBuild(_ note: Notification) {
         guard let id = note.userInfo?[RaptorTreeService.documentIDKey] as? UUID else { return }
         reReadingDocumentIDs.remove(id)
+        reReadingProgress.removeValue(forKey: id)
     }
 
     private func handleQueueChange(_ note: Notification) {

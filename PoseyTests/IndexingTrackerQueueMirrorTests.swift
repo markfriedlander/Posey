@@ -69,6 +69,32 @@ final class IndexingTrackerQueueMirrorTests: XCTestCase {
         XCTAssertNil(tracker.queuePosition(waiting))
     }
 
+    /// RAPTOR build progress mirrors into a 0…1 fraction: 0 on start, advancing
+    /// per cluster, cleared on build-complete (→ card flips off "Studying up").
+    func testReReadingFractionTracksRaptorProgress() async throws {
+        let id = UUID()
+
+        center.post(name: RaptorTreeService.didStartNotification, object: nil,
+                    userInfo: [RaptorTreeService.documentIDKey: id])
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(tracker.isReReading(id))
+        XCTAssertEqual(tracker.reReadingFraction(id), 0, "starts at 0%")
+
+        center.post(name: RaptorTreeService.didProgressNotification, object: nil,
+                    userInfo: [RaptorTreeService.documentIDKey: id,
+                               RaptorTreeService.processedClustersKey: 3,
+                               RaptorTreeService.totalClustersKey: 12])
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(tracker.reReadingFraction(id) ?? -1, 0.25, accuracy: 0.001, "3/12 → 25%")
+
+        center.post(name: RaptorTreeService.didBuildNotification, object: nil,
+                    userInfo: [RaptorTreeService.documentIDKey: id,
+                               RaptorTreeService.summaryNodeCountKey: 9])
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(tracker.isReReading(id))
+        XCTAssertNil(tracker.reReadingFraction(id), "cleared on build-complete")
+    }
+
     /// "Cooling down" is scoped to the in-flight document AND a paced thermal
     /// state. With the test host at `.nominal` thermal, even the current doc must
     /// NOT read as cooling down — guards against the label firing spuriously.

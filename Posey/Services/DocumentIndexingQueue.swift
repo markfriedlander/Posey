@@ -123,9 +123,25 @@ actor DocumentIndexingQueue {
     // MARK: Configuration
 
     /// Wire the live per-document pipeline. Called once at launch.
+    ///
+    /// 2026-06-19 — the antenna server starts from `LibraryView.onAppear`,
+    /// which is UNORDERED relative to the `PoseyApp.task` that calls this. An
+    /// antenna `REINDEX`/import that lands in that startup window enqueues
+    /// against a nil indexer. Previously `drainQueue` consumed those items as
+    /// no-ops and discarded them silently — the document sat at "Preparing"
+    /// forever with no recovery (and a transient escape glyph as the no-op job
+    /// flashed through). Now `drainQueue` DEFERS while the indexer is nil and
+    /// we re-kick it here, so any work enqueued before wiring runs the instant
+    /// the indexer lands. Self-healing instead of silently lossy.
     func configure(indexer: DocumentIndexer) {
         self.indexer = indexer
         dbgLog("DocumentIndexingQueue: configured")
+        // Drain anything that enqueued before the indexer was wired.
+        if !embedQueue.isEmpty || !raptorQueue.isEmpty {
+            dbgLog("DocumentIndexingQueue: configure — draining %d pre-wire enqueue(s) (embed=%d raptor=%d)",
+                   embedQueue.count + raptorQueue.count, embedQueue.count, raptorQueue.count)
+            Task { await drainQueue() }
+        }
     }
 
     // MARK: Public API
@@ -236,6 +252,17 @@ actor DocumentIndexingQueue {
     /// suspended on `await job.value`.
     private func drainQueue() async {
         if draining { return }
+        // 2026-06-19 — DEFER while the indexer isn't wired yet. Leaving the
+        // lanes intact (rather than dequeuing into a no-op job) is what makes
+        // a pre-wire enqueue survive: `configure(indexer:)` re-kicks this drain
+        // once the indexer lands. Without this guard the loop below would
+        // `removeFirst()` the item, run an empty `if let work` no-op, and drop
+        // it — the silent "stuck at Preparing" failure (antenna racing launch).
+        guard indexer != nil else {
+            dbgLog("DocumentIndexingQueue: drain deferred — indexer not configured (embed=%d raptor=%d)",
+                   embedQueue.count, raptorQueue.count)
+            return
+        }
         draining = true
         defer { draining = false }
 

@@ -149,6 +149,39 @@ final class DocumentIndexingQueueTests: XCTestCase {
         XCTAssertEqual(embeds.count, 1, "a re-enqueued document must not embed twice")
     }
 
+    /// 2026-06-19 regression: work enqueued BEFORE `configure(indexer:)` must
+    /// survive and run once the indexer lands — not be silently dropped. This
+    /// reproduces the antenna-races-launch window (the antenna server starts
+    /// from `LibraryView.onAppear`, unordered vs. `PoseyApp.task`'s configure):
+    /// a REINDEX/import in that window enqueued against a nil indexer and the
+    /// drain loop used to dequeue it into a no-op job and discard it, leaving
+    /// the document stuck at "Preparing" with no recovery.
+    func testEnqueueBeforeConfigureStillIndexes() async {
+        let recorder = Recorder()
+        let queue = DocumentIndexingQueue()
+
+        // Enqueue BEFORE the indexer is wired (the race window). The item must
+        // sit in the lane, NOT be consumed.
+        let a = UUID(), b = UUID()
+        await queue.enqueue(a)
+        await queue.enqueueRaptorOnly(b)
+        // Give any erroneously-kicked drain a chance to (wrongly) consume it.
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        let pre = await queue.snapshot()
+        XCTAssertNil(pre.current, "nothing runs before the indexer is configured")
+        XCTAssertEqual(pre.embedQueue, [a], "pre-wire embed enqueue is held, not dropped")
+        XCTAssertEqual(pre.raptorQueue, [b], "pre-wire raptor enqueue is held, not dropped")
+
+        // Wire the indexer — this must drain the deferred work.
+        await queue.configure(indexer: FakeIndexer(recorder: recorder, sleepNanos: 3_000_000))
+        await waitUntilIdle(queue)
+
+        let embedded = Set(await recorder.steps.filter { $0.phase == .embedding }.map { $0.id })
+        let raptored = Set(await recorder.steps.filter { $0.phase == .raptor }.map { $0.id })
+        XCTAssertTrue(embedded.contains(a), "the pre-wire embed runs after configure")
+        XCTAssertTrue(raptored.contains(b), "the pre-wire raptor-only runs after configure")
+    }
+
     /// The escape switch: cancel the in-flight pass and clear both lanes,
     /// returning all affected IDs.
     func testExpungeAllHaltsInFlightAndClearsBothLanes() async {

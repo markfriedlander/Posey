@@ -566,8 +566,12 @@ extension AskPoseyChatViewModel {
     func appendCurrentInvocationAnchorMarkerIfNeeded(persist: Bool) {
         guard initialScrollAnchorStorageID == nil else { return }
 
-        // Determine display text + scope for the marker.
-        let scope: String = (anchor != nil) ? "passage" : "document"
+        // 2026-06-19 — scope removed (Mark). The anchor always passes, so
+        // every new conversation header is a "passage" marker — the
+        // bookmark-style link back to where in the corpus it began. The
+        // `invocation`/`anchorScope` field is kept (legacy "document" rows
+        // still decode + render) but new rows are always "passage".
+        let scope: String = "passage"
         let displayText: String
         if let anchor, !anchor.trimmedDisplayText.isEmpty {
             displayText = anchor.text

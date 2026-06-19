@@ -576,12 +576,13 @@ struct ReaderView: View {
                     dbgLog("ReaderView openAskPoseyForDocument: docID mismatch %@ vs %@", documentID.uuidString, viewModel.document.id.uuidString)
                     return
                 }
-                let scopeStr = (info["scope"] as? String)?.lowercased() ?? "passage"
-                let scope: AskPoseyScope = (scopeStr == "document") ? .document : .passage
+                // 2026-06-19 — scope removed; the anchor always passes. The
+                // antenna `scope` field is ignored (kept tolerated for old
+                // callers). The sheet always opens anchored to the reader's
+                // current sentence.
                 let initialAnchorStorageID = info["initialAnchorStorageID"] as? String
-                dbgLog("ReaderView openAskPoseyForDocument: invoking openAskPosey scope=%@", scopeStr)
+                dbgLog("ReaderView openAskPoseyForDocument: invoking openAskPosey (anchor always)")
                 openAskPosey(
-                    scope: scope,
                     initialAnchorStorageID: initialAnchorStorageID
                 )
             }
@@ -1152,13 +1153,17 @@ struct ReaderView: View {
     ///   FoundationModels — the view model falls back to the M4 echo
     ///   stub so previews/tests keep running.
     ///
-    /// **M6 (2026-05-01).** `scope` parameter selects between
-    /// passage-scoped (anchor = current sentence; tight surrounding
-    /// window; classifier routes mostly to `.immediate`) and
-    /// document-scoped (anchor = nil; classifier routes mostly to
-    /// `.general`; the prompt builder relies more heavily on RAG
-    /// chunks since there's no anchor passage to ground the answer).
-    enum AskPoseyScope { case passage, document }
+    /// **2026-06-19 — `AskPoseyScope` REMOVED (Mark).** It was an AFM-era
+    /// knob (passage vs document) used to make AFM behave; the classifier
+    /// it fed was removed earlier this session, and retrieval is full-
+    /// document regardless of scope, so it changed nothing real. Now the
+    /// anchor (the current sentence at invocation) ALWAYS passes — it is
+    /// the conversation's header, a bookmark-style link back to where in
+    /// the corpus the conversation began. It is NOT a retrieval gate:
+    /// whether a question is narrow ("this passage") or broad ("the whole
+    /// book") is the LLM's call, from the question itself. The prompt
+    /// always carries the anchor + surrounding window AND the full-doc RAG
+    /// chunks, and the model decides which to lean on.
 
     /// 2026-05-04 — Quick-action helpers used by the chrome
     /// Ask Posey menu AND the corresponding remoteRegister ids.
@@ -1167,7 +1172,6 @@ struct ReaderView: View {
     private func explainAction() {
         revealChrome()
         openAskPosey(
-            scope: .passage,
             initialQuery: "Explain this passage in context — what's it saying?",
             autoSubmitInitialQuery: true
         )
@@ -1175,7 +1179,6 @@ struct ReaderView: View {
     private func defineAction() {
         revealChrome()
         openAskPosey(
-            scope: .passage,
             initialQuery: "Define ",
             autoSubmitInitialQuery: false
         )
@@ -1183,14 +1186,13 @@ struct ReaderView: View {
     private func findRelatedAction() {
         revealChrome()
         openAskPosey(
-            scope: .passage,
             initialQuery: "Find other passages in the document that discuss the same topic.",
             autoSubmitInitialQuery: true
         )
     }
     private func askSpecificAction() {
         revealChrome()
-        openAskPosey(scope: .passage)
+        openAskPosey()
     }
 
     /// 2026-05-05 — Citation-return action. Triggered when the user
@@ -1204,7 +1206,7 @@ struct ReaderView: View {
     #if POSEY_ENABLE_ASK_POSEY
     private func returnToAskPoseyAction() {
         viewModel.clearCitationReturnContext()
-        openAskPosey(scope: .passage)
+        openAskPosey()
     }
     #endif
 
@@ -1287,7 +1289,6 @@ struct ReaderView: View {
     }
 
     private func openAskPosey(
-        scope: AskPoseyScope,
         initialAnchorStorageID: String? = nil,
         initialQuery: String? = nil,
         autoSubmitInitialQuery: Bool = false
@@ -1296,32 +1297,18 @@ struct ReaderView: View {
         let active = segments.indices.contains(viewModel.currentSentenceIndex)
             ? segments[viewModel.currentSentenceIndex]
             : segments.first
-        // Captured reading offset at invocation — populated for both
-        // scopes so the persisted anchor marker is always tappable to
-        // jump back to where the question was asked, even for
-        // document-scoped invocations. Falls back to 0 when the
-        // document has no segments yet (defensive — should never
-        // happen in production since the reader is rendering them).
+        // Captured reading offset at invocation — the anchor marker is
+        // always tappable to jump back to where the question was asked.
+        // Falls back to 0 when the document has no segments yet (defensive
+        // — should never happen in production since the reader is
+        // rendering them).
         let invocationOffset: Int = active?.startOffset ?? 0
 
-        let anchor: AskPoseyAnchor?
-        switch scope {
-        case .passage:
-            if let active {
-                anchor = AskPoseyAnchor(
-                    text: active.text,
-                    plainTextOffset: active.startOffset
-                )
-            } else {
-                anchor = nil
-            }
-        case .document:
-            // Document-scoped: no AFM-side anchor (the prompt builder
-            // skips the ANCHOR + SURROUNDING sections; RAG carries
-            // the grounding). The persisted anchor MARKER row still
-            // captures `invocationOffset` so the user can jump back
-            // to where they asked the question.
-            anchor = nil
+        // 2026-06-19 — the anchor (current sentence) ALWAYS passes; it is
+        // the conversation's header / link back to the corpus, not a
+        // retrieval gate. nil only in the defensive no-segments case.
+        let anchor: AskPoseyAnchor? = active.map {
+            AskPoseyAnchor(text: $0.text, plainTextOffset: $0.startOffset)
         }
         // Stop playback while the sheet is open so the document
         // doesn't keep advancing under the user. We don't auto-resume

@@ -70,33 +70,68 @@ struct LibraryView: View {
             || !indexingTracker.reReadingDocumentIDs.isEmpty
     }
 
-    /// The Pillar-3 escape switch, as a slim top banner that appears ONLY when
-    /// there's work to halt or a rebuild waiting — invisible in the common
-    /// idle/ready state so the library stays clean. While indexing: a
-    /// destructive "Stop indexing" that confirms, then halts + clears + queues a
-    /// clean rebuild. After a halt: a calm "rebuilding when cool" / "paused" line
-    /// with an explicit "Rebuild now".
-    @ViewBuilder
-    private var escapeBanner: some View {
-        if isIndexingActive {
-            HStack(spacing: 10) {
-                Image(systemName: "hourglass")
-                    .foregroundStyle(.secondary)
-                Text("Preparing your library…")
-                    .font(.subheadline)
-                Spacer(minLength: 8)
-                Button(role: .destructive) {
-                    showHaltConfirm = true
-                } label: {
-                    Text("Stop").font(.subheadline.weight(.semibold))
-                }
-                .buttonStyle(.borderless)
-                .tint(.red)
-                .disabled(escape.isHalting)
+    /// Extracted from `body`, with the CONDITIONAL parts pushed into View-space
+    /// (`escapeToolbarButton`) rather than conditional `ToolbarContent` — the
+    /// latter (`if/else` over `ToolbarItem`) tripped "unable to type-check in
+    /// reasonable time". One trailing `ToolbarItem` holds an `HStack` of the
+    /// (optional) escape glyph + the import glyph.
+    @ToolbarContentBuilder
+    private var libraryToolbar: some ToolbarContent {
+        #if DEBUG
+        // M9 release-binary hygiene: the local-API antenna toggle is a
+        // development-only affordance. DEBUG builds expose it; release App Store
+        // builds compile it out entirely so a user picking up Posey from the App
+        // Store has no idea the developer-API surface exists.
+        ToolbarItem(placement: .topBarLeading) {
+            Button {
+                viewModel.toggleLocalAPI()
+            } label: {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .foregroundStyle(viewModel.localAPIEnabled
+                                     ? Color.primary
+                                     : Color.primary.opacity(0.25))
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.bar)
+            .remoteRegister("library.apiToggle") {
+                viewModel.toggleLocalAPI()
+            }
+            .accessibilityLabel(viewModel.localAPIEnabled ? "API On" : "API Off")
+        }
+        #endif
+        ToolbarItem(placement: .topBarTrailing) {
+            HStack(spacing: 16) {
+                escapeToolbarButton
+                Button {
+                    isImporting = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .disabled(viewModel.importStatusMessage != nil)
+                .accessibilityLabel("Import File")
+                .remoteRegister("library.importTXT") {
+                    isImporting = true
+                }
+            }
+        }
+    }
+
+    /// Pillar 3 escape switch (compact, Mark 2026-06-18): a glyph shown ONLY
+    /// while work is happening — a red Stop while indexing, a Rebuild while a
+    /// halt is pending — next to the import glyph. The per-card statuses carry
+    /// the words, so the toolbar carries only the action; nothing when idle.
+    @ViewBuilder
+    private var escapeToolbarButton: some View {
+        if isIndexingActive {
+            Button(role: .destructive) {
+                showHaltConfirm = true
+            } label: {
+                Image(systemName: "stop.circle.fill")
+            }
+            .tint(.red)
+            .disabled(escape.isHalting)
+            .accessibilityLabel("Stop indexing")
+            .accessibilityIdentifier("library.stopIndexing")
+            // Co-located with its trigger (and OFF the body's modifier chain, to
+            // keep the view's body under the type-checker's reasonable-time limit).
             .confirmationDialog("Stop indexing and rebuild?",
                                 isPresented: $showHaltConfirm,
                                 titleVisibility: .visible) {
@@ -107,121 +142,89 @@ struct LibraryView: View {
             } message: {
                 Text("Posey will stop preparing your books and rebuild from scratch once your device is cool. Your books stay readable the whole time.")
             }
-            .accessibilityIdentifier("library.stopIndexing")
         } else if !escape.pendingReindex.isEmpty {
-            let n = escape.pendingReindex.count
-            HStack(spacing: 10) {
-                Image(systemName: escape.waitingForCooldown ? "thermometer.snowflake" : "pause.circle")
-                    .foregroundStyle(.secondary)
-                Text(escape.waitingForCooldown
-                     ? "Rebuilding when your device cools"
-                     : "Paused — \(n) book\(n == 1 ? "" : "s") to rebuild")
-                    .font(.subheadline)
-                Spacer(minLength: 8)
-                Button("Rebuild now") { escape.rebuildNow() }
-                    .font(.subheadline.weight(.semibold))
-                    .buttonStyle(.borderless)
+            Button {
+                escape.rebuildNow()
+            } label: {
+                Image(systemName: "arrow.clockwise")
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.bar)
+            .accessibilityLabel("Rebuild library")
             .accessibilityIdentifier("library.rebuildPending")
         }
     }
 
-    var body: some View {
-        NavigationStack(path: $path) {
-            List(viewModel.documents) { document in
-                NavigationLink(value: document) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(document.title)
-                            .font(.headline)
-                        // **Bundle 2c + follow-up (2026-05-26)** —
-                        // edition-disambiguation subtitle. Helper
-                        // hides the conditional behind a single
-                        // String? so SwiftUI's body type-checker
-                        // doesn't have to reason about the ternary
-                        // inline.
-                        if let subtitle = viewModel.editionSubtitle(for: document) {
-                            Text(subtitle)
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        HStack(alignment: .firstTextBaseline) {
-                            LibraryReadingTimeLabel(
-                                document: document,
-                                databaseManager: viewModel.databaseManager
-                            )
-                            Spacer(minLength: 8)
-                            // Ask Posey readiness, bookending opposite the
-                            // reading-time (Mark's design, 2026-06-18).
-                            AskPoseyLibraryStatusLabel(
-                                documentID: document.id,
-                                databaseManager: viewModel.databaseManager
-                            )
-                        }
-                    }
-                    .padding(.vertical, 4)
+    /// One library row. Extracted from `body` so the (now larger) view's body
+    /// type-checks in reasonable time — adding the Pillar-3 escape state pushed
+    /// the inline List closure over the inference limit; isolating the row keeps
+    /// each piece cheap.
+    @ViewBuilder
+    private func documentRow(_ document: Document) -> some View {
+        NavigationLink(value: document) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(document.title)
+                    .font(.headline)
+                // **Bundle 2c + follow-up (2026-05-26)** —
+                // edition-disambiguation subtitle. Helper hides the conditional
+                // behind a single String? so the type-checker doesn't reason
+                // about the ternary inline.
+                if let subtitle = viewModel.editionSubtitle(for: document) {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                .remoteRegister("library.document.\(document.title)") {
-                    if path.last?.id != document.id { path = [document] }
-                }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(role: .destructive) {
-                        documentPendingDeletion = document
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                }
-            }
-            .overlay {
-                if viewModel.documents.isEmpty && viewModel.importStatusMessage == nil {
-                    ContentUnavailableView(
-                        "No Documents Yet",
-                        systemImage: "text.document",
-                        description: Text("Import a TXT, Markdown, RTF, DOCX, HTML, EPUB, or PDF file to start the reading loop.")
+                HStack(alignment: .firstTextBaseline) {
+                    LibraryReadingTimeLabel(
+                        document: document,
+                        databaseManager: viewModel.databaseManager
+                    )
+                    Spacer(minLength: 8)
+                    // Ask Posey readiness, bookending opposite the reading-time
+                    // (Mark's design, 2026-06-18).
+                    AskPoseyLibraryStatusLabel(
+                        documentID: document.id,
+                        databaseManager: viewModel.databaseManager
                     )
                 }
             }
-            .safeAreaInset(edge: .top) {
-                escapeBanner
+            .padding(.vertical, 4)
+        }
+        .remoteRegister("library.document.\(document.title)") {
+            if path.last?.id != document.id { path = [document] }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                documentPendingDeletion = document
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
-            .navigationTitle("Posey")
-            .toolbar {
-                #if DEBUG
-                // M9 release-binary hygiene: the local-API antenna
-                // toggle is a development-only affordance. DEBUG
-                // builds expose it; release App Store builds compile
-                // it out entirely so a user picking up Posey from
-                // the App Store has no idea the developer-API
-                // surface exists.
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        viewModel.toggleLocalAPI()
-                    } label: {
-                        Image(systemName: "antenna.radiowaves.left.and.right")
-                            .foregroundStyle(viewModel.localAPIEnabled
-                                             ? Color.primary
-                                             : Color.primary.opacity(0.25))
-                    }
-                    .remoteRegister("library.apiToggle") {
-                        viewModel.toggleLocalAPI()
-                    }
-                    .accessibilityLabel(viewModel.localAPIEnabled ? "API On" : "API Off")
-                }
-                #endif
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Import File") {
-                        isImporting = true
-                    }
-                    .disabled(viewModel.importStatusMessage != nil)
-                    .remoteRegister("library.importTXT") {
-                        isImporting = true
-                    }
-                }
+        }
+    }
+
+    /// The List + its directly-attached chrome (empty-state overlay, title,
+    /// toolbar), split out of `body` so the full modifier chain stays under the
+    /// type-checker's reasonable-time limit.
+    private var libraryList: some View {
+        List(viewModel.documents) { document in
+            documentRow(document)
+        }
+        .overlay {
+            if viewModel.documents.isEmpty && viewModel.importStatusMessage == nil {
+                ContentUnavailableView(
+                    "No Documents Yet",
+                    systemImage: "text.document",
+                    description: Text("Import a TXT, Markdown, RTF, DOCX, HTML, EPUB, or PDF file to start the reading loop.")
+                )
             }
+        }
+        .navigationTitle("Posey")
+        .toolbar { libraryToolbar }
+    }
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            libraryList
             .navigationDestination(for: Document.self) { document in
                 ReaderView(
                     document: document,
@@ -234,77 +237,7 @@ struct LibraryView: View {
                     automationNoteBody: automationNoteBody
                 )
             }
-            .onReceive(
-                NotificationCenter.default.publisher(for: .remoteOpenDocument)
-            ) { notification in
-                guard let documentID = notification.userInfo?["documentID"] as? UUID else { return }
-                let documents = (try? viewModel.databaseManager.documents()) ?? []
-                guard let document = documents.first(where: { $0.id == documentID }) else { return }
-                if path.last?.id != documentID {
-                    path = [document]
-                }
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(for: .remoteLibraryNavigateBack)
-            ) { _ in
-                if !path.isEmpty { path.removeLast() }
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(for: .remoteAntennaOff)
-            ) { _ in
-                if viewModel.localAPIEnabled { viewModel.toggleLocalAPI() }
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(for: PDFEnhancementService.enhancementDidComplete)
-            ) { _ in
-                // 2026-05-22 Phase 2.2 Step 7 — refresh the library
-                // so the card's characterCount reflects the post-
-                // Tier-2 + Tier-3 corrected text. Step 8 — same
-                // reload also refreshes the reading-time label.
-                viewModel.loadDocuments()
-            }
-            .onReceive(
-                NotificationCenter.default
-                    .publisher(for: .openAskPoseyForDocument)
-            ) { notification in
-                // M6 simulator-MCP UI driver: when /open-ask-posey
-                // posts this notification, navigate to the matching
-                // document. ReaderView listens to the same
-                // notification and opens the Ask Posey sheet on
-                // appear / receipt — so by the time the screenshot
-                // fires, the sheet is up.
-                guard
-                    let info = notification.userInfo,
-                    let documentID = info["documentID"] as? UUID
-                else { return }
-                let documents = (try? viewModel.databaseManager.documents()) ?? []
-                guard let document = documents.first(where: { $0.id == documentID }) else { return }
-                // Push if not already at this document.
-                let needsNavigation = path.last?.id != documentID
-                if needsNavigation {
-                    path = [document]
-                }
-                // 2026-05-05 (revised) — Always redeliver, not just
-                // on first navigation. ReaderView's onReceive may
-                // register after the original post even when the
-                // doc is already loaded (e.g. after a sheet dismiss
-                // tore down the publisher subscription). The
-                // `redelivered` flag still prevents the Library
-                // observer from looping.
-                if info["redelivered"] == nil {
-                    let delay: Int = needsNavigation ? 500 : 100
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(delay))
-                        var redeliveredInfo = info
-                        redeliveredInfo["redelivered"] = true
-                        NotificationCenter.default.post(
-                            name: .openAskPoseyForDocument,
-                            object: nil,
-                            userInfo: redeliveredInfo
-                        )
-                    }
-                }
-            }
+            .modifier(LibraryRemoteRouting(path: $path, viewModel: viewModel))
             .fileImporter(
                 isPresented: $isImporting,
                 allowedContentTypes: [.plainText, .rtf, .html, .pdf] + richDocumentContentTypes + markdownContentTypes,
@@ -317,61 +250,7 @@ struct LibraryView: View {
                     importProgressBanner(message: message)
                 }
             }
-            .task {
-                viewModel.loadDocuments()
-                maybeOpenFirstDocument()
-                if !didAttemptInitialRestore {
-                    didAttemptInitialRestore = true
-                    maybeRestoreLastOpenedDocument()
-                }
-                // 2026-05-14 (B1) — heal-on-launch for docs left with
-                // 0 chunks by an interrupted prior indexing pass.
-                // Cheap: one COUNT(*) per doc + a re-enqueue for the
-                // small set (typically zero) that need it.
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s
-                    viewModel.healAbandonedIndexing()
-                }
-                // Phase B — kick off background contextual enhancement
-                // after a short delay so the library/reader appear is
-                // smooth before background AFM work begins competing
-                // for resources. The scheduler is idempotent and self-
-                // exits when there's no pending work.
-                // 2026-05-23 — Step 8f: the Phase B
-                // enhancementScheduler start-on-task hook was torn
-                // out with the scheduler itself. PDF Tier 2/3
-                // enhancement remains; that runs via
-                // PDFEnhancementService.shared.bootstrap which
-                // PoseyApp invokes at launch.
-                // M9 release-binary hygiene: the local API server is
-                // a development tool. DEBUG builds force-on the
-                // antenna at launch (developer convenience); RELEASE
-                // builds compile out the auto-start AND the toggle UI
-                // entirely so the API never starts unless someone
-                // recompiles in DEBUG configuration. The
-                // localAPIEnabled @AppStorage default is also OFF in
-                // RELEASE (LibraryViewModel) — defense in depth.
-                #if DEBUG
-                if !viewModel.localAPIEnabled {
-                    viewModel.localAPIEnabled = true
-                }
-                if viewModel.localAPIEnabled && !viewModel.localAPIServer.isRunning {
-                    viewModel.toggleLocalAPI(showConnectionInfo: false)
-                }
-                #else
-                // 2026-05-12 — defense-in-depth: even if a prior DEBUG
-                // install's @AppStorage value for `localAPIEnabled`
-                // persists across to a Release reinstall (TestFlight,
-                // user-built Release, etc.), force-clear it so the
-                // antenna never starts in a Release binary. The
-                // LocalAPIServer file is also #if DEBUG-wrapped so
-                // the antenna can't physically run; this is belt-
-                // and-suspenders.
-                if viewModel.localAPIEnabled {
-                    viewModel.localAPIEnabled = false
-                }
-                #endif
-            }
+            .task { runLaunchTasks() }
             .onAppear {
                 viewModel.loadDocuments()
                 maybeOpenFirstDocument()
@@ -474,6 +353,121 @@ struct LibraryView: View {
 
     private var richDocumentContentTypes: [UTType] {
         [UTType(filenameExtension: "docx"), UTType(filenameExtension: "epub")].compactMap { $0 }
+    }
+
+    /// The library's on-appear launch work, extracted from the `.task` closure
+    /// so `body` stays under the type-checker's reasonable-time limit. Loads
+    /// documents, restores the last-read doc, heals abandoned indexing, and (in
+    /// DEBUG) auto-starts the antenna / (in RELEASE) force-clears it.
+    private func runLaunchTasks() {
+        viewModel.loadDocuments()
+        maybeOpenFirstDocument()
+        if !didAttemptInitialRestore {
+            didAttemptInitialRestore = true
+            maybeRestoreLastOpenedDocument()
+        }
+        // 2026-05-14 (B1) — heal-on-launch for docs left with 0 chunks by an
+        // interrupted prior indexing pass. Cheap: one COUNT(*) per doc + a
+        // re-enqueue for the small set (typically zero) that need it.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s
+            viewModel.healAbandonedIndexing()
+        }
+        // M9 release-binary hygiene: the local API server is a development tool.
+        // DEBUG builds force-on the antenna at launch (developer convenience);
+        // RELEASE builds compile out the auto-start AND the toggle UI entirely so
+        // the API never starts unless someone recompiles in DEBUG. The
+        // localAPIEnabled @AppStorage default is also OFF in RELEASE
+        // (LibraryViewModel) — defense in depth.
+        #if DEBUG
+        if !viewModel.localAPIEnabled {
+            viewModel.localAPIEnabled = true
+        }
+        if viewModel.localAPIEnabled && !viewModel.localAPIServer.isRunning {
+            viewModel.toggleLocalAPI(showConnectionInfo: false)
+        }
+        #else
+        // 2026-05-12 — defense-in-depth: even if a prior DEBUG install's
+        // @AppStorage `localAPIEnabled` persists across to a Release reinstall,
+        // force-clear it so the antenna never starts in a Release binary. The
+        // LocalAPIServer file is also #if DEBUG-wrapped so it can't physically
+        // run; this is belt-and-suspenders.
+        if viewModel.localAPIEnabled {
+            viewModel.localAPIEnabled = false
+        }
+        #endif
+    }
+}
+
+/// The library's notification routing — the five remote/antenna `onReceive`
+/// handlers, bundled into one modifier so `LibraryView.body` isn't a single
+/// modifier chain long enough to blow the SwiftUI type-checker. Behavior is a
+/// faithful port of the inline handlers.
+private struct LibraryRemoteRouting: ViewModifier {
+    @Binding var path: [Document]
+    let viewModel: LibraryViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteOpenDocument)
+            ) { notification in
+                guard let documentID = notification.userInfo?["documentID"] as? UUID else { return }
+                let documents = (try? viewModel.databaseManager.documents()) ?? []
+                guard let document = documents.first(where: { $0.id == documentID }) else { return }
+                if path.last?.id != documentID {
+                    path = [document]
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteLibraryNavigateBack)
+            ) { _ in
+                if !path.isEmpty { path.removeLast() }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .remoteAntennaOff)
+            ) { _ in
+                if viewModel.localAPIEnabled { viewModel.toggleLocalAPI() }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: PDFEnhancementService.enhancementDidComplete)
+            ) { _ in
+                // Refresh so the card's characterCount + reading-time reflect the
+                // post-Tier-2/3 corrected text.
+                viewModel.loadDocuments()
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .openAskPoseyForDocument)
+            ) { notification in
+                // M6 simulator-MCP UI driver: navigate to the matching document;
+                // ReaderView opens the Ask Posey sheet on receipt.
+                guard
+                    let info = notification.userInfo,
+                    let documentID = info["documentID"] as? UUID
+                else { return }
+                let documents = (try? viewModel.databaseManager.documents()) ?? []
+                guard let document = documents.first(where: { $0.id == documentID }) else { return }
+                let needsNavigation = path.last?.id != documentID
+                if needsNavigation {
+                    path = [document]
+                }
+                // Always redeliver (not just on first nav): ReaderView's onReceive
+                // may register after the original post; the `redelivered` flag
+                // prevents the Library observer from looping.
+                if info["redelivered"] == nil {
+                    let delay: Int = needsNavigation ? 500 : 100
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(delay))
+                        var redeliveredInfo = info
+                        redeliveredInfo["redelivered"] = true
+                        NotificationCenter.default.post(
+                            name: .openAskPoseyForDocument,
+                            object: nil,
+                            userInfo: redeliveredInfo
+                        )
+                    }
+                }
+            }
     }
 }
 

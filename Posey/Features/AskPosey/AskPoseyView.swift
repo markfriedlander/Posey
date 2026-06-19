@@ -1126,11 +1126,10 @@ private extension AskPoseyView {
                     Label(on ? "Turn off for this book" : "Turn on for this book",
                           systemImage: on ? "shield.slash" : "shield.lefthalf.filled")
                 }
-                // 2026-06-19 (Mark) — shortened; the longer copy truncated
-                // mid-word in the menu ("…but I won't g…").
-                Text(on
-                     ? "Won't reveal anything past where you've read."
-                     : "Answers freely, including what's ahead of you.")
+                // 2026-06-19 (Mark) — the menu caption truncates at ~30 chars
+                // at its narrow width; keep BOTH states short enough to never
+                // clip ("…what's a…" was the second attempt still clipping).
+                Text(on ? "Won't spoil what's ahead." : "May reveal what's ahead.")
             }
         } label: {
             Image(systemName: on ? "shield.lefthalf.filled" : "shield.slash")
@@ -1195,7 +1194,18 @@ private extension AskPoseyView {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.thinMaterial)
+        // 2026-06-19 (Mark) — extend the composer's material DOWN behind the
+        // keyboard (ignore the keyboard safe-area for the background only, not
+        // the content). The system QuickType bar has rounded TOP corners; at
+        // those two corners there's a notch where the keyboard isn't, which
+        // used to reveal the void behind it (the two corner "gaps"). The
+        // extended material now paints those notches instead. Content still
+        // respects the keyboard — only the backing rectangle bleeds under it.
+        .background {
+            Rectangle()
+                .fill(.thinMaterial)
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+        }
     }
 
     /// M7 in-sheet indexing indicator. Visible when the document's

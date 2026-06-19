@@ -910,6 +910,16 @@ extension LibraryViewModel {
         do {
             switch verb {
 
+            case "HELP", "LIST_COMMANDS":
+                // 2026-06-19 — self-describing antenna surface. `HELP` dumps the
+                // full categorized catalog of every /command verb; `HELP:<verb>`
+                // returns one entry; `HELP:<category-or-substring>` filters. Built
+                // so an operator never has to grep source to discover a verb
+                // (GET_ENHANCEMENT_STATUS existed but went unfound mid-diagnosis).
+                // The catalog is drift-guarded against this switch by
+                // tools/check_antenna_catalog.sh.
+                return json(AntennaCommandCatalog.help(filter: arg))
+
             case "LIST_DOCUMENTS":
                 let docs = try databaseManager.documents()
                 let arr: [[String: Any]] = docs.map {

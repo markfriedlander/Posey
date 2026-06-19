@@ -36,6 +36,24 @@ final class IndexingTracker: ObservableObject {
     /// cleared on `.didBuild`. (2026-06-17)
     @Published private(set) var reReadingDocumentIDs: Set<UUID> = []
 
+    /// Main-actor mirror of `DocumentIndexingQueue`'s embed lane (Pillar 4b):
+    /// document → 1-based position among the documents WAITING to be embedded
+    /// (the in-flight document is excluded — it's "Reading ahead", not queued).
+    /// Lets a library card show a precise "Queued #k" without touching the queue
+    /// actor. Empty when the embed lane is empty. (2026-06-18)
+    @Published private(set) var embedQueuePositions: [UUID: Int] = [:]
+
+    /// The document the queue is currently working (embedding or RAPTOR), or nil
+    /// when idle. Used to scope the "Cooling down" label to the one doc actually
+    /// generating heat. (2026-06-18)
+    @Published private(set) var currentIndexingDocumentID: UUID?
+
+    /// True while the device is thermally throttled (`.serious`/`.critical`), so
+    /// the `ThermalGovernor` is pacing/pausing heavy work. Surfaces as "Cooling
+    /// down" on whichever card is the current in-flight document — a paced import
+    /// is slow ON PURPOSE; the label keeps that from reading as broken. (2026-06-18)
+    @Published private(set) var isThermallyPaced: Bool = false
+
     /// Same shape as the pre-8f struct so view code that destructures
     /// the optional doesn't break.
     struct IndexingProgress: Equatable, Sendable {
@@ -70,6 +88,28 @@ final class IndexingTracker: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] note in self?.handleRaptorBuild(note) }
             .store(in: &cancellables)
+        // Queue lane state → precise "Queued #k" + current-doc identity (Pillar 4b).
+        notificationCenter.publisher(for: DocumentIndexingQueue.queueDidChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] note in self?.handleQueueChange(note) }
+            .store(in: &cancellables)
+        // Thermal pressure → "Cooling down" on the in-flight card (Pillar 4b).
+        // Read once for the initial state, then track the system notification.
+        isThermallyPaced = Self.isPaced(ProcessInfo.processInfo.thermalState)
+        notificationCenter.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.isThermallyPaced = Self.isPaced(ProcessInfo.processInfo.thermalState)
+            }
+            .store(in: &cancellables)
+    }
+
+    /// `.serious`/`.critical` are where `ThermalGovernor` adds real cooldowns
+    /// (250ms) or fully pauses — i.e. where the user would otherwise see an
+    /// unexplained slowdown. `.nominal`/`.fair` are the always-on light yields,
+    /// not worth surfacing.
+    private static func isPaced(_ state: ProcessInfo.ThermalState) -> Bool {
+        state == .serious || state == .critical
     }
 
     // MARK: - Public surface (matches pre-8f shape)
@@ -101,6 +141,21 @@ final class IndexingTracker: ObservableObject {
     /// re-reading. (2026-06-17)
     func isReReading(_ documentID: UUID) -> Bool {
         return reReadingDocumentIDs.contains(documentID)
+    }
+
+    /// 1-based position of a document among those WAITING to be embedded, or nil
+    /// if it is not waiting (idle, in-flight, or already embedded). Drives the
+    /// library card's "Queued #k". (Pillar 4b)
+    func queuePosition(_ documentID: UUID) -> Int? {
+        return embedQueuePositions[documentID]
+    }
+
+    /// True when this document is the current in-flight one AND the device is
+    /// thermally paced — i.e. its indexing is deliberately slowed to protect the
+    /// device. Scoped to the in-flight doc so only the card actually generating
+    /// heat reads "Cooling down". (Pillar 4b)
+    func isCoolingDown(_ documentID: UUID) -> Bool {
+        return isThermallyPaced && currentIndexingDocumentID == documentID
     }
 
     // MARK: - Notification handlers
@@ -137,6 +192,15 @@ final class IndexingTracker: ObservableObject {
     private func handleRaptorBuild(_ note: Notification) {
         guard let id = note.userInfo?[RaptorTreeService.documentIDKey] as? UUID else { return }
         reReadingDocumentIDs.remove(id)
+    }
+
+    private func handleQueueChange(_ note: Notification) {
+        let embed = note.userInfo?[DocumentIndexingQueue.embedQueueKey] as? [UUID] ?? []
+        currentIndexingDocumentID = note.userInfo?[DocumentIndexingQueue.currentDocumentIDKey] as? UUID
+        // Map the waiting embed lane to 1-based positions (index 0 → "Queued #1").
+        var positions: [UUID: Int] = [:]
+        for (offset, id) in embed.enumerated() { positions[id] = offset + 1 }
+        embedQueuePositions = positions
     }
 }
 

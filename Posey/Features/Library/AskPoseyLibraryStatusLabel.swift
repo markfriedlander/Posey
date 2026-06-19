@@ -14,15 +14,17 @@ import Combine
 /// **text** keeps explaining "how ready she is" past that point (e.g. green +
 /// "Studying up…" while RAPTOR deepens in the background).
 ///
-/// **States (V1):**
-///   - not set up → grey · "Ask Posey not yet available"
-///   - embedding  → grey · "Reading ahead — N%"
-///   - preparing  → grey · "Preparing…"   (imported, queued, or never indexed)
-///   - deepening  → green · "Studying up…" (answerable now; RAPTOR building)
-///   - ready      → green · "Ready"
-/// Refinements deferred (Pillar 4b): precise "Queued #k" position (needs the
-/// queue's published state) and "Cooling down" (needs the thermal governor +
-/// current-doc identity).
+/// **States:**
+///   - not set up  → grey · "Ask Posey not yet available"
+///   - cooling down → grey · "Cooling down" (in-flight doc, device thermally paced)
+///   - embedding   → grey · "Reading ahead — N%"
+///   - queued      → grey · "Queued #k" (waiting in the embed lane; Pillar 4b)
+///   - deepening   → green · "Studying up…" (answerable now; RAPTOR building)
+///   - ready       → green · "Ready"
+///   - preparing   → grey · "Preparing…"   (imported but not yet indexed)
+/// Pillar 4b (2026-06-18) added the precise "Queued #k" position (from the
+/// queue's published embed lane) and "Cooling down" (from the thermal governor
+/// scoped to the current in-flight doc), both via `IndexingTracker`.
 struct AskPoseyLibraryStatusLabel: View {
 
     let documentID: UUID
@@ -43,9 +45,20 @@ struct AskPoseyLibraryStatusLabel: View {
         if !AskPoseyAvailability.isSetUp {
             return Status(text: "Ask Posey not yet available", isGreen: false)
         }
+        // Cooling-down outranks "Reading ahead": when the device is hot the
+        // in-flight doc's indexing is deliberately paced, so say so rather than
+        // letting a frozen percentage read as broken.
+        if tracker.isCoolingDown(documentID) {
+            return Status(text: "Cooling down", isGreen: false)
+        }
         if tracker.isIndexing(documentID) {
             let pct = Int(((tracker.unifiedProgress(for: documentID) ?? 0) * 100).rounded())
             return Status(text: "Reading ahead — \(pct)%", isGreen: false)
+        }
+        // Waiting in the embed lane behind another document — show its place in
+        // line so a slow-to-start card reads as queued, not stuck.
+        if let position = tracker.queuePosition(documentID) {
+            return Status(text: "Queued #\(position)", isGreen: false)
         }
         if tracker.isReReading(documentID) {
             return Status(text: "Studying up…", isGreen: true)

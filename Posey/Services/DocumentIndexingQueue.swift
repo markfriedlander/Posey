@@ -81,6 +81,18 @@ actor DocumentIndexingQueue {
     /// index without a wired pipeline), so it is always safe to call.
     static let shared = DocumentIndexingQueue()
 
+    // MARK: Change notification (drives the library status indicators / Pillar 4b)
+
+    /// Posted (on the main actor) whenever the lane state transitions — enqueue,
+    /// drain step start/finish, cancel, expunge. Lets `IndexingTracker` mirror
+    /// the queue so a library card can show its precise "Queued #k" position
+    /// without the view ever touching this actor. userInfo: `currentDocumentID`
+    /// (UUID, omitted when idle), `embedQueue` ([UUID]), `raptorQueue` ([UUID]).
+    static let queueDidChangeNotification = Notification.Name("posey.indexingQueue.didChange")
+    static let currentDocumentIDKey = "posey.indexingQueue.currentDocumentID"
+    static let embedQueueKey = "posey.indexingQueue.embedQueue"
+    static let raptorQueueKey = "posey.indexingQueue.raptorQueue"
+
     // MARK: Injected work
 
     private var indexer: DocumentIndexer?
@@ -129,6 +141,7 @@ actor DocumentIndexingQueue {
         embedQueue.append(documentID)
         dbgLog("DocumentIndexingQueue: enqueued(embed) %@ (embed=%d raptor=%d)",
                documentID.uuidString, embedQueue.count, raptorQueue.count)
+        postChange()
         Task { await drainQueue() }
     }
 
@@ -142,6 +155,7 @@ actor DocumentIndexingQueue {
         raptorQueue.append(documentID)
         dbgLog("DocumentIndexingQueue: enqueued(raptor) %@ (embed=%d raptor=%d)",
                documentID.uuidString, embedQueue.count, raptorQueue.count)
+        postChange()
         Task { await drainQueue() }
     }
 
@@ -154,6 +168,7 @@ actor DocumentIndexingQueue {
         raptorQueue.removeAll { $0 == documentID }
         if currentDocumentID == documentID { currentJob?.cancel() }
         dbgLog("DocumentIndexingQueue: cancelled %@", documentID.uuidString)
+        postChange()
     }
 
     /// THE ESCAPE SWITCH. Halt all background indexing immediately: cancel the
@@ -179,6 +194,7 @@ actor DocumentIndexingQueue {
         currentJob?.cancel()
         dbgLog("DocumentIndexingQueue: EXPUNGE — halted + cleared %d document(s)",
                affected.count)
+        postChange()
         return affected
     }
 
@@ -188,6 +204,28 @@ actor DocumentIndexingQueue {
     func snapshot() -> (current: UUID?, phase: DocumentIndexingPhase?,
                         embedQueue: [UUID], raptorQueue: [UUID]) {
         (currentDocumentID, currentPhase, embedQueue, raptorQueue)
+    }
+
+    /// Broadcast the current lane state to the main-actor mirror
+    /// (`IndexingTracker`) so library cards can show a live "Queued #k". Snapshot
+    /// the Sendable values here, then post inside a main-actor `Task` (the actor
+    /// methods that call this are synchronous; the post must hop to the main
+    /// actor where the tracker's Combine sinks deliver). Values are plain
+    /// value-type UUIDs, so the capture is concurrency-safe.
+    private func postChange() {
+        let current = currentDocumentID
+        let embed = embedQueue
+        let raptor = raptorQueue
+        Task { @MainActor in
+            var info: [AnyHashable: Any] = [
+                DocumentIndexingQueue.embedQueueKey: embed,
+                DocumentIndexingQueue.raptorQueueKey: raptor,
+            ]
+            if let current { info[DocumentIndexingQueue.currentDocumentIDKey] = current }
+            NotificationCenter.default.post(
+                name: DocumentIndexingQueue.queueDidChangeNotification,
+                object: nil, userInfo: info)
+        }
     }
 
     // MARK: Drain loop
@@ -215,6 +253,7 @@ actor DocumentIndexingQueue {
 
             currentDocumentID = id
             currentPhase = phase
+            postChange()
             dbgLog("DocumentIndexingQueue: RUN %@ %@ (embed=%d raptor=%d)",
                    phase == .embedding ? "embed" : "raptor",
                    id.uuidString, embedQueue.count, raptorQueue.count)
@@ -239,7 +278,10 @@ actor DocumentIndexingQueue {
                 raptorQueue.append(id)
             }
             cancelled.remove(id)
+            postChange()
         }
+        // Loop fully drained — broadcast the idle state so cards clear "Queued".
+        postChange()
     }
 }
 

@@ -68,16 +68,9 @@ struct AskPoseyView: View {
     private var isMLXModel: Bool {
         ModelCatalog.current().source == .mlx
     }
-    /// Live viewport height of the conversation ScrollView, used to
-    /// size the trailing spacer so scrollTo(.top) on the user message
-    /// can actually reach the literal top of the visible area.
-    @State private var scrollViewportHeight: CGFloat = 0
-    /// Conservative pad height — most of the viewport, minus a sliver
-    /// so the user can still see the assistant content scrolling in
-    /// below their question. Computed in `trailingScrollPadHeight`.
-    private var trailingScrollPadHeight: CGFloat {
-        max(scrollViewportHeight - 80, 200)
-    }
+    // 2026-06-19 — `scrollViewportHeight` / `trailingScrollPadHeight` removed
+    // with the List migration; they sized the old ScrollView `.contentMargins`
+    // bottom pad (the scroll-jump culprit), which no longer exists.
 
 
     /// Closure invoked when the user taps a Sources-strip pill OR an
@@ -228,66 +221,53 @@ struct AskPoseyView: View {
                 indexingNotice
 
                 ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            // 2026-05-28 — dismissal is per-family
-                            // (AFM vs MLX). See firstUseDismissedMLX.
-                            if (isMLXModel ? !firstUseDismissedMLX : !firstUseDismissed) {
-                                firstUseBanner
-                                    .id("askPosey.firstUseBanner")
-                            }
-                            if viewModel.documentDetectedNonEnglish,
-                               !nonEnglishDismissed {
-                                nonEnglishBanner
-                                    .id("askPosey.nonEnglishBanner")
-                            }
-                            ForEach(viewModel.messages) { message in
-                                threadRow(for: message)
-                                    .id(message.id)
-                            }
-
-                            if viewModel.isResponding,
-                               !viewModel.messages.contains(where: { $0.isStreaming }) {
-                                typingIndicator
-                                    .id(Self.typingIndicatorID)
-                                    .transition(.opacity)
-                            }
-
+                    // 2026-06-19 (Mark) — ported to Hal's chat-scroll
+                    // architecture (`ChatViews.swift`). A `List` (stable row
+                    // layout) replaces ScrollView+LazyVStack, whose lazy
+                    // row-realization + the big bottom `.contentMargins`
+                    // recompute made the thread JUMP while a slow answer
+                    // streamed (worst under LPM/thermal). Scroll rule is
+                    // unchanged and already Hal-shaped: scroll the user's
+                    // question to the top ONCE on send; land on the anchor
+                    // ONCE on open; NOTHING mid-stream. A 1pt bottom sentinel
+                    // ("askPosey.bottom") is the scroll target for the
+                    // launch/latest helpers — no contentMargins hack.
+                    List {
+                        // 2026-05-28 — dismissal is per-family (AFM vs MLX).
+                        if (isMLXModel ? !firstUseDismissedMLX : !firstUseDismissed) {
+                            firstUseBanner
+                                .id("askPosey.firstUseBanner")
+                                .modifier(AskPoseyThreadRowStyle())
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        if viewModel.documentDetectedNonEnglish,
+                           !nonEnglishDismissed {
+                            nonEnglishBanner
+                                .id("askPosey.nonEnglishBanner")
+                                .modifier(AskPoseyThreadRowStyle())
+                        }
+                        ForEach(viewModel.messages) { message in
+                            threadRow(for: message)
+                                .id(message.id)
+                                .modifier(AskPoseyThreadRowStyle())
+                        }
+
+                        if viewModel.isResponding,
+                           !viewModel.messages.contains(where: { $0.isStreaming }) {
+                            typingIndicator
+                                .id(Self.typingIndicatorID)
+                                .modifier(AskPoseyThreadRowStyle())
+                        }
+
+                        // Bottom sentinel — scroll target for launch/latest
+                        // positioning. No auto-scroll attaches to it; the user
+                        // is in control after the initial placement (Hal).
+                        Color.clear
+                            .frame(height: 1)
+                            .id("askPosey.bottom")
+                            .modifier(AskPoseyThreadRowStyle())
                     }
-                    .frame(maxHeight: .infinity)
-                    // 2026-05-05 — `.contentMargins` (iOS 17+) on the
-                    // BOTTOM extends the scrollable area by `viewportHeight`
-                    // pixels WITHOUT rendering visible empty content.
-                    // This is the standard ChatGPT/Claude pattern: when
-                    // the user sends a message, scrollTo(userMsg.id,
-                    // anchor: .top) needs there to be room below the
-                    // user's message for the scroll position to advance.
-                    // Without contentMargins, SwiftUI ScrollView clamps
-                    // scroll to "just enough to show all content," so
-                    // a short conversation can't actually park the
-                    // question at the literal top — the LazyVStack
-                    // lays out its intrinsic height and stops. Using
-                    // contentMargins instead of an inline trailing
-                    // spacer means there's no visible blank area at
-                    // the bottom of the conversation.
-                    .contentMargins(
-                        .bottom,
-                        max(0, scrollViewportHeight - 80),
-                        for: .scrollContent
-                    )
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear
-                                .onAppear { scrollViewportHeight = geo.size.height }
-                                .onChange(of: geo.size.height) { _, h in
-                                    scrollViewportHeight = h
-                                }
-                        }
-                    )
+                    .listStyle(.plain)
+                    .scrollDismissesKeyboard(.interactively)
                     .onChange(of: latestUserMessageID) { oldValue, newValue in
                         // 2026-05-05 (revised) — Watch the most-recent
                         // user-message ID, not messages.count. The live
@@ -351,38 +331,29 @@ struct AskPoseyView: View {
                         // conversation is taller than the visible
                         // sheet. Same three-pass technique as the
                         // initial-anchor scroll.
-                        guard let target = viewModel.messages.last else { return }
                         Task { @MainActor in
                             try? await Task.sleep(for: .milliseconds(80))
-                            proxy.scrollTo(target.id, anchor: .bottom)
+                            proxy.scrollTo("askPosey.bottom", anchor: .bottom)
                             try? await Task.sleep(for: .milliseconds(180))
-                            proxy.scrollTo(target.id, anchor: .bottom)
+                            proxy.scrollTo("askPosey.bottom", anchor: .bottom)
                             try? await Task.sleep(for: .milliseconds(220))
                             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) {
-                                proxy.scrollTo(target.id, anchor: .bottom)
+                                proxy.scrollTo("askPosey.bottom", anchor: .bottom)
                             }
                         }
                     }
                 }
 
-                // 2026-05-12 — Mark confirmed (with iPhone screenshot
-                // at 1:19 PM) that even the original simple architecture
-                // (composer as plain VStack child) leaves the composer
-                // partially covered by the keyboard's QuickType bar on
-                // real iPhone hardware. SwiftUI's auto-inset pushes the
-                // composer to the keyboard's primary frame top, but
-                // iOS overlays the QuickType suggestion bar ABOVE that.
-                // The fix is additive: keep SwiftUI's auto-inset AND
-                // add an explicit 60pt bottom padding when the composer
-                // is focused. 60pt covers iPhone's QuickType bar height
-                // with breathing room. Drives off @FocusState so the
-                // padding animates in/out cleanly with focus changes.
-
+                // 2026-06-19 (Mark) — composer is now a plain child below the
+                // List (Hal's structure). The old +60pt-when-focused padding —
+                // a static guess to clear the QuickType bar that left a visible
+                // gap (the "orange" space) and mis-sized when predictive text
+                // was off — is GONE. List-based keyboard avoidance keeps the
+                // composer flush above the FULL keyboard frame (QuickType
+                // included), the way Hal's composer sits.
                 Divider().opacity(0.4)
 
                 composer
-                    .padding(.bottom, composerFocused ? 60 : 0)
-                    .animation(.easeInOut(duration: 0.25), value: composerFocused)
             }
             // 2026-06-19 (Mark) — title removed from the header. You already
             // know what you're reading (it's right behind the sheet) and the
@@ -538,6 +509,19 @@ struct AskPoseyView: View {
 }
 // ========== BLOCK 01: ROOT VIEW - END ==========
 
+
+// 2026-06-19 — shared row styling for the Ask Posey List: clear background,
+// no separators, and the thread's horizontal margin (16pt) so rows align with
+// the composer and the assistant's full-width prose. Replaces the per-row
+// padding that the old LazyVStack carried.
+private struct AskPoseyThreadRowStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+    }
+}
 
 // ========== BLOCK 01B: ANCHOR ROW REMOTE REGISTRATION - START ==========
 /// Registers each anchor row with `RemoteTargetRegistry` under a
@@ -1422,6 +1406,10 @@ private extension AskPoseyView {
     /// the M4 `sendEchoStub` for previews/tests/older OS targets.
     func submit() {
         guard viewModel.canSend else { return }
+        // 2026-06-19 (Mark) — drop the keyboard on send so Posey's answer
+        // gets full reading height. Tapping the composer brings it back for
+        // a follow-up.
+        composerFocused = false
         Task { @MainActor in
             #if canImport(FoundationModels)
             if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
@@ -1441,23 +1429,30 @@ struct AskPoseyMessageBubble: View {
     let message: AskPoseyMessage
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
+        Group {
             switch message.role {
             case .user:
-                Spacer(minLength: 32)
-                bubble
-                    .background(.tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 16))
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                // The user's words stay in a bubble — set apart, trailing.
+                HStack(spacing: 0) {
+                    Spacer(minLength: 32)
+                    bubble
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 16))
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
             case .assistant:
+                // 2026-06-19 (Mark) — Posey's answer is prose meant to be
+                // READ, so render it full-width with NO bubble (it flows like
+                // the book itself). The asymmetry IS the cue: your words sit
+                // in a bubble; Posey's answer just flows. Aligns at the
+                // thread's natural margin — no extra inset, no grey box.
                 bubble
-                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Spacer(minLength: 32)
             case .anchor:
                 // Anchor markers render via AskPoseyView.anchorMarkerRow
-                // (not as bubbles). This case is unreachable in practice
-                // because threadRow dispatches anchors away from the
-                // bubble view, but the switch must be exhaustive.
+                // (not as bubbles). Unreachable in practice (threadRow
+                // dispatches anchors away), but the switch must be exhaustive.
                 EmptyView()
             }
         }
@@ -1482,13 +1477,13 @@ struct AskPoseyMessageBubble: View {
         // citations): the original `Text(.init(markdown))` path so
         // bold/italic/code/lists all keep working.
         if message.role == .assistant, !message.chunksInjected.isEmpty {
+            // Padding/background applied per-role in `body` (user = bubble,
+            // assistant = full-width plain prose).
             CitationFlowText(
                 content: message.content,
                 chunkCount: message.chunksInjected.count,
                 displayMap: AskPoseyView.citedSources(for: message)
             )
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
             .modifier(BubbleSelectionAndCopy(
                 content: message.content,
                 role: message.role
@@ -1498,8 +1493,6 @@ struct AskPoseyMessageBubble: View {
                 .font(.body)
                 .foregroundStyle(.primary)
                 .tint(.accentColor)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
                 .modifier(BubbleSelectionAndCopy(
                     content: message.content,
                     role: message.role

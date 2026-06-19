@@ -1141,48 +1141,14 @@ private extension AskPoseyView {
             viewModel.toggleSpoilerProtection()
         }
         .popover(isPresented: $showSpoilerPopover) {
-            spoilerPopoverContent
-                // Force a true anchored popover on iPhone (compact), not a
-                // sheet — this is a small contextual control, not a destination.
-                .presentationCompactAdaptation(.popover)
+            SpoilerProtectionPopover(
+                isOn: viewModel.spoilerProtectionEnabled,
+                onToggle: { viewModel.toggleSpoilerProtection() }
+            )
+            // Force a true anchored popover on iPhone (compact), not a
+            // sheet — this is a small contextual control, not a destination.
+            .presentationCompactAdaptation(.popover)
         }
-    }
-
-    /// 2026-06-19 (Mark) — spoiler control content. Title + a clean on/off
-    /// switch + the in-character description at FULL width, so Posey's voice
-    /// has room (the old Menu truncated it). The shield in the toolbar still
-    /// shows state at a glance (filled = on, slashed = off) and just opens this.
-    var spoilerPopoverContent: some View {
-        let on = viewModel.spoilerProtectionEnabled
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: on ? "shield.lefthalf.filled" : "shield.slash")
-                    .foregroundStyle(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                Text("Spoiler protection")
-                    .font(.headline)
-                Spacer(minLength: 12)
-                Toggle("", isOn: Binding(
-                    get: { viewModel.spoilerProtectionEnabled },
-                    set: { newValue in
-                        if newValue != viewModel.spoilerProtectionEnabled {
-                            viewModel.toggleSpoilerProtection()
-                        }
-                    }
-                ))
-                .labelsHidden()
-                .accessibilityLabel("Spoiler protection")
-            }
-            // Full-width, in-character — room to breathe (placeholder copy;
-            // Mark to finalize the voice now that it isn't cramped).
-            Text(on
-                 ? "I've read the whole thing, but I won't give away anything past where you are."
-                 : "I'll answer freely — including things you haven't reached yet.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(16)
-        .frame(width: 300)
     }
 
     var composer: some View {

@@ -16,28 +16,6 @@ extension Notification.Name {
 }
 
 // ========== BLOCK 01: PROTOCOL - START ==========
-/// Read-only interface the Ask Posey UI calls when classifying an
-/// intent. Behind a protocol so:
-/// 1. Tests can swap in a stub that returns a deterministic intent
-///    without touching AFM.
-/// 2. SwiftUI previews (M4) can render the sheet with a fake service
-///    that doesn't require AFM availability on the preview host.
-/// 3. Future variants (e.g. local heuristic classifier for offline
-///    fallback in M8) can plug into the same surface.
-///
-/// The async signature reflects the Call 1 cost — even a tiny
-/// `@Generable` enum classification on AFM is hundreds of ms on a
-/// real device.
-@MainActor
-protocol AskPoseyClassifying: Sendable {
-    /// Map a user question (and the optional anchor passage that was
-    /// active at invocation) to an `AskPoseyIntent` bucket. Throws
-    /// `AskPoseyServiceError` on AFM failures so callers can surface
-    /// a helpful error UI without leaking framework error types.
-    @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
-    func classifyIntent(question: String, anchor: String?) async throws -> AskPoseyIntent
-}
-
 /// Metadata carried alongside a completed prose response. The view
 /// model uses these fields to (a) persist the assistant turn into
 /// `ask_posey_conversations` with the right diagnostics, (b) surface
@@ -245,7 +223,7 @@ nonisolated enum AskPoseyPrompts {
 #if canImport(FoundationModels)
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @MainActor
-final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySummarizing {
+final class AskPoseyService: AskPoseyStreaming, AskPoseySummarizing {
 
     private let model: SystemLanguageModel
     private let instructions: String
@@ -300,53 +278,6 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         self.polishTemperature = polishTemperature
     }
 
-    /// Classify the user's question into an `AskPoseyIntent`.
-    ///
-    /// **Threading.** Marked `@MainActor` for now to match the
-    /// `LanguageModelSession` lifetime model: the session is created
-    /// here, used for one round-trip, and dropped when the call
-    /// returns. There's no shared state to coordinate, so making the
-    /// surface main-actor keeps the UI integration simple.
-    ///
-    /// **Session lifecycle.** A fresh `LanguageModelSession` is
-    /// constructed for each call. AFM sessions accumulate a transcript;
-    /// reusing one across independent classifications would let an
-    /// earlier question's wording bias the next one's intent. For the
-    /// classifier specifically, statelessness is correct.
-    func classifyIntent(question: String, anchor: String?) async throws -> AskPoseyIntent {
-        guard model.availability == .available else {
-            throw AskPoseyServiceError.afmUnavailable
-        }
-        // 2026-05-05 — Phase B: bracket every user-driven AFM call
-        // with begin/end notifications so BackgroundEnhancementScheduler
-        // yields AFM bandwidth to the user. AFM is effectively
-        // single-stream on-device; without this, a user question can
-        // wait up to ~2s behind a chunk-context-note generation.
-        NotificationCenter.default.post(name: .askPoseyAFMDidBegin, object: nil)
-        defer {
-            NotificationCenter.default.post(name: .askPoseyAFMDidEnd, object: nil)
-        }
-        let session = LanguageModelSession(
-            model: model,
-            instructions: instructions
-        )
-        let prompt = AskPoseyPrompts.classifierPrompt(
-            question: question,
-            anchor: anchor
-        )
-        do {
-            let response = try await session.respond(
-                to: prompt,
-                generating: AskPoseyIntent.self
-            )
-            return response.content
-        } catch let generationError as LanguageModelSession.GenerationError {
-            throw Self.translate(generationError)
-        } catch {
-            throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
-        }
-    }
-
     /// Stream a prose response for an Ask Posey turn.
     ///
     /// **Lifecycle.** A fresh `LanguageModelSession` is created here,
@@ -392,7 +323,7 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
             throw AskPoseyServiceError.afmUnavailable
         }
         // Phase B: yield AFM to the user for the duration of this
-        // streaming call. See classifyIntent() above for rationale.
+        // streaming call (AFM is effectively single-stream on-device).
         NotificationCenter.default.post(name: .askPoseyAFMDidBegin, object: nil)
         defer {
             NotificationCenter.default.post(name: .askPoseyAFMDidEnd, object: nil)

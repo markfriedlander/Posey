@@ -1333,13 +1333,11 @@ struct ReaderView: View {
         // its echo-stub send path in that case.
         let document = viewModel.document
         let database = viewModel.databaseManager
-        var classifier: AskPoseyClassifying?
         var streamer: AskPoseyStreaming?
         var summarizer: AskPoseySummarizing?
         #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
             let service = AskPoseyService()
-            classifier = service
             streamer = service
             summarizer = service
         }
@@ -1360,7 +1358,6 @@ struct ReaderView: View {
                 anchor: anchor,
                 invocationReadingOffset: invocationOffset,
                 initialScrollAnchorStorageID: initialAnchorStorageID,
-                classifier: classifier,
                 streamer: streamer,
                 summarizer: summarizer,
                 databaseManager: database,

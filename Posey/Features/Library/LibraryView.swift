@@ -3784,13 +3784,11 @@ extension LibraryViewModel {
         // Compose live deps if available on this OS. Without them
         // the view model's send() falls back to the echo stub —
         // useful for tests that don't have AFM.
-        var classifier: AskPoseyClassifying?
         var streamer: AskPoseyStreaming?
         var summarizer: AskPoseySummarizing?
         #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
             let service = AskPoseyService()
-            classifier = service
             streamer = service
             summarizer = service
         }
@@ -3831,7 +3829,6 @@ extension LibraryViewModel {
             anchor: anchor,
             invocationReadingOffset: readingOffset,
             initialScrollAnchorStorageID: mostRecentAnchorID,
-            classifier: classifier,
             streamer: streamer,
             summarizer: summarizer,
             databaseManager: databaseManager,
@@ -3849,7 +3846,7 @@ extension LibraryViewModel {
         }
 
         viewModel.inputText = question
-        if classifier != nil, streamer != nil {
+        if streamer != nil {
             #if canImport(FoundationModels)
             if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
                 await viewModel.send()

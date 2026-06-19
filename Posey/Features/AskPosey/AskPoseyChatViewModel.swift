@@ -146,10 +146,6 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// large documents don't get copied on every send.
     private let documentPlainText: String
 
-    /// Live classifier injected at construction. Optional in the M4
-    /// stub canvases; required for the live `send` path.
-    private let classifier: AskPoseyClassifying?
-
     /// Live prose streamer. Required for the live `send` path; nil
     /// for tests/previews that drive `sendEchoStub` only.
     private let streamer: AskPoseyStreaming?
@@ -358,7 +354,6 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         anchor: AskPoseyAnchor?,
         invocationReadingOffset: Int? = nil,
         initialScrollAnchorStorageID: String? = nil,
-        classifier: AskPoseyClassifying? = nil,
         streamer: AskPoseyStreaming? = nil,
         summarizer: AskPoseySummarizing? = nil,
         databaseManager: DatabaseManager? = nil,
@@ -379,7 +374,6 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
         // twice. Document-scoped callers must pass it explicitly.
         self.invocationReadingOffset = invocationReadingOffset ?? anchor?.plainTextOffset
         self.initialScrollAnchorStorageID = initialScrollAnchorStorageID
-        self.classifier = classifier
         self.streamer = streamer
         self.summarizer = summarizer
         self.databaseManager = databaseManager
@@ -1504,7 +1498,7 @@ extension AskPoseyChatViewModel {
     func send() async {
         let trimmedInput = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedInput.isEmpty, !isResponding else { return }
-        guard let classifier, let streamer else {
+        guard let streamer else {
             // No live deps — degrade to echo so previews/tests keep
             // working.
             await sendEchoStub()
@@ -1599,40 +1593,17 @@ extension AskPoseyChatViewModel {
         )
         messages.append(placeholder)
 
-        let anchorTextForClassifier = anchor?.trimmedDisplayText
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                // Call 1: intent classification.
-                //
-                // **2026-05-02 fix.** AFM's safety filter sometimes
-                // refuses the classifier call itself for questions
-                // it considers sensitive (e.g. "How does Mark's role
-                // compare to the AI contributors?"). The classifier
-                // is internal infrastructure — its refusal shouldn't
-                // surface to the user as a hard failure. Fall back
-                // to `.general` intent so the prose pipeline still
-                // runs, where the proper retry-with-rephrasing logic
-                // can handle the user-facing refusal path. Other
-                // classifier errors (transient, AFM unavailable)
-                // still surface via handleSendError.
-                let intent: AskPoseyIntent
-                do {
-                    intent = try await classifier.classifyIntent(
-                        question: trimmedInput,
-                        anchor: anchorTextForClassifier
-                    )
-                } catch {
-                    let errorString = "\(error)"
-                    let isClassifierRefusal = errorString.lowercased().contains("refusal")
-                    if isClassifierRefusal {
-                        dbgLog("AskPosey: classifier refused; defaulting to .general intent")
-                        intent = .general
-                    } else {
-                        self.handleSendError(error, placeholderID: placeholderID, intent: nil)
-                        return
-                    }
-                }
+                // Intent classification REMOVED 2026-06-19 (Mark + A/B). The
+                // immediate/search/general classifier was an AFM-era "Call 1"
+                // built to pre-narrow context for AFM's 4K window. On the MLX
+                // answer path (8K budget) the A/B showed it adds ~2× latency and
+                // an AFM dependency for no quality gain, so every question now
+                // takes the single full-retrieval `.general` route (anchor +
+                // surrounding + summary + RAG — the model focuses itself).
+                let intent: AskPoseyIntent = .general
 
                 // Wait for any in-flight summarization from the
                 // previous turn to land BEFORE building this prompt

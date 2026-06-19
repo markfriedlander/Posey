@@ -18,10 +18,7 @@ struct SpoilerProtectionPopover: View {
     /// Flip protection (persists via the view model).
     let onToggle: () -> Void
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var index: Int = 0
-
-    private static let rotationSeconds: Double = 4.0
 
     /// ON — she's read it all and won't reveal anything past the reader's spot.
     private static let onPhrases: [String] = [
@@ -69,26 +66,12 @@ struct SpoilerProtectionPopover: View {
         }
         .padding(16)
         .frame(width: 300)
+        // 2026-06-19 (Mark) — rotate ONLY on open and on state change, not
+        // continuously: a fresh in-character line each time you open the
+        // popover or flip the switch, then it holds still (no fidgety timer).
         .onAppear { index = Int.random(in: 0..<phrases.count) }
         .onChange(of: isOn) { _, _ in
-            // Toggled while open — show a fresh line from the new state's set.
             index = Int.random(in: 0..<phrases.count)
-        }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.rotationSeconds))
-                if Task.isCancelled { return }
-                let next: () -> Int = {
-                    var n = Int.random(in: 0..<phrases.count)
-                    if n == index { n = (n + 1) % phrases.count }
-                    return n
-                }
-                if reduceMotion {
-                    index = next()
-                } else {
-                    withAnimation(.easeInOut(duration: 0.35)) { index = next() }
-                }
-            }
         }
     }
 }

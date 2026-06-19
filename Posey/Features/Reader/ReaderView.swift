@@ -1336,14 +1336,12 @@ struct ReaderView: View {
         var classifier: AskPoseyClassifying?
         var streamer: AskPoseyStreaming?
         var summarizer: AskPoseySummarizing?
-        var navigator: AskPoseyNavigating?
         #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
             let service = AskPoseyService()
             classifier = service
             streamer = service
             summarizer = service
-            navigator = service
         }
         #endif
 
@@ -1365,7 +1363,6 @@ struct ReaderView: View {
                 classifier: classifier,
                 streamer: streamer,
                 summarizer: summarizer,
-                navigator: navigator,
                 databaseManager: database,
                 initialQuery: initialQuery,
                 autoSubmitInitialQuery: autoSubmitInitialQuery

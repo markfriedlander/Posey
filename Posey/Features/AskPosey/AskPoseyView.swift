@@ -675,13 +675,6 @@ private extension AskPoseyView {
                 } else {
                     AskPoseyMessageBubble(message: message)
                 }
-                // Navigation cards (.search intent results) render as
-                // a separate strip — they're a structurally different
-                // surface from text + inline citations.
-                if message.role == .assistant,
-                   !message.navigationCards.isEmpty {
-                    navigationCardList(for: message)
-                }
                 // 2026-05-04 — Sources strip restored alongside
                 // inline `[ⁿ]` citations as part of the re-scoped 1.0
                 // Ask Posey. Inline citations link specific claims to
@@ -691,8 +684,7 @@ private extension AskPoseyView {
                 // reader. Skip when there are no chunks (the
                 // weak-retrieval and short-circuit paths).
                 if message.role == .assistant,
-                   !message.chunksInjected.isEmpty,
-                   message.navigationCards.isEmpty {
+                   !message.chunksInjected.isEmpty {
                     // 2026-05-05 — Filter to only chunks AFM actually
                     // cited in the response. Earlier behavior showed
                     // every chunk injected into the prompt (including
@@ -1253,56 +1245,6 @@ private extension AskPoseyView {
             .background(.thinMaterial)
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("askPosey.reReadingNotice")
-        }
-    }
-
-/// M7 navigation cards — vertical list of tappable destinations
-    /// that replace prose for `.search` intent responses. Each card
-    /// shows the title + reason; tapping cancels any in-flight stream,
-    /// dismisses the sheet, and jumps the reader to the card's offset
-    /// via the same `onJumpToChunk` closure source-attribution pills
-    /// use.
-    func navigationCardList(for message: AskPoseyMessage) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(message.navigationCards) { card in
-                Button {
-                    guard let onJumpToChunk else { return }
-                    viewModel.cancelInFlight()
-                    // Navigation card tap (search-result destination)
-                    // counts as a citation-flavored jump — user is
-                    // navigating from an Ask Posey answer to a passage
-                    // in the document; needs the return-pill flow.
-                    onJumpToChunk(card.plainTextOffset, true)
-                    dismiss()
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Image(systemName: "arrow.right.circle.fill")
-                                .imageScale(.medium)
-                                .foregroundStyle(.tint)
-                            Text(card.title)
-                                .font(.callout.weight(.semibold))
-                                .multilineTextAlignment(.leading)
-                                .foregroundStyle(.primary)
-                            Spacer(minLength: 4)
-                        }
-                        Text(card.reason)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.leading)
-                            .padding(.leading, 24)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                }
-                .buttonStyle(.plain)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Jump to \(card.title). \(card.reason)")
-                .accessibilityIdentifier("askPosey.navCard")
-                .disabled(onJumpToChunk == nil)
-            }
         }
     }
 

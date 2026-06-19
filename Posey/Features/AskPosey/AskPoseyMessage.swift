@@ -48,11 +48,6 @@ struct AskPoseyMessage: Identifiable, Equatable, Sendable {
     /// view renders these as a tappable "Sources" strip below the
     /// bubble — each pill jumps the reader to the chunk's offset.
     var chunksInjected: [RetrievedChunk]
-    /// M7 navigation-card response. When the classifier returned
-    /// `.search`, the assistant turn ships a list of tappable
-    /// destination cards instead of prose. Empty for `.immediate` /
-    /// `.general` responses and for user messages.
-    var navigationCards: [AskPoseyNavigationCard]
 
     /// Captured reading offset at invocation time — populated for
     /// every anchor row, regardless of scope. Tap-to-jump uses this
@@ -78,7 +73,6 @@ struct AskPoseyMessage: Identifiable, Equatable, Sendable {
         isStreaming: Bool = false,
         timestamp: Date = .now,
         chunksInjected: [RetrievedChunk] = [],
-        navigationCards: [AskPoseyNavigationCard] = [],
         anchorOffset: Int? = nil,
         anchorScope: String? = nil,
         storageID: String? = nil
@@ -89,7 +83,6 @@ struct AskPoseyMessage: Identifiable, Equatable, Sendable {
         self.isStreaming = isStreaming
         self.timestamp = timestamp
         self.chunksInjected = chunksInjected
-        self.navigationCards = navigationCards
         self.anchorOffset = anchorOffset
         self.anchorScope = anchorScope
         self.storageID = storageID

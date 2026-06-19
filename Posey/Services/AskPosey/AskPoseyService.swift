@@ -233,7 +233,7 @@ nonisolated enum AskPoseyPrompts {
         lines.append("")
         lines.append("Classify the question into exactly one of:")
         lines.append("- immediate — the question is about the anchor passage above.")
-        lines.append("- search — STRICT location query. The user wants to navigate to WHERE a specific named thing appears (chapter title, section name, exact phrase, table of contents entry). The expected output is a list of jump-to locations, not a substantive answer. Canonical shapes: \"where is chapter 5\", \"find the section called X\", \"locate the chapter about cetology\", \"jump to the part about Y\", \"which section discusses Z\". The intent is purely navigation.")
+        lines.append("- search — a WHERE/location question: the user mainly wants to know where in the document a specific named thing appears (a chapter, a section, a named passage). Canonical shapes: \"where is chapter 5\", \"where does the section about cetology start\", \"which chapter discusses Z\". Answer concisely with the location in prose (the part/chapter and a brief orienting phrase), not a long substantive treatment.")
         lines.append("- general — ANY question that wants a substantive answer about content, including interpretive, evaluative, comparative, thematic, descriptive, or summary questions. This is the default when in doubt. Even when the question uses verbs like \"find\", \"quote\", \"give me\", \"show me\", \"tell me about\", \"describe\", \"explain\", \"pick\", or contains the word \"passage\" / \"example\" / \"description\" — if the user wants the model to TELL them something about the content (rather than just point them at a location), it is general. Examples that are GENERAL despite their wording: \"find a passage that describes Ahab's leg\" (wants the description, not a page number), \"find me the most vivid description of the whale\" (wants the description), \"tell me about Ahab's character\" (wants substantive prose), \"quote a sentence that shows Ishmael's mood\" (wants a content selection with reasoning), \"describe how the narrator handles dialogue\" (wants analysis).")
         return lines.joined(separator: "\n")
     }
@@ -245,7 +245,7 @@ nonisolated enum AskPoseyPrompts {
 #if canImport(FoundationModels)
 @available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 @MainActor
-final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySummarizing, AskPoseyNavigating {
+final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySummarizing {
 
     private let model: SystemLanguageModel
     private let instructions: String
@@ -1274,59 +1274,6 @@ final class AskPoseyService: AskPoseyClassifying, AskPoseyStreaming, AskPoseySum
         return accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     // ========== BLOCK 09B: PAIRWISE SUMMARIZATION - END ==========
-
-    /// M7 navigation cards — Call-2 path for `.search` intent.
-    /// AFM is constrained via `@Generable` to pick 3–6 cards from
-    /// the supplied candidate chunks; we resolve the chosen indices
-    /// back to chunk metadata and return ready-to-render
-    /// `AskPoseyNavigationCard` values.
-    ///
-    /// Same fresh-session-per-call lifecycle as the other surfaces.
-    /// If AFM picks an out-of-range candidate index, we silently drop
-    /// that card rather than crashing — defensive parsing because the
-    /// `@Generable` schema can't constrain integers to a runtime-known
-    /// range.
-    func generateNavigationCards(
-        question: String,
-        candidates: [RetrievedChunk]
-    ) async throws -> [AskPoseyNavigationCard] {
-        guard model.availability == .available else {
-            throw AskPoseyServiceError.afmUnavailable
-        }
-        guard !candidates.isEmpty else {
-            // No retrieval results means nothing to navigate to. The
-            // caller surfaces a "no matches" UI state.
-            return []
-        }
-        let session = LanguageModelSession(
-            model: model,
-            instructions: AskPoseyNavigationPrompts.systemInstructions
-        )
-        let body = AskPoseyNavigationPrompts.body(question: question, candidates: candidates)
-        do {
-            let response = try await session.respond(
-                to: body,
-                generating: AskPoseyNavigationCardSet.self
-            )
-            return response.content.cards.compactMap { card in
-                guard candidates.indices.contains(card.candidateIndex) else { return nil }
-                let source = candidates[card.candidateIndex]
-                return AskPoseyNavigationCard(
-                    title: card.title,
-                    reason: card.reason,
-                    plainTextOffset: source.startOffset,
-                    relevance: source.relevance,
-                    chunkID: source.chunkID
-                )
-            }
-        } catch let g as LanguageModelSession.GenerationError {
-            throw Self.translate(g)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            throw AskPoseyServiceError.permanent(underlyingDescription: "\(error)")
-        }
-    }
 
     /// Map AFM's framework error type into our user-facing enum.
     /// Centralising the mapping here keeps the error semantics in one

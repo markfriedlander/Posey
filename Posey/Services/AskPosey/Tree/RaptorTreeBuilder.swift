@@ -180,8 +180,11 @@ public actor RaptorTreeBuilder {
                 verifyDropped: v.dropped
             ))
 
-            // Pace the next AFM call.
+            // Pace the next summary call (model-pressure cooldown) + proactive
+            // thermal pacing (Pillar 2): pause/back off the cluster loop under
+            // thermal pressure, like the embed loop.
             try? await Task.sleep(nanoseconds: UInt64(config.afmCooldownSeconds * 1_000_000_000))
+            await ThermalGovernor.shared.pace()
         }
         return out
     }

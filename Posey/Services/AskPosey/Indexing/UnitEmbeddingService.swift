@@ -291,6 +291,13 @@ actor UnitEmbeddingService {
                 } catch {
                     // Row stays NULL; continue.
                 }
+                // Pillar 2 — proactive thermal pacing. A small yield after each
+                // heavy embed so the chip never runs at a 100% duty cycle (a
+                // single long doc's ~hundreds of back-to-back embeds is what
+                // cooks the device, even when serialized); the yield scales up
+                // under thermal pressure and fully pauses at `.critical`. Honors
+                // cancellation, so the escape switch isn't delayed.
+                await ThermalGovernor.shared.pace()
             }
 
             // Post .didProgress per batch (not per row — would

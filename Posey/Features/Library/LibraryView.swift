@@ -1282,6 +1282,27 @@ extension LibraryViewModel {
                     "documents": items
                 ])
 
+            case "THERMAL_STATE":
+                // Pillar 2 observation: current device thermal state (+ the
+                // governor's view, which honors the DEBUG injection). Lets a
+                // verification run confirm proactive pacing keeps the device
+                // cool during indexing, and feeds Pillar 4's "cooling down".
+                func thermalName(_ s: ProcessInfo.ThermalState) -> String {
+                    switch s {
+                    case .nominal: return "nominal"
+                    case .fair: return "fair"
+                    case .serious: return "serious"
+                    case .critical: return "critical"
+                    @unknown default: return "unknown"
+                    }
+                }
+                let governed = await ThermalGovernor.shared.snapshot()
+                return json([
+                    "thermalState": thermalName(ProcessInfo.processInfo.thermalState),
+                    "governorState": thermalName(governed),
+                    "lowPowerMode": ProcessInfo.processInfo.isLowPowerModeEnabled
+                ])
+
             case "ENHANCE_CHUNK_NOW":
                 // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
                 _ = arg

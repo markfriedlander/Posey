@@ -76,10 +76,19 @@ struct LibraryView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
-                        LibraryReadingTimeLabel(
-                            document: document,
-                            databaseManager: viewModel.databaseManager
-                        )
+                        HStack(alignment: .firstTextBaseline) {
+                            LibraryReadingTimeLabel(
+                                document: document,
+                                databaseManager: viewModel.databaseManager
+                            )
+                            Spacer(minLength: 8)
+                            // Ask Posey readiness, bookending opposite the
+                            // reading-time (Mark's design, 2026-06-18).
+                            AskPoseyLibraryStatusLabel(
+                                documentID: document.id,
+                                databaseManager: viewModel.databaseManager
+                            )
+                        }
                     }
                     .padding(.vertical, 4)
                 }

@@ -15,6 +15,13 @@ import FoundationModels
 struct LibraryView: View {
     @StateObject private var viewModel: LibraryViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    // 2026-06-18 — Pillar 3: the library-level escape switch (halt + clean
+    // rebuild). Lives here because saturation originates from library imports,
+    // so the control is reachable exactly when needed — not buried in a reader
+    // sheet. Surfaced only while indexing is active or a rebuild is pending.
+    @ObservedObject private var indexingTracker = IndexingTracker.sharedForChat
+    @ObservedObject private var escape = IndexingEscapeController.shared
+    @State private var showHaltConfirm = false
     @State private var isImporting = false
     @State private var path: [Document] = []
     @State private var documentPendingDeletion: Document? = nil
@@ -54,6 +61,72 @@ struct LibraryView: View {
         self.shouldAutoCreateBookmarkOnReaderAppear = shouldAutoCreateBookmarkOnReaderAppear
         self.automationNoteBody = automationNoteBody
         _viewModel = StateObject(wrappedValue: LibraryViewModel(databaseManager: databaseManager))
+    }
+
+    /// Is any background indexing happening right now (something to halt)?
+    private var isIndexingActive: Bool {
+        indexingTracker.currentIndexingDocumentID != nil
+            || !indexingTracker.embedQueuePositions.isEmpty
+            || !indexingTracker.reReadingDocumentIDs.isEmpty
+    }
+
+    /// The Pillar-3 escape switch, as a slim top banner that appears ONLY when
+    /// there's work to halt or a rebuild waiting — invisible in the common
+    /// idle/ready state so the library stays clean. While indexing: a
+    /// destructive "Stop indexing" that confirms, then halts + clears + queues a
+    /// clean rebuild. After a halt: a calm "rebuilding when cool" / "paused" line
+    /// with an explicit "Rebuild now".
+    @ViewBuilder
+    private var escapeBanner: some View {
+        if isIndexingActive {
+            HStack(spacing: 10) {
+                Image(systemName: "hourglass")
+                    .foregroundStyle(.secondary)
+                Text("Preparing your library…")
+                    .font(.subheadline)
+                Spacer(minLength: 8)
+                Button(role: .destructive) {
+                    showHaltConfirm = true
+                } label: {
+                    Text("Stop").font(.subheadline.weight(.semibold))
+                }
+                .buttonStyle(.borderless)
+                .tint(.red)
+                .disabled(escape.isHalting)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.bar)
+            .confirmationDialog("Stop indexing and rebuild?",
+                                isPresented: $showHaltConfirm,
+                                titleVisibility: .visible) {
+                Button("Stop & rebuild", role: .destructive) {
+                    Task { await escape.halt() }
+                }
+                Button("Keep indexing", role: .cancel) {}
+            } message: {
+                Text("Posey will stop preparing your books and rebuild from scratch once your device is cool. Your books stay readable the whole time.")
+            }
+            .accessibilityIdentifier("library.stopIndexing")
+        } else if !escape.pendingReindex.isEmpty {
+            let n = escape.pendingReindex.count
+            HStack(spacing: 10) {
+                Image(systemName: escape.waitingForCooldown ? "thermometer.snowflake" : "pause.circle")
+                    .foregroundStyle(.secondary)
+                Text(escape.waitingForCooldown
+                     ? "Rebuilding when your device cools"
+                     : "Paused — \(n) book\(n == 1 ? "" : "s") to rebuild")
+                    .font(.subheadline)
+                Spacer(minLength: 8)
+                Button("Rebuild now") { escape.rebuildNow() }
+                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.borderless)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.bar)
+            .accessibilityIdentifier("library.rebuildPending")
+        }
     }
 
     var body: some View {
@@ -111,6 +184,9 @@ struct LibraryView: View {
                         description: Text("Import a TXT, Markdown, RTF, DOCX, HTML, EPUB, or PDF file to start the reading loop.")
                     )
                 }
+            }
+            .safeAreaInset(edge: .top) {
+                escapeBanner
             }
             .navigationTitle("Posey")
             .toolbar {
@@ -1311,6 +1387,25 @@ extension LibraryViewModel {
                     "governorState": thermalName(governed),
                     "lowPowerMode": ProcessInfo.processInfo.isLowPowerModeEnabled
                 ])
+
+            case "HALT_INDEXING":
+                // Pillar 3 escape switch (headless): same path the library's
+                // "Stop" button drives — halt all background indexing + clear the
+                // affected docs' suspect index for a clean rebuild. Lets a
+                // verification run (or a recovery from an over-queue) trigger the
+                // halt without a physical tap.
+                await IndexingEscapeController.shared.halt()
+                let pending = IndexingEscapeController.shared.pendingReindex.map { $0.uuidString }
+                let cooling = IndexingEscapeController.shared.waitingForCooldown
+                return json(["halted": true,
+                             "pendingReindex": pending,
+                             "waitingForCooldown": cooling])
+
+            case "REBUILD_INDEXING":
+                // Pillar 3: the "Rebuild now" affordance, headless — re-enqueue
+                // every pending document through the safe paced queue immediately.
+                IndexingEscapeController.shared.rebuildNow()
+                return json(["rebuilding": true])
 
             case "ENHANCE_CHUNK_NOW":
                 // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).

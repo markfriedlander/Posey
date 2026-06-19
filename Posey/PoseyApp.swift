@@ -125,6 +125,11 @@ struct PoseyApp: App {
                     await RaptorTreeService.shared.configure(databaseManager: manager)
                     await RaptorTreeService.shared.bootstrap()
 
+                    // 2026-06-18 — Pillar 3: wire the user-facing escape switch
+                    // (halt + clean rebuild) to the live DB and start it watching
+                    // thermal state for the cool-then-rebuild path.
+                    IndexingEscapeController.shared.configure(database: manager)
+
                     // 2026-05-23 — Step 8a: warm up the active embedding
                     // backend so any required asset download (e.g.
                     // NLContextual's mBERT on first launch) starts in

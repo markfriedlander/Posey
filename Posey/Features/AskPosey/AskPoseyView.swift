@@ -39,6 +39,14 @@ struct AskPoseyView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var composerFocused: Bool
 
+    /// 2026-06-19 — storageIDs of anchor markers the user has expanded.
+    /// Anchors collapse to 2 lines by default (the thread stays scannable);
+    /// tapping the passage text toggles full length. Distinct from the
+    /// header tap, which JUMPS the reader back to the anchored spot — the
+    /// two actions are visually separate (header = go there, body = read
+    /// the rest).
+    @State private var expandedAnchors: Set<String> = []
+
     /// 2026-05-04 — First-use notification per Mark's directive.
     /// Posey is optimized for non-fiction; show this once (ever, across
     /// all documents) so the user understands the strength/weakness
@@ -376,7 +384,11 @@ struct AskPoseyView: View {
                     .padding(.bottom, composerFocused ? 60 : 0)
                     .animation(.easeInOut(duration: 0.25), value: composerFocused)
             }
-            .navigationTitle(navigationTitleText)
+            // 2026-06-19 (Mark) — title removed from the header. You already
+            // know what you're reading (it's right behind the sheet) and the
+            // truncated "Frankenstein; or, the…" told you nothing. The header
+            // is now just the spoiler shield (leading) + Done (trailing).
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -703,77 +715,86 @@ private extension AskPoseyView {
         }
     }
 
-    /// Inline anchor marker — full passage text for passage scope,
-    /// `ASKING ABOUT / <doc title> / the whole document` for document
-    /// scope. Both render with the same thin-material card style and
-    /// are tappable: a tap dismisses the sheet and jumps the reader
-    /// to the captured offset (every anchor has one — passage scope
-    /// from the active sentence at invocation, document scope from
-    /// the same).
+    /// Inline ANCHOR marker — the conversation's header / bookmark-style
+    /// link back to where in the corpus the conversation began (2026-06-19,
+    /// Mark; scope removed, so always the passage form). TWO distinct tap
+    /// targets, deliberately separated so the actions are unambiguous:
+    ///   • the **header row** ("⟦ ANCHOR ⟧ + jump glyph") → JUMPS the reader
+    ///     back to the anchored offset (the bookmark behavior).
+    ///   • the **passage body** (collapsed to 2 lines) → EXPANDS in place;
+    ///     no navigation. "Show more/less" appears only when it would truncate.
     func anchorMarkerRow(_ message: AskPoseyMessage) -> some View {
-        let isDocumentScope = (message.anchorScope == "document")
-        let iconName = isDocumentScope ? "doc.text" : "quote.opening"
         let trimmedContent = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        let label = "ASKING ABOUT"
-        return Button {
-            // Capture the offset locally to avoid escaping
-            // self into the closure.
-            guard let offset = message.anchorOffset, let onJumpToChunk else {
-                return
-            }
-            viewModel.cancelInFlight()
-            // Anchor pill above the user's question — not a
-            // citation jump.
-            onJumpToChunk(offset, false)
-            dismiss()
-        } label: {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: iconName)
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 4)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(label)
+        let sid = message.storageID ?? message.id.uuidString
+        let expanded = expandedAnchors.contains(sid)
+        // Heuristic: ~2 lines of .callout is ~90 chars; only offer expand
+        // when the passage is long enough to actually clip. Avoids a
+        // misleading "Show more" on a short sentence.
+        let canExpand = trimmedContent.count > 90
+        let canJump = (onJumpToChunk != nil && message.anchorOffset != nil)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            // --- HEADER ROW → JUMP BACK ---
+            Button {
+                guard let offset = message.anchorOffset, let onJumpToChunk else { return }
+                viewModel.cancelInFlight()
+                onJumpToChunk(offset, false)
+                dismiss()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "quote.opening")
+                        .imageScale(.small)
+                        .foregroundStyle(.secondary)
+                    Text("ANCHOR")
                         .font(.caption2.smallCaps())
                         .foregroundStyle(.secondary)
-                    if isDocumentScope {
-                        Text(trimmedContent)
-                            .font(.callout.weight(.medium))
-                            .foregroundStyle(.primary.opacity(0.85))
-                            .lineLimit(2)
-                            .truncationMode(.tail)
-                            .multilineTextAlignment(.leading)
-                        Text("the whole document")
-                            .font(.caption)
+                    Spacer(minLength: 0)
+                    if canJump {
+                        // Same jump-back affordance language as bookmarks/notes.
+                        Image(systemName: "arrow.up.left")
+                            .imageScale(.small)
                             .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.leading)
-                    } else {
-                        Text(trimmedContent)
-                            .font(.callout)
-                            .italic()
-                            .foregroundStyle(.primary.opacity(0.85))
-                            .multilineTextAlignment(.leading)
-                            .textSelection(.enabled)
                     }
                 }
-                Spacer(minLength: 0)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .buttonStyle(.plain)
+            .disabled(!canJump)
+            .accessibilityLabel("Anchor. Tap to jump back to this passage in the document.")
+
+            // --- PASSAGE BODY → EXPAND IN PLACE ---
+            Text(trimmedContent)
+                .font(.callout)
+                .italic()
+                .foregroundStyle(.primary.opacity(0.85))
+                .lineLimit(expanded ? nil : 2)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard canExpand else { return }
+                    if expanded { expandedAnchors.remove(sid) } else { expandedAnchors.insert(sid) }
+                }
+                .accessibilityLabel("Anchored passage: \(trimmedContent)")
+
+            if canExpand {
+                Button {
+                    if expanded { expandedAnchors.remove(sid) } else { expandedAnchors.insert(sid) }
+                } label: {
+                    Text(expanded ? "Show less" : "Show more")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tint)
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(onJumpToChunk == nil || message.anchorOffset == nil)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            isDocumentScope
-                ? "Asking about the whole document, \(trimmedContent). Tap to jump back."
-                : "Anchor passage: \(trimmedContent). Tap to jump."
-        )
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .modifier(AskPoseyAnchorRowRemoteRegister(
             message: message,
-            isDocumentScope: isDocumentScope,
+            isDocumentScope: false,
             onJumpToChunk: onJumpToChunk,
             dismiss: dismiss,
             cancelInFlight: { viewModel.cancelInFlight() }

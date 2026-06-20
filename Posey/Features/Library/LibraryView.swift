@@ -1397,6 +1397,23 @@ extension LibraryViewModel {
                     return json(["error": "ASK_POSEY_TURN_STATS failed: \(error.localizedDescription)"])
                 }
 
+            case "SET_MEMORY_DEPTH":
+                // 2026-06-20 — override the verbatim STM depth (exchanges) so the
+                // conversation-recall pass is testable with short conversations
+                // and sweepable in the A/B/C. ':auto' restores the per-model value.
+                //   SET_MEMORY_DEPTH:1     → 1 exchange (2-msg verbatim window)
+                //   SET_MEMORY_DEPTH:auto  → per-model default
+                let raw = (arg ?? "").lowercased().trimmingCharacters(in: .whitespaces)
+                if raw == "auto" || raw.isEmpty {
+                    await MainActor.run { AskPoseyChatViewModel.memoryDepthOverride = nil }
+                    return json(["status": "set", "memoryDepth": "auto (per-model)"])
+                }
+                guard let n = Int(raw), n >= 1, n <= 50 else {
+                    return #"{"error":"Usage: SET_MEMORY_DEPTH:<1-50|auto>"}"#
+                }
+                await MainActor.run { AskPoseyChatViewModel.memoryDepthOverride = n }
+                return json(["status": "set", "memoryDepthExchanges": n, "verbatimMessages": n * 2])
+
             case "RECALL_TURNS":
                 // 2026-06-20 — verify Part B (hybrid conversation-turn recall)
                 // standalone, before it's wired into the prompt (Part C). Embeds

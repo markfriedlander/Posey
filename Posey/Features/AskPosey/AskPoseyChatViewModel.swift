@@ -273,7 +273,16 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// memory, NOT more RAG (RAG budget is unchanged by decree). Falls
     /// back to 3 (AFM-equivalent) when a model leaves it unset, so an
     /// unconfigured model degrades safely rather than to zero.
+    /// 2026-06-20 — test/sweep override for the verbatim depth. When non-nil,
+    /// forces `activeMemoryDepthExchanges` regardless of the model — so the
+    /// conversation-recall pass is exercisable with SHORT conversations (set 1 →
+    /// 2-message window → a 3-exchange convo ages turn 1 out), and so the
+    /// verbatim-vs-recall balance is a sweepable A/B/C variable. In-memory;
+    /// resets on relaunch. Set via `SET_MEMORY_DEPTH:<n|auto>`.
+    @MainActor static var memoryDepthOverride: Int? = nil
+
     private var activeMemoryDepthExchanges: Int {
+        if let o = AskPoseyChatViewModel.memoryDepthOverride { return max(1, o) }
         let depth = ModelSettingsStore.shared
             .effectiveSettings(for: ModelCatalog.answerModel())
             .effectiveMemoryDepth ?? 3

@@ -1647,6 +1647,11 @@ extension DatabaseManager {
         // applies to future swaps, not retroactively.)
         try addColumnIfNeeded(table: "unit_embedding_chunks", column: "embedding_nl", definition: "BLOB")
         try addColumnIfNeeded(table: "unit_embedding_chunks", column: "embedding_nomic", definition: "BLOB")
+        // 2026-06-19 — 3rd backend: mxbai-embed-large (BERT-large, 1024-dim),
+        // loaded via swift-embeddings' Bert path (gate-verified). Same keep-both
+        // per-backend-column design: coexists with nl/nomic, filled by the
+        // backfill worker, read when active.
+        try addColumnIfNeeded(table: "unit_embedding_chunks", column: "embedding_mxbai", definition: "BLOB")
         let activeVectorColumn = EmbeddingBackend.current().vectorColumn
         try execute("""
             UPDATE unit_embedding_chunks

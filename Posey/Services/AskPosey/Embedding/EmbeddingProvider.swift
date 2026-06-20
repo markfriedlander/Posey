@@ -75,6 +75,15 @@ final class EmbeddingProvider: @unchecked Sendable {
         label: "com.posey.embedding.nomic-inference"
     )
 
+    /// 2026-06-19 — same MPSGraph-concurrency protection for mxbai (BERT-large
+    /// via MLTensor also specializes MPSGraph executables, which is not safe to
+    /// run concurrently). Serializes mxbai inference process-wide so two
+    /// `Bert.encode` calls can never specialize in parallel. See
+    /// `nomicInferenceQueue` for the full backtrace/rationale.
+    private let mxbaiInferenceQueue = DispatchQueue(
+        label: "com.posey.embedding.mxbai-inference"
+    )
+
     // NLContextualEmbedding (mBERT) — the default backend. Asset
     // is downloaded transparently by the system on first launch;
     // until ready, `embed()` returns nil and the retrieval
@@ -88,6 +97,12 @@ final class EmbeddingProvider: @unchecked Sendable {
     // embeds are tokenize → forward → mean-pool → L2-normalize.
     nonisolated(unsafe) private var nomicBundle: NomicBert.ModelBundle?
     nonisolated(unsafe) private var nomicLoadAttempted: Bool = false
+
+    // mxbai-embed-large-v1 (BERT-large, 1024-dim, CLS pooling) — 2026-06-19.
+    // Loaded via swift-embeddings' `Bert` path (gate-verified; NOT the CoreML
+    // package, which NaNs on iOS18+). Mirrors the Nomic load/serialize shape.
+    nonisolated(unsafe) private var mxbaiBundle: Bert.ModelBundle?
+    nonisolated(unsafe) private var mxbaiLoadAttempted: Bool = false
 
     private init() {}
 
@@ -147,6 +162,8 @@ final class EmbeddingProvider: @unchecked Sendable {
             return embedNLContextual(cleaned)
         case .nomic:
             return embedNomic(cleaned, purpose: purpose)
+        case .mxbai:
+            return embedMxbai(cleaned, purpose: purpose)
         }
     }
 
@@ -158,6 +175,7 @@ final class EmbeddingProvider: @unchecked Sendable {
         switch backend {
         case .nlContextual: return nlContextualModel != nil
         case .nomic:        return nomicBundle != nil
+        case .mxbai:        return mxbaiBundle != nil
         }
     }
 
@@ -170,6 +188,7 @@ final class EmbeddingProvider: @unchecked Sendable {
             switch backend {
             case .nlContextual: self.ensureNLContextualLoadedBlocking()
             case .nomic:        self.ensureNomicLoadedBlocking()
+            case .mxbai:        self.ensureMxbaiLoadedBlocking()
             }
         }
     }
@@ -190,6 +209,7 @@ final class EmbeddingProvider: @unchecked Sendable {
         switch EmbeddingBackend.writeBackend() {
         case .nlContextual: return nlContextualModel != nil
         case .nomic:        return nomicBundle != nil
+        case .mxbai:        return mxbaiBundle != nil
         }
     }
 
@@ -210,6 +230,7 @@ final class EmbeddingProvider: @unchecked Sendable {
             switch EmbeddingBackend.writeBackend() {
             case .nlContextual: self.ensureNLContextualLoadedBlocking()
             case .nomic:        self.ensureNomicLoadedBlocking()
+            case .mxbai:        self.ensureMxbaiLoadedBlocking()
             }
         }
     }
@@ -436,6 +457,121 @@ final class EmbeddingProvider: @unchecked Sendable {
         } else {
             lock.lock()
             self.nomicLoadAttempted = false
+            lock.unlock()
+        }
+    }
+
+    // MARK: - mxbai-embed-large path (2026-06-19, swift-embeddings Bert)
+
+    /// mxbai's asymmetric-retrieval prompt. Per the model card, only the QUERY
+    /// side is prefixed ("Represent this sentence for searching relevant
+    /// passages:"); documents are embedded raw. Mirrors the Nomic asymmetric
+    /// contract (different prefix string). The prefix is load-bearing for
+    /// retrieval quality.
+    private nonisolated func mxbaiPrefixed(_ text: String, purpose: EmbeddingPurpose) -> String {
+        switch purpose {
+        case .document: return text
+        case .query:    return "Represent this sentence for searching relevant passages: " + text
+        }
+    }
+
+    private nonisolated func embedMxbai(_ text: String, purpose: EmbeddingPurpose) -> [Double]? {
+        ensureMxbaiLoadedBlocking()
+
+        lock.lock()
+        let loaded = mxbaiBundle
+        lock.unlock()
+
+        guard let bundle = loaded else { return nil }
+
+        let prefixed = mxbaiPrefixed(text, purpose: purpose)
+
+        // Serialize on the dedicated mxbai inference queue (MPSGraph specialization
+        // is not concurrency-safe — same guard as Nomic). `Bert.encode` returns
+        // the CLS token already (`sequenceOutput[:,0,:]`, shape [1, 1024]) — mxbai's
+        // recommended pooling — so no manual mean-pool; just L2-normalize.
+        return mxbaiInferenceQueue.sync {
+            let sem = DispatchSemaphore(value: 0)
+            var resultVec: [Double]?
+            Task.detached {
+                do {
+                    let encoded = try bundle.encode(prefixed, maxLength: 512)
+                    let asFloat = await encoded.cast(to: Float.self).shapedArray(of: Float.self)
+                    let scalars = asFloat.scalars
+                    // CLS output flattens to a single [hidden] vector. Guard the
+                    // shape defensively: take the last `hidden` (=count) values as
+                    // the sentence vector regardless of a leading batch dim.
+                    let vec = scalars.map { Double($0) }
+                    guard !vec.isEmpty, vec.allSatisfy({ $0.isFinite }) else {
+                        sem.signal(); return
+                    }
+                    let norm = sqrt(vec.reduce(0) { $0 + $1 * $1 })
+                    resultVec = norm > 0 ? vec.map { $0 / norm } : vec
+                } catch {
+                    // Leave resultVec nil; caller treats as "no semantic" and
+                    // falls through to BM25-only retrieval.
+                }
+                sem.signal()
+            }
+            sem.wait()
+            return resultVec
+        }
+    }
+
+    private nonisolated func ensureMxbaiLoadedBlocking() {
+        lock.lock()
+        if mxbaiBundle != nil { lock.unlock(); return }
+        if mxbaiLoadAttempted { lock.unlock(); return }
+        mxbaiLoadAttempted = true
+        lock.unlock()
+
+        guard let repoID = EmbeddingBackend.mxbai.modelID else { return }
+
+        // Memory pre-flight (same discipline as Nomic). mxbai on-disk ≈ 670 MB
+        // (BERT-large fp32); same 0.75× resident ratio + safety margin. Refuse-
+        // rather-than-crash if memory is tight; allow retry next call.
+        let availableMB = processAvailableMemoryMB()
+        let requiredMB = requiredMemoryMBForLoad(sizeGB: 0.670)
+        if availableMB < requiredMB {
+            dbgLog("EMB-MEM: mxbai load REFUSED — availableMB=%.0f requiredMB=%.0f",
+                   availableMB, requiredMB)
+            lock.lock(); self.mxbaiLoadAttempted = false; lock.unlock()
+            return
+        }
+        dbgLog("EMB-MEM: mxbai load pre-flight OK — availableMB=%.0f requiredMB=%.0f",
+               availableMB, requiredMB)
+
+        // Heavyweight load → crash guard (reverts to NLContextual next launch if
+        // the load crashes the process). Shared key with Nomic; both are
+        // downloadable/heavyweight.
+        EmbeddingBackend.recordLoadAttempt()
+
+        let sem = DispatchSemaphore(value: 0)
+        var loaded: Bert.ModelBundle?
+        Task.detached {
+            do {
+                // Same shared App Group model store as Nomic (survives storage
+                // pressure; shared across the Posey app family). swift-embeddings
+                // fetches only the safetensors + tokenizer, not the whole repo.
+                loaded = try await Bert.loadModelBundle(
+                    from: repoID,
+                    downloadBase: SharedModelStore.huggingFaceRoot
+                )
+            } catch {
+                // Leave loaded nil; allow retry next call.
+            }
+            sem.signal()
+        }
+        sem.wait()
+
+        if let loaded = loaded {
+            lock.lock()
+            self.mxbaiBundle = loaded
+            lock.unlock()
+            EmbeddingBackend.recordLoadSuccess()
+        } else {
+            lock.lock()
+            self.mxbaiLoadAttempted = false
             lock.unlock()
         }
     }

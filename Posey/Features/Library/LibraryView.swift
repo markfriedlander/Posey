@@ -1176,7 +1176,8 @@ extension LibraryViewModel {
                 switch raw {
                 case "nlcontextual", "nl", "contextual": target = .nlContextual
                 case "nomic": target = .nomic
-                default: return #"{"error":"Usage: SET_EMBEDDING_PROVIDER:<nlcontextual|nomic>"}"#
+                case "mxbai": target = .mxbai
+                default: return #"{"error":"Usage: SET_EMBEDDING_PROVIDER:<nlcontextual|nomic|mxbai>"}"#
                 }
                 await MainActor.run {
                     EmbedderMigrationCoordinator.shared.beginSwitch(to: target, database: databaseManager)
@@ -1275,10 +1276,12 @@ extension LibraryViewModel {
                     targets = [.nlContextual]
                 case "nomic":
                     targets = [.nomic]
+                case "mxbai":
+                    targets = [.mxbai]
                 case "all":
                     targets = EmbeddingBackend.allCases.filter { $0 != active }
                 default:
-                    return #"{"error":"Usage: BACKFILL_EMBEDDINGS:<nl|nomic|all>"}"#
+                    return #"{"error":"Usage: BACKFILL_EMBEDDINGS:<nl|nomic|mxbai|all>"}"#
                 }
                 if EmbeddingBackend.isSwapInProgress {
                     return json(["error": "a backend swap is in progress — backfill refused (they both write columns). Wait for the swap to finish."])

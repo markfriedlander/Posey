@@ -44,6 +44,15 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
     /// stronger retrieval quality. Wired live in Step 8h.
     case nomic = "nomic"
 
+    /// Mixedbread `mxbai-embed-large-v1` — a sentence-transformers **BERT-large**
+    /// (335M params, 1024-dim, CLS pooling), loaded via `swift-embeddings`'
+    /// `Bert` path (the same package as Nomic), NOT the `nbpe97` CoreML package
+    /// (which outputs NaN on the iOS 18+ Core ML target — our device is iOS 26 —
+    /// and ships no tokenizer). ~670 MB on disk. Gate-verified on device
+    /// 2026-06-19 (dim=1024, finite, ~0.66s/encode). The strongest-retrieval
+    /// option of the three; the heaviest + slowest to embed.
+    case mxbai = "mxbai"
+
     // MARK: - UserDefaults
 
     /// Key under which the chosen backend's `rawValue` is stored.
@@ -130,10 +139,12 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
     @discardableResult
     nonisolated static func applyCrashGuardAtLaunch() -> EmbeddingBackend {
         let selected = current()
-        // The crash guard only protects against heavyweight loads
-        // (Nomic in particular). nlSentence and nlContextual are
-        // OS-bundled and don't crash on load — no need to revert.
-        guard selected == .nomic else { return selected }
+        // The crash guard only protects against heavyweight loads (the
+        // downloadable models — Nomic, mxbai). OS-bundled backends
+        // (nlContextual) don't crash on load — no need to revert.
+        // `modelID != nil` ⇒ heavyweight/downloadable. (2026-06-19 — generalized
+        // from `== .nomic` when mxbai landed.)
+        guard selected.modelID != nil else { return selected }
         let crashed = UserDefaults.standard.bool(forKey: crashGuardKey)
         if crashed {
             UserDefaults.standard.set(
@@ -167,6 +178,7 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
         switch self {
         case .nlContextual: return 512
         case .nomic:        return 768
+        case .mxbai:        return 1024
         }
     }
 
@@ -180,6 +192,7 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
         switch self {
         case .nlContextual: return "embedding_nl"
         case .nomic:        return "embedding_nomic"
+        case .mxbai:        return "embedding_mxbai"
         }
     }
 
@@ -189,6 +202,7 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
         switch self {
         case .nlContextual: return nil
         case .nomic:        return "nomic-ai/nomic-embed-text-v1.5"
+        case .mxbai:        return "mixedbread-ai/mxbai-embed-large-v1"
         }
     }
 
@@ -198,6 +212,7 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
         switch self {
         case .nlContextual: return nil
         case .nomic:        return "~522 MB"
+        case .mxbai:        return "~670 MB"
         }
     }
 
@@ -206,6 +221,7 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
         switch self {
         case .nlContextual: return "Apple NLContextual"
         case .nomic:        return "Nomic Embed Text v1.5"
+        case .mxbai:        return "Mixedbread mxbai-embed-large"
         }
     }
 
@@ -216,6 +232,8 @@ nonisolated enum EmbeddingBackend: String, Sendable, CaseIterable {
             return "Built into iOS. Runs on the Neural Engine. Asset downloads transparently in the background on first launch — no user interaction needed. The default."
         case .nomic:
             return "Nomic AI's open embedding model. 137M params, 768-dim, purpose-built for asymmetric retrieval (query vs document). ~522 MB on disk."
+        case .mxbai:
+            return "Mixedbread's mxbai-embed-large-v1. BERT-large, 335M params, 1024-dim, CLS pooling. Strongest retrieval of the three; the heaviest. ~670 MB on disk."
         }
     }
 }

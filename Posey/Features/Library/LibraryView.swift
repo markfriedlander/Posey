@@ -1198,9 +1198,37 @@ extension LibraryViewModel {
                 return json(["status": "set", "neighborRadius": n])
 
             case "GET_NEIGHBOR_EXPANSION":
-                let r = await MainActor.run { NeighborExpansion.radius }
-                return json(["neighborRadius": r, "default": NeighborExpansion.defaultRadius,
-                             "ragTokenBudget": NeighborExpansion.ragTokenBudget])
+                let (r, override) = await MainActor.run { (NeighborExpansion.radius, NeighborExpansion.budgetOverride) }
+                // The live model-derived RAG budget (what the expander uses when
+                // there's no sweep override) — so the harness sees the real value.
+                let modelRagBudget = AskPoseyTokenBudget.forModel(ModelCatalog.answerModel(), longDocument: false).ragBudgetTokens
+                var payload: [String: Any] = [
+                    "neighborRadius": r,
+                    "default": NeighborExpansion.defaultRadius,
+                    "ragTokenBudget_modelDerived": modelRagBudget,
+                    "ragTokenBudget_fallback": NeighborExpansion.ragTokenBudgetFallback,
+                    "ragTokenBudget_effective": override ?? modelRagBudget
+                ]
+                payload["ragTokenBudget_override"] = override ?? "auto (model-derived)"
+                return json(payload)
+
+            case "SET_RAG_TOKEN_BUDGET":
+                // 2026-06-20 — A/B/C sweep knob for the neighbor-expansion RAG
+                // token ceiling, INDEPENDENT of the active model. ":auto" clears
+                // the override (back to model-derived). In-memory; resets on
+                // relaunch. Lets the harness vary the budget as its own variable.
+                //   SET_RAG_TOKEN_BUDGET:auto        → model-derived (default)
+                //   SET_RAG_TOKEN_BUDGET:2400        → force 2400 tokens
+                let raw = (arg ?? "").lowercased().trimmingCharacters(in: .whitespaces)
+                if raw == "auto" || raw.isEmpty {
+                    await MainActor.run { NeighborExpansion.budgetOverride = nil }
+                    return json(["status": "set", "ragTokenBudget": "auto (model-derived)"])
+                }
+                guard let n = Int(raw), n >= 200, n <= 16000 else {
+                    return #"{"error":"Usage: SET_RAG_TOKEN_BUDGET:<200-16000|auto>"}"#
+                }
+                await MainActor.run { NeighborExpansion.budgetOverride = n }
+                return json(["status": "set", "ragTokenBudget": n])
 
             case "SET_QUERY_EXPANSION":
                 // SET_QUERY_EXPANSION:on|off — production gate for the

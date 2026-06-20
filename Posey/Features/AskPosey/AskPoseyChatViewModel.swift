@@ -881,8 +881,16 @@ private extension AskPoseyChatViewModel {
         // `radius` is the tunable knob (0 = off); read on the main actor.
         let radius = NeighborExpansion.radius
         guard radius > 0 else { return winners }
+        // 2026-06-20 — MODEL-AWARE RAG budget. The expander's token ceiling now
+        // comes from the ACTIVE model's RAG allocation (`budget.ragBudgetTokens`,
+        // already model-aware via `AskPoseyTokenBudget.forModel`), NOT a fixed
+        // 1800 — which overflowed a 4096-ctx model and starved a 128K one. A
+        // sweep override (set via SET_NEIGHBOR_EXPANSION) wins when present so the
+        // A/B/C can vary the budget independently.
+        let neighborBudget = NeighborExpansion.budgetOverride ?? budget.ragBudgetTokens
         return NeighborExpander.expand(
-            winners: winners, documentID: documentID, database: db, radius: radius)
+            winners: winners, documentID: documentID, database: db,
+            radius: radius, tokenBudget: neighborBudget)
     }
 
 

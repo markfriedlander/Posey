@@ -27,7 +27,22 @@ nonisolated enum NeighborExpansion {
     /// Ceiling (estimated tokens) for the TOTAL expanded RAG block, so a hot
     /// multi-hit query can't blow the on-device model's context window. Lowest-
     /// relevance windows are dropped first; the top window is always kept.
-    static let ragTokenBudget = 1800
+    ///
+    /// **2026-06-20 — now MODEL-AWARE (Mark).** A fixed 1800 was model-blind:
+    /// unsafe for a 4096-ctx model (the system prose alone is ~2k tokens, so
+    /// 1800 of RAG overflows and starves STM/summary) and stingy for a 128K MLX
+    /// model. The expander now takes its budget from the ACTIVE model's
+    /// `AskPoseyTokenBudget.forModel(...).ragBudgetTokens` (the single
+    /// already-model-aware source — AFM 1400, MLX up to 2800, memory-capped),
+    /// passed in at the call site. This constant is now only the FALLBACK for
+    /// callers without a model budget (tests, the `expand` default).
+    static let ragTokenBudgetFallback = 1800
+
+    /// A/B/C sweep override. When non-nil, FORCES this token budget regardless
+    /// of the active model — so the harness can sweep the RAG budget as an
+    /// independent variable (`SET_NEIGHBOR_EXPANSION`). nil = use the model's
+    /// budget (the production path). In-memory; resets on relaunch.
+    @MainActor static var budgetOverride: Int? = nil
 }
 
 /// Expands retrieved (small) chunks to their document neighbors and stitches
@@ -44,7 +59,7 @@ nonisolated enum NeighborExpander {
         documentID: UUID,
         database: DatabaseManager,
         radius: Int,
-        tokenBudget: Int = NeighborExpansion.ragTokenBudget
+        tokenBudget: Int = NeighborExpansion.ragTokenBudgetFallback
     ) -> [RetrievedChunk] {
         guard radius > 0, !winners.isEmpty else { return winners }
 

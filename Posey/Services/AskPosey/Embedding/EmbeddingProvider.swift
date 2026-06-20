@@ -179,6 +179,21 @@ final class EmbeddingProvider: @unchecked Sendable {
         }
     }
 
+    /// 2026-06-20 — release any loaded embedder bundle(s) to drop peak memory.
+    /// Investigation lever for the sustained-generation jetsam hypothesis:
+    /// retrieval (embedder) completes BEFORE generation (LLM) in /ask, so the
+    /// embedder need not stay resident during generation. Lazy-reloads on next
+    /// embed. `backend == nil` evicts all. Returns the count evicted.
+    @discardableResult
+    nonisolated func evict(_ backend: EmbeddingBackend? = nil) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        var n = 0
+        if backend == nil || backend == .nlContextual { if nlContextualModel != nil { nlContextualModel = nil; n += 1 } }
+        if backend == nil || backend == .nomic { if nomicBundle != nil { nomicBundle = nil; n += 1 } }
+        if backend == nil || backend == .mxbai { if mxbaiBundle != nil { mxbaiBundle = nil; n += 1 } }
+        return n
+    }
+
     /// Warm-load a SPECIFIC backend off-main (independent of active/write
     /// backend), so the backfill worker can prepare an inactive backend's model
     /// without going through the swap marker. Idempotent.

@@ -2536,6 +2536,53 @@ extension LibraryViewModel {
                    let s = String(data: data, encoding: .utf8) { return s }
                 return #"{"error":"GENERATE serialization failed"}"#
 
+            case "MEMORY_STATS":
+                // Read-only memory snapshot for the sustained-generation jetsam
+                // investigation: available process memory + which embedder
+                // backends are resident + the active LLM. Used to confirm the
+                // embedder+LLM co-residency hypothesis and measure EVICT deltas.
+                let ep = EmbeddingProvider.shared
+                let memPayload: [String: Any] = [
+                    "availableMB": (processAvailableMemoryMB() * 10).rounded() / 10,
+                    "embeddersLoaded": [
+                        "nlcontextual": ep.isLoaded(.nlContextual),
+                        "nomic": ep.isLoaded(.nomic),
+                        "mxbai": ep.isLoaded(.mxbai)
+                    ],
+                    "activeEmbedder": EmbeddingBackend.current().rawValue,
+                    "activeLLM": ModelCatalog.current().displayName
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: memPayload),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"MEMORY_STATS serialization failed"}"#
+
+            case "EVICT_EMBEDDER":
+                // EVICT_EMBEDDER[:<nl|nomic|mxbai|all>] — release loaded embedder
+                // bundle(s) to drop peak memory (the proposed jetsam fix: free the
+                // embedder after retrieval, before generation). Lazy-reloads on
+                // next embed. Reports the memory reclaimed.
+                let beforeMB = processAvailableMemoryMB()
+                let which = (arg ?? "all").lowercased().trimmingCharacters(in: .whitespaces)
+                let target: EmbeddingBackend?
+                switch which {
+                case "nl", "nlcontextual": target = .nlContextual
+                case "nomic": target = .nomic
+                case "mxbai": target = .mxbai
+                case "all", "": target = nil
+                default: return #"{"error":"Usage: EVICT_EMBEDDER[:<nl|nomic|mxbai|all>]"}"#
+                }
+                let evicted = EmbeddingProvider.shared.evict(target)
+                let afterMB = processAvailableMemoryMB()
+                let evPayload: [String: Any] = [
+                    "evictedCount": evicted,
+                    "availableMBBefore": (beforeMB * 10).rounded() / 10,
+                    "availableMBAfter": (afterMB * 10).rounded() / 10,
+                    "reclaimedMB": ((afterMB - beforeMB) * 10).rounded() / 10
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: evPayload),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"EVICT_EMBEDDER serialization failed"}"#
+
             case "GET_ASK_POSEY_HISTORY":
                 // 2026-05-05 — RAG diagnostic helper. Args:
                 //   <doc-id>[:<limit>]

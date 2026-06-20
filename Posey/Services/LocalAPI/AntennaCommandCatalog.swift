@@ -55,6 +55,8 @@ nonisolated enum AntennaCommandCatalog {
         .init("SEED_ASK_POSEY_FIXTURE", .ask_posey, "SEED_ASK_POSEY_FIXTURE:<doc-id>", ""),
         .init("SET_LLM", .models, "SET_LLM:<modelID> or SET_LLM:<alias>", "Switch the active answer model. Alias: gemma|qwen|llama|dolphin (or full id)."),
         .init("GENERATE", .models, "GENERATE:<prompt>", "Raw active-LLM generation: NO retrieval, NO grounding, NO doc — the prompt is one user turn through the model's chat template. For HyDE Phase-1c (on-device hypothetical-answer generation) + direct model-behavior probes."),
+        .init("MEMORY_STATS", .system, "MEMORY_STATS", "Read-only: available process memory + which embedder backends are resident + active LLM/embedder. For the sustained-generation jetsam investigation (confirm embedder+LLM co-residency, measure EVICT deltas)."),
+        .init("EVICT_EMBEDDER", .system, "EVICT_EMBEDDER[:<nl|nomic|mxbai|all>]", "Release loaded embedder bundle(s) to drop peak memory (proposed jetsam fix: free the embedder after retrieval, before generation). Lazy-reloads on next embed. Reports reclaimed MB."),
         .init("GET_LLM", .models, "GET_LLM", "The active answer model (id, display name, context window)."),
         .init("SET_PROMPT_VARIANT", .ask_posey, "SET_PROMPT_VARIANT:current|rebalanced", "Flip the Ask Posey prose variant for the A/B (in-memory; resets on relaunch)."),
         .init("GET_PROMPT_VARIANT", .ask_posey, "GET_PROMPT_VARIANT", "The active Ask Posey prose variant (current|rebalanced)."),

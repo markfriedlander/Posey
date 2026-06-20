@@ -191,12 +191,23 @@ final class EmbeddingBackfillCoordinator: ObservableObject {
                 // Proactive thermal pacing after each heavy embed (scales up under
                 // pressure, pauses at .critical). Same discipline as indexing.
                 await ThermalGovernor.shared.pace()
-                if (processed % 8 == 0 || processed == total) && !Task.isCancelled {
+                if processed % 8 == 0 && !Task.isCancelled {
                     let snap = processed
+                    // Recompute the live denominator. `total` was a one-time snapshot
+                    // of NULL rows at start; but the normal pipeline keeps CHUNKING +
+                    // embedding NEW documents under us (import a book mid-backfill and
+                    // every new chunk is a fresh NULL row in this inactive column). A
+                    // frozen denominator let `processed` sail past it — the board read
+                    // "1,224 / 558" (>200%) and the ETA went to garbage (Mark, 2026-06-20).
+                    // The honest total is "what we've done + what's still NULL right now":
+                    // always ≥ processed, ratio always ≤ 100%, and truthful that a
+                    // growing corpus means more work, not a broken bar.
+                    let remaining = (try? database.unitEmbeddingChunkNullCount(backend: target)) ?? 0
+                    let liveTotal = snap + remaining
                     await MainActor.run {
                         // Don't resurrect a `.running` over an `.idle` that cancel()
                         // just published (the worker is bailing this checkpoint).
-                        if !Task.isCancelled { self.publish(.running(backend: target.rawValue, processed: snap, total: total)) }
+                        if !Task.isCancelled { self.publish(.running(backend: target.rawValue, processed: snap, total: liveTotal)) }
                     }
                 }
             }

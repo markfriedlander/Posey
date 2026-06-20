@@ -496,6 +496,28 @@ actor PDFEnhancementService {
     )
     static let notificationDocumentIDKey = "documentID"
 
+    // 2026-06-19 (Mark) — Tier-2 Vision OCR progress, for the embedding status
+    // board's pipeline view. Per-flagged-page: didStart (total), didProgress
+    // (processed/total) after each page lands, didComplete to clear. Mirrors the
+    // RAPTOR notification shape that `IndexingTracker` already consumes.
+    static let ocrDidStart = Notification.Name("Posey.PDFEnhancementService.ocrDidStart")
+    static let ocrDidProgress = Notification.Name("Posey.PDFEnhancementService.ocrDidProgress")
+    static let ocrDidComplete = Notification.Name("Posey.PDFEnhancementService.ocrDidComplete")
+    static let ocrProcessedPagesKey = "ocrProcessedPages"
+    static let ocrTotalPagesKey = "ocrTotalPages"
+
+    /// Post an OCR progress notification on the main thread (value-type payload).
+    private func postOCR(_ name: Notification.Name, documentID: UUID,
+                         processed: Int, total: Int) {
+        Task { @MainActor in
+            NotificationCenter.default.post(
+                name: name, object: nil,
+                userInfo: [Self.notificationDocumentIDKey: documentID,
+                           Self.ocrProcessedPagesKey: processed,
+                           Self.ocrTotalPagesKey: total])
+        }
+    }
+
     // MARK: Tier 3 — AFM fusion repair
 
     /// Run Tier 3 (AFM fusion-token correction) on the document.
@@ -744,6 +766,13 @@ actor PDFEnhancementService {
         dbgLog("PDFEnhancementService: Tier 2 starting on %@ — %d pages (already-done %d, total flagged %d)",
                documentID.uuidString, toProcess.count, pagesDone.count, allFlagged.count)
 
+        // OCR progress instrumentation (board pipeline view). Total = ALL flagged
+        // pages; processed starts at the already-done set. `defer` guarantees the
+        // complete-clear fires on every exit (cancel / error / normal).
+        let ocrTotal = allFlagged.count
+        postOCR(Self.ocrDidStart, documentID: documentID, processed: pagesDone.count, total: ocrTotal)
+        defer { postOCR(Self.ocrDidComplete, documentID: documentID, processed: ocrTotal, total: ocrTotal) }
+
         // 2026-05-23 — Step 8f: existing-chunks read removed.
         // Tier 2 page swaps work directly on units now; the
         // chunker fires end-of-enhancement.
@@ -831,6 +860,8 @@ actor PDFEnhancementService {
                        page.pageIndex, documentID.uuidString)
                 pagesDone.insert(page.pageIndex)
                 await persistPagesDone(pagesDone, for: documentID, db: db)
+                postOCR(Self.ocrDidProgress, documentID: documentID,
+                        processed: pagesDone.count, total: ocrTotal)
                 continue
             }
 

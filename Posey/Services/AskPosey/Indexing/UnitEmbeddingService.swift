@@ -61,6 +61,12 @@ actor UnitEmbeddingService {
     static let totalChunksKey = "posey.unitEmbedding.totalChunks"
     static let processedChunksKey = "posey.unitEmbedding.processedChunks"
 
+    /// 2026-06-19 (Mark) — chunking (string-split) stage, for the board pipeline
+    /// view. A brief one-shot: didStart before the chunk-build, didFinish after.
+    /// Only fires on the full-rebuild path (a resume skips re-chunking).
+    static let chunkingDidStartNotification = Notification.Name("posey.unitEmbedding.chunkingDidStart")
+    static let chunkingDidFinishNotification = Notification.Name("posey.unitEmbedding.chunkingDidFinish")
+
     /// Per-document in-flight marker. A second `enqueueIndexing`
     /// for the same documentID while the first is running short-
     /// circuits — the inflight worker re-snapshots units at start
@@ -172,6 +178,14 @@ actor UnitEmbeddingService {
             let chunkUnits = UnitEmbeddingChunker.excludingFrontMatter(
                 units, skipOffset: skipOffset, skipSource: skipSource)
 
+            // Chunking (string-split) stage — board pipeline view. Brief; clears
+            // right after the atomic persist.
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: Self.chunkingDidStartNotification, object: nil,
+                    userInfo: [Self.documentIDKey: documentID])
+            }
+
             // Build chunks (CPU-bound, but small).
             let chunks = UnitEmbeddingChunker.chunks(for: documentID, units: chunkUnits)
 
@@ -182,7 +196,17 @@ actor UnitEmbeddingService {
                     try databaseManager.replaceAllUnitEmbeddingChunks(chunks, for: documentID)
                 }
             } catch {
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: Self.chunkingDidFinishNotification, object: nil,
+                        userInfo: [Self.documentIDKey: documentID])
+                }
                 return
+            }
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: Self.chunkingDidFinishNotification, object: nil,
+                    userInfo: [Self.documentIDKey: documentID])
             }
             totalChunks = chunks.count
         }

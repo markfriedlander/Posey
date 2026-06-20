@@ -42,6 +42,13 @@ final class IndexingTracker: ObservableObject {
     /// (2026-06-18)
     @Published private(set) var reReadingProgress: [UUID: Double] = [:]
 
+    /// 2026-06-19 (Mark) — Tier-2 Vision OCR progress (0…1) per document, for the
+    /// status board's pipeline view. Present only while OCR is in flight.
+    @Published private(set) var ocrProgress: [UUID: Double] = [:]
+
+    /// 2026-06-19 — documents in the brief chunking (string-split) stage.
+    @Published private(set) var chunkingDocumentIDs: Set<UUID> = []
+
     /// Main-actor mirror of `DocumentIndexingQueue`'s embed lane (Pillar 4b):
     /// document → 1-based position among the documents WAITING to be embedded
     /// (the in-flight document is excluded — it's "Reading ahead", not queued).
@@ -110,6 +117,23 @@ final class IndexingTracker: ObservableObject {
         notificationCenter.publisher(for: DocumentIndexingQueue.queueDidChangeNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] note in self?.handleQueueChange(note) }
+            .store(in: &cancellables)
+        // 2026-06-19 — Tier-2 Vision OCR progress (board pipeline view).
+        notificationCenter.publisher(for: PDFEnhancementService.ocrDidStart)
+            .receive(on: RunLoop.main).sink { [weak self] n in self?.handleOCR(n, clear: false) }
+            .store(in: &cancellables)
+        notificationCenter.publisher(for: PDFEnhancementService.ocrDidProgress)
+            .receive(on: RunLoop.main).sink { [weak self] n in self?.handleOCR(n, clear: false) }
+            .store(in: &cancellables)
+        notificationCenter.publisher(for: PDFEnhancementService.ocrDidComplete)
+            .receive(on: RunLoop.main).sink { [weak self] n in self?.handleOCR(n, clear: true) }
+            .store(in: &cancellables)
+        // 2026-06-19 — chunking (string-split) stage.
+        notificationCenter.publisher(for: UnitEmbeddingService.chunkingDidStartNotification)
+            .receive(on: RunLoop.main).sink { [weak self] n in self?.handleChunking(n, started: true) }
+            .store(in: &cancellables)
+        notificationCenter.publisher(for: UnitEmbeddingService.chunkingDidFinishNotification)
+            .receive(on: RunLoop.main).sink { [weak self] n in self?.handleChunking(n, started: false) }
             .store(in: &cancellables)
         // Thermal pressure → "Cooling down" on the in-flight card (Pillar 4b).
         // Read once for the initial state, then track the system notification.
@@ -238,6 +262,25 @@ final class IndexingTracker: ObservableObject {
         reReadingDocumentIDs.remove(id)
         reReadingProgress.removeValue(forKey: id)
     }
+
+    // 2026-06-19 — Tier-2 OCR + chunking handlers/accessors (board pipeline).
+    private func handleOCR(_ note: Notification, clear: Bool) {
+        guard let id = note.userInfo?[PDFEnhancementService.notificationDocumentIDKey] as? UUID else { return }
+        if clear { ocrProgress.removeValue(forKey: id); return }
+        let processed = note.userInfo?[PDFEnhancementService.ocrProcessedPagesKey] as? Int ?? 0
+        let total = note.userInfo?[PDFEnhancementService.ocrTotalPagesKey] as? Int ?? 0
+        ocrProgress[id] = total > 0 ? Double(processed) / Double(total) : 0
+    }
+
+    private func handleChunking(_ note: Notification, started: Bool) {
+        guard let id = note.userInfo?[UnitEmbeddingService.documentIDKey] as? UUID else { return }
+        if started { chunkingDocumentIDs.insert(id) } else { chunkingDocumentIDs.remove(id) }
+    }
+
+    /// OCR fraction (0…1) for a document, or nil if not OCR'ing.
+    func ocrFraction(_ documentID: UUID) -> Double? { ocrProgress[documentID] }
+    /// True while a document is in the brief chunking (string-split) stage.
+    func isChunking(_ documentID: UUID) -> Bool { chunkingDocumentIDs.contains(documentID) }
 
     private func handleQueueChange(_ note: Notification) {
         let embed = note.userInfo?[DocumentIndexingQueue.embedQueueKey] as? [UUID] ?? []

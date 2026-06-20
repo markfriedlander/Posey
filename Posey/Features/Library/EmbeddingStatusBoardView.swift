@@ -62,15 +62,31 @@ struct EmbeddingStatusBoardView: View {
 
     @ViewBuilder
     private var activityContent: some View {
+        let ocr = indexing.ocrProgress.sorted { $0.key.uuidString < $1.key.uuidString }
+        let chunking = indexing.chunkingDocumentIDs.sorted { $0.uuidString < $1.uuidString }
         let embeds = indexing.indexingProgress.sorted { $0.key.uuidString < $1.key.uuidString }
         let raptors = indexing.reReadingProgress.sorted { $0.key.uuidString < $1.key.uuidString }
         let queuedCount = indexing.embedQueuePositions.count
         let backfillActive = isBackfillRunning
 
         // Nothing anywhere → idle.
-        if !backfillActive && embeds.isEmpty && raptors.isEmpty && queuedCount == 0 && !backfillTerminal {
+        if !backfillActive && ocr.isEmpty && chunking.isEmpty && embeds.isEmpty
+            && raptors.isEmpty && queuedCount == 0 && !backfillTerminal {
             Label("Idle — nothing in the pipeline right now", systemImage: "moon.zzz")
                 .foregroundStyle(.secondary)
+        }
+
+        // Pipeline order: OCR → chunking → embedding → RAPTOR.
+        // 0a) Tier-2 Vision OCR (PDF page-image rescue).
+        ForEach(ocr, id: \.key) { id, frac in
+            let pct = Int((frac * 100).rounded())
+            stageRow(title: "Reading the page images (OCR) — \(title(id))",
+                     systemImage: "doc.viewfinder", fraction: frac, detail: "\(pct)%")
+        }
+        // 0b) Chunking (string-split) — brief, no %.
+        ForEach(chunking, id: \.self) { id in
+            Label("Splitting into chunks — \(title(id))", systemImage: "scissors")
+                .font(.callout.weight(.medium))
         }
 
         // 1) Backfill (inactive-backend fill).

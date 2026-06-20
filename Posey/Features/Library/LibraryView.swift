@@ -2505,6 +2505,37 @@ extension LibraryViewModel {
                    let s = String(data: data, encoding: .utf8) { return s }
                 return #"{"error":"RAG_EVAL serialization failed"}"#
 
+            case "GENERATE":
+                // GENERATE:<prompt> — raw active-LLM generation with NO retrieval,
+                // NO grounding, NO document context. The prompt is sent as a single
+                // user turn through the model's own chat template. For HyDE Phase-1c
+                // (let the on-device model generate a hypothetical answer passage to
+                // re-query with) + direct model-behavior probes. Respects SET_LLM.
+                guard let genPrompt = arg,
+                      !genPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return #"{"error":"Usage: GENERATE:<prompt>"}"#
+                }
+                var generated = ""
+                do {
+                    let stream = LLMService.shared.streamChat(
+                        messages: [ChatMessage(role: .user, content: genPrompt)],
+                        model: ModelCatalog.current(),
+                        options: LLMGenerationOptions(temperature: 0.0)
+                    )
+                    // streamChat yields CUMULATIVE snapshots — last == full text.
+                    for try await chunk in stream { generated = chunk }
+                } catch {
+                    return #"{"error":"GENERATE failed: \#(error.localizedDescription)"}"#
+                }
+                let genPayload: [String: Any] = [
+                    "model": ModelCatalog.current().displayName,
+                    "prompt": genPrompt,
+                    "response": generated
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: genPayload),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"GENERATE serialization failed"}"#
+
             case "GET_ASK_POSEY_HISTORY":
                 // 2026-05-05 — RAG diagnostic helper. Args:
                 //   <doc-id>[:<limit>]

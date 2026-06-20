@@ -3232,6 +3232,92 @@ extension DatabaseManager {
         return Int(sqlite3_column_int(stmt, 0))
     }
 
+    // ========== EMBEDDING COVERAGE (per-backend backfill visibility) ==========
+    // 2026-06-19 (Mark) — to support the embedder A/B/C phase we need to see,
+    // and then fill, each backend's column independently. A document imported
+    // while Nomic was active has `embedding_nomic` filled but `embedding_nl`
+    // NULL (and vice-versa); the A/B/C retrieval harness needs ALL backends'
+    // columns populated. These helpers report and (via the backfill worker)
+    // close those gaps. Enum-driven over `EmbeddingBackend.allCases`, so adding
+    // a 3rd backend (mxbai) picks them up automatically — no edit here.
+
+    /// Total + filled chunk counts for a single backend's column across the
+    /// whole corpus. `filled` counts rows where the backend's vector column is
+    /// NON-NULL; `total` is every chunk row (leaves + RAPTOR summary nodes —
+    /// the backfill fills both, matching the migration coordinator's loop).
+    struct EmbeddingBackendCoverage: Sendable {
+        let backend: EmbeddingBackend
+        let filled: Int
+        let total: Int
+        var missing: Int { total - filled }
+        var isComplete: Bool { missing == 0 }
+    }
+
+    /// Corpus-wide coverage for every backend in `EmbeddingBackend.allCases`,
+    /// in declaration order. One COUNT query per backend; cheap. Drives the
+    /// `EMBEDDING_COVERAGE` antenna verb and the backfill worker's "what's
+    /// missing" decision.
+    func embeddingCoverage() throws -> [EmbeddingBackendCoverage] {
+        dbLock.lock(); defer { dbLock.unlock() }
+        // Total rows once.
+        let totalStmt = try prepareStatement(sql: "SELECT COUNT(*) FROM unit_embedding_chunks;")
+        var total = 0
+        if sqlite3_step(totalStmt) == SQLITE_ROW { total = Int(sqlite3_column_int(totalStmt, 0)) }
+        sqlite3_finalize(totalStmt)
+
+        var out: [EmbeddingBackendCoverage] = []
+        for backend in EmbeddingBackend.allCases {
+            // Column name is from the fixed enum (never user input) → safe to
+            // interpolate.
+            let stmt = try prepareStatement(
+                sql: "SELECT COUNT(*) FROM unit_embedding_chunks WHERE \(backend.vectorColumn) IS NOT NULL;"
+            )
+            var filled = 0
+            if sqlite3_step(stmt) == SQLITE_ROW { filled = Int(sqlite3_column_int(stmt, 0)) }
+            sqlite3_finalize(stmt)
+            out.append(.init(backend: backend, filled: filled, total: total))
+        }
+        return out
+    }
+
+    /// Per-document, per-backend coverage in ONE grouped query. The
+    /// `filledByColumn` dict is keyed by each backend's `vectorColumn` name and
+    /// holds that document's non-NULL count. Lets the coverage verb show, at a
+    /// glance, which specific documents still need a given backend.
+    struct DocumentEmbeddingCoverage: Sendable {
+        let documentID: UUID
+        let total: Int
+        let filledByColumn: [String: Int]
+    }
+    func embeddingCoverageByDocument() throws -> [DocumentEmbeddingCoverage] {
+        dbLock.lock(); defer { dbLock.unlock() }
+        // Build "SUM(CASE WHEN <col> IS NOT NULL THEN 1 ELSE 0 END)" per backend
+        // (columns from the fixed enum → safe to interpolate). One pass, grouped.
+        let columns = EmbeddingBackend.allCases.map { $0.vectorColumn }
+        let sums = columns
+            .map { "SUM(CASE WHEN \($0) IS NOT NULL THEN 1 ELSE 0 END)" }
+            .joined(separator: ", ")
+        let sql = """
+            SELECT document_id, COUNT(*)\(sums.isEmpty ? "" : ", " + sums)
+            FROM unit_embedding_chunks
+            GROUP BY document_id;
+            """
+        let stmt = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(stmt) }
+        var rows: [DocumentEmbeddingCoverage] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let idCStr = sqlite3_column_text(stmt, 0),
+                  let id = UUID(uuidString: String(cString: idCStr)) else { continue }
+            let total = Int(sqlite3_column_int(stmt, 1))
+            var filled: [String: Int] = [:]
+            for (offset, col) in columns.enumerated() {
+                filled[col] = Int(sqlite3_column_int(stmt, Int32(2 + offset)))
+            }
+            rows.append(.init(documentID: id, total: total, filledByColumn: filled))
+        }
+        return rows
+    }
+
     /// Count of stored RAPTOR summary nodes for `documentID` (`chunk_index
     /// >= raptorSummaryIndexBase`). `RaptorTreeService.bootstrap` uses this
     /// to skip documents that already have a tree (avoids rebuilding on

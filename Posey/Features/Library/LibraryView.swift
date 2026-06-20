@@ -1200,6 +1200,65 @@ extension LibraryViewModel {
                     "askPoseyUnlocked": AskPoseyAvailability.isUnlocked
                 ])
 
+            case "EMBEDDING_COVERAGE":
+                // 2026-06-19 (Mark) — read-only per-backend coverage so we can
+                // SEE the gaps before/after a backfill (e.g. docs embedded by
+                // Nomic but not NLContextual). Enum-driven → auto-covers mxbai
+                // when that backend lands. Usage:
+                //   EMBEDDING_COVERAGE            → corpus summary per backend
+                //   EMBEDDING_COVERAGE:docs       → + per-document gaps (only
+                //                                   docs missing ≥1 backend)
+                let wantDocs = (arg?.lowercased() == "docs")
+                do {
+                    let coverage = try databaseManager.embeddingCoverage()
+                    var summary: [[String: Any]] = []
+                    for c in coverage {
+                        summary.append([
+                            "backend": c.backend.rawValue,
+                            "active": c.backend == EmbeddingBackend.current(),
+                            "filled": c.filled,
+                            "missing": c.missing,
+                            "total": c.total,
+                            "complete": c.isComplete
+                        ])
+                    }
+                    var payload: [String: Any] = [
+                        "activeBackend": EmbeddingBackend.current().rawValue,
+                        "backends": summary
+                    ]
+                    if wantDocs {
+                        let byDoc = try databaseManager.embeddingCoverageByDocument()
+                        let titles = Dictionary(
+                            uniqueKeysWithValues: (try databaseManager.documents()).map { ($0.id, $0.title) }
+                        )
+                        let cols = EmbeddingBackend.allCases
+                        var docRows: [[String: Any]] = []
+                        for d in byDoc {
+                            // Only surface documents missing at least one backend.
+                            let missingBackends = cols.filter {
+                                (d.filledByColumn[$0.vectorColumn] ?? 0) < d.total
+                            }
+                            guard !missingBackends.isEmpty else { continue }
+                            var perBackend: [String: Any] = [:]
+                            for b in cols {
+                                perBackend[b.rawValue] = d.filledByColumn[b.vectorColumn] ?? 0
+                            }
+                            docRows.append([
+                                "documentID": d.documentID.uuidString,
+                                "title": titles[d.documentID] ?? "(unknown)",
+                                "total": d.total,
+                                "filled": perBackend,
+                                "missing": missingBackends.map { $0.rawValue }
+                            ])
+                        }
+                        payload["incompleteDocuments"] = docRows
+                        payload["incompleteCount"] = docRows.count
+                    }
+                    return json(payload)
+                } catch {
+                    return json(["error": "EMBEDDING_COVERAGE failed: \(error.localizedDescription)"])
+                }
+
             case "CANCEL_EMBEDDING_MIGRATION":
                 // 2026-05-28 — cancellation surface for mid-flight Nomic
                 // re-embed. Without this, a user who switches embedder

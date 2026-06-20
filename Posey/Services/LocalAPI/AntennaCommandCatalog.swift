@@ -61,6 +61,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("SET_EMBEDDING_PROVIDER", .retrieval, "SET_EMBEDDING_PROVIDER", ""),
         .init("GET_EMBEDDING_PROVIDER", .retrieval, "GET_EMBEDDING_PROVIDER", "Active embedding backend (Nomic / fallback)."),
         .init("CANCEL_EMBEDDING_MIGRATION", .retrieval, "CANCEL_EMBEDDING_MIGRATION", ""),
+        .init("EMBEDDING_COVERAGE", .retrieval, "EMBEDDING_COVERAGE[:docs]", "Per-backend column coverage (filled/missing/total) across the corpus; :docs adds per-document gaps. Read-only."),
         .init("DOWNLOAD_MODEL", .models, "DOWNLOAD_MODEL:<modelID> (full repo path).", ""),
         .init("DELETE_MODEL", .models, "DELETE_MODEL:<known-model-id>", ""),
         .init("MODEL_DOWNLOAD_STATE", .models, "MODEL_DOWNLOAD_STATE:<model-id>", "Download/availability state for an MLX model id."),

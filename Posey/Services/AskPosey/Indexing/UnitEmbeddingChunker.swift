@@ -25,12 +25,15 @@ import NaturalLanguage
 /// short and lets the embedding work happen off the DB's
 /// single-thread.
 ///
-/// **Window sizing:** mirrors the legacy adaptive sizing — 500 chars
-/// with 50-char overlap for short/medium docs, 1000 chars with
-/// 100-char overlap for documents over 200K chars. Hal-shaped (Hal
-/// uses a single ~400-token window) — Posey keeps the adaptive
-/// split because Hal's QA showed long documents benefit from
-/// scene-level chunks while short ones benefit from precision.
+/// **Window sizing:** 400 **chars** / 50-char overlap, sentence-aware, for ALL
+/// document sizes (see `Configuration.default`). Matches Hal's proven
+/// `createMentatChunks` value — which is 400 *characters* (verified: Hal
+/// measures `sentence.count`), NOT tokens. **CAVEAT (Mark, 2026-06-19):** Hal's
+/// 400 is proven for chunking *conversations* (short, self-contained turns);
+/// Posey chunks *documents* (continuous prose where meaning spans paragraphs),
+/// so the size is genuinely OPEN for our domain — a first-class variable to
+/// MEASURE in the retrieval-tuning phase (alongside the embedder + small-to-big
+/// retrieval expansion), not inherit. See NEXT.md.
 ///
 /// 2026-05-23 — introduced as part of the Hal-based Ask Posey
 /// rebuild (Step 8b).
@@ -251,6 +254,30 @@ struct UnitEmbeddingChunker {
             var k = j + 1
             while k - 1 > i, chunkEnd - sentenceBounds[k - 1].start <= overlap {
                 k -= 1
+            }
+            // 2026-06-19 (Mark) — FORWARD-PROGRESS GUARD (fixes duplicate
+            // micro-chunks). Without this, a short heading sentence ("CHAPTER
+            // I.") followed by a long sentence (Dickens's famous opening run-on)
+            // produced DUPLICATE chunks: this chunk could grow no further than
+            // the heading (the next sentence overflows `target`), then the
+            // overlap pulled the start back onto that same heading, and the
+            // following chunk REPLAYED the identical short sentences — observed
+            // on A Tale of Two Cities, where "CHAPTER I.\nThe Period" was emitted
+            // 2+ times. Hal never hit this: it carries overlap FORWARD as a
+            // prefix and always consumes NEW sentences, whereas our index-based
+            // window could step backward onto an already-emitted run. (And this
+            // is a DOCUMENT problem — headings interleaved with long prose — that
+            // barely arises in Hal's short conversational turns.)
+            //
+            // Fix: the next chunk MUST extend beyond sentence j (this chunk's
+            // last). If sentence j+1 won't fit within `target` starting from the
+            // overlap point k, the overlap would only replay [k…j] as a redundant
+            // subset — so drop the overlap and start the next chunk AT j+1 (the
+            // long sentence becomes its own chunk; the heading stays only here).
+            // This makes chunk END offsets strictly increasing → no chunk is a
+            // subset of another → no duplicates.
+            if sentenceBounds[j + 1].end - sentenceBounds[k].start > target {
+                k = j + 1
             }
             i = k
         }

@@ -57,6 +57,43 @@ final class ChunkerModestProposalRepro: XCTestCase {
         try diagnose("modest-proposal_1080.txt")
     }
 
+    /// 2026-06-19 (Mark) — regression for the DUPLICATE micro-chunk bug. On
+    /// real docs with chapter headings ("CHAPTER I." followed by a long opening
+    /// sentence) the pre-fix overlap stepped backward and replayed the same
+    /// short sentences as their own chunk — "CHAPTER I.\nThe Period" was emitted
+    /// 2+ times on A Tale of Two Cities. Pride & Prejudice (real corpus, Rule 7;
+    /// the Darcy "tolerable" doc) has 60+ chapter headings — the exact trigger.
+    /// The forward-progress guard makes chunk spans strictly advance, so NO two
+    /// chunks can be identical. Assert that directly.
+    func testNoDuplicateChunks_prideAndPrejudice() throws {
+        let src = Self.corpusDir.appendingPathComponent("01342_pride-and-prejudice.txt")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: src.path),
+                          "corpus file missing")
+        let dbURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("posey.sqlite")
+        let db = try DatabaseManager(databaseURL: dbURL)
+        let doc = try TXTLibraryImporter(databaseManager: db).importDocument(from: src)
+        let units = try db.units(for: doc.id)
+        let kept = UnitEmbeddingChunker.excludingFrontMatter(
+            units, skipOffset: doc.playbackSkipUntilOffset, skipSource: doc.skipSource)
+        let chunks = UnitEmbeddingChunker.chunks(for: doc.id, units: kept)
+
+        XCTAssertGreaterThan(chunks.count, 100, "expected a substantial chunk set")
+
+        // No two chunks may have identical text. (Overlap shares trailing
+        // sentences as part of LARGER chunks, so full-chunk text still differs;
+        // only the backward-step bug produced exact duplicates.)
+        var seen: [String: Int] = [:]
+        var duplicates: [String] = []
+        for c in chunks {
+            seen[c.text, default: 0] += 1
+            if seen[c.text] == 2 { duplicates.append(String(c.text.prefix(40))) }
+        }
+        XCTAssertTrue(duplicates.isEmpty,
+            "duplicate chunk text emitted (overlap stepped backward): \(duplicates.prefix(5))")
+    }
+
     func testTimeMachine_control() throws {
         try diagnose("time-machine_35.txt")
     }

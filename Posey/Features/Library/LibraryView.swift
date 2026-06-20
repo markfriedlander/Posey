@@ -1259,6 +1259,54 @@ extension LibraryViewModel {
                     return json(["error": "EMBEDDING_COVERAGE failed: \(error.localizedDescription)"])
                 }
 
+            case "BACKFILL_EMBEDDINGS":
+                // 2026-06-19 (Mark) — fill an INACTIVE backend's column for the
+                // whole corpus, non-locking (Ask Posey stays up on the active
+                // backend), paced. Prereq for the embedder A/B/C comparison.
+                //   BACKFILL_EMBEDDINGS:nl       → fill embedding_nl
+                //   BACKFILL_EMBEDDINGS:nomic    → fill embedding_nomic
+                //   BACKFILL_EMBEDDINGS:all      → fill every backend EXCEPT the
+                //                                  active (the queue owns active)
+                // Returns immediately; poll BACKFILL_STATUS or EMBEDDING_COVERAGE.
+                let active = EmbeddingBackend.current()
+                let targets: [EmbeddingBackend]
+                switch (arg ?? "").lowercased() {
+                case "nl", "nlcontextual":
+                    targets = [.nlContextual]
+                case "nomic":
+                    targets = [.nomic]
+                case "all":
+                    targets = EmbeddingBackend.allCases.filter { $0 != active }
+                default:
+                    return #"{"error":"Usage: BACKFILL_EMBEDDINGS:<nl|nomic|all>"}"#
+                }
+                if EmbeddingBackend.isSwapInProgress {
+                    return json(["error": "a backend swap is in progress — backfill refused (they both write columns). Wait for the swap to finish."])
+                }
+                if EmbeddingBackfillCoordinator.shared.isRunning {
+                    return json(["error": "a backfill is already running — poll BACKFILL_STATUS."])
+                }
+                EmbeddingBackfillCoordinator.shared.begin(targets: targets, database: databaseManager)
+                return json([
+                    "started": true,
+                    "targets": targets.map { $0.rawValue },
+                    "note": "Non-locking background backfill dispatched. Poll BACKFILL_STATUS or EMBEDDING_COVERAGE."
+                ])
+
+            case "BACKFILL_STATUS":
+                // 2026-06-19 — current backfill phase (running/done/error/idle).
+                let phaseDesc = String(describing: EmbeddingBackfillCoordinator.shared.phase)
+                return json([
+                    "running": EmbeddingBackfillCoordinator.shared.isRunning,
+                    "phase": phaseDesc
+                ])
+
+            case "CANCEL_BACKFILL":
+                // 2026-06-19 — cancel an in-flight backfill. Still-NULL rows stay
+                // NULL; a later BACKFILL_EMBEDDINGS resumes them.
+                EmbeddingBackfillCoordinator.shared.cancel()
+                return json(["status": "cancel-requested"])
+
             case "CANCEL_EMBEDDING_MIGRATION":
                 // 2026-05-28 — cancellation surface for mid-flight Nomic
                 // re-embed. Without this, a user who switches embedder

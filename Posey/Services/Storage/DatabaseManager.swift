@@ -955,6 +955,52 @@ extension DatabaseManager {
         try step(statement)
     }
 
+    /// Store a turn's semantic embedding (conversation-memory fix — see
+    /// `AskPoseyTurnEmbedder`). `id` is the turn's row id; `kind` records which
+    /// backend produced the vector so a later embedder swap can tell stale rows
+    /// apart. The `embedding`/`embedding_kind` columns already exist on
+    /// `ask_posey_conversations` (added in the schema for exactly this).
+    func updateAskPoseyTurnEmbedding(id: String, embedding: [Double], kind: String) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = "UPDATE ask_posey_conversations SET embedding = ?, embedding_kind = ? WHERE id = ?;"
+        let stmt = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(stmt) }
+        let blob = embedding.withUnsafeBufferPointer { Data(buffer: $0) }
+        _ = blob.withUnsafeBytes {
+            sqlite3_bind_blob(stmt, 1, $0.baseAddress, Int32(blob.count), SQLITE_TRANSIENT)
+        }
+        try bind(kind, at: 2, for: stmt)
+        try bind(id, at: 3, for: stmt)
+        try step(stmt)
+    }
+
+    /// Diagnostic: per-document turn-embedding coverage (total user/assistant
+    /// turns vs. how many carry an embedding for `backend`). Powers
+    /// `ASK_POSEY_TURN_STATS` so embed-at-save is verifiable end-to-end.
+    func askPoseyTurnEmbeddingStats(documentID: UUID, backend: EmbeddingBackend) throws -> (totalTurns: Int, embedded: Int) {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let totalSQL = """
+            SELECT COUNT(*) FROM ask_posey_conversations
+            WHERE document_id = ? AND is_summary = 0 AND role IN ('user','assistant');
+            """
+        let embeddedSQL = """
+            SELECT COUNT(*) FROM ask_posey_conversations
+            WHERE document_id = ? AND is_summary = 0 AND role IN ('user','assistant')
+              AND embedding IS NOT NULL AND embedding_kind = ?;
+            """
+        var total = 0, embedded = 0
+        let t = try prepareStatement(sql: totalSQL)
+        defer { sqlite3_finalize(t) }
+        sqlite3_bind_text(t, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        if sqlite3_step(t) == SQLITE_ROW { total = Int(sqlite3_column_int(t, 0)) }
+        let e = try prepareStatement(sql: embeddedSQL)
+        defer { sqlite3_finalize(e) }
+        sqlite3_bind_text(e, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(e, 2, backend.rawValue, -1, SQLITE_TRANSIENT)
+        if sqlite3_step(e) == SQLITE_ROW { embedded = Int(sqlite3_column_int(e, 0)) }
+        return (total, embedded)
+    }
+
     /// Return non-summary conversation turns for a document, oldest-first.
     /// `limit == nil` returns every turn; positive `limit` caps to the
     /// most recent N rows (still returned oldest-first so the prompt

@@ -1376,6 +1376,27 @@ extension LibraryViewModel {
                     return json(["error": "VALIDATE_EMBEDDINGS failed: \(error.localizedDescription)"])
                 }
 
+            case "ASK_POSEY_TURN_STATS":
+                // 2026-06-20 — verify embed-at-save (conversation-memory fix):
+                // how many user/assistant turns for a doc carry an active-backend
+                // embedding. Read-only.   ASK_POSEY_TURN_STATS:<documentID>
+                guard let docID = UUID(uuidString: (arg ?? "").trimmingCharacters(in: .whitespaces)) else {
+                    return json(["error": "usage: ASK_POSEY_TURN_STATS:<documentID>"])
+                }
+                do {
+                    let backend = EmbeddingBackend.current()
+                    let stats = try databaseManager.askPoseyTurnEmbeddingStats(documentID: docID, backend: backend)
+                    return json([
+                        "documentID": docID.uuidString,
+                        "backend": backend.rawValue,
+                        "totalTurns": stats.totalTurns,
+                        "embedded": stats.embedded,
+                        "missing": stats.totalTurns - stats.embedded
+                    ])
+                } catch {
+                    return json(["error": "ASK_POSEY_TURN_STATS failed: \(error.localizedDescription)"])
+                }
+
             case "SEARCH_CHUNKS":
                 // 2026-06-20 (CC) — read-only BM25 search over ONE document's
                 // stored chunk text, returning the actual indexed text. Lets the

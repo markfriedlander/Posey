@@ -762,6 +762,14 @@ extension AskPoseyChatViewModel {
 
         do {
             try db.appendAskPoseyTurn(turn)
+            // 2026-06-20 — EMBED-AT-SAVE (conversation-memory fix). Make this
+            // user/assistant turn semantically recallable once it ages out of
+            // the verbatim STM window. Fire-and-forget off the main actor; the
+            // turn is already persisted, this only enriches it. Best-effort —
+            // a nil embed leaves the row's vector NULL and STM/summary unaffected.
+            Task.detached(priority: .utility) { [turn] in
+                await AskPoseyTurnEmbedder.embedAndStore(turn, database: db)
+            }
             postConversationDidUpdate()
         } catch {
             dbgLog("AskPosey turn persist failed: \(error)")

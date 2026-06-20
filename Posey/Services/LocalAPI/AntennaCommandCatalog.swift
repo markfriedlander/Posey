@@ -65,6 +65,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("CANCEL_EMBEDDING_MIGRATION", .retrieval, "CANCEL_EMBEDDING_MIGRATION", ""),
         .init("EMBEDDING_COVERAGE", .retrieval, "EMBEDDING_COVERAGE[:docs]", "Per-backend column coverage (filled/missing/total) across the corpus; :docs adds per-document gaps. Read-only."),
         .init("VALIDATE_EMBEDDINGS", .retrieval, "VALIDATE_EMBEDDINGS[:<nl|nomic|mxbai|all>]", "Read-only health spot-check on STORED vectors: samples up to 200 random rows per backend and reports dim/all-finite/zero-norm/min-max-norm + healthy flag. Proves the backfill wrote real embeddings, not garbage."),
+        .init("SEARCH_CHUNKS", .retrieval, "SEARCH_CHUNKS:<documentID>|<query words>", "Read-only BM25 search over ONE document's stored chunk text; returns the actual indexed text of the top matches. For A/B answer-key authoring (pull verbatim defining-passages from Posey's own extraction, esp. PDFs) + harness debugging."),
         .init("BACKFILL_EMBEDDINGS", .retrieval, "BACKFILL_EMBEDDINGS:<nl|nomic|mxbai|all>", "Fill an INACTIVE backend's column for the whole corpus, non-locking + paced (Ask Posey stays up on the active backend). Prereq for embedder A/B/C. Poll BACKFILL_STATUS."),
         .init("BACKFILL_STATUS", .retrieval, "BACKFILL_STATUS", "Current backfill phase (running/done/error/idle) + processed/total."),
         .init("CANCEL_BACKFILL", .retrieval, "CANCEL_BACKFILL", "Cancel an in-flight embedding backfill; still-NULL rows stay NULL and resume on a later BACKFILL_EMBEDDINGS."),

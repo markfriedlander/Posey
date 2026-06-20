@@ -3593,6 +3593,57 @@ extension DatabaseManager {
         }
         return hits
     }
+
+    /// One matching chunk for the answer-key authoring tool: the chunk index
+    /// plus its ACTUAL stored text (what retrieval searches). Used by
+    /// `SEARCH_CHUNKS` so defining-passage quotes for PDFs/CBA are pulled from
+    /// Posey's own extracted text, not a divergent raw-file extraction.
+    struct UnitEmbeddingChunkTextHit: Sendable, Equatable {
+        let chunkIndex: Int
+        let text: String
+        let rawBM25: Double
+    }
+
+    /// BM25 search returning chunk TEXT for `documentID`. `query` is plain
+    /// words from the caller; each whitespace token is wrapped in double quotes
+    /// so FTS5 treats it as a literal term (no operator injection / no throw on
+    /// a stray apostrophe). Read-only.
+    func searchUnitEmbeddingChunkTexts(
+        documentID: UUID,
+        query: String,
+        limit: Int = 5
+    ) throws -> [UnitEmbeddingChunkTextHit] {
+        let terms = query
+            .split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" })
+            .map { "\"" + $0.replacingOccurrences(of: "\"", with: "") + "\"" }
+        guard !terms.isEmpty else { return [] }
+        let matchExpression = terms.joined(separator: " ")
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = """
+            SELECT c.chunk_index, c.text, bm25(unit_embedding_chunks_fts) AS score
+            FROM unit_embedding_chunks_fts
+            JOIN unit_embedding_chunks c ON c.rowid = unit_embedding_chunks_fts.rowid
+            WHERE unit_embedding_chunks_fts MATCH ?
+              AND c.document_id = ?
+            ORDER BY score
+            LIMIT ?;
+            """
+        let stmt = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, matchExpression, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 3, Int32(limit))
+        var hits: [UnitEmbeddingChunkTextHit] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let textCStr = sqlite3_column_text(stmt, 1) else { continue }
+            hits.append(UnitEmbeddingChunkTextHit(
+                chunkIndex: Int(sqlite3_column_int(stmt, 0)),
+                text: String(cString: textCStr),
+                rawBM25: sqlite3_column_double(stmt, 2)
+            ))
+        }
+        return hits
+    }
 }
 
 // ========== BLOCK 11: UNIT EMBEDDING CHUNKS (REBUILD STEP 8) - END ==========

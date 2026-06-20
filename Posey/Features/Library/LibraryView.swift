@@ -1348,6 +1348,30 @@ extension LibraryViewModel {
                     return json(["error": "VALIDATE_EMBEDDINGS failed: \(error.localizedDescription)"])
                 }
 
+            case "SEARCH_CHUNKS":
+                // 2026-06-20 (CC) — read-only BM25 search over ONE document's
+                // stored chunk text, returning the actual indexed text. Lets the
+                // A/B-test answer-key authoring pull verbatim defining-passages
+                // from POSEY'S OWN extraction (critical for PDFs/CBA, whose text
+                // can differ from a raw-file extraction). Also a harness debug aid.
+                //   SEARCH_CHUNKS:<documentID>|<query words>
+                let parts = (arg ?? "").split(separator: "|", maxSplits: 1).map(String.init)
+                guard parts.count == 2, let docID = UUID(uuidString: parts[0].trimmingCharacters(in: .whitespaces)) else {
+                    return json(["error": "usage: SEARCH_CHUNKS:<documentID>|<query words>"])
+                }
+                let query = parts[1].trimmingCharacters(in: .whitespaces)
+                do {
+                    let hits = try databaseManager.searchUnitEmbeddingChunkTexts(documentID: docID, query: query, limit: 6)
+                    return json([
+                        "documentID": docID.uuidString,
+                        "query": query,
+                        "hitCount": hits.count,
+                        "hits": hits.map { ["chunkIndex": $0.chunkIndex, "bm25": $0.rawBM25, "text": $0.text] }
+                    ])
+                } catch {
+                    return json(["error": "SEARCH_CHUNKS failed: \(error.localizedDescription)"])
+                }
+
             case "BACKFILL_EMBEDDINGS":
                 // 2026-06-19 (Mark) — fill an INACTIVE backend's column for the
                 // whole corpus, non-locking (Ask Posey stays up on the active

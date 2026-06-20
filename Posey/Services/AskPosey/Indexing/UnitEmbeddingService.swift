@@ -80,14 +80,15 @@ actor UnitEmbeddingService {
     /// from `LibraryView`'s `AppEnvironment`; SQLite is single-
     /// threaded so all writes funnel through the same handle.
     func enqueueIndexing(documentID: UUID,
-                         databaseManager: DatabaseManager) async {
+                         databaseManager: DatabaseManager,
+                         forceRebuild: Bool = false) async {
         // 2026-06-18 — route into the single document-level serial queue so
         // concurrent imports can never stack heavy work on the device (the
         // 2026-06-17 thermal incident). The queue runs `indexAndWait` (below)
         // then RAPTOR for ONE document at a time. `databaseManager` is kept for
         // call-site compatibility; the queue uses the shared instance wired
         // into its `LiveDocumentIndexer` at launch.
-        await DocumentIndexingQueue.shared.enqueue(documentID)
+        await DocumentIndexingQueue.shared.enqueue(documentID, forceRebuild: forceRebuild)
     }
 
     /// The awaitable embedding worker the `DocumentIndexingQueue` runs inside a
@@ -97,66 +98,98 @@ actor UnitEmbeddingService {
     /// → the queue. Honors `Task` cancellation (the escape switch) at batch +
     /// chunk granularity inside `fillEmbeddings`.
     func indexAndWait(documentID: UUID,
-                      databaseManager: DatabaseManager) async {
-        // Snapshot units. This is a synchronous SQL read; the
-        // DatabaseManager is currently main-actor-bound but the
-        // actor hop is implicit at the call site.
-        let units: [ContentUnit]
-        let skipOffset: Int
-        let skipSource: String
-        do {
-            (units, skipOffset, skipSource) = try await MainActor.run {
-                let u = try databaseManager.units(for: documentID)
-                let doc = (try? databaseManager.documents())?
-                    .first(where: { $0.id == documentID })
-                return (u, doc?.playbackSkipUntilOffset ?? 0, doc?.skipSource ?? "")
+                      databaseManager: DatabaseManager,
+                      forceRebuild: Bool = false) async {
+        // 2026-06-19 — RESUME-ON-PARTIAL. If chunk rows already exist and a
+        // rebuild wasn't explicitly requested (REINDEX), DON'T re-chunk: the
+        // re-chunk path (`replaceAllUnitEmbeddingChunks`) wipes ALL existing
+        // embeddings and starts the fill from zero — which, for a large doc that
+        // can't finish embedding in one foreground session (exactly the doc that
+        // got interrupted), turns every relaunch into a from-scratch restart
+        // that re-cooks the device and never completes. Instead we keep the
+        // existing chunks/vectors and `fillEmbeddings` (which only touches NULL
+        // rows) tops up the remainder, so progress accumulates across sessions.
+        // Mark caught this: A Tale of Two Cities stalled at 116/2436 and read as
+        // "ready". (Rule 10 — generalizes to ANY interrupted embed, not just the
+        // launch sweep: a normal import killed mid-fill now also resumes.)
+        let existingChunkCount = (try? await MainActor.run {
+            try databaseManager.unitEmbeddingChunkCount(for: documentID)
+        }) ?? 0
+        let resume = !forceRebuild && existingChunkCount > 0
+
+        let totalChunks: Int
+        if resume {
+            // Metadata extraction is idempotent (skips already-extracted); run it
+            // in case the original pass was interrupted before it landed.
+            Task { @MainActor in
+                await DocumentMetadataExtractor.extractAndStoreIfNeeded(
+                    documentID: documentID, databaseManager: databaseManager)
             }
-        } catch {
-            return
-        }
-
-        guard !units.isEmpty else { return }
-
-        // 2026-05-29 — Bibliographic metadata (author + publication year)
-        // → structured `metadata_*` columns. Central import hook (every
-        // format reaches here). Non-blocking + independent of embedding;
-        // idempotent (skips already-extracted docs). Revives the
-        // bibliographic half of the 8f-removed DocumentMetadataService so
-        // metadata questions answer from structured fields rather than
-        // front-matter retrieval (the prerequisite for excluding front
-        // matter from RAG).
-        Task { @MainActor in
-            await DocumentMetadataExtractor.extractAndStoreIfNeeded(
-                documentID: documentID, databaseManager: databaseManager)
-        }
-
-        // 2026-05-29 — Front-matter exclusion (RAG). Drop editorial front
-        // matter (prefaces, title pages) that falls before the confident
-        // content-start so it can't be retrieved and served as if it were
-        // the work — the Saintsbury-preface contamination caught by real
-        // reading (#2 Finding 3). Safe NOW because author/year answer from
-        // structured metadata (8015eb4), not front-matter prose. Only fires
-        // on a positive content-start detection (gutenberg/heuristic).
-        let chunkUnits = UnitEmbeddingChunker.excludingFrontMatter(
-            units, skipOffset: skipOffset, skipSource: skipSource)
-
-        // Build chunks (CPU-bound, but small).
-        let chunks = UnitEmbeddingChunker.chunks(for: documentID, units: chunkUnits)
-
-        // Persist atomically. The FTS5 triggers fire as part of
-        // the same transaction so the mirror is consistent.
-        do {
-            try await MainActor.run {
-                try databaseManager.replaceAllUnitEmbeddingChunks(chunks, for: documentID)
+            totalChunks = existingChunkCount
+            dbgLog("UnitEmbeddingService: RESUME doc=%@ existingChunks=%d (skip re-chunk, fill NULLs only)",
+                   documentID.uuidString, existingChunkCount)
+        } else {
+            // FULL (re)build — fresh import, or an explicit REINDEX/forceRebuild.
+            // Snapshot units. This is a synchronous SQL read; the
+            // DatabaseManager is currently main-actor-bound but the
+            // actor hop is implicit at the call site.
+            let units: [ContentUnit]
+            let skipOffset: Int
+            let skipSource: String
+            do {
+                (units, skipOffset, skipSource) = try await MainActor.run {
+                    let u = try databaseManager.units(for: documentID)
+                    let doc = (try? databaseManager.documents())?
+                        .first(where: { $0.id == documentID })
+                    return (u, doc?.playbackSkipUntilOffset ?? 0, doc?.skipSource ?? "")
+                }
+            } catch {
+                return
             }
-        } catch {
-            return
+
+            guard !units.isEmpty else { return }
+
+            // 2026-05-29 — Bibliographic metadata (author + publication year)
+            // → structured `metadata_*` columns. Central import hook (every
+            // format reaches here). Non-blocking + independent of embedding;
+            // idempotent (skips already-extracted docs). Revives the
+            // bibliographic half of the 8f-removed DocumentMetadataService so
+            // metadata questions answer from structured fields rather than
+            // front-matter retrieval (the prerequisite for excluding front
+            // matter from RAG).
+            Task { @MainActor in
+                await DocumentMetadataExtractor.extractAndStoreIfNeeded(
+                    documentID: documentID, databaseManager: databaseManager)
+            }
+
+            // 2026-05-29 — Front-matter exclusion (RAG). Drop editorial front
+            // matter (prefaces, title pages) that falls before the confident
+            // content-start so it can't be retrieved and served as if it were
+            // the work — the Saintsbury-preface contamination caught by real
+            // reading (#2 Finding 3). Safe NOW because author/year answer from
+            // structured metadata (8015eb4), not front-matter prose. Only fires
+            // on a positive content-start detection (gutenberg/heuristic).
+            let chunkUnits = UnitEmbeddingChunker.excludingFrontMatter(
+                units, skipOffset: skipOffset, skipSource: skipSource)
+
+            // Build chunks (CPU-bound, but small).
+            let chunks = UnitEmbeddingChunker.chunks(for: documentID, units: chunkUnits)
+
+            // Persist atomically. The FTS5 triggers fire as part of
+            // the same transaction so the mirror is consistent.
+            do {
+                try await MainActor.run {
+                    try databaseManager.replaceAllUnitEmbeddingChunks(chunks, for: documentID)
+                }
+            } catch {
+                return
+            }
+            totalChunks = chunks.count
         }
 
-        // Post .didStart so the indexing banner can show. Total =
-        // chunks.count; fillEmbeddings reports `processed` against
-        // this denominator.
-        let totalChunks = chunks.count
+        // Post .didStart so the indexing banner can show. Total = chunk count
+        // (resume: existing rows; rebuild: freshly-built); fillEmbeddings reports
+        // `processed` against this denominator.
         await MainActor.run {
             NotificationCenter.default.post(
                 name: Self.didStartNotification,

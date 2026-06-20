@@ -116,12 +116,50 @@ struct PoseyApp: App {
                     await PDFEnhancementService.shared.configure(databaseManager: manager)
                     await PDFEnhancementService.shared.bootstrap()
 
+                    // 2026-06-19 — Resume interrupted NORMAL embeds (Mark caught
+                    // a doc stalled at 5% reading as "ready"). The bootstraps
+                    // above resume enhancement and swaps; this is the MISSING
+                    // fourth resume — a plain embed interrupted mid-flight (jetsam
+                    // / thermal kill / force-quit / backgrounded) left the doc
+                    // partially embedded forever, and the library showed it
+                    // "ready" because it had ≥1 embedded leaf and wasn't actively
+                    // indexing. Re-enqueue every document with NULL rows in the
+                    // ACTIVE backend's column through the normal queue: it fills
+                    // only the missing chunks (resume-on-partial in
+                    // UnitEmbeddingService — no re-chunk, no wiping prior vectors),
+                    // posts didStart/didProgress so the card honestly shows
+                    // "Reading ahead — N%", and builds RAPTOR on completion.
+                    //
+                    // ORDER MATTERS — this runs BEFORE the RAPTOR bootstrap on
+                    // purpose. A single `buildRaptor` is a minutes-long,
+                    // non-preemptible queue pass; if RAPTOR is enqueued first, the
+                    // embed resume starves behind it (observed: a 70%-embedded doc
+                    // sat "Queued #1" while RAPTOR built trees for minutes).
+                    // Enqueuing embeds first lets them win the lane (embed
+                    // outranks RAPTOR at every boundary), so docs become fully
+                    // answerable BEFORE we spend time deepening — and RAPTOR then
+                    // builds on COMPLETE data instead of a partial tree it must
+                    // rebuild. Skipped during a swap (the swap owns the write
+                    // backend and has its own resume).
+                    if !EmbeddingBackend.isSwapInProgress {
+                        let incomplete = (try? manager.documentIDsNeedingActiveEmbedding()) ?? []
+                        if !incomplete.isEmpty {
+                            dbgLog("Launch resume: re-enqueuing %d document(s) with incomplete active-backend embedding",
+                                   incomplete.count)
+                            for id in incomplete {
+                                await DocumentIndexingQueue.shared.enqueue(id)
+                            }
+                        }
+                    }
+
                     // 2026-06-08 (audit fix #2) — RAPTOR summary tree.
                     // Configure the background builder and sweep the
                     // library for documents that are indexed but have no
                     // summary tree yet (pre-feature imports + builds
                     // interrupted by termination). Self-gates on AFM
                     // availability; cheap no-op when AFM is unavailable.
+                    // Runs AFTER the embed resume above so deepening never
+                    // starves answerability (see the ORDER MATTERS note).
                     await RaptorTreeService.shared.configure(databaseManager: manager)
                     await RaptorTreeService.shared.bootstrap()
 

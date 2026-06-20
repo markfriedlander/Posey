@@ -42,7 +42,7 @@ final class DocumentIndexingQueueTests: XCTestCase {
     struct FakeIndexer: DocumentIndexer {
         let recorder: Recorder
         let sleepNanos: UInt64
-        func embed(_ id: UUID) async { await run(.init(phase: .embedding, id: id)) }
+        func embed(_ id: UUID, forceRebuild: Bool) async { await run(.init(phase: .embedding, id: id)) }
         func buildRaptor(_ id: UUID) async { await run(.init(phase: .raptor, id: id)) }
         private func run(_ s: Step) async {
             await recorder.enter(s)

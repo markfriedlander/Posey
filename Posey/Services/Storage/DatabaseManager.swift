@@ -3280,6 +3280,51 @@ extension DatabaseManager {
         return out
     }
 
+    /// Total stored chunk rows for a document (leaves + any RAPTOR summary
+    /// nodes), regardless of embedding state. The resume path uses this to
+    /// distinguish "chunks already built → resume the fill" from "no chunks yet
+    /// → build them": > 0 means a prior pass already chunked this document, so a
+    /// re-enqueue should fill the remaining NULL rows rather than re-chunk from
+    /// scratch (which would discard already-embedded vectors and restart a large
+    /// doc forever). (2026-06-19)
+    func unitEmbeddingChunkCount(for documentID: UUID) throws -> Int {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let stmt = try prepareStatement(
+            sql: "SELECT COUNT(*) FROM unit_embedding_chunks WHERE document_id = ?;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// Document IDs that have at least one chunk still NULL in the ACTIVE
+    /// backend's column — i.e. documents whose embedding was interrupted
+    /// (jetsam / thermal kill / force-quit / backgrounded) and never finished.
+    /// The launch resume sweep re-enqueues these through the normal indexing
+    /// queue so they complete (and then build their RAPTOR tree). DISTINCT, in
+    /// document order. Reads the ACTIVE backend's column specifically — the
+    /// reader's column — so this is "what's not ready to answer well", not the
+    /// inactive-backend A/B/C gap (that's the backfill worker's job).
+    /// (2026-06-19 — Mark caught a doc stalled at 5% showing as "ready".)
+    func documentIDsNeedingActiveEmbedding() throws -> [UUID] {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let activeColumn = EmbeddingBackend.current().vectorColumn
+        let stmt = try prepareStatement(sql: """
+            SELECT DISTINCT document_id FROM unit_embedding_chunks
+            WHERE \(activeColumn) IS NULL
+            ORDER BY document_id;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var ids: [UUID] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let c = sqlite3_column_text(stmt, 0),
+                  let id = UUID(uuidString: String(cString: c)) else { continue }
+            ids.append(id)
+        }
+        return ids
+    }
+
     /// Per-document, per-backend coverage in ONE grouped query. The
     /// `filledByColumn` dict is keyed by each backend's `vectorColumn` name and
     /// holds that document's non-NULL count. Lets the coverage verb show, at a

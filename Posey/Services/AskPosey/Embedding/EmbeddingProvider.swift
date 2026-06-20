@@ -123,11 +123,54 @@ final class EmbeddingProvider: @unchecked Sendable {
         case .document: backend = EmbeddingBackend.writeBackend()
         }
 
+        return embed(cleaned, as: purpose, in: backend)
+    }
+
+    /// 2026-06-19 (Mark) — EXPLICIT-BACKEND embed. Produces a vector in a NAMED
+    /// backend's space, bypassing the `current()`/`writeBackend()` resolution
+    /// the swap-aware `embed(_:as:)` uses. This is what makes a NON-LOCKING
+    /// backfill possible: the active backend stays the reader (e.g. Nomic) while
+    /// the backfill fills another backend's column (e.g. NLContextual) — without
+    /// setting the swap marker (which would lock Ask Posey and flip the active
+    /// pointer). The requested backend's model loads on demand via its own
+    /// ensure-loaded path, so an inactive backend embeds fine alongside the
+    /// active one. Caller is responsible for writing the result to THAT
+    /// backend's column (`updateUnitEmbeddingChunkEmbedding(backend:)`).
+    ///
+    /// Note: `text` is assumed already non-empty/cleaned by the public overload;
+    /// this still trims defensively so direct callers are safe.
+    nonisolated func embed(_ text: String, as purpose: EmbeddingPurpose, in backend: EmbeddingBackend) -> [Double]? {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
         switch backend {
         case .nlContextual:
             return embedNLContextual(cleaned)
         case .nomic:
             return embedNomic(cleaned, purpose: purpose)
+        }
+    }
+
+    /// True iff a SPECIFIC backend's model is loaded (independent of the active /
+    /// write backend). The backfill worker's wait-for-load gate reads this for
+    /// the backend it's filling.
+    nonisolated func isLoaded(_ backend: EmbeddingBackend) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        switch backend {
+        case .nlContextual: return nlContextualModel != nil
+        case .nomic:        return nomicBundle != nil
+        }
+    }
+
+    /// Warm-load a SPECIFIC backend off-main (independent of active/write
+    /// backend), so the backfill worker can prepare an inactive backend's model
+    /// without going through the swap marker. Idempotent.
+    nonisolated func warmUp(_ backend: EmbeddingBackend) {
+        Task.detached { [weak self] in
+            guard let self = self else { return }
+            switch backend {
+            case .nlContextual: self.ensureNLContextualLoadedBlocking()
+            case .nomic:        self.ensureNomicLoadedBlocking()
+            }
         }
     }
 

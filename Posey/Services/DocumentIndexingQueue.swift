@@ -32,7 +32,13 @@ enum DocumentIndexingPhase: Sendable {
 /// ~1–2s even under sustained load (the antenna `RESET_ALL` failure during the
 /// 2026-06-17 incident was that it had no fast cooperative-cancel path).
 protocol DocumentIndexer: Sendable {
-    func embed(_ documentID: UUID) async
+    /// `forceRebuild == false` (the default for imports + the launch resume):
+    /// if the document already has chunk rows, RESUME — fill only the NULL
+    /// embeddings, leaving existing chunks/vectors intact (so a large doc
+    /// interrupted mid-embed accumulates progress across sessions instead of
+    /// restarting from zero). `forceRebuild == true` (REINDEX): re-chunk from
+    /// scratch regardless. (2026-06-19)
+    func embed(_ documentID: UUID, forceRebuild: Bool) async
     func buildRaptor(_ documentID: UUID) async
 }
 
@@ -110,6 +116,10 @@ actor DocumentIndexingQueue {
     /// IDs cancelled (per-doc delete / escape switch) — checked before work and
     /// before scheduling the RAPTOR follow-up.
     private var cancelled: Set<UUID> = []
+    /// IDs whose next embed pass must RE-CHUNK from scratch (REINDEX), rather
+    /// than resume-fill existing chunks. Populated by `enqueue(_:forceRebuild:)`,
+    /// consumed (and cleared) when the embed pass runs. (2026-06-19)
+    private var forceRebuildIDs: Set<UUID> = []
     /// True while `drainQueue` is iterating — only one drain loop at a time.
     private var draining = false
     /// The `Task` running the in-flight pass. Cancelled by the escape switch /
@@ -149,8 +159,12 @@ actor DocumentIndexingQueue {
     /// Enqueue a document for indexing, starting at the EMBED pass (tier 1).
     /// Idempotent. A pending RAPTOR for the same document is superseded — a
     /// (re-)embed rebuilds the chunks, so its tree must be rebuilt afterward.
-    func enqueue(_ documentID: UUID) {
+    func enqueue(_ documentID: UUID, forceRebuild: Bool = false) {
         cancelled.remove(documentID)
+        // forceRebuild (REINDEX) wins if requested; a normal/resume enqueue never
+        // CLEARS a pending forceRebuild (so REINDEX intent survives a coincident
+        // re-enqueue). Cleared after the embed pass consumes it (drainQueue).
+        if forceRebuild { forceRebuildIDs.insert(documentID) }
         raptorQueue.removeAll { $0 == documentID }   // re-embed supersedes a pending tree
         if currentDocumentID == documentID && currentPhase == .embedding { return }
         if embedQueue.contains(documentID) { return }
@@ -285,10 +299,14 @@ actor DocumentIndexingQueue {
                    phase == .embedding ? "embed" : "raptor",
                    id.uuidString, embedQueue.count, raptorQueue.count)
             let work = indexer
+            // Consume the force-rebuild flag for this embed pass (REINDEX);
+            // a normal/launch-resume enqueue leaves it false → resume-fill.
+            let forceRebuild = (phase == .embedding) && forceRebuildIDs.contains(id)
+            if phase == .embedding { forceRebuildIDs.remove(id) }
             let job = Task {
                 if let work {
                     switch phase {
-                    case .embedding: await work.embed(id)
+                    case .embedding: await work.embed(id, forceRebuild: forceRebuild)
                     case .raptor:    await work.buildRaptor(id)
                     }
                 }
@@ -325,9 +343,10 @@ actor DocumentIndexingQueue {
 struct LiveDocumentIndexer: DocumentIndexer {
     let databaseManager: DatabaseManager
 
-    func embed(_ documentID: UUID) async {
+    func embed(_ documentID: UUID, forceRebuild: Bool) async {
         await UnitEmbeddingService.shared.indexAndWait(
-            documentID: documentID, databaseManager: databaseManager)
+            documentID: documentID, databaseManager: databaseManager,
+            forceRebuild: forceRebuild)
     }
 
     func buildRaptor(_ documentID: UUID) async {

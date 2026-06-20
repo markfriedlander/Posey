@@ -1376,8 +1376,12 @@ extension LibraryViewModel {
                 }
                 let dbRef = databaseManager
                 Task.detached {
+                    // forceRebuild: REINDEX means "re-chunk from scratch" (e.g.
+                    // after a chunker fix), so it must override the new
+                    // resume-on-partial default that would otherwise just top up
+                    // NULL rows on the existing chunks. (2026-06-19)
                     await UnitEmbeddingService.shared.enqueueIndexing(
-                        documentID: id, databaseManager: dbRef
+                        documentID: id, databaseManager: dbRef, forceRebuild: true
                     )
                 }
                 return json([

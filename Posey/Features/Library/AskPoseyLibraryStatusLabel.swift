@@ -61,11 +61,17 @@ struct AskPoseyLibraryStatusLabel: View {
         if tracker.isCriticallyPaused(documentID) {
             return .catchingBreath
         }
-        // PDF enhancement / OCR — her first read-through. The longest, formerly
-        // invisible phase; surfacing it is the fix for "looks stuck".
-        if tracker.isEnhancing(documentID) {
-            return .firstRead
-        }
+        // Embedding in flight → "Reading ahead — N%" (the percentage is the
+        // useful signal). 2026-06-19 (Mark caught it on the phone): a PRIOR
+        // `isEnhancing` branch sat AHEAD of this one and returned `.firstRead`
+        // ("First pass — taking it in…", no %). But `IndexingTracker.isEnhancing`
+        // and `isIndexing` are the SAME predicate (`indexingProgress != nil` —
+        // metadata enhancement was torn out in 8f), so that branch shadowed this
+        // one for EVERY embedding doc: it never showed the percentage, and it
+        // never correctly fired for real PDF OCR (OCR posts no UnitEmbedding
+        // progress). Removed it; embedding now honestly shows "Reading ahead —
+        // N%". (`firstRead` stays in PoseyVoice for when a real OCR-phase signal
+        // is wired to the tracker.)
         if tracker.isIndexing(documentID) {
             let pct = Int(((tracker.unifiedProgress(for: documentID) ?? 0) * 100).rounded())
             return .readingAhead(pct)

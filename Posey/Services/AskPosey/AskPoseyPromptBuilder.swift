@@ -65,6 +65,8 @@ nonisolated struct AskPoseyPromptTokenBreakdown: Sendable, Equatable {
     var conversationSummary: Int = 0
     var stm: Int = 0
     var ragChunks: Int = 0
+    /// Recalled older conversation turns (hybrid turn-recall pass).
+    var recalledTurns: Int = 0
     var userQuestion: Int = 0
     /// Includes HelPML scaffolding (`#=== BEGIN ===#` markers,
     /// blank lines), so this is greater than the sum of the section
@@ -72,7 +74,7 @@ nonisolated struct AskPoseyPromptTokenBreakdown: Sendable, Equatable {
     var totalIncludingScaffolding: Int = 0
 
     var sectionsTotal: Int {
-        system + anchor + surrounding + conversationSummary + stm + ragChunks + userQuestion
+        system + anchor + surrounding + conversationSummary + stm + ragChunks + recalledTurns + userQuestion
     }
 }
 
@@ -148,6 +150,11 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
     /// Compressed older-turn summary. M5 always passes nil; M6's
     /// background summarizer fills this from cached summary rows.
     let conversationSummary: String?
+    /// 2026-06-20 — older-but-relevant turns surfaced by the hybrid
+    /// conversation-recall pass (cosine+BM25 RRF), already deduped against the
+    /// verbatim STM window. Oldest-first. Empty when recall found nothing or
+    /// the conversation is short. Rendered as its own labeled section.
+    let recalledTurns: [DatabaseManager.RecalledTurn]
     /// Document chunks retrieved for this question. M5 always passes
     /// `[]`; M6's cosine search populates it.
     let documentChunks: [RetrievedChunk]
@@ -227,6 +234,7 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         surroundingContext: String?,
         conversationHistory: [AskPoseyMessage],
         conversationSummary: String?,
+        recalledTurns: [DatabaseManager.RecalledTurn] = [],
         documentChunks: [RetrievedChunk],
         currentQuestion: String,
         pairwiseSummaries: [String]? = nil,
@@ -245,6 +253,7 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         self.surroundingContext = surroundingContext
         self.conversationHistory = conversationHistory
         self.conversationSummary = conversationSummary
+        self.recalledTurns = recalledTurns
         self.documentChunks = documentChunks
         self.currentQuestion = currentQuestion
         self.pairwiseSummaries = pairwiseSummaries
@@ -951,6 +960,26 @@ nonisolated enum AskPoseyPromptBuilder {
             droppedSink: &dropped
         )
         breakdown.ragChunks = AskPoseyTokenEstimator.tokens(in: ragRendered)
+        remaining -= breakdown.ragChunks
+
+        // -------- RECALLED TURNS (drops FIRST — document-primary) --------
+        // Older-but-relevant turns surfaced by the hybrid recall pass. A modest
+        // slice that takes from whatever's left AFTER the book's RAG — recalled
+        // chat must never crowd out the document. Empty when recall found
+        // nothing or the conversation is short.
+        var recalledBlock: String? = nil
+        if !inputs.recalledTurns.isEmpty {
+            let cap = min(budget.recalledTurnsBudgetTokens, max(0, remaining))
+            if cap > 0 {
+                let block = renderRecalledTurnsBlock(turns: inputs.recalledTurns, budgetTokens: cap)
+                let tokens = AskPoseyTokenEstimator.tokens(in: block)
+                if !block.isEmpty && tokens <= remaining {
+                    recalledBlock = block
+                    breakdown.recalledTurns = tokens
+                    remaining -= tokens
+                }
+            }
+        }
 
         // -------- ASSEMBLE — RAG before surrounding (recency bias) --------
         // 2026-05-04 — Order changed from
@@ -975,6 +1004,9 @@ nonisolated enum AskPoseyPromptBuilder {
         if let structuredKnowledgeBlock { sections.append(structuredKnowledgeBlock) }
         if let anchorBlock { sections.append(anchorBlock) }
         if let summaryBlock { sections.append(summaryBlock) }
+        // Recalled older turns sit between the abstractive summary and the recent
+        // verbatim window: oldest conversational context → most recent → document.
+        if let recalledBlock { sections.append(recalledBlock) }
         if !stmRendered.isEmpty { sections.append(stmRendered) }
         if !ragRendered.isEmpty { sections.append(ragRendered) }
         if let surroundingBlock { sections.append(surroundingBlock) }
@@ -1532,6 +1564,30 @@ private extension AskPoseyPromptBuilder {
         """
     }
 
+    /// 2026-06-20 — recalled older turns (the hybrid conversation-recall pass).
+    /// Verbatim, first-person ("You:" / "Me:"), oldest-first, already deduped
+    /// against the verbatim STM window. Framed as REFERENCE — these resurfaced
+    /// because they relate to the current question; they are not the live turn.
+    /// Walks oldest→newest and stops at the budget (the most relevant turns are
+    /// chosen upstream by RRF; here we just fit what we can in reading order).
+    static func renderRecalledTurnsBlock(turns: [DatabaseManager.RecalledTurn], budgetTokens: Int) -> String {
+        guard !turns.isEmpty, budgetTokens > 0 else { return "" }
+        var lines: [String] = []
+        var used = 0
+        for t in turns {
+            let line = (t.role == "user" ? "You: " : "Me: ") + compactForNarrative(t.content)
+            let cost = AskPoseyTokenEstimator.tokens(in: line) + 4
+            if used + cost > budgetTokens { break }
+            lines.append(line)
+            used += cost
+        }
+        guard !lines.isEmpty else { return "" }
+        return """
+        RELEVANT EARLIER IN THIS CONVERSATION (this came up before and relates to what you're being asked now — reference, not the current question; "You" is you, "Me" is me):
+        \(lines.joined(separator: "\n"))
+        """
+    }
+
     static func renderUserBlock(text: String, hint: String? = nil) -> String {
         // Plain-prose framing for the current user question. The
         // model parses "USER QUESTION:" as a labeled field rather
@@ -1631,23 +1687,24 @@ private extension AskPoseyPromptBuilder {
         guard !keptReversed.isEmpty else { return "" }
         let kept = Array(keptReversed.reversed())
 
-        // **2026-05-02 third iteration.** Even narrative-summary
-        // dialogue gave the model a template to copy — Q3 in real
-        // tests echoed Q2's answer back. The deeper fix: don't show
-        // the model its own prior REPLIES at all. Show only what the
-        // user asked. The model knows the conversation's topics
-        // (from the user questions) without having a previous answer
-        // to imitate or rephrase. Tradeoff: if the user says "and
-        // what else?" or "build on that," the model won't see its
-        // last reply — but the document excerpts ground each new
-        // question on its own.
-        let userQuestionsOnly = kept.filter { $0.role == .user }
-        guard !userQuestionsOnly.isEmpty else { return "" }
-        let questionList = userQuestionsOnly
-            .map { "\"\(compactForNarrative($0.content))\"" }
-            .joined(separator: ", then ")
+        // 2026-06-20 — FIRST-PERSON VERBATIM (Mark). The prior rendering showed
+        // ONLY the user's questions, narrated in third person ("the user asked
+        // X"), and deliberately HID Posey's own replies. That was an **AFM
+        // concession**: the weak AFM base model imitated role-labeled turns as a
+        // script to continue, so we stripped them. But hiding Posey's own words
+        // cripples its sense of self (it can't see what IT said two turns ago),
+        // and it's wrong for the capable MLX chat models whose NATIVE format is
+        // exactly role-labeled turns. Now: verbatim recent turns, BOTH roles, in
+        // first/second person — "You:" is the user, "Me:" is Posey's own earlier
+        // words. Posey is a distinct entity from the user and both deserve to be
+        // addressed as themselves. (AFM concessions are removable as of 2026-06-20;
+        // revisit AFM ~a month post-release for the iOS 27 update.)
+        let lines = kept.map { m in
+            (m.role == .user ? "You: " : "Me: ") + compactForNarrative(m.content)
+        }.joined(separator: "\n")
         return """
-        EARLIER IN THIS CONVERSATION (the user has so far asked: \(questionList). Don't repeat your previous answers; treat each question fresh against the excerpts.):
+        EARLIER IN THIS CONVERSATION (our exchange so far — "You" is you, "Me" is me; answer the current question below, building on this rather than repeating it):
+        \(lines)
         """
     }
 

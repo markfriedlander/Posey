@@ -1414,7 +1414,7 @@ extension LibraryViewModel {
                 do {
                     let turns = try databaseManager.retrieveConversationTurns(
                         documentID: rDocID, queryVector: rVec, queryText: rQuery,
-                        excludeTurnIDs: [], backend: rBackend, limit: 6)
+                        excludeMostRecent: 0, backend: rBackend, limit: 6)
                     return json([
                         "documentID": rDocID.uuidString,
                         "query": rQuery,
@@ -4274,6 +4274,7 @@ extension LibraryViewModel {
                 "conversationSummary": metadata.breakdown.conversationSummary,
                 "stm": metadata.breakdown.stm,
                 "ragChunks": metadata.breakdown.ragChunks,
+                "recalledTurns": metadata.breakdown.recalledTurns,
                 "userQuestion": metadata.breakdown.userQuestion,
                 "totalIncludingScaffolding": metadata.breakdown.totalIncludingScaffolding
             ]

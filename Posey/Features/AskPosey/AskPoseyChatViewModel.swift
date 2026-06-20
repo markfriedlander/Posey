@@ -887,6 +887,35 @@ private extension AskPoseyChatViewModel {
         // WITHOUT diluting the small-chunk ranking above (precision + context).
         // Pure post-ranking: attribution/relevance/gate signals are preserved.
         // `radius` is the tunable knob (0 = off); read on the main actor.
+        return await self.expandWinnersToNeighbors(winners, documentID: documentID, db: db)
+    }
+
+    /// 2026-06-20 — conversation-recall (Part C). Embeds the question (`.query`)
+    /// and runs the hybrid (cosine+BM25, RRF) turn retrieval, excluding the
+    /// verbatim STM window (the most recent `keepVerbatimRecent` turns are
+    /// already in the prompt). Returns the top older turns relevant to this
+    /// question, oldest-first. Empty on short conversations / no DB.
+    func retrieveRecalledTurns(for question: String) async -> [DatabaseManager.RecalledTurn] {
+        guard let db = databaseManager else { return [] }
+        let backend = EmbeddingBackend.current()
+        let vec = await Task.detached(priority: .userInitiated) {
+            EmbeddingProvider.shared.embed(question, as: .query, in: backend) ?? []
+        }.value
+        return (try? db.retrieveConversationTurns(
+            documentID: documentID,
+            queryVector: vec,
+            queryText: question,
+            excludeMostRecent: keepVerbatimRecent,
+            backend: backend,
+            limit: 4
+        )) ?? []
+    }
+
+    /// Small-to-big neighbor expansion of the ranked winners (extracted so the
+    /// recall method can sit cleanly between the two). Model-aware RAG budget.
+    private func expandWinnersToNeighbors(
+        _ winners: [RetrievedChunk], documentID: UUID, db: DatabaseManager
+    ) async -> [RetrievedChunk] {
         let radius = NeighborExpansion.radius
         guard radius > 0 else { return winners }
         // 2026-06-20 — MODEL-AWARE RAG budget. The expander's token ceiling now
@@ -1740,6 +1769,10 @@ extension AskPoseyChatViewModel {
                     surroundingContext: self.surroundingContext(for: intent),
                     conversationHistory: self.historyForPromptBuilder,
                     conversationSummary: self.cachedConversationSummary,
+                    // 2026-06-20 — hybrid conversation-recall pass: older turns
+                    // relevant to THIS question, deduped against the verbatim STM
+                    // window. Empty for short conversations.
+                    recalledTurns: await self.retrieveRecalledTurns(for: trimmedInput),
                     documentChunks: chunks,
                     currentQuestion: trimmedInput,
                     pairwiseSummaries: pairwiseSummaries,

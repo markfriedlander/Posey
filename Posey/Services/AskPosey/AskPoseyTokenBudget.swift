@@ -147,6 +147,15 @@ nonisolated struct AskPoseyTokenBudget: Sendable, Equatable {
     /// limited to a single chunk per turn.**
     var ragBudgetTokens: Int = 1400
 
+    /// 2026-06-20 — Recalled conversation turns (the hybrid turn-recall pass,
+    /// conversation-memory fix). A SMALL slice for older-but-relevant turns
+    /// surfaced by semantic+BM25 recall — distinct from `stmBudgetTokens` (recent
+    /// verbatim flow) and `summaryBudgetTokens` (abstractive gist). Deliberately
+    /// modest and the FIRST to drop under pressure: Posey is document-primary, so
+    /// recalled chat must never crowd out the book's RAG. AFM 250 (~1-2 turns);
+    /// MLX gets more in `forModel`. 0 would disable it entirely.
+    var recalledTurnsBudgetTokens: Int = 250
+
     /// Long-document budget — used when chunks are 2000-char
     /// scenes rather than 500-char fragments. Doubles the RAG
     /// allowance so 3-4 scene chunks fit per turn instead of 1.
@@ -200,6 +209,7 @@ nonisolated struct AskPoseyTokenBudget: Sendable, Equatable {
             b.stmBudgetTokens = 1400            // ~9 recent turns (was ~4) — continuity
             b.summaryBudgetTokens = 600         // older context, compacted
             b.ragBudgetTokens = longDocument ? 2800 : 1400   // UNCHANGED per decision
+            b.recalledTurnsBudgetTokens = 500   // a few recalled older turns
             return b
         }
     }

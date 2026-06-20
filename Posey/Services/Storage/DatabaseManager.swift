@@ -1026,11 +1026,31 @@ extension DatabaseManager {
         documentID: UUID,
         queryVector: [Double],
         queryText: String,
-        excludeTurnIDs: Set<String>,
+        excludeMostRecent: Int,
         backend: EmbeddingBackend,
         limit: Int = 4
     ) throws -> [RecalledTurn] {
         dbLock.lock(); defer { dbLock.unlock() }
+
+        // The verbatim STM window = the most-recent K user/assistant turns;
+        // those are already in the prompt verbatim, so exclude them by ID (Hal's
+        // real dedup is turn exclusion, by recency here since our in-memory
+        // messages don't carry the stored row id). K = the caller's verbatim depth.
+        var excludeTurnIDs = Set<String>()
+        if excludeMostRecent > 0 {
+            let exSQL = """
+                SELECT id FROM ask_posey_conversations
+                WHERE document_id = ? AND is_summary = 0 AND role IN ('user','assistant')
+                ORDER BY timestamp DESC LIMIT ?;
+                """
+            let exStmt = try prepareStatement(sql: exSQL)
+            defer { sqlite3_finalize(exStmt) }
+            sqlite3_bind_text(exStmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(exStmt, 2, Int32(excludeMostRecent))
+            while sqlite3_step(exStmt) == SQLITE_ROW {
+                if let idC = sqlite3_column_text(exStmt, 0) { excludeTurnIDs.insert(String(cString: idC)) }
+            }
+        }
 
         struct Cand { let id: String; let role: String; let content: String; let ts: Date }
         var cands: [String: Cand] = [:]

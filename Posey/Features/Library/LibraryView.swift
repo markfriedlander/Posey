@@ -1307,6 +1307,34 @@ extension LibraryViewModel {
                 EmbeddingBackfillCoordinator.shared.cancel()
                 return json(["status": "cancel-requested"])
 
+            case "EMBEDDER_LOADTEST":
+                // 2026-06-19 (Mark) — embedder model-load GATE. Headlessly load a
+                // candidate model via swift-embeddings' Bert path and confirm a
+                // finite, normalizable vector + its dimension, BEFORE building a
+                // full backend. Default repo = mxbai. Usage:
+                //   EMBEDDER_LOADTEST                → mixedbread-ai/mxbai-embed-large-v1
+                //   EMBEDDER_LOADTEST:<hf-repo-id>   → any BERT-family repo
+                // Returns immediately; poll EMBEDDER_LOADTEST_STATUS.
+                let repo = (arg?.isEmpty == false ? arg! : "mixedbread-ai/mxbai-embed-large-v1")
+                if await MainActor.run(body: { EmbedderLoadTest.isRunning }) {
+                    return json(["error": "a load test is already running — poll EMBEDDER_LOADTEST_STATUS."])
+                }
+                EmbedderLoadTest.run(repo: repo)
+                return json(["started": true, "repo": repo,
+                             "note": "Loading off-main (downloads ~670MB first time). Poll EMBEDDER_LOADTEST_STATUS."])
+
+            case "EMBEDDER_LOADTEST_STATUS":
+                let r = await MainActor.run { EmbedderLoadTest.report }
+                var payload: [String: Any] = ["state": r.state, "repo": r.repo]
+                if let v = r.dim { payload["dim"] = v }
+                if let v = r.allFinite { payload["allFinite"] = v }
+                if let v = r.l2Norm { payload["l2Norm"] = v }
+                if let v = r.sample { payload["sample"] = v }
+                if let v = r.loadMs { payload["loadMs"] = v }
+                if let v = r.encodeMs { payload["encodeMs"] = v }
+                if let v = r.error { payload["error"] = v }
+                return json(payload)
+
             case "CANCEL_EMBEDDING_MIGRATION":
                 // 2026-05-28 — cancellation surface for mid-flight Nomic
                 // re-embed. Without this, a user who switches embedder

@@ -65,6 +65,8 @@ nonisolated enum AntennaCommandCatalog {
         .init("BACKFILL_EMBEDDINGS", .retrieval, "BACKFILL_EMBEDDINGS:<nl|nomic|all>", "Fill an INACTIVE backend's column for the whole corpus, non-locking + paced (Ask Posey stays up on the active backend). Prereq for embedder A/B/C. Poll BACKFILL_STATUS."),
         .init("BACKFILL_STATUS", .retrieval, "BACKFILL_STATUS", "Current backfill phase (running/done/error/idle) + processed/total."),
         .init("CANCEL_BACKFILL", .retrieval, "CANCEL_BACKFILL", "Cancel an in-flight embedding backfill; still-NULL rows stay NULL and resume on a later BACKFILL_EMBEDDINGS."),
+        .init("EMBEDDER_LOADTEST", .retrieval, "EMBEDDER_LOADTEST[:<hf-repo-id>]", "GATE: headlessly load a candidate embedder via swift-embeddings' Bert path (default mxbai) and verify a finite normalizable vector + dim, before building a backend. Poll EMBEDDER_LOADTEST_STATUS."),
+        .init("EMBEDDER_LOADTEST_STATUS", .retrieval, "EMBEDDER_LOADTEST_STATUS", "Result of the last EMBEDDER_LOADTEST (state/dim/allFinite/l2Norm/sample/loadMs/encodeMs/error)."),
         .init("DOWNLOAD_MODEL", .models, "DOWNLOAD_MODEL:<modelID> (full repo path).", ""),
         .init("DELETE_MODEL", .models, "DELETE_MODEL:<known-model-id>", ""),
         .init("MODEL_DOWNLOAD_STATE", .models, "MODEL_DOWNLOAD_STATE:<model-id>", "Download/availability state for an MLX model id."),

@@ -1397,6 +1397,35 @@ extension LibraryViewModel {
                     return json(["error": "ASK_POSEY_TURN_STATS failed: \(error.localizedDescription)"])
                 }
 
+            case "RECALL_TURNS":
+                // 2026-06-20 — verify Part B (hybrid conversation-turn recall)
+                // standalone, before it's wired into the prompt (Part C). Embeds
+                // the query (.query) + runs the recall pass with NO STM exclusion
+                // (raw retrieval probe).   RECALL_TURNS:<documentID>|<query>
+                let rparts = (arg ?? "").split(separator: "|", maxSplits: 1).map(String.init)
+                guard rparts.count == 2, let rDocID = UUID(uuidString: rparts[0].trimmingCharacters(in: .whitespaces)) else {
+                    return json(["error": "usage: RECALL_TURNS:<documentID>|<query>"])
+                }
+                let rQuery = rparts[1].trimmingCharacters(in: .whitespaces)
+                let rBackend = EmbeddingBackend.current()
+                let rVec = await Task.detached(priority: .userInitiated) {
+                    EmbeddingProvider.shared.embed(rQuery, as: .query, in: rBackend) ?? []
+                }.value
+                do {
+                    let turns = try databaseManager.retrieveConversationTurns(
+                        documentID: rDocID, queryVector: rVec, queryText: rQuery,
+                        excludeTurnIDs: [], backend: rBackend, limit: 6)
+                    return json([
+                        "documentID": rDocID.uuidString,
+                        "query": rQuery,
+                        "queryEmbedded": !rVec.isEmpty,
+                        "recalledCount": turns.count,
+                        "turns": turns.map { ["role": $0.role, "rrf": $0.rrfScore, "content": String($0.content.prefix(160))] }
+                    ])
+                } catch {
+                    return json(["error": "RECALL_TURNS failed: \(error.localizedDescription)"])
+                }
+
             case "SEARCH_CHUNKS":
                 // 2026-06-20 (CC) — read-only BM25 search over ONE document's
                 // stored chunk text, returning the actual indexed text. Lets the

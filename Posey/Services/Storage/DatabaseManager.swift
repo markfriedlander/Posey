@@ -1001,6 +1001,120 @@ extension DatabaseManager {
         return (total, embedded)
     }
 
+    /// One semantically/lexically recalled past turn (conversation-memory
+    /// fix, Part B). Carries enough to render + attribute it in the prompt.
+    struct RecalledTurn: Sendable, Equatable {
+        let id: String
+        let role: String          // "user" | "assistant"
+        let content: String
+        let timestamp: Date
+        let rrfScore: Double
+    }
+
+    /// Hybrid conversation-turn recall for `documentID`: cosine over stored
+    /// turn embeddings + BM25 over `ask_posey_conversations_fts`, fused by RRF
+    /// (k=60, same as Hal). Returns the top `limit` OLDER turns relevant to the
+    /// query, EXCLUDING the verbatim-STM turns in `excludeTurnIDs` (Hal's real
+    /// dedup is turn-ID exclusion, not the dead cosine constant — HISTORY
+    /// 2026-06-20). Separate from doc-RAG by design (Posey is document-primary).
+    ///
+    /// `queryVector` empty (model not loaded) → semantic skipped, BM25 carries
+    /// (Hal's graceful degradation). Only turns embedded under `backend` are
+    /// semantic-eligible (same-space comparison); all turns are BM25-eligible.
+    /// Returned newest-last (chronological) so the prompt reads in order.
+    func retrieveConversationTurns(
+        documentID: UUID,
+        queryVector: [Double],
+        queryText: String,
+        excludeTurnIDs: Set<String>,
+        backend: EmbeddingBackend,
+        limit: Int = 4
+    ) throws -> [RecalledTurn] {
+        dbLock.lock(); defer { dbLock.unlock() }
+
+        struct Cand { let id: String; let role: String; let content: String; let ts: Date }
+        var cands: [String: Cand] = [:]
+        var semanticRank: [String: Int] = [:]
+        var bm25Rank: [String: Int] = [:]
+
+        // --- Semantic pass: cosine over eligible turn embeddings ---
+        if !queryVector.isEmpty {
+            let sql = """
+                SELECT id, role, content, timestamp, embedding FROM ask_posey_conversations
+                WHERE document_id = ? AND is_summary = 0 AND role IN ('user','assistant')
+                  AND embedding IS NOT NULL AND embedding_kind = ?;
+                """
+            let stmt = try prepareStatement(sql: sql)
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, backend.rawValue, -1, SQLITE_TRANSIENT)
+            var scored: [(String, Double)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let idC = sqlite3_column_text(stmt, 0) else { continue }
+                let id = String(cString: idC)
+                if excludeTurnIDs.contains(id) { continue }   // dedup vs verbatim STM
+                let role = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
+                let content = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
+                let ts = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3))
+                guard sqlite3_column_type(stmt, 4) != SQLITE_NULL,
+                      let blob = sqlite3_column_blob(stmt, 4) else { continue }
+                let n = Int(sqlite3_column_bytes(stmt, 4)) / MemoryLayout<Double>.size
+                let vec = Array(UnsafeBufferPointer(start: blob.assumingMemoryBound(to: Double.self), count: n))
+                cands[id] = Cand(id: id, role: role, content: content, ts: ts)
+                scored.append((id, EmbeddingProvider.cosine(queryVector, vec)))
+            }
+            for (i, pair) in scored.sorted(by: { $0.1 > $1.1 }).enumerated() {
+                semanticRank[pair.0] = i + 1
+            }
+        }
+
+        // --- BM25 pass: FTS5 over the turns mirror ---
+        let terms = queryText
+            .split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" })
+            .map { "\"" + $0.replacingOccurrences(of: "\"", with: "") + "\"" }
+        if !terms.isEmpty {
+            let match = terms.joined(separator: " ")
+            let sql = """
+                SELECT c.id, c.role, c.content, c.timestamp, bm25(ask_posey_conversations_fts) AS score
+                FROM ask_posey_conversations_fts
+                JOIN ask_posey_conversations c ON c.rowid = ask_posey_conversations_fts.rowid
+                WHERE ask_posey_conversations_fts MATCH ?
+                  AND c.document_id = ? AND c.is_summary = 0 AND c.role IN ('user','assistant')
+                ORDER BY score LIMIT 25;
+                """
+            if let stmt = try? prepareStatement(sql: sql) {
+                defer { sqlite3_finalize(stmt) }
+                sqlite3_bind_text(stmt, 1, match, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, documentID.uuidString, -1, SQLITE_TRANSIENT)
+                var rank = 0
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    guard let idC = sqlite3_column_text(stmt, 0) else { continue }
+                    let id = String(cString: idC)
+                    if excludeTurnIDs.contains(id) { continue }
+                    if cands[id] == nil {
+                        let role = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
+                        let content = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
+                        let ts = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3))
+                        cands[id] = Cand(id: id, role: role, content: content, ts: ts)
+                    }
+                    rank += 1
+                    bm25Rank[id] = rank
+                }
+            }
+        }
+
+        // --- RRF fusion (k=60), then top-N, then chronological order ---
+        let k = 60.0
+        let fused: [RecalledTurn] = cands.values.map { c in
+            var rrf = 0.0
+            if let r = semanticRank[c.id] { rrf += 1.0 / (k + Double(r)) }
+            if let r = bm25Rank[c.id]    { rrf += 1.0 / (k + Double(r)) }
+            return RecalledTurn(id: c.id, role: c.role, content: c.content, timestamp: c.ts, rrfScore: rrf)
+        }
+        let top = fused.sorted { $0.rrfScore > $1.rrfScore }.prefix(limit)
+        return top.sorted { $0.timestamp < $1.timestamp }   // chronological for the prompt
+    }
+
     /// Return non-summary conversation turns for a document, oldest-first.
     /// `limit == nil` returns every turn; positive `limit` caps to the
     /// most recent N rows (still returned oldest-first so the prompt
@@ -1452,6 +1566,53 @@ extension DatabaseManager {
         try addColumnIfNeeded(table: "ask_posey_conversations", column: "embedding", definition: "BLOB")
         try addColumnIfNeeded(table: "ask_posey_conversations", column: "embedding_kind", definition: "TEXT NOT NULL DEFAULT 'unknown'")
         // ========== End Ask Posey Milestone 5 column additions ==========
+
+        // 2026-06-20 — CONVERSATION-MEMORY FIX, Part B. FTS5 mirror over
+        // ask_posey_conversations.content so the conversation-recall pass can
+        // run BM25 alongside the semantic (embedding) pass and RRF-fuse them —
+        // Hal's own measure was dense ~78% vs hybrid ~91% recall@10, and Posey
+        // already owns this external-content pattern (see unit_embedding_chunks_fts).
+        // Same contentless external-content shape + the standard three sync
+        // triggers from the SQLite docs. The search joins back to the base table
+        // to filter is_summary=0 AND role IN ('user','assistant').
+        try execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS ask_posey_conversations_fts USING fts5(
+                content,
+                document_id UNINDEXED,
+                content='ask_posey_conversations',
+                content_rowid='rowid'
+            );
+            """)
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS ask_posey_conversations_ai
+            AFTER INSERT ON ask_posey_conversations BEGIN
+                INSERT INTO ask_posey_conversations_fts(rowid, content, document_id)
+                VALUES (new.rowid, new.content, new.document_id);
+            END;
+            """)
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS ask_posey_conversations_ad
+            AFTER DELETE ON ask_posey_conversations BEGIN
+                INSERT INTO ask_posey_conversations_fts(ask_posey_conversations_fts, rowid, content, document_id)
+                VALUES ('delete', old.rowid, old.content, old.document_id);
+            END;
+            """)
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS ask_posey_conversations_au
+            AFTER UPDATE ON ask_posey_conversations BEGIN
+                INSERT INTO ask_posey_conversations_fts(ask_posey_conversations_fts, rowid, content, document_id)
+                VALUES ('delete', old.rowid, old.content, old.document_id);
+                INSERT INTO ask_posey_conversations_fts(rowid, content, document_id)
+                VALUES (new.rowid, new.content, new.document_id);
+            END;
+            """)
+        // NOTE: no one-time 'rebuild' to backfill pre-existing turns. The
+        // triggers index every turn inserted from now on, and any conversation
+        // that predates this table is disposable test data — we clear
+        // conversations before each chat test and each A/B arm anyway, and there
+        // is no production user history to preserve (single-dev app). If a real
+        // pre-update history ever needed recall, a one-time rebuild + embed
+        // backfill would do it — not needed now (Mark, 2026-06-20).
 
         // Embedding index for Ask Posey RAG retrieval. One row per ~500-char
         // chunk with 50-char overlap, built at import time for every

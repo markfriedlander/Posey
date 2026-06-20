@@ -23,6 +23,9 @@ struct LibraryView: View {
     @ObservedObject private var escape = IndexingEscapeController.shared
     @State private var showHaltConfirm = false
     @State private var isImporting = false
+    #if DEBUG
+    @State private var showEmbeddingBoard = false
+    #endif
     @State private var path: [Document] = []
     @State private var documentPendingDeletion: Document? = nil
     /// Guards `maybeRestoreLastOpenedDocument` so it runs exactly once per
@@ -83,18 +86,32 @@ struct LibraryView: View {
         // builds compile it out entirely so a user picking up Posey from the App
         // Store has no idea the developer-API surface exists.
         ToolbarItem(placement: .topBarLeading) {
-            Button {
-                viewModel.toggleLocalAPI()
-            } label: {
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                    .foregroundStyle(viewModel.localAPIEnabled
-                                     ? Color.primary
-                                     : Color.primary.opacity(0.25))
+            HStack(spacing: 16) {
+                Button {
+                    viewModel.toggleLocalAPI()
+                } label: {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .foregroundStyle(viewModel.localAPIEnabled
+                                         ? Color.primary
+                                         : Color.primary.opacity(0.25))
+                }
+                .remoteRegister("library.apiToggle") {
+                    viewModel.toggleLocalAPI()
+                }
+                .accessibilityLabel(viewModel.localAPIEnabled ? "API On" : "API Off")
+
+                // 2026-06-19 (Mark) — embedding status board, next to the antenna.
+                // On-phone transparency into the embedding backfill / indexing.
+                Button {
+                    showEmbeddingBoard = true
+                } label: {
+                    Image(systemName: "chart.bar.xaxis")
+                }
+                .accessibilityLabel("Embedding status")
+                .remoteRegister("library.embeddingBoard") {
+                    showEmbeddingBoard = true
+                }
             }
-            .remoteRegister("library.apiToggle") {
-                viewModel.toggleLocalAPI()
-            }
-            .accessibilityLabel(viewModel.localAPIEnabled ? "API On" : "API Off")
         }
         #endif
         ToolbarItem(placement: .topBarTrailing) {
@@ -220,6 +237,19 @@ struct LibraryView: View {
         }
         .navigationTitle("Posey")
         .toolbar { libraryToolbar }
+        .modifier(EmbeddingBoardSheet(isPresented: embeddingBoardBinding,
+                                      databaseManager: viewModel.databaseManager))
+    }
+
+    /// Binding that's a no-op in RELEASE (the board is DEBUG-only, next to the
+    /// DEBUG antenna). Keeps the body modifier chain unconditional so the
+    /// type-checker stays happy.
+    private var embeddingBoardBinding: Binding<Bool> {
+        #if DEBUG
+        return $showEmbeddingBoard
+        #else
+        return .constant(false)
+        #endif
     }
 
     var body: some View {

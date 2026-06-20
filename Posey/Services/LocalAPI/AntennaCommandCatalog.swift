@@ -64,6 +64,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("GET_EMBEDDING_PROVIDER", .retrieval, "GET_EMBEDDING_PROVIDER", "Active embedding backend (Nomic / fallback)."),
         .init("CANCEL_EMBEDDING_MIGRATION", .retrieval, "CANCEL_EMBEDDING_MIGRATION", ""),
         .init("EMBEDDING_COVERAGE", .retrieval, "EMBEDDING_COVERAGE[:docs]", "Per-backend column coverage (filled/missing/total) across the corpus; :docs adds per-document gaps. Read-only."),
+        .init("VALIDATE_EMBEDDINGS", .retrieval, "VALIDATE_EMBEDDINGS[:<nl|nomic|mxbai|all>]", "Read-only health spot-check on STORED vectors: samples up to 200 random rows per backend and reports dim/all-finite/zero-norm/min-max-norm + healthy flag. Proves the backfill wrote real embeddings, not garbage."),
         .init("BACKFILL_EMBEDDINGS", .retrieval, "BACKFILL_EMBEDDINGS:<nl|nomic|mxbai|all>", "Fill an INACTIVE backend's column for the whole corpus, non-locking + paced (Ask Posey stays up on the active backend). Prereq for embedder A/B/C. Poll BACKFILL_STATUS."),
         .init("BACKFILL_STATUS", .retrieval, "BACKFILL_STATUS", "Current backfill phase (running/done/error/idle) + processed/total."),
         .init("CANCEL_BACKFILL", .retrieval, "CANCEL_BACKFILL", "Cancel an in-flight embedding backfill; still-NULL rows stay NULL and resume on a later BACKFILL_EMBEDDINGS."),

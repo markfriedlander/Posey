@@ -3216,6 +3216,72 @@ extension DatabaseManager {
         return Int(sqlite3_column_int(stmt, 0))
     }
 
+    /// Health report for a backend's STORED vectors — read-only spot-check
+    /// that the bytes on disk are real embeddings (right dimension, all-finite,
+    /// non-degenerate norm), not just "non-NULL." Used to prove the backfill
+    /// wrote good vectors, not garbage (Mark, 2026-06-20: "make sure we're not
+    /// wasting time"). Reusable as a pre-flight before the A/B/C — a backend
+    /// with dim-mismatches or NaN rows can't be fairly compared.
+    struct EmbeddingValidationReport: Sendable, Equatable {
+        let backend: String
+        let expectedDim: Int
+        let sampled: Int        // rows actually inspected (capped at sampleLimit)
+        let dimMismatch: Int    // rows whose decoded length != expectedDim
+        let nonFinite: Int      // rows containing any NaN/Inf
+        let zeroNorm: Int       // rows whose L2 norm ~ 0 (degenerate/all-zero)
+        let minNorm: Double
+        let maxNorm: Double
+        var healthy: Bool { sampled > 0 && dimMismatch == 0 && nonFinite == 0 && zeroNorm == 0 }
+    }
+
+    /// Sample up to `sampleLimit` non-NULL vectors from `backend`'s column and
+    /// report their health. `ORDER BY RANDOM()` spreads the sample across the
+    /// corpus (not just the first N rows) — a few hundred is cheap even on a
+    /// 20k-row table. Column name is from the fixed `EmbeddingBackend` enum.
+    func validateStoredEmbeddings(
+        backend: EmbeddingBackend,
+        sampleLimit: Int = 200
+    ) throws -> EmbeddingValidationReport {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let col = backend.vectorColumn
+        let stmt = try prepareStatement(
+            sql: "SELECT \(col) FROM unit_embedding_chunks WHERE \(col) IS NOT NULL ORDER BY RANDOM() LIMIT ?;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(sampleLimit))
+        let expected = backend.dimension
+        var sampled = 0, dimMismatch = 0, nonFinite = 0, zeroNorm = 0
+        var minNorm = Double.greatestFiniteMagnitude, maxNorm = 0.0
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard sqlite3_column_type(stmt, 0) != SQLITE_NULL,
+                  let blob = sqlite3_column_blob(stmt, 0) else { continue }
+            let byteCount = Int(sqlite3_column_bytes(stmt, 0))
+            let n = byteCount / MemoryLayout<Double>.size
+            let vec = UnsafeBufferPointer(start: blob.assumingMemoryBound(to: Double.self), count: n)
+            sampled += 1
+            if n != expected { dimMismatch += 1 }
+            var sumsq = 0.0
+            var bad = false
+            for x in vec where !x.isFinite { bad = true; break }
+            if bad { nonFinite += 1; continue }
+            for x in vec { sumsq += x * x }
+            let norm = sumsq.squareRoot()
+            if norm < 1e-6 { zeroNorm += 1 }
+            minNorm = Swift.min(minNorm, norm)
+            maxNorm = Swift.max(maxNorm, norm)
+        }
+        return EmbeddingValidationReport(
+            backend: backend.rawValue,
+            expectedDim: expected,
+            sampled: sampled,
+            dimMismatch: dimMismatch,
+            nonFinite: nonFinite,
+            zeroNorm: zeroNorm,
+            minNorm: sampled == 0 ? 0 : (minNorm == .greatestFiniteMagnitude ? 0 : minNorm),
+            maxNorm: maxNorm
+        )
+    }
+
     /// Count of EMBEDDED leaf chunks for `documentID` — the rows the
     /// RAPTOR builder clusters over. Leaves are `chunk_index <
     /// raptorSummaryIndexBase`; an embedded leaf has a non-NULL vector.

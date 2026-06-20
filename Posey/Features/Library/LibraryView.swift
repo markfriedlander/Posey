@@ -1306,6 +1306,48 @@ extension LibraryViewModel {
                     return json(["error": "EMBEDDING_COVERAGE failed: \(error.localizedDescription)"])
                 }
 
+            case "VALIDATE_EMBEDDINGS":
+                // 2026-06-20 (Mark) — read-only health spot-check on STORED
+                // vectors: prove the backfill wrote real embeddings (right dim,
+                // all-finite, non-zero norm), not just non-NULL bytes. Samples
+                // up to 200 random rows per backend.
+                //   VALIDATE_EMBEDDINGS            → all three backends
+                //   VALIDATE_EMBEDDINGS:mxbai      → one backend
+                let which: [EmbeddingBackend]
+                if let a = arg?.lowercased(), a != "all",
+                   let b = EmbeddingBackend(rawValue: a) {
+                    which = [b]
+                } else {
+                    which = EmbeddingBackend.allCases
+                }
+                do {
+                    var reports: [[String: Any]] = []
+                    var allHealthy = true
+                    for b in which {
+                        let r = try databaseManager.validateStoredEmbeddings(backend: b)
+                        if r.sampled > 0 && !r.healthy { allHealthy = false }
+                        reports.append([
+                            "backend": r.backend,
+                            "active": b == EmbeddingBackend.current(),
+                            "expectedDim": r.expectedDim,
+                            "sampled": r.sampled,
+                            "dimMismatch": r.dimMismatch,
+                            "nonFinite": r.nonFinite,
+                            "zeroNorm": r.zeroNorm,
+                            "minNorm": r.minNorm,
+                            "maxNorm": r.maxNorm,
+                            "healthy": r.healthy
+                        ])
+                    }
+                    return json([
+                        "allHealthy": allHealthy,
+                        "note": "sampled up to 200 random stored vectors per backend; healthy = right dim, all-finite, non-zero norm",
+                        "reports": reports
+                    ])
+                } catch {
+                    return json(["error": "VALIDATE_EMBEDDINGS failed: \(error.localizedDescription)"])
+                }
+
             case "BACKFILL_EMBEDDINGS":
                 // 2026-06-19 (Mark) — fill an INACTIVE backend's column for the
                 // whole corpus, non-locking (Ask Posey stays up on the active

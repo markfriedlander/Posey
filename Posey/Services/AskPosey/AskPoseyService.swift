@@ -1039,19 +1039,23 @@ final class AskPoseyService: AskPoseyStreaming, AskPoseySummarizing {
         guard !turns.isEmpty else { return "" }
 
         let summaryInstructions = """
-        You are summarizing an earlier portion of a reading-companion \
-        conversation between a user and an AI named Posey. Your job is \
-        to compress the exchange into a brief, faithful summary so the \
-        rest of the conversation can continue with shared context. \
-        Keep it short (3–6 sentences). Capture: the topics discussed, \
-        any specific passages or document sections referenced, and any \
-        commitments Posey made about what it found. Skip greetings and \
-        meta-talk. Never invent — only summarize what actually happened.
+        You are Posey, a reading companion. Summarize an earlier portion of \
+        YOUR OWN conversation with the reader into a brief, faithful \
+        FIRST-PERSON note — your recollection — so the rest of the conversation \
+        can continue with shared context. Keep it short (3–6 sentences). Write \
+        as "I" (you, Posey) and "you" (the reader): e.g. "You asked about X; I \
+        pointed you to Y." Capture the topics discussed, any specific passages \
+        or document sections referenced, and any commitments I made about what \
+        I found. Never the third person; never call yourself "Posey" or the \
+        reader "the user". Skip greetings and meta-talk. Never invent — only \
+        summarize what actually happened.
         """
 
         var transcriptLines: [String] = []
         for turn in turns {
-            let speaker = turn.role == .user ? "User" : "Posey"
+            // First-person framing in the transcript too ("You:" reader, "Me:"
+            // Posey) so the model summarizes in the same voice it reads.
+            let speaker = turn.role == .user ? "You" : "Me"
             transcriptLines.append("\(speaker): \(turn.content)")
         }
         let body = """
@@ -1157,19 +1161,21 @@ final class AskPoseyService: AskPoseyStreaming, AskPoseySummarizing {
         }()
 
         var instructions = """
-        You compress one user/Posey exchange from a reading-companion \
-        conversation into a brief, faithful third-person summary so a \
-        future turn has shared context without re-reading the verbatim \
-        exchange.
+        You are Posey. Compress one exchange between you and the reader from a \
+        reading-companion conversation into a brief, faithful FIRST-PERSON note \
+        — your own memory of it — so a future turn has shared context without \
+        re-reading the verbatim exchange.
 
         HARD RULES:
         1. Length: \(lengthGuidance) Do not exceed this.
-        2. Third person ("the user asked …", "Posey explained …"). \
-        Never use first or second person.
+        2. First person: you are "I" (Posey), the reader is "you". Write it as \
+        your own recollection ("You asked about X; I explained Y."). Never the \
+        third person, and never refer to yourself as "Posey" or the reader as \
+        "the user".
         3. Faithful only — never invent specifics not in the exchange. \
         Better to drop a detail than to hallucinate one.
         4. No greetings, meta-talk, or quoting. Plain prose.
-        5. Capture WHAT was asked and WHAT Posey said in response. \
+        5. Capture WHAT you were asked and WHAT you said in response. \
         Skip filler.
         """
         if let failingSentence, !failingSentence.isEmpty {

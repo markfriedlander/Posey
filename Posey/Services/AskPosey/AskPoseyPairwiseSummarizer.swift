@@ -236,7 +236,7 @@ final class AskPoseyPairwiseSummarizer {
     static func fallbackSummary(question: String, answer: String) -> String {
         let q = compactClip(question, maxChars: 120)
         let a = compactClip(answer, maxChars: 200)
-        return "The user asked: \"\(q)\". Posey responded: \"\(a)\"."
+        return "You asked: \"\(q)\". I answered: \"\(a)\"."
     }
 
     private static func compactClip(_ text: String, maxChars: Int) -> String {

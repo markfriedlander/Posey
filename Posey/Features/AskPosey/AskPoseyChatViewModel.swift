@@ -1776,11 +1776,20 @@ extension AskPoseyChatViewModel {
                     promptVariant: AskPoseyPromptVariant.active,
                     anchor: self.anchor,
                     surroundingContext: self.surroundingContext(for: intent),
-                    conversationHistory: self.historyForPromptBuilder,
+                    // 2026-06-20 — cap the verbatim window at keepVerbatimRecent
+                    // messages so the THREE memory tiers are DISJOINT: STM = the
+                    // most recent N, summary = older folded turns, recall =
+                    // relevant older turns. Previously STM token-bounded the FULL
+                    // history (~12 msgs) while keepVerbatimRecent (the depth knob)
+                    // only drove summary-fold + recall-exclusion — so the same
+                    // exchange could appear in STM + summary + recall at once
+                    // (found by the dup infra test). Now "depth N" means exactly N
+                    // exchanges verbatim, and recall's excludeMostRecent matches.
+                    conversationHistory: Array(self.historyForPromptBuilder.suffix(self.keepVerbatimRecent)),
                     conversationSummary: self.cachedConversationSummary,
-                    // 2026-06-20 — hybrid conversation-recall pass: older turns
-                    // relevant to THIS question, deduped against the verbatim STM
-                    // window. Empty for short conversations.
+                    // hybrid conversation-recall pass: older turns relevant to THIS
+                    // question, deduped against the verbatim STM window (the same
+                    // keepVerbatimRecent count). Empty for short conversations.
                     recalledTurns: await self.retrieveRecalledTurns(for: trimmedInput),
                     documentChunks: chunks,
                     currentQuestion: trimmedInput,

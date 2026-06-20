@@ -115,6 +115,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("RAG_TRACE", .retrieval, "RAG_TRACE", "Full retrieval trace for a query (BM25+semantic RRF fusion, scores)."),
         .init("RAG_FIND", .retrieval, "RAG_FIND", ""),
         .init("RAG_DEBUG", .retrieval, "RAG_DEBUG", "Retrieved chunks for a query against a doc."),
+        .init("RAG_EVAL", .retrieval, "RAG_EVAL:<doc-id>:<query>", "Embedder A/B/C Phase-1 (model-free): runs the EXACT chat retrieval path (active embedder + SET_NEIGHBOR_EXPANSION radius + model-aware budget + 0.40 floor) and returns the FULL stitched context the model would read, for answer-key substring hit-testing. No LLM, no heat, no AFM cooldown."),
         .init("RAG_DEBUG_EXPANDED", .retrieval, "RAG_DEBUG_EXPANDED", ""),
         .init("GET_ASK_POSEY_HISTORY", .ask_posey, "GET_ASK_POSEY_HISTORY:<doc-id>[:<limit>]", "The persisted Ask Posey conversation turns for a doc."),
         .init("DB_STATS", .system, "DB_STATS", "Database row counts across tables."),

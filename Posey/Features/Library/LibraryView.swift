@@ -2435,6 +2435,76 @@ extension LibraryViewModel {
                    let s = String(data: data, encoding: .utf8) { return s }
                 return #"{"error":"RAG_DEBUG_EXPANDED serialization failed"}"#
 
+            case "RAG_EVAL":
+                // RAG_EVAL:<doc-id>:<query>
+                //
+                // 2026-06-20 — embedder/retrieval A/B/C Phase-1 instrument
+                // (model-free). Unlike RAG_DEBUG (160-char previews, no
+                // neighbor expansion), this runs the EXACT chat retrieval
+                // path — `AskPoseyChatViewModel.retrieveRAGChunks` — so it
+                // reflects the active embedder (SET_EMBEDDING_PROVIDER), the
+                // small-to-big neighbor radius (SET_NEIGHBOR_EXPANSION), the
+                // model-aware RAG token budget, and the 0.40 relevance floor,
+                // then returns the FULL stitched context the model would read.
+                // The harness substring-tests the answer-key defining passage
+                // against `stitched` to score retrieval hit-rate WITHOUT
+                // invoking the LLM (no heat, no AFM cooldown). Faithful reuse
+                // of the VM, not a divergent reimplementation (Rule 9).
+                // Read-only: retrieval persists no turns.
+                guard let parts = arg?.split(separator: ":", maxSplits: 1).map(String.init),
+                      parts.count == 2,
+                      let docID = UUID(uuidString: parts[0].trimmingCharacters(in: .whitespaces)) else {
+                    return #"{"error":"RAG_EVAL requires <doc-id>:<query>"}"#
+                }
+                let query = parts[1]
+                let evalDocs = (try? databaseManager.documents()) ?? []
+                guard let evalDoc = evalDocs.first(where: { $0.id == docID }) else {
+                    return #"{"error":"RAG_EVAL: document not found"}"#
+                }
+                let evalVM = AskPoseyChatViewModel(
+                    documentID: docID,
+                    documentPlainText: evalDoc.plainText,
+                    documentTitle: evalDoc.title,
+                    anchor: nil,
+                    invocationReadingOffset: nil,
+                    initialScrollAnchorStorageID: nil,
+                    streamer: nil,
+                    summarizer: nil,
+                    databaseManager: databaseManager,
+                    useSummarizedSTM: false)
+                await evalVM.awaitHistoryLoaded()
+                let evalChunks = await evalVM.retrieveRAGChunksForEval(for: query)
+                let stitched = evalChunks.map { $0.text }.joined(separator: "\n\n")
+                var evalRows: [[String: Any]] = []
+                for (i, c) in evalChunks.enumerated() {
+                    var row: [String: Any] = [
+                        "rank": i + 1,
+                        "relevance": (c.relevance * 100000).rounded() / 100000,
+                        "startOffset": c.startOffset,
+                        "length": c.text.count
+                    ]
+                    if let sem = c.semanticScore {
+                        row["semanticScore"] = (sem * 1000).rounded() / 1000
+                    } else {
+                        row["semanticScore"] = NSNull()
+                    }
+                    evalRows.append(row)
+                }
+                let evalPayload: [String: Any] = [
+                    "documentID": docID.uuidString,
+                    "query": query,
+                    "backend": EmbeddingBackend.current().rawValue,
+                    "radius": NeighborExpansion.radius,
+                    "topRelevance": (evalVM.lastRetrievalTopRelevance * 100000).rounded() / 100000,
+                    "chunkCount": evalChunks.count,
+                    "stitchedLength": stitched.count,
+                    "stitched": stitched,
+                    "chunks": evalRows
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: evalPayload),
+                   let s = String(data: data, encoding: .utf8) { return s }
+                return #"{"error":"RAG_EVAL serialization failed"}"#
+
             case "GET_ASK_POSEY_HISTORY":
                 // 2026-05-05 — RAG diagnostic helper. Args:
                 //   <doc-id>[:<limit>]

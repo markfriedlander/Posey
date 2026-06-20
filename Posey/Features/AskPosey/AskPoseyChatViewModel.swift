@@ -971,6 +971,18 @@ private extension AskPoseyChatViewModel {
 }
 // ========== BLOCK 02B: RAG RETRIEVAL (M6) - END ==========
 
+// 2026-06-20 — internal entry point for the headless RAG_EVAL harness verb
+// (embedder/retrieval A/B/C Phase-1). `retrieveRAGChunks` lives in a
+// `private extension`, so the LibraryView command handler can't reach it;
+// this thin internal wrapper exposes the SAME path (active embedder → hybrid
+// retrieve → query-expansion → 0.40 floor → small-to-big neighbor expansion)
+// so the verb measures REAL retrieval, not a reimplementation (Rule 9).
+extension AskPoseyChatViewModel {
+    func retrieveRAGChunksForEval(for question: String) async -> [RetrievedChunk] {
+        await retrieveRAGChunks(for: question)
+    }
+}
+
 
 // ========== BLOCK 02C: AUTO-SUMMARIZATION (M6 hard blocker) - START ==========
 private extension AskPoseyChatViewModel {

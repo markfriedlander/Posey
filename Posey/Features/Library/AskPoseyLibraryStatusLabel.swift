@@ -46,37 +46,47 @@ struct AskPoseyLibraryStatusLabel: View {
     /// The status TEXT for the current phase. Dot color is computed separately
     /// from `isAnswerable` (see `body`) — text and color are intentionally
     /// decoupled.
-    private func resolveText() -> String {
+    /// 2026-06-19 — text now routes through `PoseyVoice` (curated, in-character,
+    /// stable-per-doc) instead of fixed strings. The %/#k are hard-kept by
+    /// `PoseyVoice` (appended verbatim). Two accuracy changes Mark caught:
+    /// (1) the ENHANCEMENT/OCR phase is now surfaced ("first read") instead of
+    /// being lumped into the old catch-all "Preparing…"; (2) "Catching my
+    /// breath…" fires ONLY on a true `.critical` pause — a `.serious` stretch is
+    /// still embedding (just slower), so it shows progress, not a stall.
+    private func resolveStage() -> PoseyVoice.Stage {
         if !AskPoseyAvailability.isSetUp {
-            return "Ask Posey not yet available"
+            return .notAvailable
         }
-        // Cooling-down outranks "Reading ahead": when the device is hot the
-        // in-flight doc's indexing is deliberately paced, so say so rather than
-        // letting a frozen percentage read as broken.
-        if tracker.isCoolingDown(documentID) {
-            return "Cooling down"
+        // True pause (critical) outranks everything — she's genuinely stopped.
+        if tracker.isCriticallyPaused(documentID) {
+            return .catchingBreath
+        }
+        // PDF enhancement / OCR — her first read-through. The longest, formerly
+        // invisible phase; surfacing it is the fix for "looks stuck".
+        if tracker.isEnhancing(documentID) {
+            return .firstRead
         }
         if tracker.isIndexing(documentID) {
             let pct = Int(((tracker.unifiedProgress(for: documentID) ?? 0) * 100).rounded())
-            return "Reading ahead — \(pct)%"
+            return .readingAhead(pct)
         }
-        // Waiting in the embed lane behind another document — show its place in
-        // line so a slow-to-start card reads as queued, not stuck.
         if let position = tracker.queuePosition(documentID) {
-            return "Queued #\(position)"
+            return .queued(position)
         }
         if tracker.isReReading(documentID) {
-            // Per-step % so "Studying up" reads as progress, not an indefinite
-            // spinner (Mark, 2026-06-18) — mirrors "Reading ahead — N%".
             if let frac = tracker.reReadingFraction(documentID) {
-                return "Studying up — \(Int((frac * 100).rounded()))%"
+                return .studyingUp(Int((frac * 100).rounded()))
             }
-            return "Studying up…"
+            return .studyingUp(nil)
         }
         if isAnswerable {
-            return "Ready"
+            return .ready
         }
-        return "Preparing…"
+        return .settlingIn
+    }
+
+    private func resolveText() -> String {
+        PoseyVoice.status(resolveStage(), documentID: documentID)
     }
 
     private func refreshAnswerable() {

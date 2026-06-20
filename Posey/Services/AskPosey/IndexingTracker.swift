@@ -60,6 +60,14 @@ final class IndexingTracker: ObservableObject {
     /// is slow ON PURPOSE; the label keeps that from reading as broken. (2026-06-18)
     @Published private(set) var isThermallyPaced: Bool = false
 
+    /// 2026-06-19 — TRUE pause, not just throttle. The `ThermalGovernor` only
+    /// *stops* at `.critical`; at `.serious` it keeps working, 250ms slower per
+    /// chunk. The status surface uses THIS (critical only) for "Catching my
+    /// breath…", so a `.serious` stretch reads as steady progress ("Reading
+    /// ahead — N%") instead of a stall (Mark, 2026-06-19: the old "Cooling down"
+    /// fired at `.serious` while the doc was still embedding, reading as stopped).
+    @Published private(set) var isThermallyPaused: Bool = false
+
     /// Same shape as the pre-8f struct so view code that destructures
     /// the optional doesn't break.
     struct IndexingProgress: Equatable, Sendable {
@@ -106,10 +114,13 @@ final class IndexingTracker: ObservableObject {
         // Thermal pressure → "Cooling down" on the in-flight card (Pillar 4b).
         // Read once for the initial state, then track the system notification.
         isThermallyPaced = Self.isPaced(ProcessInfo.processInfo.thermalState)
+        isThermallyPaused = (ProcessInfo.processInfo.thermalState == .critical)
         notificationCenter.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                self?.isThermallyPaced = Self.isPaced(ProcessInfo.processInfo.thermalState)
+                let state = ProcessInfo.processInfo.thermalState
+                self?.isThermallyPaced = Self.isPaced(state)
+                self?.isThermallyPaused = (state == .critical)
             }
             .store(in: &cancellables)
     }
@@ -172,6 +183,14 @@ final class IndexingTracker: ObservableObject {
     /// heat reads "Cooling down". (Pillar 4b)
     func isCoolingDown(_ documentID: UUID) -> Bool {
         return isThermallyPaced && currentIndexingDocumentID == documentID
+    }
+
+    /// 2026-06-19 — True ONLY when this in-flight document's indexing is actually
+    /// PAUSED (`.critical`), not merely throttled (`.serious`). The status surface
+    /// shows "Catching my breath…" only here; at `.serious` it shows progress,
+    /// because the doc IS still embedding.
+    func isCriticallyPaused(_ documentID: UUID) -> Bool {
+        return isThermallyPaused && currentIndexingDocumentID == documentID
     }
 
     // MARK: - Notification handlers

@@ -303,6 +303,31 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// verbatim window.
     private var keepVerbatimRecent: Int { activeMemoryDepthExchanges * 2 }
 
+    /// 2026-06-20 — THE SINGLE VERBATIM-WINDOW AUTHORITY (ports Hal's
+    /// `effectiveMemoryDepth`, whose comment says it's "the single value all STM
+    /// construction and summarization logic should use"). The most-recent
+    /// messages that ACTUALLY fit the STM token budget, capped at
+    /// `keepVerbatimRecent`. Computing ONE boundary here and keying BOTH the STM
+    /// window AND the recall-exclusion off it makes the three memory tiers
+    /// disjoint with no gap: STM token-bounding and the count no longer disagree
+    /// (the bug the dup infra test found). Hal derives this as `stmTokens / 150`;
+    /// we walk the real turns for precision. Always ≥ 1 (show at least the
+    /// latest turn). Budget-safe by construction.
+    var effectiveVerbatimMessages: Int {
+        let cap = keepVerbatimRecent
+        let budgetTokens = budget.stmBudgetTokens
+        var count = 0
+        var used = 0
+        for m in historyForPromptBuilder.reversed() {
+            if count >= cap { break }
+            let t = AskPoseyTokenEstimator.tokens(in: m.content) + 6  // ~per-turn scaffolding
+            if count > 0 && used + t > budgetTokens { break }          // keep ≥ 1
+            used += t
+            count += 1
+        }
+        return max(min(count, historyForPromptBuilder.count), historyForPromptBuilder.isEmpty ? 0 : 1)
+    }
+
     /// Auto-summarization fires once the non-summary message count
     /// exceeds the verbatim window plus this fixed margin. Margin held
     /// at +2 (the prior 6→8 relationship) so summarization only kicks
@@ -914,7 +939,9 @@ private extension AskPoseyChatViewModel {
             documentID: documentID,
             queryVector: vec,
             queryText: question,
-            excludeMostRecent: keepVerbatimRecent,
+            // Exclude exactly what STM actually shows — the SAME single boundary
+            // STM is built from, so recall and STM are disjoint with no gap.
+            excludeMostRecent: effectiveVerbatimMessages,
             backend: backend,
             limit: 4
         )) ?? []
@@ -1776,16 +1803,15 @@ extension AskPoseyChatViewModel {
                     promptVariant: AskPoseyPromptVariant.active,
                     anchor: self.anchor,
                     surroundingContext: self.surroundingContext(for: intent),
-                    // 2026-06-20 — cap the verbatim window at keepVerbatimRecent
-                    // messages so the THREE memory tiers are DISJOINT: STM = the
-                    // most recent N, summary = older folded turns, recall =
-                    // relevant older turns. Previously STM token-bounded the FULL
-                    // history (~12 msgs) while keepVerbatimRecent (the depth knob)
-                    // only drove summary-fold + recall-exclusion — so the same
-                    // exchange could appear in STM + summary + recall at once
-                    // (found by the dup infra test). Now "depth N" means exactly N
-                    // exchanges verbatim, and recall's excludeMostRecent matches.
-                    conversationHistory: Array(self.historyForPromptBuilder.suffix(self.keepVerbatimRecent)),
+                    // 2026-06-20 — the verbatim window is the SINGLE budget-fitted
+                    // boundary (`effectiveVerbatimMessages`, ports Hal's
+                    // effectiveMemoryDepth — "the single value all STM construction
+                    // and summarization logic should use"). STM shows exactly
+                    // these; recall excludes exactly these (below). Three tiers
+                    // disjoint, no gap, budget-safe — fixes the token-vs-count
+                    // desync the dup infra test found (STM token-bounded the full
+                    // history while the depth knob only drove fold + exclusion).
+                    conversationHistory: Array(self.historyForPromptBuilder.suffix(self.effectiveVerbatimMessages)),
                     conversationSummary: self.cachedConversationSummary,
                     // hybrid conversation-recall pass: older turns relevant to THIS
                     // question, deduped against the verbatim STM window (the same

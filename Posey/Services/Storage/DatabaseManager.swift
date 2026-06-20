@@ -3285,6 +3285,37 @@ extension DatabaseManager {
         return out
     }
 
+    /// 2026-06-19 — SMALL-TO-BIG retrieval. Fetch the LEAF chunks of a document
+    /// whose `chunk_index` falls in `[fromIndex, toIndex]`, ordered by index.
+    /// Used to expand a retrieved (small, precise) chunk to its neighbors so the
+    /// model sees the surrounding passage instead of a 400-char sliver — context
+    /// without sacrificing the precision small chunks give retrieval. Leaf-only
+    /// (`< raptorSummaryIndexBase`): RAPTOR summary nodes aren't contiguous prose
+    /// and must never be stitched into a neighbor window.
+    func unitEmbeddingChunkTexts(
+        documentID: UUID, fromIndex: Int, toIndex: Int
+    ) throws -> [(chunkIndex: Int, text: String)] {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let stmt = try prepareStatement(sql: """
+            SELECT chunk_index, text FROM unit_embedding_chunks
+            WHERE document_id = ? AND chunk_index >= ? AND chunk_index <= ?
+              AND chunk_index < ?
+            ORDER BY chunk_index;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(max(0, fromIndex)))
+        sqlite3_bind_int(stmt, 3, Int32(toIndex))
+        sqlite3_bind_int(stmt, 4, Int32(Self.raptorSummaryIndexBase))
+        var rows: [(chunkIndex: Int, text: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let idx = Int(sqlite3_column_int(stmt, 0))
+            guard let c = sqlite3_column_text(stmt, 1) else { continue }
+            rows.append((chunkIndex: idx, text: String(cString: c)))
+        }
+        return rows
+    }
+
     /// Total stored chunk rows for a document (leaves + any RAPTOR summary
     /// nodes), regardless of embedding state. The resume path uses this to
     /// distinguish "chunks already built → resume the fill" from "no chunks yet

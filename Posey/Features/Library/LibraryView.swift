@@ -1156,6 +1156,22 @@ extension LibraryViewModel {
                 let active = await MainActor.run { AskPoseyPromptVariant.active }
                 return json(["promptVariant": active.rawValue])
 
+            case "SET_NEIGHBOR_EXPANSION":
+                // 2026-06-19 — SMALL-TO-BIG tuning knob. Sets the neighbor
+                // RADIUS (chunks expanded on each side of a retrieved winner).
+                // 0 = off (raw small chunks). In-memory (resets on relaunch);
+                // a first-class variable for the embedder A/B/C sweep.
+                guard let raw = arg, let n = Int(raw.trimmingCharacters(in: .whitespaces)), n >= 0, n <= 10 else {
+                    return #"{"error":"Usage: SET_NEIGHBOR_EXPANSION:<0-10>  (0 = off)"}"#
+                }
+                await MainActor.run { NeighborExpansion.radius = n }
+                return json(["status": "set", "neighborRadius": n])
+
+            case "GET_NEIGHBOR_EXPANSION":
+                let r = await MainActor.run { NeighborExpansion.radius }
+                return json(["neighborRadius": r, "default": NeighborExpansion.defaultRadius,
+                             "ragTokenBudget": NeighborExpansion.ragTokenBudget])
+
             case "SET_QUERY_EXPANSION":
                 // SET_QUERY_EXPANSION:on|off — production gate for the
                 // LLM query-expansion lever (default OFF; value unproven on

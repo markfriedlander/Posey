@@ -870,9 +870,19 @@ private extension AskPoseyChatViewModel {
         // numeric band than the 0.40 cosine threshold the floor was
         // calibrated for, and the dedup-as-fabrication-guard already
         // happens via Layer-2 prompt rules + the anti-confab guard.
-        return translated
+        let winners = translated
             .filter { $0.startOffset < 0 || $0.relevance >= 0.40 }
             .sorted { $0.relevance > $1.relevance }
+
+        // 2026-06-19 — SMALL-TO-BIG. Expand each winner to its document neighbors
+        // so the model reads the surrounding passage, not a 400-char sliver,
+        // WITHOUT diluting the small-chunk ranking above (precision + context).
+        // Pure post-ranking: attribution/relevance/gate signals are preserved.
+        // `radius` is the tunable knob (0 = off); read on the main actor.
+        let radius = NeighborExpansion.radius
+        guard radius > 0 else { return winners }
+        return NeighborExpander.expand(
+            winners: winners, documentID: documentID, database: db, radius: radius)
     }
 
 

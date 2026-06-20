@@ -57,6 +57,8 @@ nonisolated enum AntennaCommandCatalog {
         .init("GET_LLM", .models, "GET_LLM", "The active answer model (id, display name, context window)."),
         .init("SET_PROMPT_VARIANT", .ask_posey, "SET_PROMPT_VARIANT:current|rebalanced", "Flip the Ask Posey prose variant for the A/B (in-memory; resets on relaunch)."),
         .init("GET_PROMPT_VARIANT", .ask_posey, "GET_PROMPT_VARIANT", "The active Ask Posey prose variant (current|rebalanced)."),
+        .init("SET_NEIGHBOR_EXPANSION", .retrieval, "SET_NEIGHBOR_EXPANSION:<0-10>", "Small-to-big retrieval radius — chunks expanded on each side of a retrieved winner (0 = off). In-memory; a knob for the embedder A/B/C sweep."),
+        .init("GET_NEIGHBOR_EXPANSION", .retrieval, "GET_NEIGHBOR_EXPANSION", "Current small-to-big neighbor radius + default + RAG token budget."),
         .init("SET_QUERY_EXPANSION", .retrieval, "SET_QUERY_EXPANSION", ""),
         .init("SET_EMBEDDING_PROVIDER", .retrieval, "SET_EMBEDDING_PROVIDER", ""),
         .init("GET_EMBEDDING_PROVIDER", .retrieval, "GET_EMBEDDING_PROVIDER", "Active embedding backend (Nomic / fallback)."),

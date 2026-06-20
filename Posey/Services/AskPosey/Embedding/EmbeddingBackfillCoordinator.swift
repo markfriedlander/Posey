@@ -81,8 +81,16 @@ final class EmbeddingBackfillCoordinator: ObservableObject {
     }
 
     /// Cancel the in-flight backfill (if any). Still-NULL rows stay NULL; a later
-    /// `begin` resumes them.
-    func cancel() { activeWorker?.cancel() }
+    /// `begin` resumes them. Resets `phase` to `.idle` IMMEDIATELY so the UI
+    /// reflects "stopped" the instant Stop is tapped — without this, the phase
+    /// stayed frozen on the last `.running(...)`, so the board kept showing
+    /// "Backfilling N" with a rate that decayed toward zero and an ETA that
+    /// ballooned (51,889h) until `Int(remaining/rate)` overflowed and CRASHED
+    /// (Mark, 2026-06-19). The worker bails at its next cancellation checkpoint.
+    func cancel() {
+        activeWorker?.cancel()
+        phase = .idle
+    }
 
     /// Reset to `.idle` after a terminal phase is acknowledged (for the verb).
     func acknowledge() {
@@ -183,10 +191,12 @@ final class EmbeddingBackfillCoordinator: ObservableObject {
                 // Proactive thermal pacing after each heavy embed (scales up under
                 // pressure, pauses at .critical). Same discipline as indexing.
                 await ThermalGovernor.shared.pace()
-                if processed % 8 == 0 || processed == total {
+                if (processed % 8 == 0 || processed == total) && !Task.isCancelled {
                     let snap = processed
                     await MainActor.run {
-                        self.publish(.running(backend: target.rawValue, processed: snap, total: total))
+                        // Don't resurrect a `.running` over an `.idle` that cancel()
+                        // just published (the worker is bailing this checkpoint).
+                        if !Task.isCancelled { self.publish(.running(backend: target.rawValue, processed: snap, total: total)) }
                     }
                 }
             }

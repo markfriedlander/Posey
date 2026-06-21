@@ -51,7 +51,11 @@ struct SearchBarView: View {
                     .submitLabel(.search)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                    .onSubmit { onNext() }
+                    // Enter = "done typing, show me." Drop the keyboard so the
+                    // document + matches are fully visible; stay on the current
+                    // (first) match rather than skipping past it — the up/down
+                    // chevrons do navigation. (Mark, 2026-06-20.)
+                    .onSubmit { isFieldFocused = false }
 
                 if !query.isEmpty {
                     if matchCount > 0 {

@@ -3,6 +3,7 @@ import SwiftUI
 import UIKit
 import Combine
 import QuartzCore
+import AVFoundation
 
 // ========== BLOCK 01: READER SURFACE VIEW (DEBUG, STAGE B) - START ==========
 
@@ -46,10 +47,17 @@ struct ReaderSurfaceView: View {
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                 .accessibilityIdentifier("reader.surface.hud")
             Spacer()
-            Button("Close") { onClose() }
-                .font(.caption.weight(.bold))
-                .padding(8)
-                .background(.regularMaterial, in: Capsule())
+            VStack(spacing: 6) {
+                Button("Close") { onClose() }
+                    .font(.caption.weight(.bold)).padding(8)
+                    .background(.regularMaterial, in: Capsule())
+                Button("▶︎ Read") { loader.play() }
+                    .font(.caption.weight(.bold)).padding(8)
+                    .background(.regularMaterial, in: Capsule())
+                Button("Stop") { loader.stop() }
+                    .font(.caption.weight(.bold)).padding(8)
+                    .background(.regularMaterial, in: Capsule())
+            }
         }
         .padding(10)
     }
@@ -70,6 +78,19 @@ private struct SurfaceTextViewRep: UIViewRepresentable {
 final class ReaderSurfaceLoader: ObservableObject {
     @Published var surface: ReaderSurface?
     @Published var stats = "loading…"
+    private var engine: ReadAlongEngine?
+    private var driver: SurfaceReadAlongDriver?
+
+    /// Stage C: start line-level read-along from ~1/3 into the doc (real body prose,
+    /// past front matter). Drives the surface's ReadAlongEngine via willSpeakRange —
+    /// the same mapping Posey's SpeechPlaybackService will use at cutover.
+    func play() {
+        guard let driver, let surface else { return }
+        let start = max(0, surface.content.layout.segments.count / 3)
+        driver.speak(fromPlaybackIndex: start, count: 25)
+    }
+
+    func stop() { driver?.stop() }
 
     private var title = ""
     private var units = 0
@@ -92,6 +113,9 @@ final class ReaderSurfaceLoader: ObservableObject {
         buildMs = (CACurrentMediaTime() - t0) * 1000
 
         let surface = ReaderSurface(content: content)
+        let engine = ReadAlongEngine(surface: surface)
+        self.engine = engine
+        self.driver = SurfaceReadAlongDriver(content: content, engine: engine)
         memAfterBuild = MemoryProbe.residentMB()
 
         self.title = document.title
@@ -137,4 +161,57 @@ enum MemoryProbe {
 }
 
 // ========== BLOCK 02: LOADER + MEMORY PROBE - END ==========
+
+// ========== BLOCK 03: STAGE-C READ-ALONG DRIVER (DEBUG) - START ==========
+
+/// Speaks consecutive sentences (each a WHOLE sentence → real prosody) and maps each
+/// `willSpeakRange(word)` to the surface via the ReadAlongEngine. Stands in for
+/// Posey's SpeechPlaybackService in the isolated cover; the engine/surface don't know
+/// or care which source drives them, so the cutover swap is mechanical.
+@MainActor
+final class SurfaceReadAlongDriver: NSObject, AVSpeechSynthesizerDelegate {
+    private let synth = AVSpeechSynthesizer()
+    private let content: ReaderSurfaceContent
+    private let engine: ReadAlongEngine
+    /// utterance → the playback index of the sentence it speaks.
+    private var utterancePlaybackIndex: [ObjectIdentifier: Int] = [:]
+
+    init(content: ReaderSurfaceContent, engine: ReadAlongEngine) {
+        self.content = content
+        self.engine = engine
+        super.init()
+        synth.delegate = self
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
+        try? AVAudioSession.sharedInstance().setActive(true)
+    }
+
+    func speak(fromPlaybackIndex start: Int, count: Int) {
+        synth.stopSpeaking(at: .immediate)
+        engine.reset()
+        utterancePlaybackIndex.removeAll()
+        for i in start..<(start + count) {
+            guard let seg = content.layout.segment(forPlaybackIndex: i) else { break }
+            let u = AVSpeechUtterance(string: seg.text)   // whole sentence → prosody
+            u.rate = AVSpeechUtteranceDefaultSpeechRate * 0.92
+            utterancePlaybackIndex[ObjectIdentifier(u)] = i
+            synth.speak(u)
+        }
+    }
+
+    func stop() {
+        synth.stopSpeaking(at: .immediate)
+        engine.reset()
+    }
+
+    nonisolated func speechSynthesizer(_ s: AVSpeechSynthesizer,
+                                       willSpeakRangeOfSpeechString characterRange: NSRange,
+                                       utterance: AVSpeechUtterance) {
+        MainActor.assumeIsolated {
+            guard let idx = utterancePlaybackIndex[ObjectIdentifier(utterance)] else { return }
+            engine.onSpokenWord(playbackIndex: idx, wordOffset: characterRange.location)
+        }
+    }
+}
+
+// ========== BLOCK 03: STAGE-C READ-ALONG DRIVER (DEBUG) - END ==========
 #endif

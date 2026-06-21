@@ -179,6 +179,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("OPEN_AUDIO_EXPORT_SHEET", .audio_export, "OPEN_AUDIO_EXPORT_SHEET", ""),
         .init("OPEN_SEARCH_BAR", .reader, "OPEN_SEARCH_BAR", ""),
         .init("OPEN_DOCUMENT", .ui_nav, "OPEN_DOCUMENT:<docID>", "Open the reader on a doc from any UI state."),
+        .init("OPEN_DOCUMENT_SURFACE", .ui_nav, "OPEN_DOCUMENT_SURFACE:<docID>", "DEBUG: open a doc in the rebuilt one-surface reader (Stage B render/memory test); isolated cover."),
         .init("LIBRARY_NAVIGATE_BACK", .ui_nav, "LIBRARY_NAVIGATE_BACK", ""),
         .init("ANTENNA_OFF", .system, "ANTENNA_OFF", ""),
         .init("SET_VOICE_MODE", .tts, "SET_VOICE_MODE:<best|custom>", ""),

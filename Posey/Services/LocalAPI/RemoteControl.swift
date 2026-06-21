@@ -201,6 +201,10 @@ extension Notification.Name {
     /// `userInfo["documentID"]: UUID`. LibraryView observes; pushes
     /// the matching document onto the navigation path.
     static let remoteOpenDocument = Notification.Name("PoseyRemoteOpenDocument")
+    /// DEBUG (reader rebuild, Stage B). `userInfo["documentID"]: UUID`. LibraryView
+    /// presents the NEW one-surface reader (`ReaderSurfaceView`) as a separate cover —
+    /// isolated from the shipping reader so render/memory testing can't disturb it.
+    static let remoteOpenDocumentSurface = Notification.Name("PoseyRemoteOpenDocumentSurface")
     /// No userInfo. LibraryView observes; pops the navigation path.
     static let remoteLibraryNavigateBack = Notification.Name("PoseyRemoteLibraryNavigateBack")
     /// No userInfo. LibraryView observes; toggles antenna OFF (re-enable

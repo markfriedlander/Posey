@@ -239,6 +239,7 @@ struct LibraryView: View {
         .toolbar { libraryToolbar }
         .modifier(EmbeddingBoardSheet(isPresented: embeddingBoardBinding,
                                       databaseManager: viewModel.databaseManager))
+        .modifier(SurfaceCoverModifier(databaseManager: viewModel.databaseManager))
     }
 
     /// Binding that's a no-op in RELEASE (the board is DEBUG-only, next to the
@@ -3496,6 +3497,20 @@ extension LibraryViewModel {
                                                     userInfo: ["documentID": docID])
                 }
                 return json(["status": "posted", "documentID": idStr])
+
+            case "OPEN_DOCUMENT_SURFACE":
+                // Reader rebuild (Stage B): open a doc in the NEW one-surface reader
+                // as a separate cover. Isolated from the shipping reader + its verbs.
+                // The presenting cover is DEBUG-only (no-op in RELEASE); the antenna
+                // itself is DEBUG-only, so this verb is harmless in RELEASE.
+                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: OPEN_DOCUMENT_SURFACE:<docID>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteOpenDocumentSurface, object: nil,
+                                                    userInfo: ["documentID": docID])
+                }
+                return json(["status": "posted", "documentID": idStr, "surface": "new"])
 
             // ===== Library nav ================================================
             case "LIBRARY_NAVIGATE_BACK":

@@ -25,6 +25,11 @@ struct LibraryView: View {
     @State private var isImporting = false
     #if DEBUG
     @State private var showEmbeddingBoard = false
+    /// DEBUG reader-rebuild switch: when ON, tapping a document opens it in the NEW
+    /// one-surface reader (read-along + tap-to-jump) instead of the shipping reader.
+    /// Off by default; opt-in via the library toolbar. Lets Mark drive the new reader
+    /// on the phone with no laptop/antenna (e.g. in the car).
+    @AppStorage("useNewReaderSurface") private var useNewReaderSurface = false
     #endif
     @State private var path: [Document] = []
     @State private var documentPendingDeletion: Document? = nil
@@ -73,6 +78,20 @@ struct LibraryView: View {
             || !indexingTracker.reReadingDocumentIDs.isEmpty
     }
 
+    @ViewBuilder
+    private func shippingReader(for document: Document) -> some View {
+        ReaderView(
+            document: document,
+            databaseManager: viewModel.databaseManager,
+            playbackMode: playbackMode,
+            isTestMode: isTestMode,
+            shouldAutoPlayOnAppear: shouldAutoPlayOnReaderAppear,
+            shouldAutoCreateNoteOnAppear: shouldAutoCreateNoteOnReaderAppear,
+            shouldAutoCreateBookmarkOnAppear: shouldAutoCreateBookmarkOnReaderAppear,
+            automationNoteBody: automationNoteBody
+        )
+    }
+
     /// Extracted from `body`, with the CONDITIONAL parts pushed into View-space
     /// (`escapeToolbarButton`) rather than conditional `ToolbarContent` — the
     /// latter (`if/else` over `ToolbarItem`) tripped "unable to type-check in
@@ -110,6 +129,18 @@ struct LibraryView: View {
                 .accessibilityLabel("Embedding status")
                 .remoteRegister("library.embeddingBoard") {
                     showEmbeddingBoard = true
+                }
+
+                // Reader-rebuild switch: tap a doc → NEW one-surface reader when ON.
+                Button {
+                    useNewReaderSurface.toggle()
+                } label: {
+                    Image(systemName: useNewReaderSurface ? "book.pages.fill" : "book.pages")
+                        .foregroundStyle(useNewReaderSurface ? Color.accentColor : Color.primary.opacity(0.25))
+                }
+                .accessibilityLabel(useNewReaderSurface ? "New reader ON" : "New reader OFF")
+                .remoteRegister("library.newReaderToggle") {
+                    useNewReaderSurface.toggle()
                 }
             }
         }
@@ -257,16 +288,21 @@ struct LibraryView: View {
         NavigationStack(path: $path) {
             libraryList
             .navigationDestination(for: Document.self) { document in
-                ReaderView(
-                    document: document,
-                    databaseManager: viewModel.databaseManager,
-                    playbackMode: playbackMode,
-                    isTestMode: isTestMode,
-                    shouldAutoPlayOnAppear: shouldAutoPlayOnReaderAppear,
-                    shouldAutoCreateNoteOnAppear: shouldAutoCreateNoteOnReaderAppear,
-                    shouldAutoCreateBookmarkOnAppear: shouldAutoCreateBookmarkOnReaderAppear,
-                    automationNoteBody: automationNoteBody
-                )
+                #if DEBUG
+                if useNewReaderSurface {
+                    ReaderSurfaceView(
+                        document: document,
+                        databaseManager: viewModel.databaseManager,
+                        onClose: { if !path.isEmpty { path.removeLast() } }
+                    )
+                    .navigationBarBackButtonHidden(true)
+                    .toolbar(.hidden, for: .navigationBar)
+                } else {
+                    shippingReader(for: document)
+                }
+                #else
+                shippingReader(for: document)
+                #endif
             }
             .modifier(LibraryRemoteRouting(path: $path, viewModel: viewModel))
             .fileImporter(

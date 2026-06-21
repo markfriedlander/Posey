@@ -31,6 +31,11 @@ struct ReaderSurfaceView: View {
         }
         .background(Color(.systemBackground))
         .task { loader.load(document: document, databaseManager: databaseManager) }
+        .onAppear {
+            // Re-measure layout + memory AFTER the text view has real on-screen
+            // width — forcing layout before that gives a bogus (near-zero) time.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { loader.measureAfterDisplay() }
+        }
     }
 
     private var hud: some View {
@@ -66,9 +71,17 @@ final class ReaderSurfaceLoader: ObservableObject {
     @Published var surface: ReaderSurface?
     @Published var stats = "loading…"
 
+    private var title = ""
+    private var units = 0
+    private var sents = 0
+    private var chars = 0
+    private var buildMs = 0.0
+    private var memBefore = 0.0
+    private var memAfterBuild = 0.0
+
     func load(document: Document, databaseManager: DatabaseManager) {
         guard surface == nil else { return }
-        let memBefore = MemoryProbe.residentMB()
+        memBefore = MemoryProbe.residentMB()
         let units = (try? databaseManager.units(for: document.id)) ?? []
         let sentences = (try? databaseManager.sentences(for: document.id)) ?? []
 
@@ -76,24 +89,35 @@ final class ReaderSurfaceLoader: ObservableObject {
         let content = SurfaceBuilder.build(
             units: units, sentences: sentences, bodyPointSize: 19,
             imageData: { (try? databaseManager.imageData(for: $0)) ?? nil })
-        let buildMs = (CACurrentMediaTime() - t0) * 1000
+        buildMs = (CACurrentMediaTime() - t0) * 1000
 
         let surface = ReaderSurface(content: content)
-        let memAfterBuild = MemoryProbe.residentMB()
+        memAfterBuild = MemoryProbe.residentMB()
 
-        // Force the full first layout (the cost that would block on open) and time it.
+        self.title = document.title
+        self.units = units.count
+        self.sents = content.layout.segments.count
+        self.chars = content.attributed.length
+        self.surface = surface
+        self.stats = String(format:
+            "%@\nunits %d · sent %d · chars %d\nbuild %.0fms · mem %.0f→%.0f MB\n(measuring layout after display…)",
+            title, self.units, sents, chars, buildMs, memBefore, memAfterBuild)
+    }
+
+    /// Run AFTER the text view has real on-screen width: force the full glyph layout
+    /// (the true open-blocking cost), then read the post-display footprint. This is
+    /// the number the on-device memory gate uses.
+    func measureAfterDisplay() {
+        guard let surface, surface.textView.bounds.width > 1 else { return }
         let t1 = CACurrentMediaTime()
         let lm = surface.textView.layoutManager
         lm.ensureLayout(for: surface.textView.textContainer)
         let height = lm.usedRect(for: surface.textView.textContainer).height
         let layoutMs = (CACurrentMediaTime() - t1) * 1000
         let memAfterLayout = MemoryProbe.residentMB()
-
-        self.surface = surface
         self.stats = String(format:
-            "%@\nunits %d · sent %d · chars %d\nbuild %.0fms · layout %.0fms · h %.0fpt\nmem %.0f→%.0f→%.0f MB (Δ+%.0f)",
-            document.title, units.count, content.layout.segments.count, content.attributed.length,
-            buildMs, layoutMs, height,
+            "%@\nunits %d · sent %d · chars %d\nbuild %.0fms · LAYOUT %.0fms · h %.0fpt\nmem %.0f→%.0f→%.0f MB (Δ+%.0f, post-display)",
+            title, units, sents, chars, buildMs, layoutMs, height,
             memBefore, memAfterBuild, memAfterLayout, memAfterLayout - memBefore)
     }
 }

@@ -3190,6 +3190,16 @@ extension LibraryViewModel {
                 }
                 return json(["bytes": data.count, "base64": data.base64EncodedString()])
 
+            case "SCREENSHOT_STABLE":
+                // Fade/animation-aware capture: waits for the screen to stop
+                // moving before snapping, so the image is a real settled frame
+                // (not a mid-transition composite). Use this for any UI claim.
+                let pngData = await RemoteControl.screenshotStablePNG()
+                guard let data = pngData else {
+                    return #"{"error":"Screenshot failed (no key window)"}"#
+                }
+                return json(["bytes": data.count, "base64": data.base64EncodedString(), "stable": true])
+
             case "TAP_CITATION":
                 guard let raw = arg, let n = Int(raw), n >= 1 else {
                     return #"{"error":"Usage: TAP_CITATION:<n>"}"#

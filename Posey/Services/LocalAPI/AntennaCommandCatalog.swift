@@ -156,6 +156,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("TYPE", .ui_nav, "TYPE:<text>", ""),
         .init("READ_TREE", .indexing, "READ_TREE", "Read a doc's RAPTOR summary tree."),
         .init("SCREENSHOT", .system, "SCREENSHOT", "Capture the current screen (returns image)."),
+        .init("SCREENSHOT_STABLE", .system, "SCREENSHOT_STABLE", "Capture the screen AFTER it stops moving — waits out chrome fade, search-bar slide, scroll, any in-flight animation, then snaps. Use for ALL UI verification; a plain SCREENSHOT can catch a mid-transition composite no user sees."),
         .init("TAP_CITATION", .ui_nav, "TAP_CITATION:<n>", ""),
         .init("TAP_ASKPOSEY_ANCHOR", .ui_nav, "TAP_ASKPOSEY_ANCHOR:<storageID>", ""),
         .init("TAP_SAVED_ANNOTATION", .annotations, "TAP_SAVED_ANNOTATION:<entryID>", ""),

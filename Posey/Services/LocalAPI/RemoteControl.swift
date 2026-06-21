@@ -348,12 +348,90 @@ enum RemoteControl {
     /// Snapshot the active key window into a PNG. Returns nil when
     /// no foreground-active window is available.
     static func screenshotPNG() -> Data? {
-        guard let window = keyWindow else { return nil }
-        let renderer = UIGraphicsImageRenderer(bounds: window.bounds)
-        let image = renderer.image { _ in
-            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        return compositeScreenPNG()
+    }
+
+    /// Composite EVERY foreground window (app + any presented/keyboard
+    /// windows) in window-level order into one image, so the capture
+    /// matches the true screen. Capturing only the app's key window omits
+    /// the software keyboard — which, while a search field is focused,
+    /// pushes the bottom chrome up and makes a key-window-only capture look
+    /// like the chrome is floating mid-screen (the confusion on 2026-06-20).
+    /// Note: iOS renders the system keyboard out-of-process, so even
+    /// `drawHierarchy` on the keyboard window may paint blank; compositing
+    /// is still strictly more faithful than the single-window grab.
+    static func compositeScreenPNG() -> Data? {
+        let windows = allWindows.sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
+        guard let base = windows.first(where: { $0.isKeyWindow }) ?? windows.first else { return nil }
+        let bounds = base.bounds
+        let image = UIGraphicsImageRenderer(bounds: bounds).image { _ in
+            for window in windows where !window.isHidden && window.alpha > 0.01 {
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
         }
         return image.pngData()
+    }
+
+    /// Fade/animation-AWARE capture. The plain `screenshotPNG` snaps a
+    /// single frame whenever it's called — so a capture taken while chrome
+    /// is fading, the search bar is sliding in, or a scroll is in flight
+    /// returns a garbled composite that NO USER ever sees (the bug that
+    /// produced false "verified" screenshots, 2026-06-20). This version
+    /// re-snaps until the frame stops changing (two consecutive captures
+    /// within a small tolerance) or `maxWaitMs` elapses, so the returned
+    /// image is a settled, real screen.
+    ///
+    /// The tolerance is a mean-absolute-difference over a 40×80 grayscale
+    /// thumbnail: large enough to ignore the text-field caret blink (a few
+    /// pixels) but far below what any slide / scroll / fade moves.
+    @MainActor
+    static func screenshotStablePNG(maxWaitMs: Int = 3500,
+                                    intervalMs: Int = 130,
+                                    tolerance: Double = 0.008) async -> Data? {
+        func thumb(_ image: UIImage) -> [UInt8]? {
+            let w = 40, h = 80
+            guard let cg = image.cgImage,
+                  let ctx = CGContext(data: nil, width: w, height: h,
+                                      bitsPerComponent: 8, bytesPerRow: w,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue)
+            else { return nil }
+            ctx.interpolationQuality = .low
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            guard let data = ctx.data else { return nil }
+            let ptr = data.bindMemory(to: UInt8.self, capacity: w * h)
+            return Array(UnsafeBufferPointer(start: ptr, count: w * h))
+        }
+        func mad(_ a: [UInt8], _ b: [UInt8]) -> Double {
+            guard a.count == b.count, !a.isEmpty else { return 1 }
+            var sum = 0
+            for i in a.indices { sum += abs(Int(a[i]) - Int(b[i])) }
+            return Double(sum) / Double(a.count) / 255.0
+        }
+        func capture() -> UIImage? {
+            let windows = allWindows.sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
+            guard let base = windows.first(where: { $0.isKeyWindow }) ?? windows.first else { return nil }
+            return UIGraphicsImageRenderer(bounds: base.bounds).image { _ in
+                for window in windows where !window.isHidden && window.alpha > 0.01 {
+                    window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+                }
+            }
+        }
+        var lastThumb: [UInt8]? = nil
+        var lastImage: UIImage? = nil
+        var waited = 0
+        while waited <= maxWaitMs {
+            guard let image = capture() else { return nil }
+            let t = thumb(image)
+            if let lt = lastThumb, let t, mad(lt, t) < tolerance {
+                return image.pngData()   // settled
+            }
+            lastThumb = t
+            lastImage = image
+            try? await Task.sleep(for: .milliseconds(intervalMs))
+            waited += intervalMs
+        }
+        return lastImage?.pngData()       // timed out — return the last frame
     }
 
     /// All windows across all foreground scenes, including any sheet

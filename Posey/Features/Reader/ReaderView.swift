@@ -230,20 +230,55 @@ struct ReaderView: View {
             //     orientations.
             .safeAreaInset(edge: .top) {
                 if viewModel.isSearchActive {
-                    SearchBarView(
-                        query: Binding(
-                            get: { viewModel.searchQuery },
-                            set: { viewModel.updateSearchQuery($0) }
-                        ),
-                        matchCount: viewModel.searchMatchCount,
-                        currentMatchPosition: viewModel.currentSearchMatchPosition,
-                        onPrevious: { viewModel.goToPreviousSearchMatch() },
-                        onNext: { viewModel.goToNextSearchMatch() },
-                        onDismiss: {
-                            viewModel.deactivateSearch()
-                            revealChrome()
+                    VStack(spacing: 0) {
+                        SearchBarView(
+                            query: Binding(
+                                get: { viewModel.searchQuery },
+                                set: { viewModel.updateSearchQuery($0) }
+                            ),
+                            matchCount: viewModel.searchMatchCount,
+                            currentMatchPosition: viewModel.currentSearchMatchPosition,
+                            isSemanticSearching: viewModel.isSemanticSearching,
+                            onPrevious: { viewModel.goToPreviousSearchMatch() },
+                            onNext: { viewModel.goToNextSearchMatch() },
+                            onSemanticSearch: { viewModel.runSemanticSearch() },
+                            onDismiss: {
+                                viewModel.deactivateSearch()
+                                revealChrome()
+                            }
+                        )
+                        if viewModel.pausedForSearch {
+                            // Search paused the voice; one tap flies back to
+                            // where it left off and resumes (the listening
+                            // anchor — currentSentenceIndex — is untouched by
+                            // search scrolling). Sits with the search UI so the
+                            // two modes read as distinct.
+                            Button { viewModel.resumeListening() } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "play.circle.fill")
+                                    Text("Resume listening")
+                                    Spacer(minLength: 0)
+                                }
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tint)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .background(.regularMaterial)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("search.resumeListening")
+                            .remoteRegister("search.resumeListening") { viewModel.resumeListening() }
                         }
-                    )
+                        if viewModel.didRunSemanticSearch {
+                            SemanticSearchResultsView(
+                                isSearching: viewModel.isSemanticSearching,
+                                results: viewModel.semanticSearchResults,
+                                onSelect: { viewModel.jumpToSemanticResult($0) }
+                            )
+                        }
+                    }
                     .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
                 }
             }
@@ -256,18 +291,31 @@ struct ReaderView: View {
                 }
             }
             .overlay(alignment: .bottom) {
-                controls
-                    .opacity(isChromeVisible ? 1 : 0)
-                    .offset(y: isChromeVisible ? 0 : (reduceMotion ? 0 : 20))
-                    .allowsHitTesting(isChromeVisible)
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
+                // Hidden in search mode — the transport has no job while the
+                // voice is paused for a search, and it only floats over the
+                // text being hunted (Mark, 2026-06-20). Resume listening is the
+                // way back to playback.
+                if !viewModel.isSearchActive {
+                    controls
+                        .opacity(isChromeVisible ? 1 : 0)
+                        .offset(y: isChromeVisible ? 0 : (reduceMotion ? 0 : 20))
+                        .allowsHitTesting(isChromeVisible)
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isChromeVisible)
+                }
             }
             // 2026-05-16 — Ambient progress meter. Always-visible thin
             // bar + "~N min left" sits at the very bottom of the
             // reading area, below the (overlay) chrome strip. Quiet
             // typography so it never pulls focus from the document.
             .safeAreaInset(edge: .bottom) {
-                ReaderProgressMeter(viewModel: viewModel, indexingTracker: indexingTracker)
+                // Search is its own mode: the time-left pill (like the transport
+                // and mini-player) hides while searching so nothing floats over
+                // the text being hunted — and so the keyboard doesn't bump it up
+                // the screen. It returns on dismiss / Resume listening. (Mark,
+                // 2026-06-20.)
+                if !viewModel.isSearchActive {
+                    ReaderProgressMeter(viewModel: viewModel, indexingTracker: indexingTracker)
+                }
             }
             // 2026-05-04 — Mini-player. When chrome auto-fades during
             // playback, the play/pause button alone stays visible so
@@ -279,10 +327,12 @@ struct ReaderView: View {
             // for any other reason (end of doc, etc.) chrome also
             // re-reveals.
             .overlay(alignment: .bottom) {
-                miniPlayer
-                    .opacity(miniPlayerVisible ? 1 : 0)
-                    .allowsHitTesting(miniPlayerVisible)
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: miniPlayerVisible)
+                if !viewModel.isSearchActive {
+                    miniPlayer
+                        .opacity(miniPlayerVisible ? 1 : 0)
+                        .allowsHitTesting(miniPlayerVisible)
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: miniPlayerVisible)
+                }
             }
             .onChange(of: viewModel.playbackState) { oldValue, newValue in
                 // Re-reveal chrome when playback transitions from
@@ -705,7 +755,7 @@ struct ReaderView: View {
         UnitRowView(
             unit: unit,
             sentencesInUnit: viewModel.sentencesByUnit[unit.id] ?? [],
-            activeSentence: viewModel.activeSentence,
+            bandSentenceID: viewModel.highlightBandSentenceID,
             activeSentenceIndex: viewModel.currentSentenceIndex,
             sentenceIndexBase: viewModel.sentenceIndexBase(for: unit),
             readingStyle: viewModel.readingStyle,
@@ -718,7 +768,7 @@ struct ReaderView: View {
             onTapConversation: { openConversationFromGlyph(unit: unit) },
             bodyFontSize: viewModel.fontSize,
             imageDataProvider: { viewModel.imageData(for: $0) },
-            isSearchMatchUnit: viewModel.isSearchActive && viewModel.currentSearchMatchUnitID == unit.id,
+            isSearchMatchUnit: viewModel.isSearchActive && viewModel.searchHighlightUnitID == unit.id,
             onActiveLine: { tv, range in viewModel.setActiveProseLine(tv, range) }
         )
         .padding(.horizontal, 14)
@@ -947,7 +997,7 @@ struct ReaderView: View {
                 Spacer(minLength: 8)
                 chromeGlyphButton(system: "magnifyingglass",
                                   label: "Search in document", hook: "reader.search") {
-                    viewModel.isSearchActive = true
+                    viewModel.activateSearch()
                     chromeFadeTask?.cancel()
                 }
                 Spacer(minLength: 8)
@@ -1731,7 +1781,7 @@ private struct ReaderRemoteControlSheetObservers: ViewModifier {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .remoteOpenSearchBar)) { _ in
-                viewModel.isSearchActive = true
+                viewModel.activateSearch()
             }
             .onReceive(NotificationCenter.default.publisher(for: .remoteBeginAudioExport)) { note in
                 guard matches(note, viewModel: viewModel) else { return }
@@ -1794,7 +1844,7 @@ private struct ReaderRemoteControlSearchObservers: ViewModifier {
         content
             .onReceive(NotificationCenter.default.publisher(for: .remoteSetSearchQuery)) { note in
                 guard let query = note.userInfo?["query"] as? String else { return }
-                viewModel.isSearchActive = true
+                viewModel.activateSearch()
                 viewModel.updateSearchQuery(query)
             }
             .onReceive(NotificationCenter.default.publisher(for: .remoteSearchNext)) { _ in
@@ -3122,6 +3172,32 @@ final class ReaderViewModel: ObservableObject {
     private var searchScrollCounter = 0
 
     var searchMatchCount: Int { searchMatchIndices.count }
+
+    // 2026-06-20 — SEMANTIC SEARCH (Tier-3 fallback). Populated only when
+    // the reader taps "Search by meaning" after literal find returns zero.
+    // Ranked "related passages" the reader picks from — NOT navigated via
+    // the literal chevron sequence. See `runSemanticSearch`.
+    @Published private(set) var semanticSearchResults: [SemanticSearchResult] = []
+    @Published private(set) var isSemanticSearching: Bool = false
+    /// True once a meaning-search has been run for the current query — drives
+    /// whether the "Related passages" panel is shown at all.
+    @Published private(set) var didRunSemanticSearch: Bool = false
+    /// Segment index of the "search by meaning" result the reader last tapped.
+    /// Drives a PERSISTENT highlight band on that passage (via
+    /// `searchHighlightSentenceID`) and the image/table border (via
+    /// `searchHighlightUnitID`); it holds until the reader picks another
+    /// result, edits the query, or leaves search — so they can always see
+    /// which passage they jumped to (no fade). nil ⇒ none selected.
+    @Published private(set) var selectedSemanticSegmentIndex: Int? = nil
+    private var semanticSearchToken = 0
+
+    /// True when search was opened while TTS was playing. Search and playback
+    /// are separate modes: opening search pauses the voice (so a found passage
+    /// isn't fighting the spoken one), and this flag surfaces the "Resume
+    /// listening" affordance so the reader can fly back to where the voice left
+    /// off (`currentSentenceIndex` is untouched by search scrolling) and pick
+    /// it back up in one tap. Cleared on resume or when search is dismissed.
+    @Published private(set) var pausedForSearch: Bool = false
     // ========== BLOCK VM-SEARCH: SEARCH STATE - END ==========
 
     /// 2026-05-21 — Was `let document: Document` until the smart-skip
@@ -4002,6 +4078,9 @@ final class ReaderViewModel: ObservableObject {
 
     func updateSearchQuery(_ query: String) {
         searchQuery = query
+        // Any edit to the query invalidates a prior meaning-search and
+        // re-arms the "No exact matches — search by meaning?" affordance.
+        clearSemanticSearch()
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else {
             searchMatchIndices = []
@@ -4035,12 +4114,40 @@ final class ReaderViewModel: ObservableObject {
         emitSearchScroll(to: searchMatchIndices[prev])
     }
 
+    /// Enter search mode. Search and playback are separate modes, so opening
+    /// search pauses the voice; if it WAS playing we remember that so the
+    /// "Resume listening" affordance can offer a one-tap return to the spoken
+    /// position. Search scrolling never moves `currentSentenceIndex`, so that
+    /// position is preserved for free. Routed through here from every entry
+    /// point (chrome button + the two remote verbs) so the pause is uniform.
+    func activateSearch() {
+        if playbackState == .playing {
+            playbackService.pause()
+            playbackState = .paused
+            persistPosition()
+            pausedForSearch = true
+        }
+        isSearchActive = true
+    }
+
+    /// Leave search and fly back to where the voice left off, resuming
+    /// playback from `currentSentenceIndex` (the listening anchor search
+    /// never moved). The normal active-line scroll re-centers it on play.
+    func resumeListening() {
+        deactivateSearch()
+        focusedUnitID = nil
+        playbackState = .playing
+        playbackService.play(segments: segments, startingAt: currentSentenceIndex)
+    }
+
     func deactivateSearch() {
         isSearchActive = false
         searchQuery = ""
         searchMatchIndices = []
         currentSearchMatchPosition = nil
         searchScrollSignal = nil
+        pausedForSearch = false
+        clearSemanticSearch()
     }
 
     func scrollToSearchMatch(with proxy: ScrollViewProxy) {
@@ -4104,6 +4211,146 @@ final class ReaderViewModel: ObservableObject {
     }
 
     // ========== BLOCK VM-SEARCH: SEARCH METHODS - END ==========
+
+    // ========== BLOCK VM-SEMANTIC-SEARCH: SEMANTIC SEARCH METHODS - START ==========
+
+    /// Meaning-based search over THIS document — the Tier-3 fallback the
+    /// reader opts into when literal find returns nothing. Reuses the exact
+    /// retrieval RANKING component Ask Posey uses (`HybridRetriever.retrieve`
+    /// = cosine over the active embedder ⊕ BM25, RRF-fused), but deliberately
+    /// NOT the full `retrieveRAGChunks` pipeline: no neighbor-stitch, no
+    /// token budget, no 0.40 floor — those shape passages to fill an LLM
+    /// context window, the opposite of what a search list needs (the reader
+    /// judges relevance, so we keep every ranked candidate and just map it to
+    /// a jumpable position). Uses whatever embedder is active, which is the
+    /// free, no-download NLContextual for the default-tier reader.
+    ///
+    /// Concurrency: `HybridRetriever.retrieve` embeds the query + cosines over
+    /// every chunk; we run it off the main actor so reader scrolling stays
+    /// smooth (the RAG path runs inline because it's already off the reader's
+    /// hot path — Rule 9 deviation, stated).
+    func runSemanticSearch() {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+
+        semanticSearchToken += 1
+        let token = semanticSearchToken
+        isSemanticSearching = true
+        didRunSemanticSearch = true
+        semanticSearchResults = []
+
+        let docID = document.id
+        let db = databaseManager
+        // Snapshot unit → first on-screen segment index on the main actor so
+        // results can be resolved to a jumpable reader position. A unit not
+        // in this map (front-matter trimmed from the reader, summary-only)
+        // yields a result we drop.
+        var unitToSegment: [UUID: Int] = [:]
+        for (idx, sentence) in sentences.enumerated() where unitToSegment[sentence.unitID] == nil {
+            unitToSegment[sentence.unitID] = idx
+        }
+
+        Task { [weak self] in
+            // All retrieval, DB resolution and mapping run OFF the main actor.
+            let mapped: [SemanticSearchResult] = await Task.detached(priority: .userInitiated) {
+                let outcome = HybridRetriever(database: db).retrieve(
+                    documentID: docID, query: query, limit: 30
+                )
+                // The retriever returns chunkIndex (Int) + text, not the start
+                // unit id, so resolve positions from the stored chunk rows.
+                let storedByIndex: [Int: StoredUnitEmbeddingChunk] = {
+                    guard let rows = try? db.unitEmbeddingChunks(for: docID) else { return [:] }
+                    return Dictionary(rows.map { ($0.chunkIndex, $0) }, uniquingKeysWith: { a, _ in a })
+                }()
+                let summaryBase = DatabaseManager.raptorSummaryIndexBase
+                // Map ranked chunks → reader positions. Drop RAPTOR summary
+                // nodes (abstractive, not verbatim-jumpable), units not on
+                // screen, and duplicate units. Preserve RRF rank order.
+                var seenUnits = Set<UUID>()
+                var results: [SemanticSearchResult] = []
+                for rc in outcome.results {
+                    guard rc.chunkID < summaryBase,
+                          let stored = storedByIndex[rc.chunkID],
+                          let segIdx = unitToSegment[stored.startUnitID],
+                          !seenUnits.contains(stored.startUnitID) else { continue }
+                    seenUnits.insert(stored.startUnitID)
+                    let snippet = stored.text
+                        .replacingOccurrences(of: "\n", with: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    results.append(SemanticSearchResult(
+                        id: stored.id,
+                        snippet: snippet,
+                        unitID: stored.startUnitID,
+                        segmentIndex: segIdx
+                    ))
+                }
+                return results
+            }.value
+
+            guard let self, token == self.semanticSearchToken else { return }
+            self.semanticSearchResults = mapped
+            self.isSemanticSearching = false
+        }
+    }
+
+    /// Jump to a chosen related passage: scroll it to center (reusing the
+    /// literal-search scroll signal) and select it, so a persistent highlight
+    /// band marks the passage the reader landed on until they pick another.
+    func jumpToSemanticResult(_ result: SemanticSearchResult) {
+        guard sentences.indices.contains(result.segmentIndex) else { return }
+        selectedSemanticSegmentIndex = result.segmentIndex
+        // Collapse the related-passages panel so the reader lands cleanly on
+        // the highlighted passage — the panel otherwise covers the very text
+        // they just picked (same "don't cover the text" principle as hiding the
+        // chrome in search; Mark, 2026-06-20). The selection + band persist;
+        // "Search by meaning" re-opens the list to pick another.
+        didRunSemanticSearch = false
+        emitSearchScroll(to: result.segmentIndex)
+    }
+
+    func clearSemanticSearch() {
+        semanticSearchToken += 1   // invalidate any in-flight search
+        semanticSearchResults = []
+        isSemanticSearching = false
+        didRunSemanticSearch = false
+        selectedSemanticSegmentIndex = nil
+    }
+
+    /// The sentence carrying the persistent search-highlight band. A literal
+    /// current match wins; otherwise the selected "search by meaning" result.
+    /// nil when search has produced no positioned hit. Consumed only while
+    /// search is active (see `highlightBandSentenceID`).
+    var searchHighlightSentenceID: UUID? {
+        if let pos = currentSearchMatchPosition, searchMatchIndices.indices.contains(pos) {
+            let idx = searchMatchIndices[pos]
+            if sentences.indices.contains(idx) { return sentences[idx].id }
+        }
+        if let segIdx = selectedSemanticSegmentIndex, sentences.indices.contains(segIdx) {
+            return sentences[segIdx].id
+        }
+        return nil
+    }
+
+    /// The unit owning the current search hit (literal match or selected
+    /// semantic result) — drives the image/table accent border for hits that
+    /// can't carry a per-sentence band. nil when there's no positioned hit.
+    var searchHighlightUnitID: UUID? {
+        if let u = currentSearchMatchUnitID { return u }
+        if let segIdx = selectedSemanticSegmentIndex, sentences.indices.contains(segIdx) {
+            return sentences[segIdx].unitID
+        }
+        return nil
+    }
+
+    /// The single sentence that should carry the accent highlight band. While
+    /// search is active it's the current search hit; otherwise it's the active
+    /// reading/TTS sentence. The two never coexist — opening search pauses
+    /// playback — so one target serves both modes (passed to every row).
+    var highlightBandSentenceID: UUID? {
+        isSearchActive ? searchHighlightSentenceID : activeSentence?.id
+    }
+
+    // ========== BLOCK VM-SEMANTIC-SEARCH: SEMANTIC SEARCH METHODS - END ==========
 
     func isActive(segment: TextSegment) -> Bool {
         segment.id == currentSentenceIndex

@@ -46,9 +46,14 @@ struct UnitRowView: View {
     /// redraw — the parent VM keeps a `sentencesByUnit` lookup.
     let sentencesInUnit: [Sentence]
 
-    /// The active sentence in the WHOLE document. The row only
-    /// styles it when `activeSentence?.unitID == unit.id`.
-    let activeSentence: Sentence?
+    /// The sentence that should carry the accent highlight band, if it
+    /// belongs to this unit. In normal reading it's the active TTS /
+    /// reading sentence; while search is active it's the current search
+    /// hit (literal match or the selected "search by meaning" result).
+    /// The two never appear at once — opening search pauses playback — so
+    /// one band target serves both. nil ⇒ no band in this unit. Sentence
+    /// ids are globally unique, so an id match implies the right unit.
+    let bandSentenceID: UUID?
 
     /// Index of the active sentence in the flat `sentences` array on
     /// the VM. Used together with `sentenceIndexBase` and the per-
@@ -280,7 +285,6 @@ struct UnitRowView: View {
         paragraphStyle.lineSpacing = bodyFontSize * 0.35
         attributed.addAttribute(.paragraphStyle, value: paragraphStyle, range: fullRange)
 
-        let active = (activeSentence?.unitID == unit.id) ? activeSentence : nil
         let utf16 = plain.utf16
 
         for (positionInUnit, sentence) in sentencesInUnit.enumerated() {
@@ -316,8 +320,9 @@ struct UnitRowView: View {
                 range: range
             )
 
-            // Active-sentence accent background.
-            if let active, sentence.id == active.id {
+            // Accent highlight band — active reading sentence, or the
+            // current search hit while search is active (see bandSentenceID).
+            if sentence.id == bandSentenceID {
                 attributed.addAttribute(
                     .backgroundColor,
                     value: UIColor(named: "AccentColor")?.withAlphaComponent(0.30)
@@ -341,7 +346,6 @@ struct UnitRowView: View {
     private var attributedProse: AttributedString {
         var attributed = AttributedString(unit.text)
         let plain = unit.text
-        let active = (activeSentence?.unitID == unit.id) ? activeSentence : nil
 
         for (positionInUnit, sentence) in sentencesInUnit.enumerated() {
             guard sentence.intraStart >= 0,
@@ -375,7 +379,7 @@ struct UnitRowView: View {
             // Bumped to Color.accentColor at 0.30 — accents to brand
             // color (not gray-on-gray), opacity readable in both Light
             // and Dark mode without overpowering the prose.
-            if let active, sentence.id == active.id {
+            if sentence.id == bandSentenceID {
                 attributed[range].backgroundColor = Color.accentColor.opacity(0.30)
             }
         }

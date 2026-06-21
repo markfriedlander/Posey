@@ -19,6 +19,11 @@ final class ReaderSurface: NSObject {
     /// ~700ms/step — the scale-test bug we fixed).
     private var activeLineRange: NSRange?
 
+    /// Tap-to-jump (core): fires the tapped character offset. Coexists with native
+    /// selection (the gesture doesn't cancel touches, so long-press selection still
+    /// works). The owner resolves the offset → sentence → playback position.
+    var onTap: ((Int) -> Void)?
+
     init(content: ReaderSurfaceContent, tuning: ReaderTuning = .aml) {
         self.content = content
         self.tuning = tuning
@@ -35,6 +40,14 @@ final class ReaderSurface: NSObject {
         tv.attributedText = content.attributed
         self.textView = tv
         super.init()
+        // Tap-to-jump: non-cancelling so native long-press selection still works.
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        tap.cancelsTouchesInView = false
+        tv.addGestureRecognizer(tap)
+    }
+
+    @objc private func handleTap(_ g: UITapGestureRecognizer) {
+        if let idx = charIndex(at: g.location(in: textView)) { onTap?(idx) }
     }
 
     // ========== BLOCK 02: GEOMETRY - START ==========

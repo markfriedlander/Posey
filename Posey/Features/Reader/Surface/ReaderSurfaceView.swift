@@ -92,6 +92,13 @@ final class ReaderSurfaceLoader: ObservableObject {
 
     func stop() { driver?.stop() }
 
+    /// Stage D — tap-to-jump: a tap resolves to its sentence and starts read-along
+    /// from there (the surface owns the hit-test; we own the playback meaning).
+    func jumpTo(surfaceOffset: Int) {
+        guard let seg = surface?.content.layout.segment(atSurfaceOffset: surfaceOffset) else { return }
+        driver?.speak(fromPlaybackIndex: seg.playbackIndex, count: 25)
+    }
+
     private var title = ""
     private var units = 0
     private var sents = 0
@@ -116,6 +123,7 @@ final class ReaderSurfaceLoader: ObservableObject {
         let engine = ReadAlongEngine(surface: surface)
         self.engine = engine
         self.driver = SurfaceReadAlongDriver(content: content, engine: engine)
+        surface.onTap = { [weak self] offset in self?.jumpTo(surfaceOffset: offset) }
         memAfterBuild = MemoryProbe.residentMB()
 
         self.title = document.title

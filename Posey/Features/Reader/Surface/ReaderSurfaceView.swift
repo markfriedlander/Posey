@@ -87,7 +87,7 @@ final class ReaderSurfaceLoader: ObservableObject {
     func play() {
         guard let driver, let surface else { return }
         let start = max(0, surface.content.layout.segments.count / 3)
-        driver.speak(fromPlaybackIndex: start, count: 25)
+        driver.speak(fromPlaybackIndex: start)
     }
 
     func stop() { driver?.stop() }
@@ -96,7 +96,7 @@ final class ReaderSurfaceLoader: ObservableObject {
     /// from there (the surface owns the hit-test; we own the playback meaning).
     func jumpTo(surfaceOffset: Int) {
         guard let seg = surface?.content.layout.segment(atSurfaceOffset: surfaceOffset) else { return }
-        driver?.speak(fromPlaybackIndex: seg.playbackIndex, count: 25)
+        driver?.speak(fromPlaybackIndex: seg.playbackIndex)
     }
 
     private var title = ""
@@ -183,6 +183,11 @@ final class SurfaceReadAlongDriver: NSObject, AVSpeechSynthesizerDelegate {
     private let engine: ReadAlongEngine
     /// utterance → the playback index of the sentence it speaks.
     private var utterancePlaybackIndex: [ObjectIdentifier: Int] = [:]
+    /// How many sentences to queue per Read (a chunk — a few minutes of audio).
+    /// The TRULY continuous, windowed read-through is the real SpeechPlaybackService's
+    /// job at cutover; the rolling-window re-enqueue tried here caused repeats, so the
+    /// stub stays on the proven batch queue (Mark, 2026-06-21).
+    private let batchCount = 60
 
     init(content: ReaderSurfaceContent, engine: ReadAlongEngine) {
         self.content = content
@@ -193,14 +198,18 @@ final class SurfaceReadAlongDriver: NSObject, AVSpeechSynthesizerDelegate {
         try? AVAudioSession.sharedInstance().setActive(true)
     }
 
-    func speak(fromPlaybackIndex start: Int, count: Int) {
+    /// Queue a batch of whole sentences from `start`. Uses the system "best available"
+    /// (Siri-quality / Spoken Content) voice — the SAME path Posey's real
+    /// SpeechPlaybackService uses for `VoiceMode.bestAvailable`. Device-confirmed it's
+    /// the Siri voice AND that `willSpeakRange` fires on it (the keystone risk closed).
+    func speak(fromPlaybackIndex start: Int) {
         synth.stopSpeaking(at: .immediate)
         engine.reset()
         utterancePlaybackIndex.removeAll()
-        for i in start..<(start + count) {
+        for i in start..<(start + batchCount) {
             guard let seg = content.layout.segment(forPlaybackIndex: i) else { break }
-            let u = AVSpeechUtterance(string: seg.text)   // whole sentence → prosody
-            u.rate = AVSpeechUtteranceDefaultSpeechRate * 0.92
+            let u = AVSpeechUtterance(string: seg.text)        // whole sentence → prosody
+            u.prefersAssistiveTechnologySettings = true        // best-available system voice
             utterancePlaybackIndex[ObjectIdentifier(u)] = i
             synth.speak(u)
         }

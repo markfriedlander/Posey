@@ -42,6 +42,12 @@ struct ReaderSurfaceView: View {
             // width — forcing layout before that gives a bogus (near-zero) time.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { loader.measureAfterDisplay() }
         }
+        .sheet(item: $loader.editingNote) { note in
+            NoteEditorSheet(note: note,
+                            onSave: { loader.saveNoteBody(note, body: $0) },
+                            onDelete: { loader.deleteNote(note) })
+                .presentationDetents([.medium])
+        }
     }
 
     private var hud: some View {
@@ -75,6 +81,51 @@ private struct SurfaceTextViewRep: UIViewRepresentable {
     func updateUIView(_ uiView: UITextView, context: Context) {}
 }
 
+/// Minimal note/bookmark editor (E2). A note edits its body; a bookmark is bodyless.
+/// Both can be deleted. "Done" saves and closes.
+private struct NoteEditorSheet: View {
+    let note: Note
+    let onSave: (String) -> Void
+    let onDelete: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: String
+
+    init(note: Note, onSave: @escaping (String) -> Void, onDelete: @escaping () -> Void) {
+        self.note = note
+        self.onSave = onSave
+        self.onDelete = onDelete
+        _draft = State(initialValue: note.body ?? "")
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if note.kind == .note {
+                    Section("Note") {
+                        TextField("Write a note…", text: $draft, axis: .vertical)
+                            .lineLimit(4...10)
+                            .accessibilityIdentifier("surface.note.draft")
+                    }
+                } else {
+                    Section { Label("Bookmark", systemImage: "bookmark.fill") }
+                }
+                Section {
+                    Button("Delete", role: .destructive) { onDelete(); dismiss() }
+                        .accessibilityIdentifier("surface.note.delete")
+                }
+            }
+            .navigationTitle(note.kind == .bookmark ? "Bookmark" : "Note")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { onSave(draft); dismiss() }
+                        .accessibilityIdentifier("surface.note.done")
+                }
+            }
+        }
+    }
+}
+
 // ========== BLOCK 01: READER SURFACE VIEW (DEBUG, STAGE B) - END ==========
 
 // ========== BLOCK 02: LOADER + MEMORY PROBE - START ==========
@@ -83,8 +134,12 @@ private struct SurfaceTextViewRep: UIViewRepresentable {
 final class ReaderSurfaceLoader: ObservableObject {
     @Published var surface: ReaderSurface?
     @Published var stats = "loading…"
+    /// The note/bookmark currently open in the editor sheet (E2). nil = closed.
+    @Published var editingNote: Note?
     private var engine: ReadAlongEngine?
     private var driver: SurfaceReadAlongDriver?
+    private var databaseManager: DatabaseManager?
+    private var documentID: UUID?
 
     /// Stage C: start line-level read-along from ~1/3 into the doc (real body prose,
     /// past front matter). Drives the surface's ReadAlongEngine via willSpeakRange —
@@ -102,6 +157,58 @@ final class ReaderSurfaceLoader: ObservableObject {
     func jumpTo(surfaceOffset: Int) {
         guard let seg = surface?.content.layout.segment(atSurfaceOffset: surfaceOffset) else { return }
         driver?.speak(fromPlaybackIndex: seg.playbackIndex)
+    }
+
+    // ----- Stage E2: inline annotations (create / render / open / edit / delete) -----
+
+    /// Render all persisted notes/bookmarks as inline markers: canonical anchor →
+    /// surface range → underline + glyph. A note whose anchor no longer resolves is
+    /// skipped here (Step 1); Step 2 adds re-find-or-flag so it's never silently lost.
+    func loadMarkers() {
+        guard let surface, let db = databaseManager, let docID = documentID else { return }
+        let notes = (try? db.notes(for: docID)) ?? []
+        let markers: [SurfaceMarker] = notes.compactMap { note in
+            let canonical = NSRange(location: note.startOffset,
+                                    length: max(0, note.endOffset - note.startOffset))
+            guard let sr = surface.content.layout.surfaceRange(forCanonicalRange: canonical),
+                  sr.length > 0 else { return nil }
+            return SurfaceMarker(id: note.id, surfaceRange: sr)
+        }
+        surface.setMarkers(markers)
+    }
+
+    /// Selection → Note/Bookmark: convert the SURFACE selection to a canonical anchor
+    /// and persist it, then re-render markers. For a note, open the editor immediately
+    /// so the user can type the body.
+    func createAnnotation(surfaceRange: NSRange, kind: AnnotationKind) {
+        guard let surface, let db = databaseManager, let docID = documentID,
+              let canonical = surface.content.layout.canonicalRange(forSurfaceRange: surfaceRange),
+              canonical.length > 0 else { return }
+        let now = Date()
+        let note = Note(id: UUID(), documentID: docID, createdAt: now, updatedAt: now,
+                        kind: kind == .bookmark ? .bookmark : .note,
+                        startOffset: canonical.location, endOffset: NSMaxRange(canonical), body: nil)
+        guard (try? db.insertNote(note)) != nil else { return }
+        loadMarkers()
+        if kind == .note { editingNote = note }
+    }
+
+    /// Glyph tap → open the note/bookmark in the editor sheet.
+    func openMarker(id: UUID) {
+        guard let db = databaseManager, let docID = documentID else { return }
+        let notes = (try? db.notes(for: docID)) ?? []
+        if let n = notes.first(where: { $0.id == id }) { editingNote = n }
+    }
+
+    func saveNoteBody(_ note: Note, body: String) {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        try? databaseManager?.updateNote(id: note.id, body: trimmed.isEmpty ? nil : trimmed)
+        loadMarkers()
+    }
+
+    func deleteNote(_ note: Note) {
+        try? databaseManager?.deleteNote(id: note.id)
+        loadMarkers()
     }
 
     private var title = ""
@@ -128,7 +235,11 @@ final class ReaderSurfaceLoader: ObservableObject {
         let engine = ReadAlongEngine(surface: surface)
         self.engine = engine
         self.driver = SurfaceReadAlongDriver(content: content, engine: engine)
+        self.databaseManager = databaseManager
+        self.documentID = document.id
         surface.onTap = { [weak self] offset in self?.jumpTo(surfaceOffset: offset) }
+        surface.onAnnotate = { [weak self] range, kind in self?.createAnnotation(surfaceRange: range, kind: kind) }
+        surface.onOpenMarker = { [weak self] id in self?.openMarker(id: id) }
         memAfterBuild = MemoryProbe.residentMB()
 
         self.title = document.title
@@ -136,6 +247,7 @@ final class ReaderSurfaceLoader: ObservableObject {
         self.sents = content.layout.segments.count
         self.chars = content.attributed.length
         self.surface = surface
+        loadMarkers()
         self.stats = String(format:
             "%@\nunits %d · sent %d · chars %d\nbuild %.0fms · mem %.0f→%.0f MB\n(measuring layout after display…)",
             title, self.units, sents, chars, buildMs, memBefore, memAfterBuild)

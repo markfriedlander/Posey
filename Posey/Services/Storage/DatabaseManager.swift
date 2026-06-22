@@ -685,6 +685,29 @@ extension DatabaseManager {
 
         try step(statement)
     }
+
+    /// Update a note's body (and bump `updated_at`). Used by the inline-annotation
+    /// editor: a note is created on selection, its body edited afterward.
+    func updateNote(id: UUID, body: String?, updatedAt: Date = Date()) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = "UPDATE notes SET body = ?, updated_at = ? WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        if let body { try bind(body, at: 1, for: statement) } else { sqlite3_bind_null(statement, 1) }
+        sqlite3_bind_double(statement, 2, updatedAt.timeIntervalSince1970)
+        try bind(id.uuidString, at: 3, for: statement)
+        try step(statement)
+    }
+
+    /// Delete a note/bookmark by id.
+    func deleteNote(id: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = "DELETE FROM notes WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(id.uuidString, at: 1, for: statement)
+        try step(statement)
+    }
 }
 
 // ========== BLOCK 04: NOTES - END ==========

@@ -34,6 +34,15 @@ struct ReaderTuning: Equatable {
     /// Focus-mode dimming of non-active sentences (the surviving M8 reading style).
     var dimNonActiveOpacity: CGFloat = 0.45
 
+    /// Inline annotation styling (E2). The anchored substring is underlined in the
+    /// SAME hue as the read-along highlight (Mark, 2026-06-22) so a note visually ties
+    /// to the reading highlight; full-strength alpha keeps the underline legible where
+    /// the 0.30 highlight band would be too faint as a thin line. One underline for all
+    /// annotation kinds (note / bookmark / conversation) — the underline is the marker
+    /// AND the tap target; no inline glyph (it collides with prose / forces a reflow).
+    var annotationUnderlineColor: UIColor = UIColor(named: "AccentColor")?.withAlphaComponent(0.9)
+        ?? UIColor.systemBlue.withAlphaComponent(0.9)
+
     static let aml = ReaderTuning()
 }
 

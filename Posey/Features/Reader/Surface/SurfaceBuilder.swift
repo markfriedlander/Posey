@@ -22,6 +22,8 @@ enum SurfaceBuilder {
         let body = NSMutableAttributedString()
         var unitRanges: [UUID: NSRange] = [:]
         var segments: [SurfaceSegment] = []
+        var anchors: [AnchorUnit] = []
+        var canonicalCursor = 0     // Character offset into the joined canonical text
         var playbackIndex = 0
 
         // Sentences grouped by unit, in intra order.
@@ -43,6 +45,17 @@ enum SurfaceBuilder {
             body.append(NSAttributedString(string: "\n"))
             let unitRange = NSRange(location: unitStart, length: body.length - unitStart)
             unitRanges[unit.id] = unitRange
+
+            // Record the canonical ↔ surface anchor for any unit that rendered real
+            // text (textStart >= 0). This is the annotation bridge AND the canonical
+            // text source; advance the canonical cursor by the unit's Character count
+            // + a "\n\n" separator so canonical offsets are globally unique + monotonic.
+            if textStart >= 0 {
+                anchors.append(AnchorUnit(unitID: unit.id, canonicalStart: canonicalCursor,
+                                          charCount: unit.text.count, surfaceTextStart: textStart,
+                                          text: unit.text))
+                canonicalCursor += unit.text.count + 2
+            }
 
             // Map this unit's sentences to surface ranges (playback order).
             guard unit.kind.carriesProseText, let segs = sentencesByUnit[unit.id] else { continue }
@@ -67,7 +80,8 @@ enum SurfaceBuilder {
         }
 
         return ReaderSurfaceContent(attributed: body,
-                                    layout: LayoutMap(unitRanges: unitRanges, segments: segments))
+                                    layout: LayoutMap(unitRanges: unitRanges, segments: segments,
+                                                      anchors: anchors))
     }
 
     // ========== BLOCK 02: PER-KIND RENDERING - START ==========

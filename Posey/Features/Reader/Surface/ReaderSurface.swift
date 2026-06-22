@@ -1,5 +1,22 @@
 import UIKit
 
+// ========== BLOCK 00: ANNOTATION SEAM TYPES - START ==========
+
+/// What the selection menu can place. UI-agnostic on purpose (the core knows nothing
+/// about Posey's `NoteKind`); the owner maps this to the domain model.
+enum AnnotationKind { case note, bookmark }
+
+/// A rendered annotation: an exact surface range to underline. The underline IS the
+/// marker AND the tap target (one treatment for all annotation kinds — note, bookmark,
+/// conversation; the kind is revealed when you open it). `id` is opaque to the core —
+/// the owner round-trips it back when the underline is tapped.
+struct SurfaceMarker {
+    let id: UUID
+    let surfaceRange: NSRange
+}
+
+// ========== BLOCK 00: ANNOTATION SEAM TYPES - END ==========
+
 // ========== BLOCK 01: READER SURFACE (CORE SPINE) - START ==========
 
 /// The CORE of the rebuilt reader: ONE owned UITextView (which IS its own scroll
@@ -24,6 +41,18 @@ final class ReaderSurface: NSObject {
     /// works). The owner resolves the offset → sentence → playback position.
     var onTap: ((Int) -> Void)?
 
+    /// Fired when the user picks Note/Bookmark from the selection menu, with the
+    /// current SURFACE selection range. The owner converts it to a canonical anchor
+    /// and persists (E2 create flow).
+    var onAnnotate: ((NSRange, AnnotationKind) -> Void)?
+
+    /// Fired when the user taps an annotation's underline — the owner opens it.
+    var onOpenMarker: ((UUID) -> Void)?
+
+    /// Rendered annotations (kept so a tap can be hit-tested against their ranges and
+    /// the prior underline attributes cleared on the next `setMarkers`).
+    private var markers: [SurfaceMarker] = []
+
     init(content: ReaderSurfaceContent, tuning: ReaderTuning = .aml) {
         self.content = content
         self.tuning = tuning
@@ -40,6 +69,7 @@ final class ReaderSurface: NSObject {
         tv.attributedText = content.attributed
         self.textView = tv
         super.init()
+        tv.delegate = self                                   // selection-menu actions
         // Tap-to-jump: non-cancelling so native long-press selection still works.
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         tap.cancelsTouchesInView = false
@@ -47,7 +77,14 @@ final class ReaderSurface: NSObject {
     }
 
     @objc private func handleTap(_ g: UITapGestureRecognizer) {
-        if let idx = charIndex(at: g.location(in: textView)) { onTap?(idx) }
+        guard let idx = charIndex(at: g.location(in: textView)) else { return }
+        // A tap landing ON an annotation's underline opens it; anywhere else jumps
+        // playback. Annotations are sparse, so this is unambiguous in practice.
+        if let m = markers.first(where: { NSLocationInRange(idx, $0.surfaceRange) }) {
+            onOpenMarker?(m.id)
+        } else {
+            onTap?(idx)
+        }
     }
 
     // ========== BLOCK 02: GEOMETRY - START ==========
@@ -130,6 +167,53 @@ final class ReaderSurface: NSObject {
     }
 
     // ========== BLOCK 04: READ-ALONG LINE BAND (LOCAL EDIT) - END ==========
+
+    // ========== BLOCK 05: ANNOTATION MARKERS (UNDERLINE) - START ==========
+
+    /// Render the given annotations by underlining each anchored substring in the
+    /// highlight hue. Replaces the previous set wholesale (attribute-only edits —
+    /// cheap, no reflow). `.underlineStyle` is independent of the read-along band's
+    /// `.backgroundColor`, so a note and the moving highlight coexist on the same line
+    /// without fighting. The underline is the marker AND the tap target (see handleTap);
+    /// no inline glyph — it would either collide with the prose or force a reflow that
+    /// shifts every downstream offset (the coordinate drift this rebuild exists to kill).
+    func setMarkers(_ newMarkers: [SurfaceMarker]) {
+        let ts = textView.textStorage
+        ts.beginEditing()
+        for m in markers where NSMaxRange(m.surfaceRange) <= ts.length {
+            ts.removeAttribute(.underlineStyle, range: m.surfaceRange)
+            ts.removeAttribute(.underlineColor, range: m.surfaceRange)
+        }
+        for m in newMarkers where m.surfaceRange.length > 0 && NSMaxRange(m.surfaceRange) <= ts.length {
+            ts.addAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue, range: m.surfaceRange)
+            ts.addAttribute(.underlineColor, value: tuning.annotationUnderlineColor, range: m.surfaceRange)
+        }
+        ts.endEditing()
+        markers = newMarkers
+    }
+
+    // ========== BLOCK 05: ANNOTATION MARKERS - END ==========
 }
 
 // ========== BLOCK 01: READER SURFACE (CORE SPINE) - END ==========
+
+// ========== BLOCK 06: SELECTION MENU (NOTE / BOOKMARK) - START ==========
+
+extension ReaderSurface: UITextViewDelegate {
+    /// Inject Note + Bookmark into the selection's contextual menu. The user selects
+    /// text and picks one; the owner converts the SURFACE range to a canonical anchor.
+    func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
+                  suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard range.length > 0 else { return UIMenu(children: suggestedActions) }
+        let note = UIAction(title: "Note", image: UIImage(systemName: "square.and.pencil")) {
+            [weak self] _ in self?.onAnnotate?(range, .note)
+        }
+        let bookmark = UIAction(title: "Bookmark", image: UIImage(systemName: "bookmark.fill")) {
+            [weak self] _ in self?.onAnnotate?(range, .bookmark)
+        }
+        let group = UIMenu(title: "", options: .displayInline, children: [note, bookmark])
+        return UIMenu(children: [group] + suggestedActions)
+    }
+}
+
+// ========== BLOCK 06: SELECTION MENU - END ==========

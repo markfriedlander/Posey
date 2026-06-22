@@ -24,7 +24,12 @@ struct ReaderSurfaceView: View {
         ZStack(alignment: .top) {
             if let surface = loader.surface {
                 SurfaceTextViewRep(textView: surface.textView)
-                    .ignoresSafeArea()
+                    // Respect the top + horizontal safe area so the notch / Dynamic
+                    // Island never obscures text in landscape (Mark, 2026-06-21);
+                    // extend under the bottom home-indicator only. Letting SwiftUI
+                    // size the view within the safe area also gives it a clean
+                    // re-layout on rotation (re-flow to the new width).
+                    .ignoresSafeArea(edges: .bottom)
             } else {
                 ProgressView("Building surface…").frame(maxWidth: .infinity, maxHeight: .infinity)
             }

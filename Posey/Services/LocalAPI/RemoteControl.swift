@@ -205,6 +205,14 @@ extension Notification.Name {
     /// presents the NEW one-surface reader (`ReaderSurfaceView`) as a separate cover —
     /// isolated from the shipping reader so render/memory testing can't disturb it.
     static let remoteOpenDocumentSurface = Notification.Name("PoseyRemoteOpenDocumentSurface")
+    /// DEBUG (reader rebuild). `userInfo["fraction"]: Double` (0…1). Scrolls the open
+    /// one-surface reader to that fraction of its content — lets the antenna frame any
+    /// part of the surface (e.g. an annotation) for capture/verification.
+    static let remoteScrollSurface = Notification.Name("PoseyRemoteScrollSurface")
+    /// DEBUG (reader rebuild). `userInfo["pointSize"]: Double`. Rebuilds the open
+    /// one-surface reader at a new body point size — the E2 Step-2 durability test
+    /// (annotation underlines must re-land on the exact characters after a re-flow).
+    static let remoteSetSurfaceFont = Notification.Name("PoseyRemoteSetSurfaceFont")
     /// No userInfo. LibraryView observes; pops the navigation path.
     static let remoteLibraryNavigateBack = Notification.Name("PoseyRemoteLibraryNavigateBack")
     /// No userInfo. LibraryView observes; toggles antenna OFF (re-enable

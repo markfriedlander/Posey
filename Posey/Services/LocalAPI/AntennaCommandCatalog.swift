@@ -180,6 +180,8 @@ nonisolated enum AntennaCommandCatalog {
         .init("OPEN_SEARCH_BAR", .reader, "OPEN_SEARCH_BAR", ""),
         .init("OPEN_DOCUMENT", .ui_nav, "OPEN_DOCUMENT:<docID>", "Open the reader on a doc from any UI state."),
         .init("OPEN_DOCUMENT_SURFACE", .ui_nav, "OPEN_DOCUMENT_SURFACE:<docID>", "DEBUG: open a doc in the rebuilt one-surface reader (Stage B render/memory test); isolated cover."),
+        .init("SCROLL_SURFACE", .ui_nav, "SCROLL_SURFACE:<fraction 0..1>", "DEBUG: scroll the open one-surface reader to a fraction of its content (frame any part for capture)."),
+        .init("SURFACE_FONT", .ui_nav, "SURFACE_FONT:<pointSize>", "DEBUG: rebuild the open one-surface reader at a new body point size (E2 annotation re-flow durability test)."),
         .init("LIBRARY_NAVIGATE_BACK", .ui_nav, "LIBRARY_NAVIGATE_BACK", ""),
         .init("ANTENNA_OFF", .system, "ANTENNA_OFF", ""),
         .init("SET_VOICE_MODE", .tts, "SET_VOICE_MODE:<best|custom>", ""),

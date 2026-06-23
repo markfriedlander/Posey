@@ -48,6 +48,12 @@ struct ReaderSurfaceView: View {
                             onDelete: { loader.deleteNote(note) })
                 .presentationDetents([.medium])
         }
+        .onReceive(NotificationCenter.default.publisher(for: .remoteScrollSurface)) { note in
+            if let f = note.userInfo?["fraction"] as? Double { loader.scrollTo(fraction: CGFloat(f)) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .remoteSetSurfaceFont)) { note in
+            if let pt = note.userInfo?["pointSize"] as? Double { loader.setBodyPointSize(CGFloat(pt)) }
+        }
     }
 
     private var hud: some View {
@@ -140,6 +146,9 @@ final class ReaderSurfaceLoader: ObservableObject {
     private var driver: SurfaceReadAlongDriver?
     private var databaseManager: DatabaseManager?
     private var documentID: UUID?
+    /// Current body point size — a stored knob so SURFACE_FONT can rebuild at a new
+    /// size (E2 Step-2 re-flow durability test).
+    private var bodyPointSize: CGFloat = 19
 
     /// Stage C: start line-level read-along from ~1/3 into the doc (real body prose,
     /// past front matter). Drives the surface's ReadAlongEngine via willSpeakRange —
@@ -211,6 +220,42 @@ final class ReaderSurfaceLoader: ObservableObject {
         loadMarkers()
     }
 
+    // ----- Verification tooling (antenna-driven): scroll + font re-flow -----
+
+    /// Scroll to a fraction (0…1) of the content — lets the antenna frame any part of
+    /// the surface (e.g. an annotation) for capture.
+    func scrollTo(fraction: CGFloat) {
+        guard let tv = surface?.textView else { return }
+        tv.layoutManager.ensureLayout(for: tv.textContainer)
+        let f = max(0, min(1, fraction))
+        let maxOff = max(0, tv.contentSize.height - tv.bounds.height)
+        tv.setContentOffset(CGPoint(x: 0, y: maxOff * f), animated: true)
+    }
+
+    /// Rebuild the surface at a new body point size and re-render annotations — the
+    /// E2 Step-2 durability test: underlines must re-land on the EXACT same characters
+    /// after the re-flow (canonical anchors re-resolve to the new surface ranges).
+    /// Scroll position is preserved as a fraction across the re-flow.
+    func setBodyPointSize(_ size: CGFloat) {
+        guard let surface, let db = databaseManager, let docID = documentID else { return }
+        bodyPointSize = max(10, min(48, size))
+        let tv = surface.textView
+        let oldMax = max(1, tv.contentSize.height - tv.bounds.height)
+        let frac = oldMax > 1 ? tv.contentOffset.y / oldMax : 0
+
+        let units = (try? db.units(for: docID)) ?? []
+        let sentences = (try? db.sentences(for: docID)) ?? []
+        let content = SurfaceBuilder.build(units: units, sentences: sentences,
+                                           bodyPointSize: bodyPointSize,
+                                           imageData: { (try? db.imageData(for: $0)) ?? nil })
+        surface.reload(content: content)
+        loadMarkers()
+
+        tv.layoutManager.ensureLayout(for: tv.textContainer)
+        let newMax = max(0, tv.contentSize.height - tv.bounds.height)
+        tv.setContentOffset(CGPoint(x: 0, y: newMax * frac), animated: false)
+    }
+
     private var title = ""
     private var units = 0
     private var sents = 0
@@ -227,7 +272,7 @@ final class ReaderSurfaceLoader: ObservableObject {
 
         let t0 = CACurrentMediaTime()
         let content = SurfaceBuilder.build(
-            units: units, sentences: sentences, bodyPointSize: 19,
+            units: units, sentences: sentences, bodyPointSize: bodyPointSize,
             imageData: { (try? databaseManager.imageData(for: $0)) ?? nil })
         buildMs = (CACurrentMediaTime() - t0) * 1000
 

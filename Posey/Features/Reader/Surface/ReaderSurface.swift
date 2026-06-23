@@ -193,6 +193,23 @@ final class ReaderSurface: NSObject {
     }
 
     // ========== BLOCK 05: ANNOTATION MARKERS - END ==========
+
+    // ========== BLOCK 05B: CONTENT RELOAD (FONT-SIZE / RE-FLOW) - START ==========
+
+    /// Swap in freshly-built content (e.g. rebuilt at a new body point size) on the
+    /// SAME text view — the SwiftUI host keeps its reference, so the document re-flows
+    /// in place. Clears transient render state (active line, markers); the owner
+    /// re-applies markers afterward, re-resolving canonical anchors → the NEW surface
+    /// ranges. This is the E2 Step-2 durability path: an annotation underline must
+    /// land on the exact same characters after the re-flow.
+    func reload(content newContent: ReaderSurfaceContent) {
+        content = newContent
+        activeLineRange = nil
+        markers = []
+        textView.attributedText = newContent.attributed
+    }
+
+    // ========== BLOCK 05B: CONTENT RELOAD - END ==========
 }
 
 // ========== BLOCK 01: READER SURFACE (CORE SPINE) - END ==========

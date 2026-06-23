@@ -3548,6 +3548,31 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted", "documentID": idStr, "surface": "new"])
 
+            case "SCROLL_SURFACE":
+                // Reader rebuild: scroll the open one-surface reader to a fraction of
+                // its content, so the antenna can frame any part (e.g. an annotation).
+                guard let s = arg, let f = Double(s) else {
+                    return #"{"error":"Usage: SCROLL_SURFACE:<fraction 0..1>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteScrollSurface, object: nil,
+                                                    userInfo: ["fraction": f])
+                }
+                return json(["status": "posted", "fraction": s])
+
+            case "SURFACE_FONT":
+                // Reader rebuild: rebuild the open one-surface reader at a new body
+                // point size (E2 Step-2: annotation underlines must re-land exactly
+                // on the same characters after the re-flow).
+                guard let s = arg, let pt = Double(s), pt >= 10, pt <= 48 else {
+                    return #"{"error":"Usage: SURFACE_FONT:<pointSize 10..48>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetSurfaceFont, object: nil,
+                                                    userInfo: ["pointSize": pt])
+                }
+                return json(["status": "posted", "pointSize": s])
+
             // ===== Library nav ================================================
             case "LIBRARY_NAVIGATE_BACK":
                 await MainActor.run {

@@ -3573,6 +3573,56 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted", "pointSize": s])
 
+            case "SIMULATE_ANCHOR_DRIFT":
+                // TEST (E2 R8): mutate the host unit's text of the most-recent anchored
+                // annotation to prove the durable anchor re-finds (shift) or flags
+                // (break) — reversibly (restore). Reopen the surface after to rebuild.
+                let parts = (arg ?? "").split(separator: ":", maxSplits: 1).map(String.init)
+                guard parts.count == 2, let docID = UUID(uuidString: parts[0]) else {
+                    return #"{"error":"Usage: SIMULATE_ANCHOR_DRIFT:<docID>:<shift|break|restore>"}"#
+                }
+                let mode = parts[1]
+                let notes = (try? databaseManager.notes(for: docID)) ?? []
+                guard let note = notes.first(where: { ($0.anchorText?.isEmpty == false) }),
+                      let anchorText = note.anchorText else {
+                    return #"{"error":"no R8-anchored note found for this doc"}"#
+                }
+                let units = (try? databaseManager.units(for: docID)) ?? []
+                let prefix = "[Editor's note: a paragraph was inserted here during enhancement.] "
+                guard let host = units.first(where: {
+                    $0.text.contains(anchorText) || $0.text.contains("[REDACTED]") || $0.text.hasPrefix(prefix)
+                }) else {
+                    return #"{"error":"host unit not found"}"#
+                }
+                var newText = host.text
+                switch mode {
+                case "shift":   if !newText.hasPrefix(prefix) { newText = prefix + newText }
+                case "break":   newText = newText.replacingOccurrences(of: anchorText, with: "[REDACTED]")
+                case "restore":
+                    if newText.hasPrefix(prefix) { newText.removeFirst(prefix.count) }
+                    newText = newText.replacingOccurrences(of: "[REDACTED]", with: anchorText)
+                default:
+                    return #"{"error":"mode must be shift|break|restore"}"#
+                }
+                try? databaseManager.debugSetUnitText(unitID: host.id, text: newText)
+                return json(["status": "mutated", "mode": mode, "unit": host.id.uuidString,
+                             "anchorText": anchorText])
+
+            case "SURFACE_ANNOTATE":
+                // TEST (E2 R8): annotate the first occurrence of a phrase in the open
+                // one-surface reader (no interactive selection needed). Format:
+                // SURFACE_ANNOTATE:<note|bookmark>:<phrase>.
+                let parts = (arg ?? "").split(separator: ":", maxSplits: 1).map(String.init)
+                guard parts.count == 2, !parts[1].isEmpty else {
+                    return #"{"error":"Usage: SURFACE_ANNOTATE:<note|bookmark>:<phrase>"}"#
+                }
+                let kind = parts[0]
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteAnnotateSurface, object: nil,
+                                                    userInfo: ["phrase": parts[1], "kind": kind])
+                }
+                return json(["status": "posted", "kind": kind, "phrase": parts[1]])
+
             // ===== Library nav ================================================
             case "LIBRARY_NAVIGATE_BACK":
                 await MainActor.run {

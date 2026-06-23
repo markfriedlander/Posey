@@ -18,7 +18,10 @@ struct SurfaceCoverModifier: ViewModifier {
                 guard let id = note.userInfo?["documentID"] as? UUID,
                       let doc = (try? databaseManager.documents())?.first(where: { $0.id == id })
                 else { return }
-                surfaceDocument = doc
+                // Dismiss-then-present so reopening the SAME doc forces a fresh build
+                // from the current DB (needed to pick up a text mutation in the R8 test).
+                surfaceDocument = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { surfaceDocument = doc }
             }
             .fullScreenCover(item: $surfaceDocument) { doc in
                 ReaderSurfaceView(document: doc, databaseManager: databaseManager,

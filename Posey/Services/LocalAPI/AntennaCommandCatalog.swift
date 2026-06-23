@@ -182,6 +182,8 @@ nonisolated enum AntennaCommandCatalog {
         .init("OPEN_DOCUMENT_SURFACE", .ui_nav, "OPEN_DOCUMENT_SURFACE:<docID>", "DEBUG: open a doc in the rebuilt one-surface reader (Stage B render/memory test); isolated cover."),
         .init("SCROLL_SURFACE", .ui_nav, "SCROLL_SURFACE:<fraction 0..1>", "DEBUG: scroll the open one-surface reader to a fraction of its content (frame any part for capture)."),
         .init("SURFACE_FONT", .ui_nav, "SURFACE_FONT:<pointSize>", "DEBUG: rebuild the open one-surface reader at a new body point size (E2 annotation re-flow durability test)."),
+        .init("SIMULATE_ANCHOR_DRIFT", .ui_nav, "SIMULATE_ANCHOR_DRIFT:<docID>:<shift|break|restore>", "TEST (E2 R8): mutate the most-recent annotation's host-unit text to prove the durable anchor re-finds (shift) / flags (break), reversibly (restore). Reopen the surface after."),
+        .init("SURFACE_ANNOTATE", .ui_nav, "SURFACE_ANNOTATE:<note|bookmark>:<phrase>", "TEST (E2 R8): annotate the first occurrence of a phrase in the open one-surface reader (no interactive selection needed)."),
         .init("LIBRARY_NAVIGATE_BACK", .ui_nav, "LIBRARY_NAVIGATE_BACK", ""),
         .init("ANTENNA_OFF", .system, "ANTENNA_OFF", ""),
         .init("SET_VOICE_MODE", .tts, "SET_VOICE_MODE:<best|custom>", ""),

@@ -54,11 +54,23 @@ struct ReaderSurfaceView: View {
         .onReceive(NotificationCenter.default.publisher(for: .remoteSetSurfaceFont)) { note in
             if let pt = note.userInfo?["pointSize"] as? Double { loader.setBodyPointSize(CGFloat(pt)) }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .remoteAnnotateSurface)) { note in
+            if let phrase = note.userInfo?["phrase"] as? String {
+                let kind: AnnotationKind = (note.userInfo?["kind"] as? String) == "bookmark" ? .bookmark : .note
+                loader.annotatePhrase(phrase, kind: kind)
+            }
+        }
     }
 
     private var hud: some View {
         HStack(alignment: .top) {
-            Text(loader.stats)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(loader.stats)
+                if loader.brokenAnchorCount > 0 {
+                    Text("⚠︎ \(loader.brokenAnchorCount) annotation(s) unanchorable — not drawn")
+                        .foregroundStyle(.orange)
+                }
+            }
                 .font(.system(size: 11, weight: .semibold).monospaced())
                 .padding(8)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
@@ -142,6 +154,9 @@ final class ReaderSurfaceLoader: ObservableObject {
     @Published var stats = "loading…"
     /// The note/bookmark currently open in the editor sheet (E2). nil = closed.
     @Published var editingNote: Note?
+    /// R8: count of annotations whose anchor text could no longer be found, so they
+    /// were NOT drawn (never mis-highlighted). Surfaced in the HUD for verification.
+    @Published var brokenAnchorCount = 0
     private var engine: ReadAlongEngine?
     private var driver: SurfaceReadAlongDriver?
     private var databaseManager: DatabaseManager?
@@ -176,30 +191,68 @@ final class ReaderSurfaceLoader: ObservableObject {
     func loadMarkers() {
         guard let surface, let db = databaseManager, let docID = documentID else { return }
         let notes = (try? db.notes(for: docID)) ?? []
-        let markers: [SurfaceMarker] = notes.compactMap { note in
+        let layout = surface.content.layout
+        var markers: [SurfaceMarker] = []
+        var broken = 0
+        for note in notes {
             let canonical = NSRange(location: note.startOffset,
                                     length: max(0, note.endOffset - note.startOffset))
-            guard let sr = surface.content.layout.surfaceRange(forCanonicalRange: canonical),
-                  sr.length > 0 else { return nil }
-            return SurfaceMarker(id: note.id, surfaceRange: sr)
+            // R8: resolve the durable anchor — exact, re-found, or broken. A broken
+            // anchor is NEVER drawn (it would land on the wrong words); it's counted
+            // so the reader can surface "this annotation's text changed" instead.
+            switch layout.resolveAnchor(canonicalRange: canonical, anchorText: note.anchorText,
+                                        contextBefore: note.contextBefore, contextAfter: note.contextAfter) {
+            case .exact(let cr), .relocated(let cr):
+                if let sr = layout.surfaceRange(forCanonicalRange: cr), sr.length > 0 {
+                    markers.append(SurfaceMarker(id: note.id, surfaceRange: sr))
+                } else { broken += 1 }
+            case .broken:
+                broken += 1
+            }
         }
         surface.setMarkers(markers)
+        brokenAnchorCount = broken
     }
 
     /// Selection → Note/Bookmark: convert the SURFACE selection to a canonical anchor
     /// and persist it, then re-render markers. For a note, open the editor immediately
     /// so the user can type the body.
     func createAnnotation(surfaceRange: NSRange, kind: AnnotationKind) {
-        guard let surface, let db = databaseManager, let docID = documentID,
-              let canonical = surface.content.layout.canonicalRange(forSurfaceRange: surfaceRange),
-              canonical.length > 0 else { return }
+        guard let canonical = surface?.content.layout.canonicalRange(forSurfaceRange: surfaceRange),
+              let note = createFromCanonical(canonical, kind: kind) else { return }
+        if kind == .note { editingNote = note }
+    }
+
+    /// Create an annotation from a CANONICAL range, capturing the R8 durable anchor
+    /// (exact substring + context) so it can be re-found or flagged if a later text
+    /// mutation drifts offsets. Shared by the selection menu and the test verb.
+    @discardableResult
+    func createFromCanonical(_ canonical: NSRange, kind: AnnotationKind) -> Note? {
+        guard let surface, let db = databaseManager, let docID = documentID, canonical.length > 0 else { return nil }
+        let layout = surface.content.layout
+        let anchorText = layout.canonicalText(forCanonicalRange: canonical)
+        let ctx = layout.canonicalContext(forCanonicalRange: canonical, window: 24)
         let now = Date()
         let note = Note(id: UUID(), documentID: docID, createdAt: now, updatedAt: now,
                         kind: kind == .bookmark ? .bookmark : .note,
-                        startOffset: canonical.location, endOffset: NSMaxRange(canonical), body: nil)
-        guard (try? db.insertNote(note)) != nil else { return }
+                        startOffset: canonical.location, endOffset: NSMaxRange(canonical), body: nil,
+                        anchorText: anchorText, contextBefore: ctx.before, contextAfter: ctx.after)
+        guard (try? db.insertNote(note)) != nil else { return nil }
         loadMarkers()
-        if kind == .note { editingNote = note }
+        return note
+    }
+
+    /// TEST (E2 R8): annotate the first occurrence of `phrase` in the canonical text —
+    /// lets the antenna create a real R8-anchored annotation without an interactive
+    /// text selection, so the full re-find/flag cycle is autonomously verifiable.
+    @discardableResult
+    func annotatePhrase(_ phrase: String, kind: AnnotationKind) -> Bool {
+        guard let surface, !phrase.isEmpty else { return false }
+        let full = surface.content.layout.fullCanonicalText()
+        guard let r = full.range(of: phrase) else { return false }
+        let start = full.distance(from: full.startIndex, to: r.lowerBound)
+        let len = full.distance(from: r.lowerBound, to: r.upperBound)
+        return createFromCanonical(NSRange(location: start, length: len), kind: kind) != nil
     }
 
     /// Glyph tap → open the note/bookmark in the editor sheet.

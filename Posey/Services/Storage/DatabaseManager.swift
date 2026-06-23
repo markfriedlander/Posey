@@ -625,7 +625,8 @@ extension DatabaseManager {
     func notes(for documentID: UUID) throws -> [Note] {
         dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
-        SELECT id, document_id, created_at, updated_at, kind, start_offset, end_offset, body
+        SELECT id, document_id, created_at, updated_at, kind, start_offset, end_offset, body,
+               anchor_text, context_before, context_after
         FROM notes
         WHERE document_id = ?
         ORDER BY created_at DESC;
@@ -654,7 +655,10 @@ extension DatabaseManager {
                 kind: kind,
                 startOffset: Int(sqlite3_column_int64(statement, 5)),
                 endOffset: Int(sqlite3_column_int64(statement, 6)),
-                body: sqliteString(statement, index: 7)
+                body: sqliteString(statement, index: 7),
+                anchorText: sqliteString(statement, index: 8),
+                contextBefore: sqliteString(statement, index: 9),
+                contextAfter: sqliteString(statement, index: 10)
             ))
         }
         return notes
@@ -663,8 +667,9 @@ extension DatabaseManager {
     func insertNote(_ note: Note) throws {
         dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
-        INSERT INTO notes (id, document_id, created_at, updated_at, kind, start_offset, end_offset, body)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        INSERT INTO notes (id, document_id, created_at, updated_at, kind, start_offset, end_offset, body,
+                           anchor_text, context_before, context_after)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -677,11 +682,11 @@ extension DatabaseManager {
         sqlite3_bind_int64(statement, 6, sqlite3_int64(note.startOffset))
         sqlite3_bind_int64(statement, 7, sqlite3_int64(note.endOffset))
 
-        if let body = note.body {
-            try bind(body, at: 8, for: statement)
-        } else {
-            sqlite3_bind_null(statement, 8)
-        }
+        if let body = note.body { try bind(body, at: 8, for: statement) }
+        else { sqlite3_bind_null(statement, 8) }
+        if let t = note.anchorText { try bind(t, at: 9, for: statement) } else { sqlite3_bind_null(statement, 9) }
+        if let c = note.contextBefore { try bind(c, at: 10, for: statement) } else { sqlite3_bind_null(statement, 10) }
+        if let c = note.contextAfter { try bind(c, at: 11, for: statement) } else { sqlite3_bind_null(statement, 11) }
 
         try step(statement)
     }
@@ -706,6 +711,20 @@ extension DatabaseManager {
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
         try bind(id.uuidString, at: 1, for: statement)
+        try step(statement)
+    }
+
+    /// TEST SUPPORT (E2 R8): overwrite a unit's text + bump its revision, simulating
+    /// the enhancement pipeline mutating text after an annotation was anchored. Reached
+    /// only via the DEBUG-only antenna verb `SIMULATE_ANCHOR_DRIFT`; not used in normal
+    /// flows. Lets the annotation re-find / flag path be exercised on a real device.
+    func debugSetUnitText(unitID: UUID, text: String) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = "UPDATE document_units SET text = ?, revision = revision + 1 WHERE id = ?;"
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(text, at: 1, for: statement)
+        try bind(unitID.uuidString, at: 2, for: statement)
         try step(statement)
     }
 }
@@ -1510,6 +1529,17 @@ extension DatabaseManager {
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
             """)
+
+        // E2 R8 — durable annotation anchor (legal-grade). Bare offsets silently point
+        // at the wrong characters if a unit's text is later mutated (enhancement
+        // pipeline bumps revision + rewrites text) or re-imported. Store the anchored
+        // substring + a small left/right context window so an anchor can be RE-FOUND
+        // when offsets drift, and FLAGGED as unanchorable rather than mis-highlighting
+        // if the text truly changed. Nullable + additive (legacy/bookmark rows = NULL,
+        // treated as offset-only). No migration — just three ADD COLUMNs.
+        try addColumnIfNeeded(table: "notes", column: "anchor_text", definition: "TEXT")
+        try addColumnIfNeeded(table: "notes", column: "context_before", definition: "TEXT")
+        try addColumnIfNeeded(table: "notes", column: "context_after", definition: "TEXT")
 
         try execute("""
             CREATE TABLE IF NOT EXISTS document_images (

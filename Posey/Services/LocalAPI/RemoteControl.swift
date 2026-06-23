@@ -213,6 +213,11 @@ extension Notification.Name {
     /// one-surface reader at a new body point size — the E2 Step-2 durability test
     /// (annotation underlines must re-land on the exact characters after a re-flow).
     static let remoteSetSurfaceFont = Notification.Name("PoseyRemoteSetSurfaceFont")
+    /// DEBUG/TEST (E2 R8). `userInfo["phrase"]: String`, `["kind"]: "note"|"bookmark"`.
+    /// Annotates the first occurrence of the phrase in the open one-surface reader —
+    /// creates a real R8-anchored annotation without an interactive text selection, so
+    /// the re-find/flag cycle is autonomously verifiable.
+    static let remoteAnnotateSurface = Notification.Name("PoseyRemoteAnnotateSurface")
     /// No userInfo. LibraryView observes; pops the navigation path.
     static let remoteLibraryNavigateBack = Notification.Name("PoseyRemoteLibraryNavigateBack")
     /// No userInfo. LibraryView observes; toggles antenna OFF (re-enable

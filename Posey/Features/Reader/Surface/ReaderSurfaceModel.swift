@@ -48,6 +48,13 @@ struct AnchorUnit {
     var surfaceTextLength: Int { text.utf16.count }
 }
 
+/// Outcome of resolving a persisted annotation anchor against the current text (R8).
+enum AnchorResolution: Equatable {
+    case exact(NSRange)       // canonical range unchanged
+    case relocated(NSRange)   // text drifted; re-found the exact substring here
+    case broken               // substring gone — never highlight (visibly-broken > silently-wrong)
+}
+
 // ========== BLOCK 01b: ANCHOR UNIT - END ==========
 
 // ========== BLOCK 02: LAYOUT MAP (THE SINGLE COORDINATE AUTHORITY) - START ==========
@@ -127,6 +134,81 @@ struct LayoutMap {
               let hi = surfaceLocation(forCanonicalOffset: NSMaxRange(r)) else { return nil }
         let start = min(lo, hi), end = max(lo, hi)
         return NSRange(location: start, length: end - start)
+    }
+
+    /// Total Character length of the canonical text (last unit's end).
+    var totalCanonicalLength: Int { anchors.last.map { $0.canonicalStart + $0.charCount } ?? 0 }
+
+    /// The full canonical document text — units joined by `"\n\n"`, which reproduces
+    /// the exact `canonicalStart` offsets (each gap is the 2-char separator the builder
+    /// used). Built on demand (only when an anchor must be re-found), never per-open.
+    func fullCanonicalText() -> String { anchors.map(\.text).joined(separator: "\n\n") }
+
+    /// The left/right context windows around a canonical range — captured at creation
+    /// so a drifted anchor can be re-found unambiguously (R8 durability).
+    func canonicalContext(forCanonicalRange r: NSRange, window: Int) -> (before: String, after: String) {
+        let beforeLen = min(window, r.location)
+        let before = canonicalText(forCanonicalRange: NSRange(location: r.location - beforeLen, length: beforeLen))
+        let afterStart = NSMaxRange(r)
+        let afterLen = max(0, min(window, totalCanonicalLength - afterStart))
+        let after = canonicalText(forCanonicalRange: NSRange(location: afterStart, length: afterLen))
+        return (before, after)
+    }
+
+    /// R8 — resolve a persisted annotation anchor against the CURRENT document text,
+    /// so a later text mutation can never silently mis-highlight:
+    ///   • `.exact`     — the stored range still holds the expected substring.
+    ///   • `.relocated` — the text drifted; we re-found the exact substring elsewhere
+    ///                    (context-bracketed, nearest the old offset) → highlight there.
+    ///   • `.broken`    — the substring is gone; do NOT highlight (visibly-broken beats
+    ///                    silently-wrong). The owner surfaces it; it never lands on the
+    ///                    wrong words.
+    /// Legacy/bookmark rows (no `anchorText`) trust the offset as-is.
+    func resolveAnchor(canonicalRange r: NSRange, anchorText: String?,
+                       contextBefore: String?, contextAfter: String?) -> AnchorResolution {
+        guard let expected = anchorText, !expected.isEmpty else {
+            return surfaceRange(forCanonicalRange: r) != nil ? .exact(r) : .broken
+        }
+        if canonicalText(forCanonicalRange: r) == expected, surfaceRange(forCanonicalRange: r) != nil {
+            return .exact(r)
+        }
+        if let found = locate(expected, before: contextBefore, after: contextAfter,
+                              near: r.location, in: fullCanonicalText()) {
+            return .relocated(found)
+        }
+        return .broken
+    }
+
+    /// Find `needle` in `full`, preferring an occurrence whose surrounding text matches
+    /// the stored context (disambiguates repeated phrases), then the one nearest the old
+    /// offset (drift is usually small). Returns its canonical Character range.
+    private func locate(_ needle: String, before: String?, after: String?,
+                        near: Int, in full: String) -> NSRange? {
+        guard !needle.isEmpty else { return nil }
+        var best: (range: NSRange, dist: Int)?
+        var from = full.startIndex
+        while let r = full.range(of: needle, range: from..<full.endIndex) {
+            let startOff = full.distance(from: full.startIndex, to: r.lowerBound)
+            let len = full.distance(from: r.lowerBound, to: r.upperBound)
+            var ok = true
+            if let b = before, !b.isEmpty {
+                let bLen = min(b.count, startOff)
+                let preStart = full.index(r.lowerBound, offsetBy: -bLen)
+                if String(full[preStart..<r.lowerBound]) != String(b.suffix(bLen)) { ok = false }
+            }
+            if ok, let a = after, !a.isEmpty {
+                let aAvail = full.distance(from: r.upperBound, to: full.endIndex)
+                let aLen = min(a.count, aAvail)
+                let postEnd = full.index(r.upperBound, offsetBy: aLen)
+                if String(full[r.upperBound..<postEnd]) != String(a.prefix(aLen)) { ok = false }
+            }
+            if ok {
+                let dist = abs(startOff - near)
+                if best == nil || dist < best!.dist { best = (NSRange(location: startOff, length: len), dist) }
+            }
+            from = full.index(after: r.lowerBound)
+        }
+        return best?.range
     }
 
     /// The exact canonical substring for a canonical range (Step-2 durability: the

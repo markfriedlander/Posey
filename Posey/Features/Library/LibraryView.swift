@@ -3608,6 +3608,24 @@ extension LibraryViewModel {
                 return json(["status": "mutated", "mode": mode, "unit": host.id.uuidString,
                              "anchorText": anchorText])
 
+            case "SIMULATE_FUSION_FIX":
+                // TEST (annotation precise-repair): run the REAL Tier-3 token swap
+                // (replaceTokenInUnits) so its in-transaction note re-anchor is exercised.
+                // Format: SIMULATE_FUSION_FIX:<docID>:<original>:<corrected>.
+                let parts = (arg ?? "").split(separator: ":", maxSplits: 2).map(String.init)
+                guard parts.count == 3, let docID = UUID(uuidString: parts[0]),
+                      !parts[1].isEmpty else {
+                    return #"{"error":"Usage: SIMULATE_FUSION_FIX:<docID>:<original>:<corrected>"}"#
+                }
+                do {
+                    let r = try databaseManager.replaceTokenInUnits(documentID: docID, original: parts[1],
+                                                                    corrected: parts[2], sourceTier: "tier3_afm")
+                    return json(["status": "swapped", "original": parts[1], "corrected": parts[2],
+                                 "unitsTouched": String(r.unitsTouched), "occurrences": String(r.totalOccurrences)])
+                } catch {
+                    return #"{"error":"replaceTokenInUnits failed"}"#
+                }
+
             case "SURFACE_ANNOTATE":
                 // TEST (E2 R8): annotate the first occurrence of a phrase in the open
                 // one-surface reader (no interactive selection needed). Format:

@@ -184,6 +184,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("SURFACE_FONT", .ui_nav, "SURFACE_FONT:<pointSize>", "DEBUG: rebuild the open one-surface reader at a new body point size (E2 annotation re-flow durability test)."),
         .init("SIMULATE_ANCHOR_DRIFT", .ui_nav, "SIMULATE_ANCHOR_DRIFT:<docID>:<shift|break|restore>", "TEST (E2 R8): mutate the most-recent annotation's host-unit text to prove the durable anchor re-finds (shift) / flags (break), reversibly (restore). Reopen the surface after."),
         .init("SURFACE_ANNOTATE", .ui_nav, "SURFACE_ANNOTATE:<note|bookmark>:<phrase>", "TEST (E2 R8): annotate the first occurrence of a phrase in the open one-surface reader (no interactive selection needed)."),
+        .init("SIMULATE_FUSION_FIX", .ui_nav, "SIMULATE_FUSION_FIX:<docID>:<original>:<corrected>", "TEST (annotation precise-repair): run the real Tier-3 replaceTokenInUnits swap to exercise its in-transaction note re-anchor."),
         .init("LIBRARY_NAVIGATE_BACK", .ui_nav, "LIBRARY_NAVIGATE_BACK", ""),
         .init("ANTENNA_OFF", .system, "ANTENNA_OFF", ""),
         .init("SET_VOICE_MODE", .tts, "SET_VOICE_MODE:<best|custom>", ""),

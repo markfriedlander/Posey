@@ -3254,6 +3254,42 @@ extension DatabaseManager {
                 try step(updateStmt)
             }
 
+            // Keep annotations CONFIDENT through this fix (precise re-anchor). Apply the
+            // SAME word-boundary token swap to each note's stored anchored substring +
+            // surrounding context for this document. A note whose highlighted phrase (or
+            // its context) contained the fused token now re-finds itself EXACTLY against
+            // the corrected text — staying a solid/confident highlight instead of
+            // degrading to an "unsure" placement the reader must re-confirm. Offsets are
+            // left as-is; the reader's re-find relocates by the corrected text. Runs in
+            // the SAME transaction as the unit edits, so text + annotations stay
+            // consistent atomically. (dbLock is recursive; notes(for:) re-enters safely.)
+            if totalOccurrences > 0 {
+                let template = NSRegularExpression.escapedTemplate(for: corrected)
+                func swapToken(_ s: String?) -> String? {
+                    guard let s, !s.isEmpty else { return s }
+                    let rng = NSRange(s.startIndex..., in: s)
+                    guard regex.firstMatch(in: s, range: rng) != nil else { return s }
+                    return regex.stringByReplacingMatches(in: s, range: rng, withTemplate: template)
+                }
+                for note in try notes(for: documentID) {
+                    let na = swapToken(note.anchorText)
+                    let nb = swapToken(note.contextBefore)
+                    let nc = swapToken(note.contextAfter)
+                    guard na != note.anchorText || nb != note.contextBefore || nc != note.contextAfter else { continue }
+                    let nStmt = try prepareStatement(sql: """
+                        UPDATE notes SET anchor_text = ?, context_before = ?, context_after = ?, updated_at = ?
+                        WHERE id = ?;
+                        """)
+                    defer { sqlite3_finalize(nStmt) }
+                    if let na { try bind(na, at: 1, for: nStmt) } else { sqlite3_bind_null(nStmt, 1) }
+                    if let nb { try bind(nb, at: 2, for: nStmt) } else { sqlite3_bind_null(nStmt, 2) }
+                    if let nc { try bind(nc, at: 3, for: nStmt) } else { sqlite3_bind_null(nStmt, 3) }
+                    sqlite3_bind_double(nStmt, 4, Date().timeIntervalSince1970)
+                    try bind(note.id.uuidString, at: 5, for: nStmt)
+                    try step(nStmt)
+                }
+            }
+
             try execute("COMMIT;")
             return ReplaceTokenInUnitsResult(
                 unitsTouched: unitsTouched,

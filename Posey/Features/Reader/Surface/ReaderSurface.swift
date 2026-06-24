@@ -7,12 +7,14 @@ import UIKit
 enum AnnotationKind { case note, bookmark }
 
 /// A rendered annotation: an exact surface range to underline. The underline IS the
-/// marker AND the tap target (one treatment for all annotation kinds — note, bookmark,
-/// conversation; the kind is revealed when you open it). `id` is opaque to the core —
-/// the owner round-trips it back when the underline is tapped.
+/// marker AND the tap target. `id` is opaque to the core — the owner round-trips it
+/// back when the underline is tapped. `unsure` = we couldn't verify the exact words
+/// (the text changed under the note), so it's drawn faded/dotted and a tap offers
+/// re-confirm — the note is never hidden, never confidently mis-placed.
 struct SurfaceMarker {
     let id: UUID
     let surfaceRange: NSRange
+    var unsure: Bool = false
 }
 
 // ========== BLOCK 00: ANNOTATION SEAM TYPES - END ==========
@@ -48,6 +50,11 @@ final class ReaderSurface: NSObject {
 
     /// Fired when the user taps an annotation's underline — the owner opens it.
     var onOpenMarker: ((UUID) -> Void)?
+
+    /// When the owner is re-placing an unsure note ("Move it"), the selection menu
+    /// offers "Move note here" instead of Note/Bookmark, and a selection fires this.
+    var awaitingMove = false
+    var onMoveHere: ((NSRange) -> Void)?
 
     /// Rendered annotations (kept so a tap can be hit-tested against their ranges and
     /// the prior underline attributes cleared on the next `setMarkers`).
@@ -185,8 +192,13 @@ final class ReaderSurface: NSObject {
             ts.removeAttribute(.underlineColor, range: m.surfaceRange)
         }
         for m in newMarkers where m.surfaceRange.length > 0 && NSMaxRange(m.surfaceRange) <= ts.length {
-            ts.addAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue, range: m.surfaceRange)
-            ts.addAttribute(.underlineColor, value: tuning.annotationUnderlineColor, range: m.surfaceRange)
+            // Confident = solid thick underline. Unsure = dotted + dimmed: visibly "this
+            // note's spot isn't certain," never a confident (mis)placement.
+            let style: NSUnderlineStyle = m.unsure ? [.thick, .patternDot] : .thick
+            let color = m.unsure ? tuning.annotationUnderlineColor.withAlphaComponent(0.55)
+                                 : tuning.annotationUnderlineColor
+            ts.addAttribute(.underlineStyle, value: style.rawValue, range: m.surfaceRange)
+            ts.addAttribute(.underlineColor, value: color, range: m.surfaceRange)
         }
         ts.endEditing()
         markers = newMarkers
@@ -222,6 +234,13 @@ extension ReaderSurface: UITextViewDelegate {
     func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
                   suggestedActions: [UIMenuElement]) -> UIMenu? {
         guard range.length > 0 else { return UIMenu(children: suggestedActions) }
+        if awaitingMove {
+            // Re-placing an unsure note: the only annotation action is "move it here".
+            let move = UIAction(title: "Move note here", image: UIImage(systemName: "hand.point.up.left.fill")) {
+                [weak self] _ in self?.onMoveHere?(range)
+            }
+            return UIMenu(children: [UIMenu(title: "", options: .displayInline, children: [move])] + suggestedActions)
+        }
         let note = UIAction(title: "Note", image: UIImage(systemName: "square.and.pencil")) {
             [weak self] _ in self?.onAnnotate?(range, .note)
         }

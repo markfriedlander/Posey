@@ -704,6 +704,29 @@ extension DatabaseManager {
         try step(statement)
     }
 
+    /// Re-anchor a note: overwrite its offsets + durable anchor (substring + context).
+    /// Used when the reader re-confirms an unsure note's location, or when the
+    /// enhancement pipeline precisely re-anchors a note whose text it just rewrote.
+    func updateNoteAnchor(id: UUID, startOffset: Int, endOffset: Int,
+                          anchorText: String?, contextBefore: String?, contextAfter: String?,
+                          updatedAt: Date = Date()) throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = """
+        UPDATE notes SET start_offset = ?, end_offset = ?, anchor_text = ?,
+                         context_before = ?, context_after = ?, updated_at = ? WHERE id = ?;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, sqlite3_int64(startOffset))
+        sqlite3_bind_int64(statement, 2, sqlite3_int64(endOffset))
+        if let t = anchorText { try bind(t, at: 3, for: statement) } else { sqlite3_bind_null(statement, 3) }
+        if let c = contextBefore { try bind(c, at: 4, for: statement) } else { sqlite3_bind_null(statement, 4) }
+        if let c = contextAfter { try bind(c, at: 5, for: statement) } else { sqlite3_bind_null(statement, 5) }
+        sqlite3_bind_double(statement, 6, updatedAt.timeIntervalSince1970)
+        try bind(id.uuidString, at: 7, for: statement)
+        try step(statement)
+    }
+
     /// Delete a note/bookmark by id.
     func deleteNote(id: UUID) throws {
         dbLock.lock(); defer { dbLock.unlock() }

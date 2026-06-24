@@ -44,9 +44,27 @@ struct ReaderSurfaceView: View {
         }
         .sheet(item: $loader.editingNote) { note in
             NoteEditorSheet(note: note,
+                            isUnsure: loader.editingNoteIsUnsure,
                             onSave: { loader.saveNoteBody(note, body: $0) },
+                            onReconfirm: { loader.reconfirmNote(note) },
+                            onMoveIt: { loader.beginMove(note) },
                             onDelete: { loader.deleteNote(note) })
                 .presentationDetents([.medium])
+        }
+        .overlay(alignment: .bottom) {
+            if loader.pendingReanchorNote != nil {
+                HStack(spacing: 12) {
+                    Image(systemName: "hand.point.up.left.fill")
+                    Text("Select the correct text for this note, then tap “Move note here.”")
+                        .font(.footnote.weight(.semibold))
+                    Spacer()
+                    Button("Cancel") { loader.cancelMove() }.font(.footnote.weight(.bold))
+                }
+                .padding(12)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 12).padding(.bottom, 24)
+                .transition(.move(edge: .bottom))
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .remoteScrollSurface)) { note in
             if let f = note.userInfo?["fraction"] as? Double { loader.scrollTo(fraction: CGFloat(f)) }
@@ -66,8 +84,8 @@ struct ReaderSurfaceView: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(loader.stats)
-                if loader.brokenAnchorCount > 0 {
-                    Text("⚠︎ \(loader.brokenAnchorCount) annotation(s) unanchorable — not drawn")
+                if loader.unsureAnchorCount > 0 {
+                    Text("⚠︎ \(loader.unsureAnchorCount) note(s) need a quick look (text changed)")
                         .foregroundStyle(.orange)
                 }
             }
@@ -100,17 +118,26 @@ private struct SurfaceTextViewRep: UIViewRepresentable {
 }
 
 /// Minimal note/bookmark editor (E2). A note edits its body; a bookmark is bodyless.
-/// Both can be deleted. "Done" saves and closes.
+/// When the note is on an UNSURE placement (the text changed under it), the editor
+/// surfaces what was highlighted and offers the confirm/counter pair: **Keep it here**
+/// (lock the best-guess spot) vs **Move it** (re-pick the spot). Both can be deleted.
 private struct NoteEditorSheet: View {
     let note: Note
+    let isUnsure: Bool
     let onSave: (String) -> Void
+    let onReconfirm: () -> Void
+    let onMoveIt: () -> Void
     let onDelete: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var draft: String
 
-    init(note: Note, onSave: @escaping (String) -> Void, onDelete: @escaping () -> Void) {
+    init(note: Note, isUnsure: Bool, onSave: @escaping (String) -> Void,
+         onReconfirm: @escaping () -> Void, onMoveIt: @escaping () -> Void, onDelete: @escaping () -> Void) {
         self.note = note
+        self.isUnsure = isUnsure
         self.onSave = onSave
+        self.onReconfirm = onReconfirm
+        self.onMoveIt = onMoveIt
         self.onDelete = onDelete
         _draft = State(initialValue: note.body ?? "")
     }
@@ -118,6 +145,29 @@ private struct NoteEditorSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                if isUnsure {
+                    Section {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("The text here changed since you made this note",
+                                  systemImage: "exclamationmark.triangle.fill")
+                                .font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
+                            if let a = note.anchorText, !a.isEmpty {
+                                Text("You highlighted: “\(a)”")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            }
+                            Text("This is our best guess at where it belongs.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                        Button { onReconfirm(); dismiss() } label: {
+                            Label("Keep it here", systemImage: "checkmark.circle.fill")
+                        }
+                        .accessibilityIdentifier("surface.note.keephere")
+                        Button { onMoveIt() } label: {
+                            Label("Move it — I’ll pick the spot", systemImage: "hand.point.up.left.fill")
+                        }
+                        .accessibilityIdentifier("surface.note.moveit")
+                    }
+                }
                 if note.kind == .note {
                     Section("Note") {
                         TextField("Write a note…", text: $draft, axis: .vertical)
@@ -154,9 +204,16 @@ final class ReaderSurfaceLoader: ObservableObject {
     @Published var stats = "loading…"
     /// The note/bookmark currently open in the editor sheet (E2). nil = closed.
     @Published var editingNote: Note?
-    /// R8: count of annotations whose anchor text could no longer be found, so they
-    /// were NOT drawn (never mis-highlighted). Surfaced in the HUD for verification.
-    @Published var brokenAnchorCount = 0
+    /// Whether the open note is on an UNSURE placement (offer re-confirm in the editor).
+    @Published var editingNoteIsUnsure = false
+    /// A note awaiting re-placement ("Move it"): the next text selection re-anchors it.
+    @Published var pendingReanchorNote: Note?
+    /// Count of annotations placed UNSURELY (the text under them changed, so we drew a
+    /// best-guess spot rather than a verified one). Surfaced in the HUD; tapping such a
+    /// note offers re-confirm. They are never hidden.
+    @Published var unsureAnchorCount = 0
+    /// Which notes are currently unsure — so a tap can route to the re-confirm flow.
+    private var unsureNoteIDs: Set<UUID> = []
     private var engine: ReadAlongEngine?
     private var driver: SurfaceReadAlongDriver?
     private var databaseManager: DatabaseManager?
@@ -192,26 +249,27 @@ final class ReaderSurfaceLoader: ObservableObject {
         guard let surface, let db = databaseManager, let docID = documentID else { return }
         let notes = (try? db.notes(for: docID)) ?? []
         let layout = surface.content.layout
+        let docLen = surface.content.attributed.length
         var markers: [SurfaceMarker] = []
-        var broken = 0
+        var unsure = 0
+        unsureNoteIDs.removeAll()
         for note in notes {
             let canonical = NSRange(location: note.startOffset,
                                     length: max(0, note.endOffset - note.startOffset))
-            // R8: resolve the durable anchor — exact, re-found, or broken. A broken
-            // anchor is NEVER drawn (it would land on the wrong words); it's counted
-            // so the reader can surface "this annotation's text changed" instead.
-            switch layout.resolveAnchor(canonicalRange: canonical, anchorText: note.anchorText,
-                                        contextBefore: note.contextBefore, contextAfter: note.contextAfter) {
-            case .exact(let cr), .relocated(let cr):
-                if let sr = layout.surfaceRange(forCanonicalRange: cr), sr.length > 0 {
-                    markers.append(SurfaceMarker(id: note.id, surfaceRange: sr))
-                } else { broken += 1 }
-            case .broken:
-                broken += 1
+            // Resolve to a placement — exact / relocated (confident) or approximate
+            // (unsure). A note is NEVER skipped: if even the surface range won't resolve
+            // we drop a tiny visible marker so nothing is ever lost (the floor).
+            let resolution = layout.resolveAnchor(canonicalRange: canonical, anchorText: note.anchorText,
+                                                  contextBefore: note.contextBefore, contextAfter: note.contextAfter)
+            var sr = layout.surfaceRange(forCanonicalRange: resolution.range) ?? NSRange(location: 0, length: 0)
+            if sr.length == 0, docLen > 0 {
+                sr = NSRange(location: max(0, min(sr.location, docLen - 1)), length: 1)
             }
+            markers.append(SurfaceMarker(id: note.id, surfaceRange: sr, unsure: resolution.isUnsure))
+            if resolution.isUnsure { unsure += 1; unsureNoteIDs.insert(note.id) }
         }
         surface.setMarkers(markers)
-        brokenAnchorCount = broken
+        unsureAnchorCount = unsure
     }
 
     /// Selection → Note/Bookmark: convert the SURFACE selection to a canonical anchor
@@ -255,11 +313,57 @@ final class ReaderSurfaceLoader: ObservableObject {
         return createFromCanonical(NSRange(location: start, length: len), kind: kind) != nil
     }
 
-    /// Glyph tap → open the note/bookmark in the editor sheet.
+    /// Underline tap → open the note/bookmark in the editor sheet (flagging whether it's
+    /// on an unsure placement, so the editor can offer re-confirm).
     func openMarker(id: UUID) {
         guard let db = databaseManager, let docID = documentID else { return }
         let notes = (try? db.notes(for: docID)) ?? []
-        if let n = notes.first(where: { $0.id == id }) { editingNote = n }
+        if let n = notes.first(where: { $0.id == id }) {
+            editingNoteIsUnsure = unsureNoteIDs.contains(id)
+            editingNote = n
+        }
+    }
+
+    /// Re-confirm an unsure note: the user says "yes, this spot is right." Re-capture the
+    /// anchor (offsets + substring + context) at its current best-guess location so it
+    /// resolves confidently from now on.
+    func reconfirmNote(_ note: Note) {
+        guard let surface, let db = databaseManager else { return }
+        let layout = surface.content.layout
+        let canonical = NSRange(location: note.startOffset, length: max(0, note.endOffset - note.startOffset))
+        let placement = layout.resolveAnchor(canonicalRange: canonical, anchorText: note.anchorText,
+                                             contextBefore: note.contextBefore, contextAfter: note.contextAfter).range
+        let newText = layout.canonicalText(forCanonicalRange: placement)
+        let ctx = layout.canonicalContext(forCanonicalRange: placement, window: 24)
+        try? db.updateNoteAnchor(id: note.id, startOffset: placement.location, endOffset: NSMaxRange(placement),
+                                 anchorText: newText, contextBefore: ctx.before, contextAfter: ctx.after)
+        loadMarkers()
+    }
+
+    /// "Move it": arm the surface so the next text selection re-anchors THIS note.
+    func beginMove(_ note: Note) {
+        pendingReanchorNote = note
+        surface?.awaitingMove = true
+        editingNote = nil   // close the editor; the user now picks the spot
+    }
+
+    func cancelMove() {
+        pendingReanchorNote = nil
+        surface?.awaitingMove = false
+    }
+
+    /// The user picked the correct passage for the note being moved — re-anchor it there.
+    func completeMove(toSurfaceRange surfaceRange: NSRange) {
+        guard let note = pendingReanchorNote, let surface, let db = databaseManager,
+              let canonical = surface.content.layout.canonicalRange(forSurfaceRange: surfaceRange),
+              canonical.length > 0 else { cancelMove(); return }
+        let layout = surface.content.layout
+        let anchorText = layout.canonicalText(forCanonicalRange: canonical)
+        let ctx = layout.canonicalContext(forCanonicalRange: canonical, window: 24)
+        try? db.updateNoteAnchor(id: note.id, startOffset: canonical.location, endOffset: NSMaxRange(canonical),
+                                 anchorText: anchorText, contextBefore: ctx.before, contextAfter: ctx.after)
+        cancelMove()
+        loadMarkers()
     }
 
     func saveNoteBody(_ note: Note, body: String) {
@@ -338,6 +442,7 @@ final class ReaderSurfaceLoader: ObservableObject {
         surface.onTap = { [weak self] offset in self?.jumpTo(surfaceOffset: offset) }
         surface.onAnnotate = { [weak self] range, kind in self?.createAnnotation(surfaceRange: range, kind: kind) }
         surface.onOpenMarker = { [weak self] id in self?.openMarker(id: id) }
+        surface.onMoveHere = { [weak self] range in self?.completeMove(toSurfaceRange: range) }
         memAfterBuild = MemoryProbe.residentMB()
 
         self.title = document.title

@@ -48,11 +48,21 @@ struct AnchorUnit {
     var surfaceTextLength: Int { text.utf16.count }
 }
 
-/// Outcome of resolving a persisted annotation anchor against the current text (R8).
+/// Outcome of resolving a persisted annotation anchor against the current text. A note
+/// is NEVER dropped — every resolution yields a placement; the only variable is how
+/// CONFIDENT we are. `confident` draws a solid underline; `unsure` draws a faded/dotted
+/// underline and offers one-tap re-confirm (the floor: we never hide a note, and we
+/// never confidently mis-place one).
 enum AnchorResolution: Equatable {
-    case exact(NSRange)       // canonical range unchanged
-    case relocated(NSRange)   // text drifted; re-found the exact substring here
-    case broken               // substring gone — never highlight (visibly-broken > silently-wrong)
+    case exact(NSRange)         // stored range still holds the highlighted text — confident
+    case relocated(NSRange)     // text shifted; re-found the exact substring elsewhere — confident
+    case approximate(NSRange)   // phrase chars changed / can't verify; best-guess spot — UNSURE
+
+    var range: NSRange {
+        switch self { case .exact(let r), .relocated(let r), .approximate(let r): return r }
+    }
+    /// True when we couldn't verify the exact words — draw unsure + offer re-confirm.
+    var isUnsure: Bool { if case .approximate = self { return true }; return false }
 }
 
 // ========== BLOCK 01b: ANCHOR UNIT - END ==========
@@ -155,28 +165,68 @@ struct LayoutMap {
         return (before, after)
     }
 
-    /// R8 — resolve a persisted annotation anchor against the CURRENT document text,
-    /// so a later text mutation can never silently mis-highlight:
-    ///   • `.exact`     — the stored range still holds the expected substring.
-    ///   • `.relocated` — the text drifted; we re-found the exact substring elsewhere
-    ///                    (context-bracketed, nearest the old offset) → highlight there.
-    ///   • `.broken`    — the substring is gone; do NOT highlight (visibly-broken beats
-    ///                    silently-wrong). The owner surfaces it; it never lands on the
-    ///                    wrong words.
-    /// Legacy/bookmark rows (no `anchorText`) trust the offset as-is.
+    /// Resolve a persisted annotation anchor against the CURRENT document text, so a
+    /// later text change can never silently mis-highlight AND never make a note vanish.
+    /// Escalating strategy, most-confident first:
+    ///   1. `.exact`      — stored range still holds the highlighted text.
+    ///   2. `.relocated`  — exact substring re-found elsewhere (context-preferred,
+    ///                      nearest the old offset). Confident.
+    ///   3. `.approximate`— the phrase's own characters changed (re-OCR, fusion repair),
+    ///                      but the words AROUND it survive → place between the matched
+    ///                      before/after context. Unsure (the text differs from what was
+    ///                      highlighted, so worth a glance).
+    ///   4. `.approximate`— last resort: place at the last-known position, clamped into
+    ///                      the doc. Never hidden; drawn unsure; one-tap re-confirm.
+    /// Legacy/bookmark rows (no `anchorText`) trust the offset, clamped.
     func resolveAnchor(canonicalRange r: NSRange, anchorText: String?,
                        contextBefore: String?, contextAfter: String?) -> AnchorResolution {
         guard let expected = anchorText, !expected.isEmpty else {
-            return surfaceRange(forCanonicalRange: r) != nil ? .exact(r) : .broken
+            return .exact(clampedToDoc(r))   // offset-only legacy row — trust it
         }
-        if canonicalText(forCanonicalRange: r) == expected, surfaceRange(forCanonicalRange: r) != nil {
+        if canonicalText(forCanonicalRange: r) == expected {
             return .exact(r)
         }
-        if let found = locate(expected, before: contextBefore, after: contextAfter,
-                              near: r.location, in: fullCanonicalText()) {
+        let full = fullCanonicalText()
+        if let found = locate(expected, before: contextBefore, after: contextAfter, near: r.location, in: full) {
             return .relocated(found)
         }
-        return .broken
+        if let found = locateByContext(before: contextBefore, after: contextAfter, near: r.location, in: full) {
+            return .approximate(found)
+        }
+        return .approximate(clampedToDoc(r))
+    }
+
+    /// Clamp a canonical range into the current document bounds (the floor — guarantees
+    /// a placement even when nothing matches, so a note is never lost).
+    private func clampedToDoc(_ r: NSRange) -> NSRange {
+        let total = totalCanonicalLength
+        let loc = max(0, min(r.location, total))
+        let len = max(0, min(r.length, total - loc))
+        return NSRange(location: loc, length: len)
+    }
+
+    /// Locate the phrase by its SURROUNDING context when the phrase's own characters
+    /// changed: find `before` followed (within a small gap) by `after`, and take the
+    /// span between them. The words around a highlight usually survive a re-OCR / fusion
+    /// repair even when the highlighted phrase itself is altered. Nearest old offset wins.
+    private func locateByContext(before: String?, after: String?, near: Int, in full: String) -> NSRange? {
+        guard let b = before, let a = after, !b.isEmpty, !a.isEmpty else { return nil }
+        let maxGap = b.count + a.count + 240   // the phrase between contexts shouldn't be huge
+        var best: (range: NSRange, dist: Int)?
+        var from = full.startIndex
+        while let br = full.range(of: b, range: from..<full.endIndex) {
+            let windowEnd = full.index(br.upperBound, offsetBy: maxGap, limitedBy: full.endIndex) ?? full.endIndex
+            if let ar = full.range(of: a, range: br.upperBound..<windowEnd) {
+                let start = full.distance(from: full.startIndex, to: br.upperBound)
+                let end = full.distance(from: full.startIndex, to: ar.lowerBound)
+                if end >= start {
+                    let dist = abs(start - near)
+                    if best == nil || dist < best!.dist { best = (NSRange(location: start, length: end - start), dist) }
+                }
+            }
+            from = full.index(after: br.lowerBound)
+        }
+        return best?.range
     }
 
     /// Find `needle` in `full`, preferring an occurrence whose surrounding text matches

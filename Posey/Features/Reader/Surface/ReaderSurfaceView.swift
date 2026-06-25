@@ -30,6 +30,14 @@ struct ReaderSurfaceView: View {
                     // size the view within the safe area also gives it a clean
                     // re-layout on rotation (re-flow to the new width).
                     .ignoresSafeArea(edges: .bottom)
+                    // Re-pin the margin glyphs after a re-flow (rotation / size change).
+                    .background(GeometryReader { geo in
+                        Color.clear.onChange(of: geo.size) { _, _ in
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                surface.refreshMarkerPositions()
+                            }
+                        }
+                    })
             } else {
                 ProgressView("Building surface…").frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -265,7 +273,9 @@ final class ReaderSurfaceLoader: ObservableObject {
             if sr.length == 0, docLen > 0 {
                 sr = NSRange(location: max(0, min(sr.location, docLen - 1)), length: 1)
             }
-            markers.append(SurfaceMarker(id: note.id, surfaceRange: sr, unsure: resolution.isUnsure))
+            let symbol = note.kind == .bookmark ? "bookmark.fill" : "square.and.pencil"
+            markers.append(SurfaceMarker(id: note.id, surfaceRange: sr,
+                                         unsure: resolution.isUnsure, symbol: symbol))
             if resolution.isUnsure { unsure += 1; unsureNoteIDs.insert(note.id) }
         }
         surface.setMarkers(markers)
@@ -467,6 +477,8 @@ final class ReaderSurfaceLoader: ObservableObject {
         let height = lm.usedRect(for: surface.textView.textContainer).height
         let layoutMs = (CACurrentMediaTime() - t1) * 1000
         let memAfterLayout = MemoryProbe.residentMB()
+        // Margin glyphs need real on-screen layout to position; load() ran pre-display.
+        surface.refreshMarkerPositions()
         self.stats = String(format:
             "%@\nunits %d · sent %d · chars %d\nbuild %.0fms · LAYOUT %.0fms · h %.0fpt\nmem %.0f→%.0f→%.0f MB (Δ+%.0f, post-display)",
             title, units, sents, chars, buildMs, layoutMs, height,

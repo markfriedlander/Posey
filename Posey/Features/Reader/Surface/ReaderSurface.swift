@@ -6,15 +6,16 @@ import UIKit
 /// about Posey's `NoteKind`); the owner maps this to the domain model.
 enum AnnotationKind { case note, bookmark }
 
-/// A rendered annotation: an exact surface range to underline. The underline IS the
-/// marker AND the tap target. `id` is opaque to the core — the owner round-trips it
-/// back when the underline is tapped. `unsure` = we couldn't verify the exact words
-/// (the text changed under the note), so it's drawn faded/dotted and a tap offers
-/// re-confirm — the note is never hidden, never confidently mis-placed.
+/// A rendered annotation: an exact surface range to underline + a kind-glyph drawn in
+/// the left margin gutter beside its first line. The underline marks WHERE + confidence
+/// (solid = sure; dotted = `unsure`, text changed under it). The `symbol` (an SF Symbol
+/// name) marks WHAT kind — note / bookmark / conversation. Both the underline and the
+/// glyph are tap targets; `id` is opaque to the core — the owner round-trips it back.
 struct SurfaceMarker {
     let id: UUID
     let surfaceRange: NSRange
     var unsure: Bool = false
+    var symbol: String = "square.and.pencil"
 }
 
 // ========== BLOCK 00: ANNOTATION SEAM TYPES - END ==========
@@ -59,6 +60,8 @@ final class ReaderSurface: NSObject {
     /// Rendered annotations (kept so a tap can be hit-tested against their ranges and
     /// the prior underline attributes cleared on the next `setMarkers`).
     private var markers: [SurfaceMarker] = []
+    /// Margin kind-glyph buttons, keyed by annotation id (repositioned on re-layout).
+    private var glyphButtons: [UUID: UIButton] = [:]
 
     init(content: ReaderSurfaceContent, tuning: ReaderTuning = .aml) {
         self.content = content
@@ -71,7 +74,8 @@ final class ReaderSurface: NSObject {
         tv.backgroundColor = .clear
         // Contiguous layout: lay out once, then every rect/glide is cheap + uniform.
         tv.layoutManager.allowsNonContiguousLayout = false
-        tv.textContainerInset = UIEdgeInsets(top: tuning.topInset, left: tuning.sideInset,
+        // Left inset = gutter (room for the margin kind-glyph); right = reading margin.
+        tv.textContainerInset = UIEdgeInsets(top: tuning.topInset, left: tuning.gutterWidth,
                                              bottom: tuning.bottomInset, right: tuning.sideInset)
         tv.attributedText = content.attributed
         self.textView = tv
@@ -201,7 +205,51 @@ final class ReaderSurface: NSObject {
             ts.addAttribute(.underlineColor, value: color, range: m.surfaceRange)
         }
         ts.endEditing()
+
+        // Rebuild the margin kind-glyphs (note / bookmark / conversation), one per
+        // annotation, in the left gutter beside its first line — collision-free.
+        glyphButtons.values.forEach { $0.removeFromSuperview() }
+        glyphButtons.removeAll()
         markers = newMarkers
+        for m in newMarkers {
+            let b = makeGlyphButton(for: m)
+            glyphButtons[m.id] = b
+            textView.addSubview(b)
+        }
+        refreshMarkerPositions()
+    }
+
+    /// Position each margin glyph in the gutter, vertically aligned with the first line
+    /// of its annotation. Call after any re-layout (rotation / Dynamic Type / re-flow).
+    func refreshMarkerPositions() {
+        let lm = textView.layoutManager
+        lm.ensureLayout(for: textView.textContainer)
+        let size = tuning.annotationGlyphPointSize + 8   // tap target ≈ glyph + padding
+        for m in markers {
+            guard let b = glyphButtons[m.id], m.surfaceRange.length > 0,
+                  NSMaxRange(m.surfaceRange) <= textView.textStorage.length else { continue }
+            let firstChar = NSRange(location: m.surfaceRange.location, length: 1)
+            let r = rect(for: firstChar)
+            // Center the glyph in the gutter (left of the text column), on the line.
+            let x = max(0, (tuning.gutterWidth - size) / 2)
+            b.frame = CGRect(x: x, y: r.minY + (r.height - size) / 2, width: size, height: size)
+        }
+    }
+
+    private func makeGlyphButton(for m: SurfaceMarker) -> UIButton {
+        var cfg = UIButton.Configuration.plain()
+        cfg.image = UIImage(systemName: m.symbol,
+                            withConfiguration: UIImage.SymbolConfiguration(
+                                pointSize: tuning.annotationGlyphPointSize, weight: .semibold))
+        cfg.contentInsets = .zero
+        cfg.baseForegroundColor = m.unsure ? tuning.annotationUnderlineColor.withAlphaComponent(0.55)
+                                           : tuning.annotationUnderlineColor
+        let b = UIButton(configuration: cfg)
+        let id = m.id
+        b.addAction(UIAction { [weak self] _ in self?.onOpenMarker?(id) }, for: .touchUpInside)
+        b.accessibilityLabel = m.symbol.contains("bookmark") ? "Open bookmark"
+                             : m.symbol.contains("bubble") ? "Open conversation" : "Open note"
+        return b
     }
 
     // ========== BLOCK 05: ANNOTATION MARKERS - END ==========

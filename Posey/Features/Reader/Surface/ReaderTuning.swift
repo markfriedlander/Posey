@@ -26,10 +26,17 @@ struct ReaderTuning: Equatable {
     var highlightLinesBelow: Int = 0
 
     /// Surface insets. Big bottom inset lets even the last line reach the focal
-    /// position; top/side are reading margins.
+    /// position; top/side are reading margins. The LEFT margin is widened into a
+    /// `gutterWidth` so annotation glyphs sit beside the text without colliding with it.
     var topInset: CGFloat = 24
     var sideInset: CGFloat = 16
     var bottomInset: CGFloat = 600
+
+    /// Left gutter that holds the annotation kind-glyph (note / bookmark / conversation)
+    /// beside each annotated line — collision-free because it's outside the text column.
+    var gutterWidth: CGFloat = 34
+    /// Point size of the margin kind-glyph.
+    var annotationGlyphPointSize: CGFloat = 14
 
     /// Focus-mode dimming of non-active sentences (the surviving M8 reading style).
     var dimNonActiveOpacity: CGFloat = 0.45
@@ -37,9 +44,9 @@ struct ReaderTuning: Equatable {
     /// Inline annotation styling (E2). The anchored substring is underlined in the
     /// SAME hue as the read-along highlight (Mark, 2026-06-22) so a note visually ties
     /// to the reading highlight; full-strength alpha keeps the underline legible where
-    /// the 0.30 highlight band would be too faint as a thin line. One underline for all
-    /// annotation kinds (note / bookmark / conversation) — the underline is the marker
-    /// AND the tap target; no inline glyph (it collides with prose / forces a reflow).
+    /// the 0.30 highlight band would be too faint as a thin line. The underline marks
+    /// WHERE + confidence (solid = sure, dotted = unsure); the margin glyph marks WHAT
+    /// kind. Glyph lives in the gutter (margin), not inline (inline collides / reflows).
     var annotationUnderlineColor: UIColor = UIColor(named: "AccentColor")?.withAlphaComponent(0.9)
         ?? UIColor.systemBlue.withAlphaComponent(0.9)
 

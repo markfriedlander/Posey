@@ -275,9 +275,11 @@ final class ReaderSurfaceLoader: ObservableObject {
             }
             let isBookmark = note.kind == .bookmark
             let symbol = isBookmark ? "bookmark.fill" : "square.and.pencil"
-            // Menu label for when several annotations share a gutter line: kind + snippet.
-            let snippet = (note.anchorText ?? note.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let shortSnippet = snippet.count > 40 ? String(snippet.prefix(40)) + "…" : snippet
+            // Menu label for when several annotations share a gutter line: kind + a
+            // SHORT snippet (tight cap so the fan-out menu stays clean, not a wall of text).
+            let snippetMax = 28
+            let raw = (note.anchorText ?? note.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let shortSnippet = raw.count > snippetMax ? String(raw.prefix(snippetMax)) + "…" : raw
             let label = (isBookmark ? "Bookmark" : "Note") + (shortSnippet.isEmpty ? "" : " · \(shortSnippet)")
             markers.append(SurfaceMarker(id: note.id, surfaceRange: sr,
                                          unsure: resolution.isUnsure, symbol: symbol, label: label))

@@ -32,11 +32,13 @@ struct ReaderTuning: Equatable {
     var sideInset: CGFloat = 16
     var bottomInset: CGFloat = 600
 
-    /// Left gutter that holds the annotation kind-glyph (note / bookmark / conversation)
-    /// beside each annotated line — collision-free because it's outside the text column.
-    var gutterWidth: CGFloat = 34
-    /// Point size of the margin kind-glyph.
-    var annotationGlyphPointSize: CGFloat = 14
+    /// RIGHT gutter that holds the annotation kind-glyph (note / bookmark / conversation)
+    /// beside each annotated line — collision-free (outside the text column) and out of
+    /// the reading path (lines are ragged-right), so the left reading margin stays clean.
+    var gutterWidth: CGFloat = 38
+    /// Margin glyph point size as a FRACTION of the body font, so it scales with the
+    /// reading size (a Dynamic-Type / font bump carries the glyph with it).
+    var annotationGlyphScale: CGFloat = 0.95
 
     /// Focus-mode dimming of non-active sentences (the surviving M8 reading style).
     var dimNonActiveOpacity: CGFloat = 0.45

@@ -16,6 +16,9 @@ struct SurfaceMarker {
     let surfaceRange: NSRange
     var unsure: Bool = false
     var symbol: String = "square.and.pencil"
+    /// Human label for the fan-out menu when several annotations share a gutter line
+    /// (e.g. "Note · Golden Krone Hotel").
+    var label: String = "Note"
 }
 
 // ========== BLOCK 00: ANNOTATION SEAM TYPES - END ==========
@@ -33,6 +36,8 @@ final class ReaderSurface: NSObject {
     let textView: UITextView
     private(set) var content: ReaderSurfaceContent
     var tuning: ReaderTuning
+    /// Current body font size — the margin glyph scales with it. Updated on font change.
+    var bodyPointSize: CGFloat = 19
 
     /// The single line currently lit by read-along — tracked so we clear ONLY the
     /// prior line (a full-range attribute edit re-lays-out the whole book; measured
@@ -60,8 +65,9 @@ final class ReaderSurface: NSObject {
     /// Rendered annotations (kept so a tap can be hit-tested against their ranges and
     /// the prior underline attributes cleared on the next `setMarkers`).
     private var markers: [SurfaceMarker] = []
-    /// Margin kind-glyph buttons, keyed by annotation id (repositioned on re-layout).
-    private var glyphButtons: [UUID: UIButton] = [:]
+    /// Margin glyph buttons — ONE per gutter line (annotations sharing a line collapse
+    /// into a single count-marker that fans out a menu). Rebuilt on re-layout.
+    private var glyphButtons: [UIButton] = []
 
     init(content: ReaderSurfaceContent, tuning: ReaderTuning = .aml) {
         self.content = content
@@ -74,9 +80,10 @@ final class ReaderSurface: NSObject {
         tv.backgroundColor = .clear
         // Contiguous layout: lay out once, then every rect/glide is cheap + uniform.
         tv.layoutManager.allowsNonContiguousLayout = false
-        // Left inset = gutter (room for the margin kind-glyph); right = reading margin.
-        tv.textContainerInset = UIEdgeInsets(top: tuning.topInset, left: tuning.gutterWidth,
-                                             bottom: tuning.bottomInset, right: tuning.sideInset)
+        // Right inset = gutter (room for the margin kind-glyph, out of the reading
+        // path); left = the natural reading margin.
+        tv.textContainerInset = UIEdgeInsets(top: tuning.topInset, left: tuning.sideInset,
+                                             bottom: tuning.bottomInset, right: tuning.gutterWidth)
         tv.attributedText = content.attributed
         self.textView = tv
         super.init()
@@ -205,42 +212,54 @@ final class ReaderSurface: NSObject {
             ts.addAttribute(.underlineColor, value: color, range: m.surfaceRange)
         }
         ts.endEditing()
-
-        // Rebuild the margin kind-glyphs (note / bookmark / conversation), one per
-        // annotation, in the left gutter beside its first line — collision-free.
-        glyphButtons.values.forEach { $0.removeFromSuperview() }
-        glyphButtons.removeAll()
         markers = newMarkers
-        for m in newMarkers {
-            let b = makeGlyphButton(for: m)
-            glyphButtons[m.id] = b
-            textView.addSubview(b)
-        }
-        refreshMarkerPositions()
+        rebuildGlyphs()
     }
 
-    /// Position each margin glyph in the gutter, vertically aligned with the first line
-    /// of its annotation. Call after any re-layout (rotation / Dynamic Type / re-flow).
-    func refreshMarkerPositions() {
+    /// (Re)build the margin glyphs: annotations are GROUPED by the gutter line they sit
+    /// on; a line with one annotation shows its kind-glyph, a line with several collapses
+    /// to a single count-marker that fans out a menu to pick one (so co-located notes /
+    /// bookmarks / conversations never draw on top of each other). Glyph size scales with
+    /// the body font. Call after any re-layout (rotation / Dynamic Type / re-flow / scroll
+    /// is automatic — buttons live in the text view's content and move with it).
+    func rebuildGlyphs() {
+        glyphButtons.forEach { $0.removeFromSuperview() }
+        glyphButtons.removeAll()
         let lm = textView.layoutManager
         lm.ensureLayout(for: textView.textContainer)
-        let size = tuning.annotationGlyphPointSize + 8   // tap target ≈ glyph + padding
-        for m in markers {
-            guard let b = glyphButtons[m.id], m.surfaceRange.length > 0,
-                  NSMaxRange(m.surfaceRange) <= textView.textStorage.length else { continue }
-            let firstChar = NSRange(location: m.surfaceRange.location, length: 1)
-            let r = rect(for: firstChar)
-            // Center the glyph in the gutter (left of the text column), on the line.
-            let x = max(0, (tuning.gutterWidth - size) / 2)
-            b.frame = CGRect(x: x, y: r.minY + (r.height - size) / 2, width: size, height: size)
+
+        // Group markers by the visual line their first character sits on.
+        struct LineGroup { var rect: CGRect; var markers: [SurfaceMarker] }
+        var groups: [Int: LineGroup] = [:]
+        var order: [Int] = []
+        for m in markers where m.surfaceRange.length > 0 && NSMaxRange(m.surfaceRange) <= textView.textStorage.length {
+            guard let line = visualLine(forCharAt: m.surfaceRange.location) else { continue }
+            let key = line.range.location
+            if groups[key] == nil { groups[key] = LineGroup(rect: line.rect, markers: []); order.append(key) }
+            groups[key]?.markers.append(m)
+        }
+
+        let box = bodyPointSize * tuning.annotationGlyphScale + 10   // tap target ≈ glyph + padding
+        for key in order {
+            guard let g = groups[key] else { continue }
+            let b = g.markers.count == 1 ? makeGlyphButton(for: g.markers[0])
+                                         : makeCountButton(g.markers)
+            let x = textView.bounds.width - tuning.gutterWidth + (tuning.gutterWidth - box) / 2
+            b.frame = CGRect(x: x, y: g.rect.minY + (g.rect.height - box) / 2, width: box, height: box)
+            glyphButtons.append(b)
+            textView.addSubview(b)
         }
     }
 
+    private func glyphImage(_ symbol: String) -> UIImage? {
+        UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(
+            pointSize: bodyPointSize * tuning.annotationGlyphScale, weight: .semibold))
+    }
+
+    /// A single annotation: its kind glyph, tap opens it.
     private func makeGlyphButton(for m: SurfaceMarker) -> UIButton {
         var cfg = UIButton.Configuration.plain()
-        cfg.image = UIImage(systemName: m.symbol,
-                            withConfiguration: UIImage.SymbolConfiguration(
-                                pointSize: tuning.annotationGlyphPointSize, weight: .semibold))
+        cfg.image = glyphImage(m.symbol)
         cfg.contentInsets = .zero
         cfg.baseForegroundColor = m.unsure ? tuning.annotationUnderlineColor.withAlphaComponent(0.55)
                                            : tuning.annotationUnderlineColor
@@ -249,6 +268,26 @@ final class ReaderSurface: NSObject {
         b.addAction(UIAction { [weak self] _ in self?.onOpenMarker?(id) }, for: .touchUpInside)
         b.accessibilityLabel = m.symbol.contains("bookmark") ? "Open bookmark"
                              : m.symbol.contains("bubble") ? "Open conversation" : "Open note"
+        return b
+    }
+
+    /// Several annotations on one line: a count badge that fans out a menu to pick one.
+    private func makeCountButton(_ group: [SurfaceMarker]) -> UIButton {
+        var cfg = UIButton.Configuration.plain()
+        let n = min(group.count, 50)
+        cfg.image = glyphImage("\(n).circle.fill")
+        cfg.contentInsets = .zero
+        cfg.baseForegroundColor = tuning.annotationUnderlineColor
+        let b = UIButton(configuration: cfg)
+        let items = group.map { m -> UIAction in
+            let id = m.id
+            return UIAction(title: m.label, image: UIImage(systemName: m.symbol)) {
+                [weak self] _ in self?.onOpenMarker?(id)
+            }
+        }
+        b.menu = UIMenu(title: "Annotations here", children: items)
+        b.showsMenuAsPrimaryAction = true
+        b.accessibilityLabel = "\(group.count) annotations here"
         return b
     }
 

@@ -34,7 +34,7 @@ struct ReaderSurfaceView: View {
                     .background(GeometryReader { geo in
                         Color.clear.onChange(of: geo.size) { _, _ in
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                surface.refreshMarkerPositions()
+                                surface.rebuildGlyphs()
                             }
                         }
                     })
@@ -273,9 +273,14 @@ final class ReaderSurfaceLoader: ObservableObject {
             if sr.length == 0, docLen > 0 {
                 sr = NSRange(location: max(0, min(sr.location, docLen - 1)), length: 1)
             }
-            let symbol = note.kind == .bookmark ? "bookmark.fill" : "square.and.pencil"
+            let isBookmark = note.kind == .bookmark
+            let symbol = isBookmark ? "bookmark.fill" : "square.and.pencil"
+            // Menu label for when several annotations share a gutter line: kind + snippet.
+            let snippet = (note.anchorText ?? note.body ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let shortSnippet = snippet.count > 40 ? String(snippet.prefix(40)) + "…" : snippet
+            let label = (isBookmark ? "Bookmark" : "Note") + (shortSnippet.isEmpty ? "" : " · \(shortSnippet)")
             markers.append(SurfaceMarker(id: note.id, surfaceRange: sr,
-                                         unsure: resolution.isUnsure, symbol: symbol))
+                                         unsure: resolution.isUnsure, symbol: symbol, label: label))
             if resolution.isUnsure { unsure += 1; unsureNoteIDs.insert(note.id) }
         }
         surface.setMarkers(markers)
@@ -406,6 +411,7 @@ final class ReaderSurfaceLoader: ObservableObject {
     func setBodyPointSize(_ size: CGFloat) {
         guard let surface, let db = databaseManager, let docID = documentID else { return }
         bodyPointSize = max(10, min(48, size))
+        surface.bodyPointSize = bodyPointSize   // margin glyph scales with the font
         let tv = surface.textView
         let oldMax = max(1, tv.contentSize.height - tv.bounds.height)
         let frac = oldMax > 1 ? tv.contentOffset.y / oldMax : 0
@@ -444,6 +450,7 @@ final class ReaderSurfaceLoader: ObservableObject {
         buildMs = (CACurrentMediaTime() - t0) * 1000
 
         let surface = ReaderSurface(content: content)
+        surface.bodyPointSize = bodyPointSize   // margin glyph scales with the font
         let engine = ReadAlongEngine(surface: surface)
         self.engine = engine
         self.driver = SurfaceReadAlongDriver(content: content, engine: engine)
@@ -478,7 +485,7 @@ final class ReaderSurfaceLoader: ObservableObject {
         let layoutMs = (CACurrentMediaTime() - t1) * 1000
         let memAfterLayout = MemoryProbe.residentMB()
         // Margin glyphs need real on-screen layout to position; load() ran pre-display.
-        surface.refreshMarkerPositions()
+        surface.rebuildGlyphs()
         self.stats = String(format:
             "%@\nunits %d · sent %d · chars %d\nbuild %.0fms · LAYOUT %.0fms · h %.0fpt\nmem %.0f→%.0f→%.0f MB (Δ+%.0f, post-display)",
             title, units, sents, chars, buildMs, layoutMs, height,

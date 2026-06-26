@@ -120,6 +120,11 @@ struct LayoutMap {
 
     func unitRange(_ unitID: UUID) -> NSRange? { unitRanges[unitID] }
 
+    /// The unit whose surface range contains a surface offset — image/table tap hit-test.
+    func unitID(atSurfaceOffset offset: Int) -> UUID? {
+        unitRanges.first(where: { NSLocationInRange(offset, $0.value) })?.key
+    }
+
     // ----- Annotation anchor bridge (canonical ↔ surface) -----
 
     /// Map a SURFACE selection range to a CANONICAL anchor range (the persisted form).

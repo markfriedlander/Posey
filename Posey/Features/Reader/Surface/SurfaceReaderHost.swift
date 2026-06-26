@@ -29,6 +29,8 @@ struct SurfaceReaderHost: UIViewRepresentable {
     let onOpenConversation: (String?) -> Void
     /// Any interaction with the page reveals the auto-fading chrome.
     let onReveal: () -> Void
+    /// Tap on an image / table → open the full-screen zoomable viewer (restored cutover behavior).
+    let onOpenImage: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -92,9 +94,22 @@ struct SurfaceReaderHost: UIViewRepresentable {
 
         private func wireCallbacks(_ vm: ReaderViewModel) {
             surface.onTap = { [weak vm, weak self] offset in
-                self?.parent.onReveal()
-                guard let seg = self?.surface.content.layout.segment(atSurfaceOffset: offset) else { return }
-                vm?.jumpToSentenceID(seg.sentenceID)
+                guard let self, let vm else { return }
+                self.parent.onReveal()
+                let layout = self.surface.content.layout
+                // Image / table tap → open the full-screen viewer (restored 2026-06-26;
+                // the old per-row onTapGesture did this before the cutover). Checked FIRST
+                // because a rasterized table also carries a (pinned) sentence range.
+                if let uid = layout.unitID(atSurfaceOffset: offset),
+                   let unit = vm.units.first(where: { $0.id == uid }),
+                   unit.kind == .image || unit.kind == .table,
+                   let imageID = unit.metadata.imageID, vm.imageData(for: imageID) != nil {
+                    self.parent.onOpenImage(imageID)
+                    return
+                }
+                if let seg = layout.segment(atSurfaceOffset: offset) {
+                    vm.jumpToSentenceID(seg.sentenceID)
+                }
             }
             // Dragging to scroll re-reveals the auto-fading chrome WITHOUT moving the
             // reading position (a tap would). Restores the old reader's scroll-to-reveal,
@@ -145,6 +160,41 @@ struct SurfaceReaderHost: UIViewRepresentable {
                     case "word":     self.surface.tuning.readAlongGranularity = .word
                     case "sentence": self.surface.tuning.readAlongGranularity = .sentence
                     default:         self.surface.tuning.readAlongGranularity = .line
+                    }
+                }
+                .store(in: &cancellables)
+            NotificationCenter.default.publisher(for: .remoteSurfaceTapImage)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in
+                    guard let self else { return }
+                    let layout = self.surface.content.layout
+                    // Tap the first image/table with bytes — exercises the REAL onTap path
+                    // (offset → image-detect → onOpenImage → viewer), not a shortcut.
+                    for unit in self.parent.viewModel.units where unit.kind == .image || unit.kind == .table {
+                        guard let imageID = unit.metadata.imageID,
+                              self.parent.viewModel.imageData(for: imageID) != nil,
+                              let r = layout.unitRange(unit.id) else { continue }
+                        self.surface.onTap?(r.location)
+                        break
+                    }
+                }
+                .store(in: &cancellables)
+            NotificationCenter.default.publisher(for: .remoteTapAt)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] note in
+                    guard let self,
+                          let x = note.userInfo?["x"] as? Double,
+                          let y = note.userInfo?["y"] as? Double else { return }
+                    let tv = self.surface.textView
+                    let local = tv.convert(CGPoint(x: x, y: y), from: nil)   // window → textView space
+                    // A glyph / count button under the point → fire it (opens the marker).
+                    if let btn = tv.hitTest(local, with: nil) as? UIButton {
+                        btn.sendActions(for: .touchUpInside)
+                        return
+                    }
+                    // Otherwise a text / image tap at that point.
+                    if let idx = self.surface.charIndex(at: local) {
+                        self.surface.onTap?(idx)
                     }
                 }
                 .store(in: &cancellables)

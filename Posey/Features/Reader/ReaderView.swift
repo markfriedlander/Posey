@@ -146,7 +146,11 @@ struct ReaderView: View {
                     openAskPosey(initialAnchorStorageID: storageID)
                     #endif
                 },
-                onReveal: { revealChrome() }
+                onReveal: { revealChrome() },
+                onOpenImage: { imageID in
+                    revealChrome()
+                    expandedImageItem = ExpandedImageItem(id: imageID)
+                }
             )
             .contentShape(Rectangle())
             // Cutover: the old sentence-link openURL tap handler is gone — the surface

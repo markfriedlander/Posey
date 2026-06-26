@@ -3538,6 +3538,27 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted", "level": lvl])
 
+            case "SURFACE_TAP_IMAGE":
+                // Tap the first image/table on the open reader → opens the full-screen
+                // viewer (tests image-zoom restore without a physical tap).
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSurfaceTapImage, object: nil)
+                }
+                return json(["status": "posted"])
+
+            case "TAP_AT":
+                // General human-equivalent tap: route a tap to whatever is at (x,y) on the
+                // open reader — glyph button, image, or text. Points, window coordinates.
+                let xy = (arg ?? "").split(separator: ",").map { Double($0.trimmingCharacters(in: .whitespaces)) }
+                guard xy.count == 2, let tx = xy[0], let ty = xy[1] else {
+                    return #"{"error":"Usage: TAP_AT:<x>,<y> (points)"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteTapAt, object: nil,
+                                                    userInfo: ["x": tx, "y": ty])
+                }
+                return json(["status": "posted", "x": tx, "y": ty])
+
             case "SURFACE_FONT":
                 // Reader rebuild: rebuild the open one-surface reader at a new body
                 // point size (E2 Step-2: annotation underlines must re-land exactly

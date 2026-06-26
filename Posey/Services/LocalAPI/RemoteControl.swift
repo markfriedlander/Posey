@@ -221,6 +221,14 @@ extension Notification.Name {
     /// `userInfo["level"]: "word"|"line"|"sentence"`. Sets the open reader's read-along
     /// highlight granularity (the glow-extent dial) at runtime.
     static let remoteSetReadAlongLevel = Notification.Name("PoseyRemoteSetReadAlongLevel")
+    /// No userInfo. Taps the first image/table on the open reader (exercises the real
+    /// onTap → image-detect → full-screen viewer path) so image-zoom is testable without
+    /// a physical tap.
+    static let remoteSurfaceTapImage = Notification.Name("PoseyRemoteSurfaceTapImage")
+    /// `userInfo["x"], ["y"]: Double` (points, window coords). Routes a tap to whatever
+    /// is at that point on the open reader — glyph button, image, or text. The general
+    /// "tap anywhere a human could" capability (replaces per-feature tap verbs).
+    static let remoteTapAt = Notification.Name("PoseyRemoteTapAt")
     /// No userInfo. LibraryView observes; pops the navigation path.
     static let remoteLibraryNavigateBack = Notification.Name("PoseyRemoteLibraryNavigateBack")
     /// No userInfo. LibraryView observes; toggles antenna OFF (re-enable

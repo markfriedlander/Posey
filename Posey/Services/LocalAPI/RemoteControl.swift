@@ -218,6 +218,9 @@ extension Notification.Name {
     /// `onUserScroll` → re-reveals the auto-fading chrome) so scroll-to-reveal is
     /// verifiable on the phone without a physical gesture.
     static let remoteSimulateSurfaceDrag = Notification.Name("PoseyRemoteSimulateSurfaceDrag")
+    /// `userInfo["level"]: "word"|"line"|"sentence"`. Sets the open reader's read-along
+    /// highlight granularity (the glow-extent dial) at runtime.
+    static let remoteSetReadAlongLevel = Notification.Name("PoseyRemoteSetReadAlongLevel")
     /// No userInfo. LibraryView observes; pops the navigation path.
     static let remoteLibraryNavigateBack = Notification.Name("PoseyRemoteLibraryNavigateBack")
     /// No userInfo. LibraryView observes; toggles antenna OFF (re-enable

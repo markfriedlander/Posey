@@ -3526,6 +3526,18 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "SET_READALONG_LEVEL":
+                // Set the read-along highlight granularity dial (word | line | sentence)
+                // on the open reader at runtime.
+                guard let lvl = arg?.lowercased(), ["word", "line", "sentence"].contains(lvl) else {
+                    return #"{"error":"Usage: SET_READALONG_LEVEL:<word|line|sentence>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetReadAlongLevel, object: nil,
+                                                    userInfo: ["level": lvl])
+                }
+                return json(["status": "posted", "level": lvl])
+
             case "SURFACE_FONT":
                 // Reader rebuild: rebuild the open one-surface reader at a new body
                 // point size (E2 Step-2: annotation underlines must re-land exactly

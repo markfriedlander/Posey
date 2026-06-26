@@ -137,6 +137,17 @@ struct SurfaceReaderHost: UIViewRepresentable {
                 .receive(on: RunLoop.main)
                 .sink { [weak self] _ in self?.surface.onUserScroll?() }   // same path a real drag fires
                 .store(in: &cancellables)
+            NotificationCenter.default.publisher(for: .remoteSetReadAlongLevel)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] note in
+                    guard let self, let lvl = note.userInfo?["level"] as? String else { return }
+                    switch lvl {
+                    case "word":     self.surface.tuning.readAlongGranularity = .word
+                    case "sentence": self.surface.tuning.readAlongGranularity = .sentence
+                    default:         self.surface.tuning.readAlongGranularity = .line
+                    }
+                }
+                .store(in: &cancellables)
         }
 
         /// Scroll the surface to a fraction (0…1) of its content — antenna capture framing

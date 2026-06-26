@@ -201,10 +201,6 @@ extension Notification.Name {
     /// `userInfo["documentID"]: UUID`. LibraryView observes; pushes
     /// the matching document onto the navigation path.
     static let remoteOpenDocument = Notification.Name("PoseyRemoteOpenDocument")
-    /// DEBUG (reader rebuild, Stage B). `userInfo["documentID"]: UUID`. LibraryView
-    /// presents the NEW one-surface reader (`ReaderSurfaceView`) as a separate cover —
-    /// isolated from the shipping reader so render/memory testing can't disturb it.
-    static let remoteOpenDocumentSurface = Notification.Name("PoseyRemoteOpenDocumentSurface")
     /// DEBUG (reader rebuild). `userInfo["fraction"]: Double` (0…1). Scrolls the open
     /// one-surface reader to that fraction of its content — lets the antenna frame any
     /// part of the surface (e.g. an annotation) for capture/verification.

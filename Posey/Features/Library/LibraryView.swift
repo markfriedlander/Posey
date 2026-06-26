@@ -25,11 +25,6 @@ struct LibraryView: View {
     @State private var isImporting = false
     #if DEBUG
     @State private var showEmbeddingBoard = false
-    /// DEBUG reader-rebuild switch: when ON, tapping a document opens it in the NEW
-    /// one-surface reader (read-along + tap-to-jump) instead of the shipping reader.
-    /// Off by default; opt-in via the library toolbar. Lets Mark drive the new reader
-    /// on the phone with no laptop/antenna (e.g. in the car).
-    @AppStorage("useNewReaderSurface") private var useNewReaderSurface = false
     #endif
     @State private var path: [Document] = []
     @State private var documentPendingDeletion: Document? = nil
@@ -259,7 +254,6 @@ struct LibraryView: View {
         .toolbar { libraryToolbar }
         .modifier(EmbeddingBoardSheet(isPresented: embeddingBoardBinding,
                                       databaseManager: viewModel.databaseManager))
-        .modifier(SurfaceCoverModifier(databaseManager: viewModel.databaseManager))
     }
 
     /// Binding that's a no-op in RELEASE (the board is DEBUG-only, next to the
@@ -3510,20 +3504,6 @@ extension LibraryViewModel {
                                                     userInfo: ["documentID": docID])
                 }
                 return json(["status": "posted", "documentID": idStr])
-
-            case "OPEN_DOCUMENT_SURFACE":
-                // Reader rebuild (Stage B): open a doc in the NEW one-surface reader
-                // as a separate cover. Isolated from the shipping reader + its verbs.
-                // The presenting cover is DEBUG-only (no-op in RELEASE); the antenna
-                // itself is DEBUG-only, so this verb is harmless in RELEASE.
-                guard let idStr = arg, let docID = UUID(uuidString: idStr) else {
-                    return #"{"error":"Usage: OPEN_DOCUMENT_SURFACE:<docID>"}"#
-                }
-                await MainActor.run {
-                    NotificationCenter.default.post(name: .remoteOpenDocumentSurface, object: nil,
-                                                    userInfo: ["documentID": docID])
-                }
-                return json(["status": "posted", "documentID": idStr, "surface": "new"])
 
             case "SCROLL_SURFACE":
                 // Reader rebuild: scroll the open one-surface reader to a fraction of

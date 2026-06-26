@@ -230,15 +230,16 @@ final class TTSVerifyHarness {
                 sink.handleAudioApp(sampleBuffer)
             }
             // .video / .audioMic ignored (mic disabled; video unused).
-        }, completionHandler: { error in
-            // [weak self] on the Task (not the outer closure) so `self` is a Task-local
-            // `let`, not a reference to an outer captured `var` — Swift 6 concurrency-safe.
-            Task { @MainActor [weak self] in
+        }, completionHandler: { [weak self] error in
+            // outer-weak + guard-let → the Task captures a local strong `let self`
+            // (no implicit-strong-outer warning, no captured-var-in-concurrent warning).
+            guard let self else { return }
+            Task { @MainActor in
                 if let error = error {
-                    self?.captureActive = false
+                    self.captureActive = false
                     completion(false, error.localizedDescription)
                 } else {
-                    self?.captureActive = true
+                    self.captureActive = true
                     completion(true, nil)
                 }
             }
@@ -321,8 +322,9 @@ final class TTSVerifyHarness {
 
         let maxSeconds = Double(playedSegments.count) * 14.0 + 25.0
         watchdog?.invalidate()
-        watchdog = Timer.scheduledTimer(withTimeInterval: maxSeconds, repeats: false) { _ in
-            Task { @MainActor [weak self] in self?.end(reason: "watchdog") }
+        watchdog = Timer.scheduledTimer(withTimeInterval: maxSeconds, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.end(reason: "watchdog") }
         }
         return true
     }
@@ -339,8 +341,9 @@ final class TTSVerifyHarness {
 
     private func scheduleTrailingStop() {
         guard trailingStop == nil else { return }
-        trailingStop = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { _ in
-            Task { @MainActor [weak self] in self?.end(reason: "reached-target") }
+        trailingStop = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.end(reason: "reached-target") }
         }
     }
 

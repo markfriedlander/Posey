@@ -149,21 +149,8 @@ struct ReaderView: View {
                 onReveal: { revealChrome() }
             )
             .contentShape(Rectangle())
-            // Step 9 — sentence-precise tap. The per-sentence
-            // AttributedString ranges inside UnitRowView emit
-            // posey-sentence:// URLs on tap; intercept here, jump
-            // playback to the matching sentence, and return
-            // `.handled` so SwiftUI doesn't try to open the URL in
-            // Safari.
-            .environment(\.openURL, OpenURLAction { url in
-                guard url.scheme == UnitRowView.sentenceURLScheme,
-                      let host = url.host(),
-                      let sentenceID = UUID(uuidString: host) else {
-                    return .systemAction
-                }
-                viewModel.jumpToSentenceID(sentenceID)
-                return .handled
-            })
+            // Cutover: the old sentence-link openURL tap handler is gone — the surface
+            // owns tap-to-jump now (ReaderSurface.onTap → jumpToSentenceID).
             // 2026-05-04 — Tap-to-toggle-chrome removed; single-tap
             // on a sentence row now jumps reading position there
             // (sentence-link tap in UnitRowView, plus the per-unit
@@ -720,84 +707,9 @@ struct ReaderView: View {
         }
     }
 
-    /// One unit row + all its modifiers. Extracted from the `ForEach` body so
-    /// the main `body` expression type-checks (adding the c13 anchor overlay +
-    /// publish closure tipped the Swift type-checker over its time limit).
-    /// Behavior is unchanged from the prior inline row.
-    @ViewBuilder
-    private func unitRow(_ unit: ContentUnit) -> some View {
-        // 2026-05-28 — incorporate unitAnnotationVersion into the row's id() so
-        // SwiftUI re-runs the body when the version changes (annotationFlags is
-        // a method call SwiftUI doesn't observe otherwise).
-        let annotationVersion = viewModel.unitAnnotationVersion
-        let annotations = viewModel.annotationFlags(for: unit)
-        UnitRowView(
-            unit: unit,
-            sentencesInUnit: viewModel.sentencesByUnit[unit.id] ?? [],
-            bandSentenceID: viewModel.highlightBandSentenceID,
-            activeSentenceIndex: viewModel.currentSentenceIndex,
-            sentenceIndexBase: viewModel.sentenceIndexBase(for: unit),
-            readingStyle: viewModel.readingStyle,
-            hasNote: annotations.hasNote,
-            hasBookmark: annotations.hasBookmark,
-            hasConversation: annotations.hasConversation,
-            annotationVersion: annotationVersion,
-            onTapBookmark: { openAnnotationFromGlyph(unit: unit, kind: .bookmark) },
-            onTapNote: { openAnnotationFromGlyph(unit: unit, kind: .note) },
-            onTapConversation: { openConversationFromGlyph(unit: unit) },
-            bodyFontSize: viewModel.fontSize,
-            imageDataProvider: { viewModel.imageData(for: $0) },
-            isSearchMatchUnit: viewModel.isSearchActive && viewModel.searchHighlightUnitID == unit.id,
-            onActiveLine: { tv, range in viewModel.setActiveProseLine(tv, range) }
-        )
-        .padding(.horizontal, 14)
-        .id(unit.id)
-        .accessibilityIdentifier("reader.unit.\(unit.id.uuidString)")
-        #if POSEY_ENABLE_ASK_POSEY
-        .overlay(alignment: .topTrailing) {
-            if isCitedRow(unit: unit) {
-                citationReturnPill()
-                    .padding(.trailing, 8)
-                    .padding(.top, 2)
-            }
-        }
-        #endif
-        // Tap behavior for non-prose rows (image / pageBreak / horizontalRule),
-        // which carry no sentence ranges:
-        //   • IMAGE rows with real bytes → open the full-screen zoomable viewer
-        //     (ExpandedImageSheet → ZoomableImageView). This trigger was MISSING:
-        //     `.sheet(item: $expandedImageItem)` and ZoomableImageView were fully
-        //     wired, but nothing ever set `expandedImageItem`, and this very tap
-        //     hijacked image taps to JUMP — so the image viewer was dead code and
-        //     there was no way to view an image (2026-06-14, Mark caught it).
-        //   • everything else (pageBreak / hr / image with no bytes) → legacy
-        //     "tap-the-image-block" jump to the first sentence of the next prose unit.
-        .contentShape(Rectangle())
-        .onTapGesture {
-            // `.table` renders as an image (2026-06-15) and is carriesProseText,
-            // so it would hit the prose early-return below — handle it FIRST so
-            // tapping a table opens the zoomable viewer like an image.
-            if unit.kind == .table,
-               let imageID = unit.metadata.imageID,
-               viewModel.imageData(for: imageID) != nil {
-                expandedImageItem = ExpandedImageItem(id: imageID)
-                return
-            }
-            guard !unit.kind.carriesProseText else { return }
-            if unit.kind == .image,
-               let imageID = unit.metadata.imageID,
-               viewModel.imageData(for: imageID) != nil {
-                expandedImageItem = ExpandedImageItem(id: imageID)
-                return
-            }
-            if let firstAfter = viewModel.sentences.first(where: { s in
-                guard let u = viewModel.units.first(where: { $0.id == s.unitID }) else { return false }
-                return u.sequence > unit.sequence
-            }) {
-                viewModel.jumpToSentenceID(firstAfter.id)
-            }
-        }
-    }
+    // Cutover: the old per-unit `unitRow` / `UnitRowView` renderer is gone — the reader
+    // renders through `SurfaceReaderHost` now. (Image-tap-to-zoom lived in this helper's
+    // `.onTapGesture`; restoring it on the surface is a tracked cutover gap.)
 
     /// Full-screen loading affordance that covers the reader while
     /// segmentation + display block parsing run on the background

@@ -72,7 +72,7 @@ final class ReaderSurface: NSObject {
     init(content: ReaderSurfaceContent, tuning: ReaderTuning = .aml) {
         self.content = content
         self.tuning = tuning
-        let tv = UITextView(usingTextLayoutManager: false)   // TextKit 1 → simple layoutManager rects
+        let tv = GutterTextView(usingTextLayoutManager: false)   // TextKit 1 → simple layoutManager rects
         tv.isEditable = false
         tv.isSelectable = true                               // native selection, spans anything
         tv.isScrollEnabled = true
@@ -92,6 +92,10 @@ final class ReaderSurface: NSObject {
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         tap.cancelsTouchesInView = false
         tv.addGestureRecognizer(tap)
+        // Rotation / split-view: a width change re-flows the text, so the gutter glyphs
+        // (positioned in content coordinates against the old width) must be rebuilt
+        // against the new geometry — otherwise they land in the wrong place in landscape.
+        tv.onLayoutWidthChange = { [weak self] in self?.rebuildGlyphs() }
     }
 
     @objc private func handleTap(_ g: UITapGestureRecognizer) {
@@ -137,6 +141,25 @@ final class ReaderSurface: NSObject {
     func charIndex(at point: CGPoint) -> Int? {
         guard let pos = textView.closestPosition(to: point) else { return nil }
         return textView.offset(from: textView.beginningOfDocument, to: pos)
+    }
+
+    /// The character range of the WORD at `charIndex` (word-level read-along highlight):
+    /// expand left/right over non-whitespace. nil if out of range or on whitespace.
+    /// Words are short, so the per-character scan is cheap.
+    func wordRange(forCharAt charIndex: Int) -> NSRange? {
+        let s = textView.textStorage.string as NSString
+        let len = s.length
+        guard charIndex >= 0, charIndex < len else { return nil }
+        let seps = CharacterSet.whitespacesAndNewlines
+        func isSep(_ i: Int) -> Bool {
+            s.rangeOfCharacter(from: seps, options: [], range: NSRange(location: i, length: 1)).location != NSNotFound
+        }
+        if isSep(charIndex) { return nil }
+        var start = charIndex
+        while start > 0, !isSep(start - 1) { start -= 1 }
+        var end = charIndex + 1
+        while end < len, !isSep(end) { end += 1 }
+        return NSRange(location: start, length: end - start)
     }
 
     // ========== BLOCK 02: GEOMETRY - END ==========
@@ -340,3 +363,25 @@ extension ReaderSurface: UITextViewDelegate {
 }
 
 // ========== BLOCK 06: SELECTION MENU - END ==========
+
+// ========== BLOCK 07: GUTTER TEXT VIEW (WIDTH-CHANGE HOOK) - START ==========
+
+/// A `UITextView` that fires `onLayoutWidthChange` when its width changes — so the
+/// right-gutter annotation glyphs get repositioned after rotation / split-view resize.
+/// The glyphs live in content coordinates against a specific width; a re-flow at a new
+/// width strands them unless they're rebuilt. Gated on WIDTH ONLY so ordinary vertical
+/// scrolling (height/offset changes) never triggers a rebuild.
+final class GutterTextView: UITextView {
+    var onLayoutWidthChange: (() -> Void)?
+    private var lastWidth: CGFloat = -1
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.width != lastWidth else { return }
+        lastWidth = bounds.width
+        // Defer: rebuildGlyphs adds/removes subviews — don't mutate mid-layout.
+        DispatchQueue.main.async { [weak self] in self?.onLayoutWidthChange?() }
+    }
+}
+
+// ========== BLOCK 07: GUTTER TEXT VIEW - END ==========

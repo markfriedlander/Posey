@@ -25,6 +25,14 @@ struct ReaderTuning: Equatable {
     var highlightLinesAbove: Int = 0
     var highlightLinesBelow: Int = 0
 
+    /// How much of the text the read-along glow covers as the voice reads — a user-facing
+    /// DIAL (Mark, 2026-06-26). `.sentence` lights the whole spoken sentence; `.line`
+    /// lights just the visual line the voice is on (the gliding-line feel); `.word` lights
+    /// only the single word being spoken. The scroll always pins the active LINE to the
+    /// focal point regardless — only the glow's extent changes with this dial.
+    enum ReadAlongGranularity: Equatable { case word, line, sentence }
+    var readAlongGranularity: ReadAlongGranularity = .line
+
     /// Surface insets. Big bottom inset lets even the last line reach the focal
     /// position; top/side are reading margins. The LEFT margin is widened into a
     /// `gutterWidth` so annotation glyphs sit beside the text without colliding with it.

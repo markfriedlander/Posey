@@ -131,17 +131,6 @@ struct LibraryView: View {
                     showEmbeddingBoard = true
                 }
 
-                // Reader-rebuild switch: tap a doc → NEW one-surface reader when ON.
-                Button {
-                    useNewReaderSurface.toggle()
-                } label: {
-                    Image(systemName: useNewReaderSurface ? "book.pages.fill" : "book.pages")
-                        .foregroundStyle(useNewReaderSurface ? Color.accentColor : Color.primary.opacity(0.25))
-                }
-                .accessibilityLabel(useNewReaderSurface ? "New reader ON" : "New reader OFF")
-                .remoteRegister("library.newReaderToggle") {
-                    useNewReaderSurface.toggle()
-                }
             }
         }
         #endif
@@ -288,21 +277,9 @@ struct LibraryView: View {
         NavigationStack(path: $path) {
             libraryList
             .navigationDestination(for: Document.self) { document in
-                #if DEBUG
-                if useNewReaderSurface {
-                    ReaderSurfaceView(
-                        document: document,
-                        databaseManager: viewModel.databaseManager,
-                        onClose: { if !path.isEmpty { path.removeLast() } }
-                    )
-                    .navigationBarBackButtonHidden(true)
-                    .toolbar(.hidden, for: .navigationBar)
-                } else {
-                    shippingReader(for: document)
-                }
-                #else
+                // Cutover (2026-06-26): the shipping reader renders through the one
+                // surface. No flag, no fallback — this is the only reader path.
                 shippingReader(for: document)
-                #endif
             }
             .modifier(LibraryRemoteRouting(path: $path, viewModel: viewModel))
             .fileImporter(

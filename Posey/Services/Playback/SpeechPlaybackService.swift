@@ -30,6 +30,20 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         case finished
     }
 
+    /// The word the synthesizer is speaking RIGHT NOW: which sentence (`index`, the
+    /// playback-queue index == `currentSentenceIndex`) and how many characters into
+    /// that sentence's spoken text the word starts (`wordOffset`). Published from
+    /// `willSpeakRange` so the reader's read-along can light the exact VISUAL LINE the
+    /// voice is on and glide it to the focal point — true line-level sync through a
+    /// multi-line sentence (Mark's single-point-of-gaze). `wordOffset` indexes the
+    /// SPOKEN text (list markers stripped, any visual-announcement prefix included), so
+    /// it matches the sentence text exactly for prose; list/announcement rows can be
+    /// off by the stripped/prepended length — acceptable, prose is the dominant case.
+    struct SpokenWord: Equatable, Sendable {
+        let index: Int
+        let wordOffset: Int
+    }
+
     /// Utterances to keep queued ahead of the current position.
     private static let windowSize = 50
 
@@ -39,6 +53,9 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
 
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var currentSentenceIndex: Int?
+    /// The word currently being spoken (sentence index + intra-sentence char offset).
+    /// Drives line-level read-along. nil when idle/paused/stopped.
+    @Published private(set) var spokenWord: SpokenWord?
 
     private let synthesizer = AVSpeechSynthesizer()
     private let mode: Mode
@@ -365,6 +382,7 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
             synthesizer.stopSpeaking(at: .immediate)
         }
         sentenceIndicesByUtteranceID.removeAll()
+        spokenWord = nil
         if state != .finished {
             state = .idle
         }
@@ -535,6 +553,18 @@ extension SpeechPlaybackService: AVSpeechSynthesizerDelegate {
             // overwrites it after.
             self.state = .playing
             self.currentSentenceIndex = self.sentenceIndicesByUtteranceID[utteranceID]
+        }
+    }
+
+    nonisolated func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        willSpeakRangeOfSpeechString characterRange: NSRange,
+        utterance: AVSpeechUtterance
+    ) {
+        let utteranceID = ObjectIdentifier(utterance)
+        Task { @MainActor in
+            guard let index = self.sentenceIndicesByUtteranceID[utteranceID] else { return }
+            self.spokenWord = SpokenWord(index: index, wordOffset: characterRange.location)
         }
     }
 

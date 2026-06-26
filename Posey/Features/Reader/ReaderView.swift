@@ -122,53 +122,32 @@ struct ReaderView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-
-                    // Step 9 — unified units-based renderer. Walks
-                    // every `ContentUnit` (prose / heading / blockquote
-                    // / listItem / image / pageBreak / horizontalRule)
-                    // and delegates to `UnitRowView`. Sentence-precise
-                    // tap is delivered via per-sentence link ranges
-                    // inside the row's `AttributedString`; the openURL
-                    // action below dispatches to `jumpToSentenceID`.
-                    ForEach(viewModel.units) { unit in
-                        unitRow(unit)
+            // Cutover (2026-06-26) — the reader renders through ONE owned
+            // `ReaderSurface` (`SurfaceReaderHost`), replacing the old
+            // `ScrollView → LazyVStack → ForEach(UnitRowView)` (N per-unit text views
+            // + a SwiftUI↔UIKit scroll race). Same `ReaderViewModel` drives it; the
+            // surface owns its own scroll, so the `proxy` calls in the modifiers below
+            // are harmless no-ops and the host scrolls itself from `currentSentenceIndex`.
+            SurfaceReaderHost(
+                viewModel: viewModel,
+                onOpenNote: { id in
+                    revealChrome()
+                    isShowingNotesSheet = true
+                    let entryID = "note:\(id.uuidString)"
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        NotificationCenter.default.post(
+                            name: .remoteScrollSavedAnnotations, object: nil,
+                            userInfo: ["entryID": entryID])
                     }
-
-                    // 2026-05-21 — End-of-book indicator. Appears at
-                    // the very bottom of the scroll content when the
-                    // document has a known content-end boundary
-                    // (Gutenberg `*** END *** ` marker detected at
-                    // import time → contentEndOffset > 0 → reader
-                    // truncates segments/blocks past that offset).
-                    // Without this the doc just stops mid-scroll and
-                    // the user can wonder if something broke. The
-                    // treatment is intentionally understated: a thin
-                    // centered separator + the book's title in small
-                    // italic. No "THE END" copy — the typographic
-                    // colophon carries the meaning. Monochrome,
-                    // consistent with Posey's standing style.
-                    if viewModel.shouldShowEndOfBookIndicator {
-                        VStack(spacing: 14) {
-                            Rectangle()
-                                .fill(Color.primary.opacity(0.25))
-                                .frame(width: 60, height: 0.5)
-                            Text(viewModel.document.title)
-                                .italic()
-                                .font(.system(size: viewModel.fontSize * 0.85, weight: .regular))
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 32)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 56)
-                        .padding(.bottom, 24)
-                        .accessibilityIdentifier("reader.endOfBook")
-                    }
-                }
-                .padding(.vertical)
-            }
+                },
+                onOpenConversation: { storageID in
+                    revealChrome()
+                    #if POSEY_ENABLE_ASK_POSEY
+                    openAskPosey(initialAnchorStorageID: storageID)
+                    #endif
+                },
+                onReveal: { revealChrome() }
+            )
             .contentShape(Rectangle())
             // Step 9 — sentence-precise tap. The per-sentence
             // AttributedString ranges inside UnitRowView emit
@@ -2085,30 +2064,14 @@ private struct ReaderPreferencesSheet: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    // Audio export (notification-based background render).
-                    Button {
-                        viewModel.beginAudioExport()
-                    } label: {
-                        Label("Export to Audio File", systemImage: "waveform.badge.plus")
-                            .frame(minHeight: 44, alignment: .leading)
-                    }
-                    .accessibilityIdentifier("preferences.exportAudio")
-                    .accessibilityHint("Renders this document as an M4A audio file. The export runs in the background and notifies you when complete.")
-                    .remoteRegister("preferences.exportAudio") {
-                        viewModel.beginAudioExport()
-                    }
-                    Text("Renders this document as an M4A file. Continues in the background if you lock your phone or switch apps; you'll get a notification when it's ready.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    // Audio export — DISABLED, feature under review (Mark, 2026-06-26).
+                    // UI entry point removed; export logic #if-false'd below; helper
+                    // files (AudioExporter/Cache/Notifications) left dormant on disk.
                 } header: {
                     Label("Sound", systemImage: "speaker.wave.2")
                 }
 
-                // Cached Audio Files — lists M4As in the persistent cache
-                // (its own component Section; sits with audio export under
-                // the Sound grouping). iOS may purge under storage
-                // pressure; re-export regenerates.
-                CachedAudioFilesSection(databaseManager: viewModel.databaseManager)
+                // Cached Audio Files list — DISABLED with audio export (Mark, 2026-06-26).
 
                 // ===== READING — everything that affects how the page looks =====
                 // Font size + image handling today. Presentation mode
@@ -2930,6 +2893,9 @@ final class ReaderViewModel: ObservableObject {
     /// best capturable voice on the device. The user's reading
     /// experience is unchanged.
     func beginAudioExport() {
+        // Audio export DISABLED — feature under review (Mark, 2026-06-26).
+        // Body excluded from the build; helper files left dormant for easy restore.
+        #if false
         let exporter = AudioExporter()
         audioExporter = exporter
         lastCompletedExportURL = nil
@@ -3029,6 +2995,7 @@ final class ReaderViewModel: ObservableObject {
                 }
             }
         }
+        #endif
     }
 
     /// Pick the voice mode the export should actually run with.
@@ -3079,6 +3046,10 @@ final class ReaderViewModel: ObservableObject {
         )
     }
     @Published private(set) var currentSentenceIndex: Int = 0
+    /// The word currently being spoken, republished from the playback service so the
+    /// surface reader's read-along lights + glides the exact visual line the voice is
+    /// on (line-level sync / single point of gaze). nil when not playing.
+    @Published private(set) var spokenWord: SpeechPlaybackService.SpokenWord?
     @Published private(set) var playbackState: SpeechPlaybackService.PlaybackState = .idle
     // Step 9 — focusedDisplayBlockID deleted; focusedUnitID replaces it.
     @Published var isShowingError = false
@@ -4646,6 +4617,22 @@ final class ReaderViewModel: ObservableObject {
                 self?.updateNowPlaying()
             }
             .store(in: &cancellables)
+
+        // Line-level read-along: republish the spoken-word position for the surface.
+        playbackService.$spokenWord
+            .sink { [weak self] word in self?.spokenWord = word }
+            .store(in: &cancellables)
+    }
+
+    /// Ask Posey conversation anchor rows for THIS document (the `.conversation`
+    /// annotations). Surfaced as right-gutter glyphs by the reader. Empty when Ask
+    /// Posey isn't compiled in or the document has no anchored conversations.
+    func conversationAnchorRows() -> [StoredAskPoseyTurn] {
+        #if POSEY_ENABLE_ASK_POSEY
+        return (try? databaseManager.askPoseyAnchorRows(for: document.id)) ?? []
+        #else
+        return []
+        #endif
     }
 
     private func pauseForVisualBlockIfNeeded(atSentenceIndex sentenceIndex: Int) {

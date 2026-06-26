@@ -17,6 +17,7 @@ final class ReadAlongEngine {
 
     private let surface: ReaderSurface
     private var lastLineRange: NSRange?
+    private var lastHighlightRange: NSRange?
 
     /// Fired on each line change (status / now-playing / observers).
     var onLineChange: ((_ lineRange: NSRange, _ segment: SurfaceSegment?) -> Void)?
@@ -26,6 +27,7 @@ final class ReadAlongEngine {
     /// Playback started/stopped/seeked — next word re-pins fresh.
     func reset() {
         lastLineRange = nil
+        lastHighlightRange = nil
         surface.setActiveLine(nil)
     }
 
@@ -51,10 +53,20 @@ final class ReadAlongEngine {
 
     private func advance(toSurfaceOffset surfaceOffset: Int, segment: SurfaceSegment?) {
         guard let line = surface.visualLine(forCharAt: surfaceOffset), line.range.length > 0 else { return }
-        if let last = lastLineRange, NSEqualRanges(last, line.range) { return }   // dedup to line changes
+        // The glow's EXTENT follows the granularity dial; the scroll always pins the LINE.
+        let highlight: NSRange
+        switch surface.tuning.readAlongGranularity {
+        case .line:     highlight = line.range
+        case .sentence: highlight = segment?.range ?? line.range
+        case .word:     highlight = surface.wordRange(forCharAt: surfaceOffset) ?? line.range
+        }
+        let lineChanged = !(lastLineRange.map { NSEqualRanges($0, line.range) } ?? false)
+        let highlightChanged = !(lastHighlightRange.map { NSEqualRanges($0, highlight) } ?? false)
+        guard lineChanged || highlightChanged else { return }
         lastLineRange = line.range
-        surface.setActiveLine(line.range)
-        surface.glide(toRect: line.rect)
+        lastHighlightRange = highlight
+        surface.setActiveLine(highlight)
+        if lineChanged { surface.glide(toRect: line.rect) }   // only re-glide on line change → no per-word jitter
         onLineChange?(line.range, segment)
     }
 }

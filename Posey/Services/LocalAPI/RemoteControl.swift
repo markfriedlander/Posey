@@ -218,6 +218,10 @@ extension Notification.Name {
     /// creates a real R8-anchored annotation without an interactive text selection, so
     /// the re-find/flag cycle is autonomously verifiable.
     static let remoteAnnotateSurface = Notification.Name("PoseyRemoteAnnotateSurface")
+    /// No userInfo. Simulates a USER drag on the open reader (fires the surface's
+    /// `onUserScroll` → re-reveals the auto-fading chrome) so scroll-to-reveal is
+    /// verifiable on the phone without a physical gesture.
+    static let remoteSimulateSurfaceDrag = Notification.Name("PoseyRemoteSimulateSurfaceDrag")
     /// No userInfo. LibraryView observes; pops the navigation path.
     static let remoteLibraryNavigateBack = Notification.Name("PoseyRemoteLibraryNavigateBack")
     /// No userInfo. LibraryView observes; toggles antenna OFF (re-enable

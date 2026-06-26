@@ -125,6 +125,27 @@ struct SurfaceReaderHost: UIViewRepresentable {
                     self.lastBandSegmentIndex = word.index
                 }
                 .store(in: &cancellables)
+            // Antenna test hooks, re-pointed from the retired toy cover to the real reader.
+            NotificationCenter.default.publisher(for: .remoteScrollSurface)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] note in
+                    guard let self, let f = note.userInfo?["fraction"] as? Double else { return }
+                    self.scrollToFraction(CGFloat(f))
+                }
+                .store(in: &cancellables)
+            NotificationCenter.default.publisher(for: .remoteSimulateSurfaceDrag)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in self?.surface.onUserScroll?() }   // same path a real drag fires
+                .store(in: &cancellables)
+        }
+
+        /// Scroll the surface to a fraction (0…1) of its content — antenna capture framing
+        /// (SCROLL_SURFACE), so any part of the page can be reliably positioned for a shot.
+        private func scrollToFraction(_ f: CGFloat) {
+            let tv = surface.textView
+            tv.layoutManager.ensureLayout(for: tv.textContainer)
+            let maxOff = max(0, tv.contentSize.height - tv.bounds.height)
+            tv.setContentOffset(CGPoint(x: 0, y: maxOff * max(0, min(1, f))), animated: true)
         }
 
         /// Apply every per-update diff: rebuild on content/font change, move the

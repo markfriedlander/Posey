@@ -3537,6 +3537,15 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted", "fraction": s])
 
+            case "SIMULATE_DRAG":
+                // Reader rebuild: simulate a user drag on the open surface reader so the
+                // chrome re-reveals — verifies scroll-to-reveal without a physical gesture
+                // (a programmatic glide can't trigger it, by design).
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSimulateSurfaceDrag, object: nil)
+                }
+                return json(["status": "posted"])
+
             case "SURFACE_FONT":
                 // Reader rebuild: rebuild the open one-surface reader at a new body
                 // point size (E2 Step-2: annotation underlines must re-land exactly

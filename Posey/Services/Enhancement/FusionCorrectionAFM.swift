@@ -136,7 +136,7 @@ enum FusionCorrectionAFM {
             let response = try await session.respond(
                 to: prompt,
                 generating: FusionCorrectionVerdict.self,
-                options: GenerationOptions(sampling: .greedy)
+                options: GenerationOptions(samplingMode: .greedy)
             )
             let corrected = response.content.corrected
                 .trimmingCharacters(in: .whitespacesAndNewlines)

@@ -49,6 +49,11 @@ final class ReaderSurface: NSObject {
     /// works). The owner resolves the offset → sentence → playback position.
     var onTap: ((Int) -> Void)?
 
+    /// Fired when the USER drags to scroll (not programmatic read-along glide) — the
+    /// owner uses it to re-reveal the auto-fading chrome the way scrolling did in the
+    /// old reader. Non-destructive (unlike a tap, it doesn't move the reading position).
+    var onUserScroll: (() -> Void)?
+
     /// Fired when the user picks Note/Bookmark from the selection menu, with the
     /// current SURFACE selection range. The owner converts it to a canonical anchor
     /// and persists (E2 create flow).
@@ -339,6 +344,13 @@ final class ReaderSurface: NSObject {
 // ========== BLOCK 06: SELECTION MENU (NOTE / BOOKMARK) - START ==========
 
 extension ReaderSurface: UITextViewDelegate {
+    /// The user started dragging the page → re-reveal the chrome. Programmatic read-along
+    /// glide uses `setContentOffset` and does NOT fire `willBeginDragging`, so playback
+    /// auto-scroll never spuriously triggers this.
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        onUserScroll?()
+    }
+
     /// Inject Note + Bookmark into the selection's contextual menu. The user selects
     /// text and picks one; the owner converts the SURFACE range to a canonical anchor.
     func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,

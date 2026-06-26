@@ -96,6 +96,10 @@ struct SurfaceReaderHost: UIViewRepresentable {
                 guard let seg = self?.surface.content.layout.segment(atSurfaceOffset: offset) else { return }
                 vm?.jumpToSentenceID(seg.sentenceID)
             }
+            // Dragging to scroll re-reveals the auto-fading chrome WITHOUT moving the
+            // reading position (a tap would). Restores the old reader's scroll-to-reveal,
+            // which died when the SwiftUI ScrollView was replaced by the surface.
+            surface.onUserScroll = { [weak self] in self?.parent.onReveal() }
             surface.onOpenMarker = { [weak self] id in
                 guard let self else { return }
                 self.parent.onReveal()

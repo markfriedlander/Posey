@@ -56,9 +56,10 @@ final class ReadAlongEngine {
         // The glow's EXTENT follows the granularity dial; the scroll always pins the LINE.
         let highlight: NSRange
         switch surface.tuning.readAlongGranularity {
-        case .line:     highlight = line.range
-        case .sentence: highlight = segment?.range ?? line.range
-        case .word:     highlight = surface.wordRange(forCharAt: surfaceOffset) ?? line.range
+        case .line:      highlight = line.range
+        case .sentence:  highlight = segment?.range ?? line.range
+        case .word:      highlight = surface.wordRange(forCharAt: surfaceOffset) ?? line.range
+        case .paragraph: highlight = surface.paragraphRange(forCharAt: surfaceOffset) ?? segment?.range ?? line.range
         }
         let lineChanged = !(lastLineRange.map { NSEqualRanges($0, line.range) } ?? false)
         let highlightChanged = !(lastHighlightRange.map { NSEqualRanges($0, highlight) } ?? false)

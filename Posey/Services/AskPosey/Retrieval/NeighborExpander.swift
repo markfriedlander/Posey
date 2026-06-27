@@ -98,6 +98,9 @@ nonisolated enum NeighborExpander {
             blocks.append(RetrievedChunk(
                 chunkID: m.best.chunkID,
                 startOffset: m.best.startOffset,
+                // Keep the winner's document home through neighbor expansion.
+                startUnitID: m.best.startUnitID,
+                startIntraOffset: m.best.startIntraOffset,
                 text: stitched,
                 relevance: m.best.relevance,
                 semanticScore: m.best.semanticScore))

@@ -975,6 +975,17 @@ nonisolated struct StoredAskPoseyTurn: Equatable, Sendable, Identifiable {
     let isSummary: Bool
 }
 
+/// A passage an Ask Posey conversation CITED (a retrieved chunk injected into one of its
+/// assistant turns). An anchor (a passage the USER asked about) and a citation (a passage
+/// the MODEL pulled in to answer) are the same kind of thing — a pointer from a document
+/// spot to the doc's one conversation (Mark, 2026-06-26). `turnStorageID` is the id of the
+/// ANSWER turn that cited the passage, so tapping the glyph lands the reader on the
+/// contextually relevant turn — the answer where the passage was actually used.
+struct AskPoseyCitedPassage {
+    let offset: Int
+    let turnStorageID: String
+}
+
 extension DatabaseManager {
     /// Append a single turn to the persistent conversation log for
     /// `documentID`. Called both for user turns (immediately on send)
@@ -1373,6 +1384,85 @@ extension DatabaseManager {
             rows.append(row)
         }
         return rows
+    }
+
+    /// Every passage CITED by an Ask Posey conversation for `documentID`, each tagged with
+    /// the ANSWER turn that cited it. For each assistant turn, decodes the injected chunks
+    /// and emits one entry per cited chunk offset, owned by that turn's storage id — so the
+    /// reader glyph reopens the conversation at the answer where the passage was used.
+    /// Powers the conversation glyphs alongside anchors — see `AskPoseyCitedPassage`.
+    func askPoseyCitedPassages(for documentID: UUID) throws -> [AskPoseyCitedPassage] {
+        // Resolve each cited chunk's DURABLE unit-anchor (startUnitID + intra offset)
+        // to a CURRENT plainText offset, so a glyph lands on the right passage even
+        // after Tier-2/3 reprocessing shifted global offsets. Build the unit → start-
+        // offset map the same way `plain_text` is joined (prose units, "\n\n"-joined).
+        // `units(for:)` takes the lock itself, so do it BEFORE acquiring the lock here.
+        let prose = (try units(for: documentID))
+            .filter { $0.kind.carriesProseText }
+            .sorted { $0.sequence < $1.sequence }
+        var unitStart: [UUID: Int] = [:]
+        var unitLen: [UUID: Int] = [:]
+        var cursor = 0
+        for (idx, u) in prose.enumerated() {
+            unitStart[u.id] = cursor
+            unitLen[u.id] = u.text.count
+            cursor += u.text.count + (idx < prose.count - 1 ? 2 : 0)
+        }
+
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = """
+        SELECT id, document_id, timestamp, role, content, invocation,
+               anchor_offset, summary_of_turns_through, is_summary,
+               intent, chunks_injected, full_prompt_for_logging
+        FROM ask_posey_conversations
+        WHERE document_id = ? AND is_summary = 0 AND role = 'assistant'
+        ORDER BY timestamp ASC;
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+
+        var passages: [AskPoseyCitedPassage] = []
+        var seen = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let row = decodeAskPoseyTurn(statement: statement),
+                  let data = row.chunksInjectedJSON.data(using: .utf8),
+                  let chunks = try? JSONDecoder().decode([RetrievedChunk].self, from: data),
+                  !chunks.isEmpty else { continue }
+            for chunk in chunks {
+                // Only chunks that carry a durable unit-anchor can be placed. Rows
+                // persisted before this field (and anchor-less results) are skipped —
+                // their location was not recorded, so we honestly show no glyph rather
+                // than guess. New conversations record it going forward.
+                guard let uid = chunk.startUnitID, let base = unitStart[uid] else { continue }
+                let intra = max(0, min(chunk.startIntraOffset ?? 0, unitLen[uid] ?? 0))
+                let offset = base + intra
+                // One glyph per (turn, passage): a turn can cite the same spot via
+                // overlapping chunks.
+                guard seen.insert("\(row.id)#\(offset)").inserted else { continue }
+                passages.append(AskPoseyCitedPassage(offset: offset, turnStorageID: row.id))
+            }
+        }
+        return passages
+    }
+
+    /// Current plainText offset of a unit-anchored position (unit + intra offset).
+    /// Inverse of `unitID(plainTextOffset:)`; computed against the document's CURRENT
+    /// units so it reflects any Tier-2/3 reprocessing. nil if `unitID` isn't a
+    /// prose-bearing unit in the doc. Resolves a cited passage / glyph to a live
+    /// reader offset at display time.
+    func plainTextOffset(forUnitID unitID: UUID, intraOffset: Int, in documentID: UUID) throws -> Int? {
+        let prose = (try units(for: documentID))
+            .filter { $0.kind.carriesProseText }
+            .sorted { $0.sequence < $1.sequence }
+        var cursor = 0
+        for (idx, u) in prose.enumerated() {
+            if u.id == unitID {
+                return cursor + max(0, min(intraOffset, u.text.count))
+            }
+            cursor += u.text.count + (idx < prose.count - 1 ? 2 : 0)
+        }
+        return nil
     }
 
     /// Decode the columns selected by `askPoseyTurns` / `askPoseyLatestSummary`

@@ -250,6 +250,11 @@ struct HybridRetriever {
                 return HybridRetrievalResult(
                     chunkID: chunk.chunkIndex,
                     startOffset: kUnitAnchoredStartOffsetSentinel,
+                    // Carry the chunk's real document home so a cited passage can be
+                    // located in the reader. startOffset stays the sentinel — the
+                    // weak-retrieval gate keys on `startOffset < 0`.
+                    startUnitID: chunk.startUnitID,
+                    startIntraOffset: chunk.startIntraOffset,
                     text: chunk.text,
                     relevance: score,
                     // Raw semantic cosine (nil ⇒ BM25-only, no semantic

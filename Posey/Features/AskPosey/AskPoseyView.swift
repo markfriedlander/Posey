@@ -202,9 +202,12 @@ struct AskPoseyView: View {
         // and the composer pinned at the bottom of the sheet.
         let target: AskPoseyMessage?
         if let storageID {
-            target = viewModel.messages.first { msg in
-                msg.role == .anchor && msg.storageID == storageID
-            }
+            // Match ANY row by id, not just anchors: a margin glyph can point at an
+            // anchor (where the user asked) OR an answer turn (a passage that answer
+            // cited). Both are pointers into this one conversation; we land on whichever
+            // turn the tapped glyph refers to so the user sees the contextually relevant
+            // spot. Falls back to no scroll if that turn is outside the loaded history.
+            target = viewModel.messages.first { $0.storageID == storageID }
         } else {
             target = viewModel.messages.last { $0.role == .anchor }
         }
@@ -506,7 +509,7 @@ struct AskPoseyView: View {
             viewModel.cancelInFlight()
             // Inline citation tap — fromCitation = true so the
             // reader sets up the return-pill flow.
-            onJumpToChunk(chunk.startOffset, true)
+            onJumpToChunk(viewModel.citedChunkOffset(chunk), true)
             dismiss()
             return true
         }
@@ -1301,7 +1304,7 @@ private extension AskPoseyView {
                     Button {
                         guard let onJumpToChunk else { return }
                         viewModel.cancelInFlight()
-                        onJumpToChunk(source.chunk.startOffset, true)
+                        onJumpToChunk(viewModel.citedChunkOffset(source.chunk), true)
                         dismiss()
                     } label: {
                         HStack(spacing: 3) {

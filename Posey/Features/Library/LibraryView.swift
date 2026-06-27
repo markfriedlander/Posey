@@ -2627,6 +2627,25 @@ extension LibraryViewModel {
                     "turns": items
                 ])
 
+            case "LIST_CONVERSATION_CITED_PASSAGES":
+                // Read-only: every passage an Ask Posey conversation CITED for a doc
+                // (a retrieved chunk injected into some assistant turn), each tagged
+                // with the conversation (anchor storage id) that cited it. This is the
+                // exact data that drives the bidirectional conversation glyphs — use it
+                // to verify which lines should carry a margin bubble.
+                guard let raw = arg, let id = UUID(uuidString: raw) else {
+                    return #"{"error":"Usage: LIST_CONVERSATION_CITED_PASSAGES:<doc-id>"}"#
+                }
+                let cited = try databaseManager.askPoseyCitedPassages(for: id)
+                let items: [[String: Any]] = cited.map { c in
+                    ["offset": c.offset, "turnStorageID": c.turnStorageID]
+                }
+                return json([
+                    "documentID": id.uuidString,
+                    "citedCount": items.count,
+                    "cited": items
+                ])
+
             case "DB_STATS":
                 let docs = try databaseManager.documents()
                 var byType: [String: Int] = [:]
@@ -3527,10 +3546,11 @@ extension LibraryViewModel {
                 return json(["status": "posted"])
 
             case "SET_READALONG_LEVEL":
-                // Set the read-along highlight granularity dial (word | line | sentence)
-                // on the open reader at runtime.
-                guard let lvl = arg?.lowercased(), ["word", "line", "sentence"].contains(lvl) else {
-                    return #"{"error":"Usage: SET_READALONG_LEVEL:<word|line|sentence>"}"#
+                // Set the read-along highlight granularity dial
+                // (word | line | sentence | paragraph) on the open reader at runtime.
+                guard let lvl = arg?.lowercased(),
+                      ["word", "line", "sentence", "paragraph"].contains(lvl) else {
+                    return #"{"error":"Usage: SET_READALONG_LEVEL:<word|line|sentence|paragraph>"}"#
                 }
                 await MainActor.run {
                     NotificationCenter.default.post(name: .remoteSetReadAlongLevel, object: nil,

@@ -154,6 +154,20 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// so previews/tests can run without a real DB.
     private let databaseManager: DatabaseManager?
 
+    /// Resolve a cited chunk to a CURRENT reader offset for jump-to-passage.
+    /// Uses the chunk's durable unit-anchor against the live document when present
+    /// (so it survives Tier-2/3 text reprocessing); falls back to the stored
+    /// `startOffset` for legacy rows that carry no anchor.
+    func citedChunkOffset(_ chunk: RetrievedChunk) -> Int {
+        if let uid = chunk.startUnitID, let db = databaseManager,
+           let off = try? db.plainTextOffset(forUnitID: uid,
+                                             intraOffset: chunk.startIntraOffset ?? 0,
+                                             in: documentID) {
+            return off
+        }
+        return chunk.startOffset
+    }
+
     /// 2026-05-12 — Closure the View sets at construction time so the
     /// VM can ask "is this document still being indexed right now?"
     /// when deciding what message to surface for a weak-retrieval
@@ -898,6 +912,9 @@ private extension AskPoseyChatViewModel {
             RetrievedChunk(
                 chunkID: rc.chunkID,
                 startOffset: rc.startOffset,
+                // Carry the document home into the persisted turn (the glyph source).
+                startUnitID: rc.startUnitID,
+                startIntraOffset: rc.startIntraOffset,
                 text: TextNormalizer.stripWaybackPrintHeaders(rc.text),
                 relevance: rc.relevance,
                 // Thread the semantic cosine through — `isWeakRetrieval`

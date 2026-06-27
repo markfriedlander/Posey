@@ -2018,6 +2018,22 @@ private struct ReaderPreferencesSheet: View {
                     Text(viewModel.visualHandling.description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    // Read-along highlight granularity dial (Mark, 2026-06-26). Menu
+                    // style (not segmented) — four options read better in a list than
+                    // crammed into a segmented control.
+                    Picker("Read-along highlight",
+                           selection: $viewModel.readAlongGranularity) {
+                        ForEach(ReaderTuning.ReadAlongGranularity.allCases, id: \.self) { level in
+                            Text(level.displayName).tag(level)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("preferences.readAlongGranularity")
+
+                    Text(viewModel.readAlongGranularity.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 } header: {
                     Label("Reading", systemImage: "book")
                 }
@@ -2594,6 +2610,16 @@ final class ReaderViewModel: ObservableObject {
 
     @Published var fontSize: CGFloat = PlaybackPreferences.shared.fontSize {
         didSet { PlaybackPreferences.shared.fontSize = fontSize }
+    }
+
+    /// Read-along highlight granularity dial (word / line / sentence / paragraph),
+    /// surfaced as a Preferences picker. didSet writes through to PlaybackPreferences;
+    /// the SurfaceReaderHost reads it on each sync and applies it to the surface tuning,
+    /// so a change takes effect live mid-read. The antenna `SET_READALONG_LEVEL` verb
+    /// drives this same property, keeping one source of truth.
+    @Published var readAlongGranularity: ReaderTuning.ReadAlongGranularity
+        = PlaybackPreferences.shared.readAlongGranularity {
+        didSet { PlaybackPreferences.shared.readAlongGranularity = readAlongGranularity }
     }
 
     /// 2026-05-21 — True when the document carries a known content-end
@@ -4546,6 +4572,20 @@ final class ReaderViewModel: ObservableObject {
     func conversationAnchorRows() -> [StoredAskPoseyTurn] {
         #if POSEY_ENABLE_ASK_POSEY
         return (try? databaseManager.askPoseyAnchorRows(for: document.id)) ?? []
+        #else
+        return []
+        #endif
+    }
+
+    /// Bidirectional conversation glyphs (Mark, 2026-06-26): every passage an Ask Posey
+    /// conversation CITED (a retrieved chunk it pulled into an answer), paired with the
+    /// conversation that cited it. The reader drops the same bubble glyph on each, so a
+    /// passage Posey talked about is always visible and tappable back into that thread —
+    /// not just the one passage the user anchored on. Empty when Ask Posey isn't compiled
+    /// in or no conversation has cited anything.
+    func conversationCitedPassages() -> [AskPoseyCitedPassage] {
+        #if POSEY_ENABLE_ASK_POSEY
+        return (try? databaseManager.askPoseyCitedPassages(for: document.id)) ?? []
         #else
         return []
         #endif

@@ -167,6 +167,15 @@ final class ReaderSurface: NSObject {
         return NSRange(location: start, length: end - start)
     }
 
+    /// The character range of the PARAGRAPH containing `charIndex` — the widest
+    /// read-along granularity. A "paragraph" is one content unit, so this is just the
+    /// unit's full surface range from the layout map. nil if the offset isn't inside any
+    /// unit (defensive; every prose char belongs to one).
+    func paragraphRange(forCharAt charIndex: Int) -> NSRange? {
+        guard let uid = content.layout.unitID(atSurfaceOffset: charIndex) else { return nil }
+        return content.layout.unitRange(uid)
+    }
+
     // ========== BLOCK 02: GEOMETRY - END ==========
 
     // ========== BLOCK 03: SCROLL (SINGLE OWNER) - START ==========

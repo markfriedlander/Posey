@@ -14,6 +14,15 @@ nonisolated struct RetrievedChunk: Sendable, Equatable, Codable {
     /// Stored alongside `chunkID` so jump-back doesn't need a SQL
     /// round-trip when the user taps a "Sources" pill.
     let startOffset: Int
+    /// The cited passage's DURABLE home in the document: the unit it starts in and
+    /// the character offset within that unit's text. The retriever knows this (the
+    /// chunk is anchored to it); we carry it through so a persisted turn can resolve
+    /// a citation / margin glyph to a CURRENT document offset at display time —
+    /// surviving Tier-2/3 reprocessing that shifts global offsets. `nil` for rows
+    /// persisted before this field existed (they decode cleanly) and for results with
+    /// no unit anchor. `var … = nil` keeps the memberwise init backward-compatible.
+    var startUnitID: UUID? = nil
+    var startIntraOffset: Int? = nil
     /// The chunk text actually rendered into the prompt. Persisted so
     /// the user can see exactly which passage informed the answer.
     let text: String

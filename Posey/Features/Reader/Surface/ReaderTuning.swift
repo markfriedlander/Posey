@@ -26,11 +26,37 @@ struct ReaderTuning: Equatable {
     var highlightLinesBelow: Int = 0
 
     /// How much of the text the read-along glow covers as the voice reads — a user-facing
-    /// DIAL (Mark, 2026-06-26). `.sentence` lights the whole spoken sentence; `.line`
-    /// lights just the visual line the voice is on (the gliding-line feel); `.word` lights
-    /// only the single word being spoken. The scroll always pins the active LINE to the
-    /// focal point regardless — only the glow's extent changes with this dial.
-    enum ReadAlongGranularity: Equatable { case word, line, sentence }
+    /// DIAL (Mark, 2026-06-26; `.paragraph` added 2026-06-26 pm). From tightest to widest:
+    /// `.word` lights only the single word being spoken; `.line` lights just the visual line
+    /// the voice is on (the gliding-line feel); `.sentence` lights the whole spoken sentence;
+    /// `.paragraph` lights the entire paragraph being read. The scroll always pins the active
+    /// LINE to the focal point regardless — only the glow's extent changes with this dial.
+    /// `String`-backed so it persists in `PlaybackPreferences` and round-trips through the
+    /// `SET_READALONG_LEVEL` antenna verb by raw name; `CaseIterable` drives the Preferences
+    /// picker. Order is tightest→widest so the picker reads naturally.
+    enum ReadAlongGranularity: String, CaseIterable, Equatable {
+        case word, line, sentence, paragraph
+
+        /// Title shown in the Preferences picker.
+        var displayName: String {
+            switch self {
+            case .word:      return "Word"
+            case .line:      return "Line"
+            case .sentence:  return "Sentence"
+            case .paragraph: return "Paragraph"
+            }
+        }
+
+        /// One-line explanation under the picker.
+        var description: String {
+            switch self {
+            case .word:      return "Glow only the single word being spoken."
+            case .line:      return "Glow the line the voice is on as it glides — the read-along feel."
+            case .sentence:  return "Glow the whole sentence being spoken."
+            case .paragraph: return "Glow the entire paragraph being read."
+            }
+        }
+    }
     var readAlongGranularity: ReadAlongGranularity = .line
 
     /// Surface insets. Big bottom inset lets even the last line reach the focal

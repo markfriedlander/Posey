@@ -59,9 +59,14 @@ struct SurfaceReaderHost: UIViewRepresentable {
         private var lastBandSegmentIndex: Int = -1
         private var lastSearchActive = false
         private var lastMarkersToken = ""
-        /// UUID-keyed map back to the conversation anchor's storage id (its row id is a
-        /// String; the surface marker id is a UUID, so we round-trip through this).
+        /// UUID-keyed map back to the conversation's storage id (the owning anchor row id,
+        /// a String; the surface marker id is a UUID, so we round-trip through this). A
+        /// document-scope conversation has no anchor → no entry here (opens unscoped).
         private var conversationStorageByMarkerID: [UUID: String] = [:]
+        /// Every conversation marker id currently rendered — both anchor glyphs AND cited-
+        /// passage glyphs (bidirectional). A marker tap routes to the conversation path when
+        /// its id is in here; the storage-id map above is consulted for WHICH thread.
+        private var conversationMarkerIDs: Set<UUID> = []
         /// Note ids currently rendered, so a marker tap routes to the note vs conversation path.
         private var noteMarkerIDs: Set<UUID> = []
 
@@ -83,6 +88,7 @@ struct SurfaceReaderHost: UIViewRepresentable {
             )
             surface.reload(content: content)
             surface.bodyPointSize = vm.fontSize
+            surface.tuning.readAlongGranularity = vm.readAlongGranularity   // honor saved dial
             builtContentToken = Self.contentToken(vm)
             builtFontSize = vm.fontSize
 
@@ -120,8 +126,10 @@ struct SurfaceReaderHost: UIViewRepresentable {
                 self.parent.onReveal()
                 if self.noteMarkerIDs.contains(id) {
                     self.parent.onOpenNote(id)
-                } else if let storageID = self.conversationStorageByMarkerID[id] {
-                    self.parent.onOpenConversation(storageID)
+                } else if self.conversationMarkerIDs.contains(id) {
+                    // Anchor glyph or cited-passage glyph — both reopen the same thread.
+                    // Storage id may be nil (document-scope) → opens the unscoped thread.
+                    self.parent.onOpenConversation(self.conversationStorageByMarkerID[id])
                 }
             }
         }
@@ -155,12 +163,12 @@ struct SurfaceReaderHost: UIViewRepresentable {
             NotificationCenter.default.publisher(for: .remoteSetReadAlongLevel)
                 .receive(on: RunLoop.main)
                 .sink { [weak self] note in
-                    guard let self, let lvl = note.userInfo?["level"] as? String else { return }
-                    switch lvl {
-                    case "word":     self.surface.tuning.readAlongGranularity = .word
-                    case "sentence": self.surface.tuning.readAlongGranularity = .sentence
-                    default:         self.surface.tuning.readAlongGranularity = .line
-                    }
+                    guard let self, let lvl = note.userInfo?["level"] as? String,
+                          let g = ReaderTuning.ReadAlongGranularity(rawValue: lvl) else { return }
+                    // Drive the user preference (not just the surface) so the antenna verb,
+                    // the Preferences picker, and persistence share one source of truth; the
+                    // VM's didSet persists it and the next sync applies it to the surface.
+                    self.parent.viewModel.readAlongGranularity = g
                 }
                 .store(in: &cancellables)
             NotificationCenter.default.publisher(for: .remoteSurfaceTapImage)
@@ -217,6 +225,9 @@ struct SurfaceReaderHost: UIViewRepresentable {
                 build(from: vm)                 // structural change → full rebuild + re-apply
                 return
             }
+            // Read-along dial can change without a rebuild (Preferences picker / antenna);
+            // the engine reads tuning live on the next spoken word, so this is enough.
+            surface.tuning.readAlongGranularity = vm.readAlongGranularity
             applyMarkers(vm, force: false)
             applyBand(vm, force: false)
         }
@@ -263,7 +274,15 @@ struct SurfaceReaderHost: UIViewRepresentable {
             let layout = surface.content.layout
             var markers: [SurfaceMarker] = []
             noteMarkerIDs.removeAll()
+            conversationMarkerIDs.removeAll()
             conversationStorageByMarkerID.removeAll()
+            // Anchors and citations are the SAME kind of thing — a pointer from a document
+            // spot to this doc's one conversation (Mark, 2026-06-26). No special-casing, no
+            // hiding: every pointer gets a bubble; where two land on one line the shared
+            // count-badge fans them out, exactly like notes/bookmarks. The only thing we
+            // skip is a LITERAL duplicate (same line + same target turn) — that's two doors
+            // to the identical spot, pure noise, not distinct information.
+            var seenConversationDoors: Set<String> = []
 
             func surfaceRange(forPlainOffset offset: Int) -> NSRange? {
                 guard let idx = vm.segments.lastIndex(where: { $0.startOffset <= offset })
@@ -288,15 +307,36 @@ struct SurfaceReaderHost: UIViewRepresentable {
             // (square-ish) so it sits in the gutter like the note/bookmark marks instead of
             // the wide double-bubble that spilled into the highlighted text.
             let docContentEnd = vm.segments.last?.endOffset ?? Int.max
-            for row in vm.conversationAnchorRows() {
-                guard let off = row.anchorOffset, off >= 0, off <= docContentEnd,
-                      let r = surfaceRange(forPlainOffset: off) else { continue }
+
+            // Helper: drop a conversation bubble on the line at `offset`, opening the
+            // conversation at `storageID` (the turn the glyph points at). `label` is the
+            // fan-out menu title when this bubble shares a line with others.
+            func addConversationMarker(atOffset offset: Int, storageID: String, label: String) {
+                guard offset >= 0, offset <= docContentEnd,
+                      let r = surfaceRange(forPlainOffset: offset) else { return }
+                guard seenConversationDoors.insert("\(r.location)#\(storageID)").inserted else { return }
                 let markerID = UUID()
-                conversationStorageByMarkerID[markerID] = row.id
+                conversationMarkerIDs.insert(markerID)
+                conversationStorageByMarkerID[markerID] = storageID
                 markers.append(SurfaceMarker(
                     id: markerID, surfaceRange: r, unsure: false,
                     symbol: "bubble.left.fill",
-                    label: "Conversation"))
+                    label: label))
+            }
+
+            // The user's pointers: anchors. A document-scope conversation carries a
+            // sentinel offset (> docContentEnd) and is naturally skipped — it has no
+            // passage to point at; only passage-anchored ones earn a glyph here.
+            for row in vm.conversationAnchorRows() {
+                guard let off = row.anchorOffset else { continue }
+                addConversationMarker(atOffset: off, storageID: row.id, label: "Conversation")
+            }
+
+            // The model's pointers: citations. Every passage an answer cited gets the same
+            // bubble, opening the conversation AT that answer (the relevant turn). NO LIMIT.
+            for cited in vm.conversationCitedPassages() {
+                addConversationMarker(atOffset: cited.offset, storageID: cited.turnStorageID,
+                                      label: "Cited passage")
             }
 
             surface.setMarkers(markers)

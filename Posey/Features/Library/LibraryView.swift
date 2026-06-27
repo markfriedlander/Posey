@@ -4623,8 +4623,8 @@ extension LibraryViewModel {
                     "reason": drop.reason
                 ]
             }
-            payload["chunksInjected"] = metadata.chunksInjected.map { chunk in
-                [
+            payload["chunksInjected"] = metadata.chunksInjected.map { chunk -> [String: Any] in
+                var d: [String: Any] = [
                     "chunkID": chunk.chunkID,
                     "startOffset": chunk.startOffset,
                     "relevance": chunk.relevance,
@@ -4636,6 +4636,14 @@ extension LibraryViewModel {
                     "text": chunk.text,
                     "semanticScore": chunk.semanticScore ?? -1
                 ]
+                // 2026-06-26 — also surface the chunk's DURABLE document home
+                // (unit anchor) so this debug readout matches what's persisted.
+                // Without it the readout omitted the field, which falsely read
+                // as "no anchor" even though storage had it correctly (the
+                // conversation-glyph source). nil ⇒ chunk carried no unit anchor.
+                if let uid = chunk.startUnitID { d["startUnitID"] = uid.uuidString }
+                if let intra = chunk.startIntraOffset { d["startIntraOffset"] = intra }
+                return d
             }
         } else if viewModel.lastError != nil {
             payload["note"] = "No metadata — send failed; see error field"

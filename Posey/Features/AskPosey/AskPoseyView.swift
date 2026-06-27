@@ -1308,25 +1308,19 @@ private extension AskPoseyView {
                         dismiss()
                     } label: {
                         HStack(spacing: 3) {
-                            // 2026-05-05 (revised again) — Pills are
-                            // numbered 1..N within this message, in
-                            // body-order of first appearance. Mark's
-                            // directive: "each block starts with
-                            // citation 1 and goes through N." The
-                            // body chips get the same display numbers
-                            // (see CitationFlowText), so pill K and
-                            // chip K in the prose refer to the same
-                            // source. Tap dispatch uses source.chunk
-                            // (the AFM-injected chunk) for navigation,
-                            // independent of the display label.
+                            // 2026-06-26 (Mark) — conversation bubble + RANK number.
+                            // The bubble is the SAME glyph the book draws in the
+                            // margin on this source's passage, so a chip here and its
+                            // bubble there read as one thing (tap either to cross
+                            // between book and conversation). The number is the rank
+                            // (1 = most relevant of the top 3). Replaces the old
+                            // confidence circle, which keyed off a 0–1 cosine scale the
+                            // RRF `relevance` (~0.1) never reaches, so it always drew
+                            // the empty "low" state and misled.
+                            Image(systemName: "bubble.left.fill")
+                                .font(.caption2)
                             Text("\(source.displayNumber)")
                                 .font(.caption2.weight(.semibold))
-                            // Single circle glyph, three states for
-                            // confidence: filled (●) high (>65%),
-                            // half (◐) medium (40–65%), empty (○)
-                            // low (<40%). No pill background.
-                            Image(systemName: confidenceGlyph(for: source.chunk.relevance))
-                                .font(.caption2)
                         }
                         .foregroundStyle(.secondary)
                         // 2026-05-05 (revised) — Hit area enlarged
@@ -1340,7 +1334,7 @@ private extension AskPoseyView {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(sourcesAccessibilityLabel(number: source.displayNumber, chunk: source.chunk))
+                    .accessibilityLabel(sourcesAccessibilityLabel(number: source.displayNumber))
                     .disabled(onJumpToChunk == nil)
                 }
             }
@@ -1362,63 +1356,32 @@ private extension AskPoseyView {
         Self.citedSources(for: message)
     }
 
-    /// 2026-05-05 (revised) — Build the per-message display sequence:
-    /// 1..N pills/chips in BODY ORDER of first appearance. Mark's
-    /// directive: "each block starts with citation 1 and goes
-    /// through N." So if AFM emitted `[2][5][3]`, the user sees
-    /// `[1][2][3]` in the prose (in that order — first encounter of
-    /// each unique original number gets the next display number) and
-    /// `1 2 3` in the strip. Pill K dispatches to the chunk AFM
-    /// originally called `[origN]`, which is `chunksInjected[origN-1]`.
+    /// 2026-06-26 (Mark) — SOURCES = transparency to retrieval, NOT the LLM's
+    /// footnotes. RAG hands the model a set of passages of varying value and the
+    /// model answers in its own words without reliably tagging which sentence came
+    /// from where; so the honest "sources" are the most-relevant passages it drew
+    /// from. We surface the **top 3 by relevance above the quality floor**
+    /// (`RetrievedChunk.topSources`) — the SAME rule the reader's conversation
+    /// glyphs use, so every margin bubble in the book has a matching numbered chip
+    /// here and vice versa (the round-trip is whole by construction). Numbered 1..N
+    /// by rank (source #1 = most relevant). No dependency on inline `[N]` markers —
+    /// the earlier body-`[N]`-parse returned EMPTY for any answer the model didn't
+    /// footnote (most of them), which is exactly why the strip kept vanishing.
     static func citedSources(for message: AskPoseyMessage) -> [CitedSource] {
-        guard !message.chunksInjected.isEmpty else { return [] }
-        let text = message.content
-        let pattern = #"\[(\d{1,2})\]"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return []
-        }
-        let nsRange = NSRange(text.startIndex..., in: text)
-        var orderedOriginal: [Int] = []   // first-appearance order
-        var seen = Set<Int>()
-        regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
-            guard let match,
-                  let numRange = Range(match.range(at: 1), in: text),
-                  let n = Int(text[numRange]),
-                  n >= 1, n <= message.chunksInjected.count else { return }
-            if seen.insert(n).inserted {
-                orderedOriginal.append(n)
+        guard message.role == .assistant else { return [] }
+        return RetrievedChunk.topSources(from: message.chunksInjected)
+            .enumerated()
+            .map { (idx, chunk) in
+                CitedSource(displayNumber: idx + 1, originalNumber: idx + 1, chunk: chunk)
             }
-        }
-        return orderedOriginal.enumerated().map { (idx, origN) in
-            CitedSource(
-                displayNumber: idx + 1,
-                originalNumber: origN,
-                chunk: message.chunksInjected[origN - 1]
-            )
-        }
     }
 
-    /// SF Symbol name for the confidence-tier circle glyph next to
-    /// each source number. Three states; no in-between rendering.
-    private func confidenceGlyph(for relevance: Double) -> String {
-        if relevance > 0.65 { return "circle.fill" }
-        if relevance >= 0.40 { return "circle.lefthalf.filled" }
-        return "circle"
-    }
-
-    /// Accessibility label for a source. VoiceOver users still get
-    /// the precise relevance number even though the visual is just
-    /// number + circle — no information loss in the alt text.
-    private func sourcesAccessibilityLabel(number: Int, chunk: RetrievedChunk) -> String {
-        let tier: String
-        if chunk.relevance > 0.65 {
-            tier = "high confidence"
-        } else if chunk.relevance >= 0.40 {
-            tier = "medium confidence"
-        } else {
-            tier = "low confidence"
-        }
-        return "Source \(number), \(tier) (\(String(format: "%.0f", chunk.relevance * 100)) percent). Tap to jump."
+    /// Accessibility label for a source chip. The RANK is the meaningful
+    /// thing (1 = most relevant of the top 3); we no longer voice a
+    /// "confidence percent" — the RRF `relevance` isn't a 0–1 confidence and
+    /// reading it as one misled both the glyph and VoiceOver.
+    private func sourcesAccessibilityLabel(number: Int) -> String {
+        "Source \(number). Tap to jump to this passage in the document."
     }
 
 /// Submit the composer's content. Routes to the live `send()`

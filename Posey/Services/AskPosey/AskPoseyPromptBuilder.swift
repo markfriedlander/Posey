@@ -63,6 +63,36 @@ nonisolated struct RetrievedChunk: Sendable, Equatable, Codable {
     var bm25Rank: Int? = nil
 }
 
+extension RetrievedChunk {
+    /// The "transparency sources" for one answer: the top-N retrieved passages
+    /// by relevance, above a quality floor, ranked. **One shared rule, used by
+    /// BOTH the conversation SOURCES strip AND the reader's conversation glyphs,**
+    /// so the two always show the SAME set — every margin bubble in the book has a
+    /// matching numbered chip in the conversation and vice versa (Mark, 2026-06-26).
+    /// Independent of whether the LLM footnoted anything in its prose: RAG returns
+    /// passages of varying value and the model synthesizes silently, so "sources" =
+    /// the most-relevant passages retrieval handed it, capped + floored — an honest
+    /// "best-available" peek, never a claim the model textually quoted them.
+    ///
+    /// Cap is 3 (Mark). The floor mirrors `AskPoseyChatViewModel.weakRetrievalRRFFloor`
+    /// (0.020) — the value already calibrated as "above pure-noise"; below it the
+    /// weak-retrieval gate already steers the answer toward "unsure", so we show no
+    /// sources rather than dress up a noise hit. This floor is a tuning knob for the
+    /// later RAG-tuning phase (it is RRF-rank-based, a coarse bar, not a cosine).
+    static let maxSources = 3
+    static let sourceRelevanceFloor: Double = 0.020
+
+    /// Rank `chunks` by relevance (desc), drop those below the floor, take the top
+    /// `maxSources`. Returned in rank order so index 0 = source #1.
+    static func topSources(from chunks: [RetrievedChunk]) -> [RetrievedChunk] {
+        chunks
+            .filter { $0.relevance >= sourceRelevanceFloor }
+            .sorted { $0.relevance > $1.relevance }
+            .prefix(maxSources)
+            .map { $0 }
+    }
+}
+
 /// Per-section token cost of a built prompt. Sum equals the total
 /// prompt token count seen by the model. Used by callers for the
 /// observability Mark called for ("we know exactly how many tokens

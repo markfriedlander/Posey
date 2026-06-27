@@ -1429,7 +1429,14 @@ extension DatabaseManager {
                   let data = row.chunksInjectedJSON.data(using: .utf8),
                   let chunks = try? JSONDecoder().decode([RetrievedChunk].self, from: data),
                   !chunks.isEmpty else { continue }
-            for chunk in chunks {
+            // SAME selection as the conversation SOURCES strip
+            // (`RetrievedChunk.topSources`): the top 3 most-relevant passages
+            // above the floor. This is what makes the round-trip whole — a margin
+            // bubble appears for exactly the passages the conversation shows as
+            // numbered sources, no more (Mark, 2026-06-26). Previously this emitted
+            // a bubble for EVERY injected chunk, so the book had bubbles the
+            // conversation had no chip for.
+            for chunk in RetrievedChunk.topSources(from: chunks) {
                 // Only chunks that carry a durable unit-anchor can be placed. Rows
                 // persisted before this field (and anchor-less results) are skipped —
                 // their location was not recorded, so we honestly show no glyph rather

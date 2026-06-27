@@ -339,3 +339,142 @@ struct ReaderSurfaceContent {
 }
 
 // ========== BLOCK 03: READER SURFACE CONTENT - END ==========
+
+// ========== BLOCK 04: ANCHOR REFINDER (THE ONE PLACEMENT SYSTEM) - START ==========
+
+/// ONE placement system for EVERY annotation glyph — notes, bookmarks, Ask Posey
+/// conversation anchors, and cited passages (Mark, 2026-06-26). A glyph remembers the
+/// WORDS it marks (+ a little surrounding context), and we re-find those words rather
+/// than trusting a raw character number — so a glyph moves with its source text when
+/// OCR / AFM / any pass rewrites the document ("words, not numbers"). Replaces the
+/// three divergent mechanisms that had accreted (raw offset for notes/anchors; a
+/// unit-anchor for citations; a dead canonical `resolveAnchor` bridge).
+///
+/// **Coordinate space: plainText** (prose units INCLUDING tables, joined by `"\n\n"`)
+/// — the one space `vm.segments`, notes, conversation anchors, and `askPoseyCitedPassages`
+/// all share. (The older `LayoutMap.resolveAnchor` worked in *canonical* space, which
+/// excludes table text because tables render as attachments — so it silently diverged
+/// from plainText on any document with a table. This refinder uses plainText so it is
+/// correct across all 7 formats.)
+///
+/// **Performance:** built once per `applyMarkers` pass (the Character array is the only
+/// O(n) cost); each glyph's fast path is a slice-equality at its stored offset — NO
+/// search unless the text actually drifted. Re-flow (font/rotation) doesn't change the
+/// text, so it never triggers a search.
+struct AnchorRefinder {
+    private let chars: [Character]   // plainText as Characters — offsets are Character-based
+    private let text: String         // plainText, for substring search on the drift path
+
+    init(plainText: String) {
+        self.chars = Array(plainText)
+        self.text = plainText
+    }
+
+    /// A short, distinctive opening slice of a passage — enough to re-find the spot
+    /// without requiring a whole long passage to match exactly (the "fingerprint" for
+    /// conversation anchors + cited passages, whose stored text is a long passage).
+    /// Cut at a word boundary, trimmed.
+    static func fingerprint(_ s: String, max: Int = 48) -> String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.count <= max { return t }
+        let slice = String(t.prefix(max))
+        if let sp = slice.lastIndex(of: " "),
+           slice.distance(from: slice.startIndex, to: sp) > max / 2 {
+            return String(slice[..<sp])
+        }
+        return slice
+    }
+
+    /// Capture an annotation's durable anchor (highlighted text + left/right context)
+    /// from the document's plainText AT CREATION time. Character-offset based to match
+    /// plainText space. Used by note/bookmark creation; conversation anchors/citations
+    /// fingerprint their already-stored passage text instead.
+    static func capture(in plainText: String, start: Int, end: Int,
+                        window: Int = 48) -> (anchorText: String, before: String, after: String) {
+        let chars = Array(plainText)
+        let n = chars.count
+        let s = max(0, min(start, n)); let e = max(s, min(end, n))
+        let anchorText = String(chars[s..<e])
+        let before = String(chars[max(0, s - window)..<s])
+        let after = String(chars[e..<min(n, e + window)])
+        return (anchorText, before, after)
+    }
+
+    /// Re-find a glyph's spot. `near` = its best-known plainText offset (a fast hint +
+    /// final fallback). `anchorText` = the words to find. Escalating, most-confident
+    /// first: exact-at-near → re-find exact words (context-preferred, nearest old spot)
+    /// → bracket by surviving context → clamp to near. Never returns "nowhere": a glyph
+    /// is always placed, never hidden (the floor).
+    func refine(near: Int, anchorText: String?,
+                contextBefore: String?, contextAfter: String?) -> Int {
+        let n = chars.count
+        let safeNear = max(0, min(near, n))
+        guard let needle = anchorText, !needle.isEmpty else { return safeNear }
+        let len = needle.count
+        // 1) exact at the stored spot — the common case; cheap, no search.
+        if safeNear + len <= n, String(chars[safeNear..<safeNear + len]) == needle {
+            return safeNear
+        }
+        // 2) re-find the exact words elsewhere, nearest the old spot (context disambiguates).
+        if let loc = locate(needle, before: contextBefore, after: contextAfter, near: safeNear) {
+            return loc
+        }
+        // 3) the words themselves changed (re-OCR) — bracket by surviving context.
+        if let loc = locateByContext(before: contextBefore, after: contextAfter, near: safeNear) {
+            return loc
+        }
+        // 4) floor — clamp to last-known spot; never lose the glyph.
+        return safeNear
+    }
+
+    // Mirrors LayoutMap.locate / locateByContext, but in plainText space. Returns a
+    // Character offset (the start of the re-found anchor).
+    private func locate(_ needle: String, before: String?, after: String?, near: Int) -> Int? {
+        guard !needle.isEmpty else { return nil }
+        var best: (loc: Int, dist: Int)?
+        var from = text.startIndex
+        while let r = text.range(of: needle, range: from..<text.endIndex) {
+            let startOff = text.distance(from: text.startIndex, to: r.lowerBound)
+            var ok = true
+            if let b = before, !b.isEmpty {
+                let bLen = min(b.count, startOff)
+                let preStart = text.index(r.lowerBound, offsetBy: -bLen)
+                if String(text[preStart..<r.lowerBound]) != String(b.suffix(bLen)) { ok = false }
+            }
+            if ok, let a = after, !a.isEmpty {
+                let aAvail = text.distance(from: r.upperBound, to: text.endIndex)
+                let aLen = min(a.count, aAvail)
+                let postEnd = text.index(r.upperBound, offsetBy: aLen)
+                if String(text[r.upperBound..<postEnd]) != String(a.prefix(aLen)) { ok = false }
+            }
+            if ok {
+                let dist = abs(startOff - near)
+                if best == nil || dist < best!.dist { best = (startOff, dist) }
+            }
+            from = text.index(after: r.lowerBound)
+        }
+        return best?.loc
+    }
+
+    private func locateByContext(before: String?, after: String?, near: Int) -> Int? {
+        guard let b = before, let a = after, !b.isEmpty, !a.isEmpty else { return nil }
+        let maxGap = b.count + a.count + 240
+        var best: (loc: Int, dist: Int)?
+        var from = text.startIndex
+        while let br = text.range(of: b, range: from..<text.endIndex) {
+            let windowEnd = text.index(br.upperBound, offsetBy: maxGap, limitedBy: text.endIndex) ?? text.endIndex
+            if let ar = text.range(of: a, range: br.upperBound..<windowEnd) {
+                let start = text.distance(from: text.startIndex, to: br.upperBound)
+                let end = text.distance(from: text.startIndex, to: ar.lowerBound)
+                if end >= start {
+                    let dist = abs(start - near)
+                    if best == nil || dist < best!.dist { best = (start, dist) }
+                }
+            }
+            from = text.index(after: br.lowerBound)
+        }
+        return best?.loc
+    }
+}
+
+// ========== BLOCK 04: ANCHOR REFINDER - END ==========

@@ -4753,6 +4753,14 @@ final class ReaderViewModel: ObservableObject {
 
     private func saveAnnotation(kind: NoteKind, body: String?, segment: TextSegment) {
         let now = Date()
+        // Capture the durable anchor (highlighted words + surrounding context) at
+        // creation, against the document's plainText — the one coordinate space the
+        // glyphs resolve in. This is what lets `AnchorRefinder` re-find the mark by its
+        // WORDS after an OCR/AFM rewrite instead of trusting the raw offset (Mark,
+        // 2026-06-26 unification). Previously left nil, which is why notes silently
+        // drifted in the shipping reader.
+        let cap = AnchorRefinder.capture(in: document.plainText,
+                                         start: segment.startOffset, end: segment.endOffset)
         let note = Note(
             id: UUID(),
             documentID: document.id,
@@ -4761,7 +4769,10 @@ final class ReaderViewModel: ObservableObject {
             kind: kind,
             startOffset: segment.startOffset,
             endOffset: segment.endOffset,
-            body: body
+            body: body,
+            anchorText: cap.anchorText,
+            contextBefore: cap.before,
+            contextAfter: cap.after
         )
 
         do {

@@ -122,6 +122,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("RAG_DEBUG_EXPANDED", .retrieval, "RAG_DEBUG_EXPANDED", ""),
         .init("GET_ASK_POSEY_HISTORY", .ask_posey, "GET_ASK_POSEY_HISTORY:<doc-id>[:<limit>]", "The persisted Ask Posey conversation turns for a doc."),
         .init("LIST_CONVERSATION_CITED_PASSAGES", .ask_posey, "LIST_CONVERSATION_CITED_PASSAGES:<doc-id>", "Read-only: every passage a conversation CITED for a doc (offset + owning conversation storage id). The data behind the bidirectional conversation glyphs."),
+        .init("RESOLVE_GLYPHS", .ask_posey, "RESOLVE_GLYPHS:<doc-id>", "Read-only: for every glyph (note/bookmark/anchor/cited) report stored offset (raw) vs the offset AnchorRefinder re-finds it to (refined) + moved. Run before/after SIMULATE_FUSION_FIX to prove each glyph tracks its words (the one placement system)."),
         .init("DB_STATS", .system, "DB_STATS", "Database row counts across tables."),
         .init("CLEAR_ASK_POSEY_CONVERSATION", .ask_posey, "CLEAR_ASK_POSEY_CONVERSATION", "Wipe a doc's Ask Posey conversation (clean memory between A/B arms)."),
         .init("GET_IMAGE", .document, "GET_IMAGE", ""),

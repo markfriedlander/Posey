@@ -2646,6 +2646,44 @@ extension LibraryViewModel {
                     "cited": items
                 ])
 
+            case "RESOLVE_GLYPHS":
+                // Read-only verification of the ONE placement system (Mark, 2026-06-26):
+                // for EVERY glyph (note / bookmark / conversation anchor / cited passage)
+                // report its stored offset (`raw`) and the offset `AnchorRefinder`
+                // re-finds it to (`refined`) against the doc's CURRENT plainText, plus
+                // `moved`. Run before/after a SIMULATE_FUSION_FIX rewrite to PROVE each
+                // glyph tracks its words: pre-rewrite refined==raw; post-rewrite refined
+                // shifts to follow the text while raw goes stale.
+                guard let raw = arg, let id = UUID(uuidString: raw) else {
+                    return #"{"error":"Usage: RESOLVE_GLYPHS:<doc-id>"}"#
+                }
+                guard let pt = try databaseManager.plainText(for: id) else {
+                    return #"{"error":"no plainText for document"}"#
+                }
+                let refinder = AnchorRefinder(plainText: pt)
+                var glyphs: [[String: Any]] = []
+                for note in try databaseManager.notes(for: id) {
+                    let refined = refinder.refine(near: note.startOffset, anchorText: note.anchorText,
+                                                  contextBefore: note.contextBefore, contextAfter: note.contextAfter)
+                    glyphs.append(["type": note.kind.rawValue, "raw": note.startOffset, "refined": refined,
+                                   "moved": refined != note.startOffset,
+                                   "anchorText": String((note.anchorText ?? "").prefix(40))])
+                }
+                for row in try databaseManager.askPoseyAnchorRows(for: id) {
+                    guard let off = row.anchorOffset else { continue }
+                    let fp = AnchorRefinder.fingerprint(row.content)
+                    let refined = refinder.refine(near: off, anchorText: fp, contextBefore: nil, contextAfter: nil)
+                    glyphs.append(["type": "anchor", "raw": off, "refined": refined,
+                                   "moved": refined != off, "anchorText": String(fp.prefix(40))])
+                }
+                for cited in try databaseManager.askPoseyCitedPassages(for: id) {
+                    let refined = refinder.refine(near: cited.offset, anchorText: cited.anchorText,
+                                                  contextBefore: nil, contextAfter: nil)
+                    glyphs.append(["type": "cited", "raw": cited.offset, "refined": refined,
+                                   "moved": refined != cited.offset, "anchorText": String(cited.anchorText.prefix(40))])
+                }
+                return json(["documentID": raw, "count": glyphs.count, "glyphs": glyphs])
+
             case "DB_STATS":
                 let docs = try databaseManager.documents()
                 var byType: [String: Int] = [:]

@@ -984,6 +984,13 @@ nonisolated struct StoredAskPoseyTurn: Equatable, Sendable, Identifiable {
 struct AskPoseyCitedPassage {
     let offset: Int
     let turnStorageID: String
+    /// A short fingerprint of the cited passage's text, so the reader's one placement
+    /// system (`AnchorRefinder`) can re-find the glyph's spot by its WORDS after an
+    /// OCR/AFM rewrite — not just trust `offset`. `offset` is already the durable
+    /// unit-anchor resolution (a strong starting hint + fallback); the fingerprint adds
+    /// content verification on top, so a cited glyph is at least as durable as the
+    /// anchor it points to.
+    let anchorText: String
 }
 
 extension DatabaseManager {
@@ -1402,10 +1409,12 @@ extension DatabaseManager {
             .sorted { $0.sequence < $1.sequence }
         var unitStart: [UUID: Int] = [:]
         var unitLen: [UUID: Int] = [:]
+        var unitText: [UUID: String] = [:]
         var cursor = 0
         for (idx, u) in prose.enumerated() {
             unitStart[u.id] = cursor
             unitLen[u.id] = u.text.count
+            unitText[u.id] = u.text
             cursor += u.text.count + (idx < prose.count - 1 ? 2 : 0)
         }
 
@@ -1447,7 +1456,16 @@ extension DatabaseManager {
                 // One glyph per (turn, passage): a turn can cite the same spot via
                 // overlapping chunks.
                 guard seen.insert("\(row.id)#\(offset)").inserted else { continue }
-                passages.append(AskPoseyCitedPassage(offset: offset, turnStorageID: row.id))
+                // Fingerprint the document text AT the anchor offset — NOT chunk.text.
+                // `chunk.text` is the neighbor-EXPANDED (stitched) passage, which can
+                // begin hundreds of chars before the stored anchor; fingerprinting it
+                // would relocate the glyph to the stitched start (and away from the
+                // chip, which jumps to the anchor). The unit text from `intra` is exactly
+                // what sits at `offset`, so the glyph stays put at baseline and re-finds
+                // by content after a rewrite. (Caught by RESOLVE_GLYPHS, 2026-06-26.)
+                let atAnchor = String((unitText[uid] ?? "").dropFirst(intra))
+                passages.append(AskPoseyCitedPassage(offset: offset, turnStorageID: row.id,
+                                                     anchorText: AnchorRefinder.fingerprint(atAnchor)))
             }
         }
         return passages

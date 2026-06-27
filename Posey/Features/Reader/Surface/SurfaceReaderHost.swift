@@ -291,8 +291,18 @@ struct SurfaceReaderHost: UIViewRepresentable {
                 return seg.range
             }
 
+            // ONE placement system for every glyph (Mark, 2026-06-26): re-find each
+            // mark's spot by its WORDS, not a raw character number, so it survives an
+            // OCR/AFM rewrite. Built ONCE per pass (the only O(n) cost); each glyph's
+            // fast path is a slice-equality at its stored offset — no search unless the
+            // text actually drifted. Then the re-found offset snaps to its sentence via
+            // the existing `surfaceRange(forPlainOffset:)` (display unchanged).
+            let refinder = AnchorRefinder(plainText: vm.document.plainText)
+
             for note in vm.notes {
-                guard let r = surfaceRange(forPlainOffset: note.startOffset) else { continue }
+                let off = refinder.refine(near: note.startOffset, anchorText: note.anchorText,
+                                          contextBefore: note.contextBefore, contextAfter: note.contextAfter)
+                guard let r = surfaceRange(forPlainOffset: off) else { continue }
                 noteMarkerIDs.insert(note.id)
                 let isBookmark = note.kind == .bookmark
                 markers.append(SurfaceMarker(
@@ -308,12 +318,16 @@ struct SurfaceReaderHost: UIViewRepresentable {
             // the wide double-bubble that spilled into the highlighted text.
             let docContentEnd = vm.segments.last?.endOffset ?? Int.max
 
-            // Helper: drop a conversation bubble on the line at `offset`, opening the
-            // conversation at `storageID` (the turn the glyph points at). `label` is the
-            // fan-out menu title when this bubble shares a line with others.
-            func addConversationMarker(atOffset offset: Int, storageID: String, label: String) {
-                guard offset >= 0, offset <= docContentEnd,
-                      let r = surfaceRange(forPlainOffset: offset) else { return }
+            // Helper: drop a conversation bubble at the spot whose words are `anchorText`
+            // (re-found via the one placement system), near `rawOffset`, opening the
+            // conversation at `storageID`. `label` is the fan-out menu title when this
+            // bubble shares a line with others. The sentinel check on `rawOffset` skips
+            // document-scope conversations (no passage to point at).
+            func addConversationMarker(rawOffset: Int, anchorText: String?, storageID: String, label: String) {
+                guard rawOffset >= 0, rawOffset <= docContentEnd else { return }
+                let off = refinder.refine(near: rawOffset, anchorText: anchorText,
+                                          contextBefore: nil, contextAfter: nil)
+                guard let r = surfaceRange(forPlainOffset: off) else { return }
                 guard seenConversationDoors.insert("\(r.location)#\(storageID)").inserted else { return }
                 let markerID = UUID()
                 conversationMarkerIDs.insert(markerID)
@@ -324,19 +338,22 @@ struct SurfaceReaderHost: UIViewRepresentable {
                     label: label))
             }
 
-            // The user's pointers: anchors. A document-scope conversation carries a
-            // sentinel offset (> docContentEnd) and is naturally skipped — it has no
-            // passage to point at; only passage-anchored ones earn a glyph here.
+            // The user's pointers: anchors. Re-found by a fingerprint of the anchored
+            // passage text (`row.content`), so the bubble tracks its sentence through a
+            // rewrite instead of pinning to a stale raw offset. A document-scope
+            // conversation carries a sentinel offset (> docContentEnd) and is skipped.
             for row in vm.conversationAnchorRows() {
                 guard let off = row.anchorOffset else { continue }
-                addConversationMarker(atOffset: off, storageID: row.id, label: "Conversation")
+                addConversationMarker(rawOffset: off,
+                                      anchorText: AnchorRefinder.fingerprint(row.content),
+                                      storageID: row.id, label: "Conversation")
             }
 
             // The model's pointers: citations. Every passage an answer cited gets the same
-            // bubble, opening the conversation AT that answer (the relevant turn). NO LIMIT.
+            // bubble, re-found by a fingerprint of the cited passage. NO LIMIT.
             for cited in vm.conversationCitedPassages() {
-                addConversationMarker(atOffset: cited.offset, storageID: cited.turnStorageID,
-                                      label: "Cited passage")
+                addConversationMarker(rawOffset: cited.offset, anchorText: cited.anchorText,
+                                      storageID: cited.turnStorageID, label: "Cited passage")
             }
 
             surface.setMarkers(markers)

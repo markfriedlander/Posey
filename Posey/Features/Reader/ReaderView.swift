@@ -71,6 +71,9 @@ struct ReaderView: View {
     @State private var askPoseyChat: AskPoseyChatViewModel? = nil
     @State private var isChromeVisible = true
     @State private var chromeFadeTask: Task<Void, Never>?
+    /// Test-only (antenna CHROME:pin): hold the chrome visible (no auto-fade) so its
+    /// buttons stay registered and tappable. Doesn't affect end-user behavior.
+    @State private var chromePinned = false
 
     /// 2026-05-04 — Programmatic-scroll guard. The reader auto-scrolls
     /// to track the highlighted sentence during playback; that scroll
@@ -406,6 +409,23 @@ struct ReaderView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .remoteReaderToggleChrome)) { _ in
                 toggleChrome()
+            }
+            // Antenna CHROME:<pin|fade|auto> — hold the chrome visible (so its buttons stay
+            // registered/tappable), force it away, or restore normal auto-fade. Test tooling.
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSetChrome)) { note in
+                switch note.userInfo?["mode"] as? String {
+                case "pin":
+                    chromePinned = true
+                    chromeFadeTask?.cancel()
+                    isChromeVisible = true
+                case "fade":
+                    chromePinned = false
+                    chromeFadeTask?.cancel()
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) { isChromeVisible = false }
+                default: // "auto"
+                    chromePinned = false
+                    revealChrome()
+                }
             }
             .onDisappear {
                 chromeFadeTask?.cancel()
@@ -1070,10 +1090,9 @@ struct ReaderView: View {
     private func revealChrome() {
         chromeFadeTask?.cancel()
         isChromeVisible = true
-        // Test-mode skips the 3-second auto-fade so automated
-        // screenshot capture can reliably show the chrome controls.
-        // Doesn't affect end-user behavior.
-        guard !isTestMode else { return }
+        // Test-mode and the antenna CHROME:pin both skip the 3-second auto-fade so
+        // automated capture / TAP can reliably reach the chrome controls. No end-user effect.
+        guard !isTestMode, !chromePinned else { return }
         chromeFadeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             guard Task.isCancelled == false else { return }
@@ -1936,6 +1955,16 @@ private struct ReaderPreferencesSheet: View {
     /// entry until Nomic + ≥1 MLX model are present.
     @State private var showAskPoseyOnboarding = false
 
+    /// Lazily-built Markdown export of every annotation + conversation (Data Portability).
+    /// nil while the DB is unavailable.
+    private var annotationsExportURL: URL? {
+        let payload = AnnotationExporter.export(
+            document: viewModel.document,
+            databaseManager: viewModel.databaseManager
+        )
+        return try? payload.temporaryFileURL()
+    }
+
     private var isCustomMode: Bool {
         if case .custom = viewModel.voiceMode { return true }
         return false
@@ -2068,6 +2097,24 @@ private struct ReaderPreferencesSheet: View {
                         .foregroundStyle(.secondary)
                 } header: {
                     Label("Reading", systemImage: "book")
+                }
+
+                // ===== ANNOTATIONS — export (Data Portability) =====
+                // A document-management action (not navigation), so it lives here in
+                // Preferences rather than the navigator (Mark, 2026-06-27). The light
+                // annotations-only Markdown export; the future heavyweight "Posey file"
+                // (doc + annotations, re-openable) will join it here.
+                Section {
+                    if let exportURL = annotationsExportURL {
+                        ShareLink(item: exportURL) {
+                            Label("Export annotations", systemImage: "square.and.arrow.up")
+                        }
+                        .accessibilityLabel("Export annotations and conversations")
+                    }
+                } header: {
+                    Text("Annotations")
+                } footer: {
+                    Text("Save this document's notes, bookmarks, and conversations as a Markdown file you can share or back up.")
                 }
 
                 // ===== ASK POSEY — links to the Model Library screen =====
@@ -5135,16 +5182,6 @@ private struct TOCSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
     @Environment(\.dismiss) private var dismiss
 
-    /// Lazily-built Markdown export of every annotation + conversation (Data Portability),
-    /// surfaced by the toolbar ShareLink. nil while the DB is unavailable.
-    private var annotationsExportURL: URL? {
-        let payload = AnnotationExporter.export(
-            document: viewModel.document,
-            databaseManager: viewModel.databaseManager
-        )
-        return try? payload.temporaryFileURL()
-    }
-
     @State private var pageInputText: String = ""
     @State private var pageInputErrorMessage: String? = nil
     @FocusState private var pageInputFocused: Bool
@@ -5290,17 +5327,6 @@ private struct TOCSheet: View {
             .navigationTitle("Navigate")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                // Export every annotation + conversation as one Markdown file. Moved here
-                // from the old Notes sheet — this is the "everything" surface, so export
-                // belongs with it, not on a single-note editor.
-                ToolbarItem(placement: .topBarLeading) {
-                    if let exportURL = annotationsExportURL {
-                        ShareLink(item: exportURL) {
-                            Label("Export", systemImage: "square.and.arrow.up")
-                        }
-                        .accessibilityLabel("Export annotations and conversations")
-                    }
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                 }

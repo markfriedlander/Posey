@@ -186,6 +186,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("OPEN_DOCUMENT", .ui_nav, "OPEN_DOCUMENT:<docID>", "Open the reader on a doc from any UI state."),
         .init("SCROLL_SURFACE", .ui_nav, "SCROLL_SURFACE:<fraction 0..1>", "DEBUG: scroll the open one-surface reader to a fraction of its content (frame any part for capture)."),
         .init("SIMULATE_DRAG", .ui_nav, "SIMULATE_DRAG", "TEST: simulate a user drag on the open reader → re-reveals the auto-fading chrome (scroll-to-reveal, no physical gesture needed)."),
+        .init("CHROME", .ui_nav, "CHROME:<pin|fade|auto>", "TEST: pin holds the reader chrome visible (its buttons stay registered so TAP:reader.* works), fade hides it, auto restores normal auto-fade."),
         .init("SET_READALONG_LEVEL", .ui_nav, "SET_READALONG_LEVEL:<word|line|sentence|paragraph>", "TEST: set the read-along highlight granularity dial on the open reader (word/line/sentence/paragraph)."),
         .init("SURFACE_TAP_IMAGE", .ui_nav, "SURFACE_TAP_IMAGE", "TEST: tap the first image/table on the open reader → opens the full-screen viewer (image-zoom restore)."),
         .init("TAP_AT", .ui_nav, "TAP_AT:<x>,<y>", "General human-equivalent tap (points): routes to the glyph button / image / text under the point on the open reader."),

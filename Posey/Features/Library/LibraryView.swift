@@ -2997,6 +2997,7 @@ extension LibraryViewModel {
                     var noteOffsets: [[String: Any]] = []
                     for n in notes {
                         noteOffsets.append([
+                            "id": n.id.uuidString,
                             "kind": String(describing: n.kind),
                             "start": n.startOffset,
                             "end": n.endOffset,
@@ -3599,6 +3600,20 @@ extension LibraryViewModel {
                     NotificationCenter.default.post(name: .remoteSimulateSurfaceDrag, object: nil)
                 }
                 return json(["status": "posted"])
+
+            case "CHROME":
+                // CHROME:<pin|fade|auto> — pin holds the reader chrome visible (its buttons
+                // stay registered so TAP:reader.* works), fade hides it, auto restores the
+                // normal auto-fade. Test tooling for reaching chrome controls.
+                let mode = (arg ?? "").lowercased()
+                guard ["pin", "fade", "auto"].contains(mode) else {
+                    return #"{"error":"Usage: CHROME:<pin|fade|auto>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetChrome, object: nil,
+                                                    userInfo: ["mode": mode])
+                }
+                return json(["status": "posted", "mode": mode])
 
             case "SIMULATE_ANNOTATE_SELECTION":
                 // args: <surfaceStart>:<surfaceLen>:<note|bookmark|ask> — set the open

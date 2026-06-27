@@ -240,6 +240,10 @@ extension Notification.Name {
     /// `userInfo["noteID"]: String` (UUID). Open the single-note editor for that note —
     /// posted when a note row is tapped in the navigator, so browse → edit is one tap.
     static let remoteEditNote = Notification.Name("PoseyRemoteEditNote")
+    /// `userInfo["mode"]: "pin"|"fade"|"auto"`. Hold the reader chrome visible (so its
+    /// buttons stay registered/tappable for the antenna), force it away, or restore the
+    /// normal auto-fade. Test tooling — no end-user surface.
+    static let remoteSetChrome = Notification.Name("PoseyRemoteSetChrome")
     /// `userInfo["x"], ["y"]: Double` (points, window coords). Routes a tap to whatever
     /// is at that point on the open reader — glyph button, image, or text. The general
     /// "tap anywhere a human could" capability (replaces per-feature tap verbs).

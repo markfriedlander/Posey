@@ -31,7 +31,7 @@ struct SurfaceMarker {
 /// dimming, search live elsewhere). Proven in the standalone tester (scale + line-pin
 /// + sentence-TTS); this is its port into Posey behind the `useNewReaderSurface` flag.
 @MainActor
-final class ReaderSurface: NSObject {
+final class ReaderSurface: NSObject, UIGestureRecognizerDelegate {
 
     let textView: UITextView
     private(set) var content: ReaderSurfaceContent
@@ -58,6 +58,11 @@ final class ReaderSurface: NSObject {
     /// current SURFACE selection range. The owner converts it to a canonical anchor
     /// and persists (E2 create flow).
     var onAnnotate: ((NSRange, AnnotationKind) -> Void)?
+
+    /// Fired when the user picks "Ask Posey" from the selection menu, with the current
+    /// SURFACE selection range. The owner opens a conversation anchored to those exact
+    /// words (more precise than the chrome sparkle's reading-position anchor).
+    var onAskPosey: ((NSRange) -> Void)?
 
     /// Fired when the user taps an annotation's underline — the owner opens it.
     var onOpenMarker: ((UUID) -> Void)?
@@ -96,6 +101,7 @@ final class ReaderSurface: NSObject {
         // Tap-to-jump: non-cancelling so native long-press selection still works.
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         tap.cancelsTouchesInView = false
+        tap.delegate = self                                  // ignore taps on gutter glyph buttons
         tv.addGestureRecognizer(tap)
         // Rotation / split-view: a width change re-flows the text, so the gutter glyphs
         // (positioned in content coordinates against the old width) must be rebuilt
@@ -222,6 +228,58 @@ final class ReaderSurface: NSObject {
     }
 
     // ========== BLOCK 04: READ-ALONG LINE BAND (LOCAL EDIT) - END ==========
+
+    // ========== BLOCK 04A: TAP-VS-GLYPH ARBITRATION - START ==========
+
+    /// Tap-to-jump must NOT fire when the touch lands on a gutter glyph button — otherwise
+    /// `handleTap` (which resolves the nearest character even out in the gutter via
+    /// `closestPosition`) opens one co-located marker and PREEMPTS the count badge's
+    /// fan-out menu. Let the button own its own touches; the gesture only handles taps on
+    /// the text itself. (Mark, 2026-06-27 — tapping the "N" badge did nothing because the
+    /// gesture stole the touch.)
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldReceive touch: UITouch) -> Bool {
+        guard let touched = touch.view else { return true }
+        return !glyphButtons.contains { $0 == touched || touched.isDescendant(of: $0) }
+    }
+
+    // ========== BLOCK 04A: TAP-VS-GLYPH ARBITRATION - END ==========
+
+    // ========== BLOCK 04B: ANNOTATION-TARGET HELPERS (WYSIWYG) - START ==========
+
+    /// The user's CURRENT text selection as a surface range, or nil if nothing is
+    /// selected. The first choice for an annotation target — an explicit selection is
+    /// the user telling us exactly what they mean.
+    var currentSelectionRange: NSRange? {
+        let r = textView.selectedRange
+        return r.length > 0 ? r : nil
+    }
+
+    /// The range currently GLOWING (the read-along highlight band) as a surface range,
+    /// or nil if nothing is lit. The WYSIWYG fallback when there's no selection: grab
+    /// exactly what the user sees highlighted, whatever its extent (word/line/sentence/
+    /// paragraph — whatever the last read-along step lit).
+    var currentHighlightRange: NSRange? {
+        guard let r = activeLineRange, r.length > 0 else { return nil }
+        return r
+    }
+
+    /// The literal text occupying a surface range — the WORDS we anchor by.
+    func text(inSurfaceRange r: NSRange) -> String {
+        let ns = textView.attributedText.string as NSString
+        guard r.location >= 0, r.length >= 0, NSMaxRange(r) <= ns.length else { return "" }
+        return ns.substring(with: r)
+    }
+
+    /// A rough plainText offset for a surface range, used only as a search HINT to
+    /// disambiguate a phrase that occurs more than once. Canonical ≈ plainText (they
+    /// diverge only around table/image attachments), which is plenty for a hint — the
+    /// exact placement comes from finding the words themselves.
+    func plainTextHint(forSurfaceRange r: NSRange) -> Int {
+        content.layout.canonicalRange(forSurfaceRange: r)?.location ?? 0
+    }
+
+    // ========== BLOCK 04B: ANNOTATION-TARGET HELPERS - END ==========
 
     // ========== BLOCK 05: ANNOTATION MARKERS (UNDERLINE) - START ==========
 
@@ -378,7 +436,14 @@ extension ReaderSurface: UITextViewDelegate {
         let bookmark = UIAction(title: "Bookmark", image: UIImage(systemName: "bookmark.fill")) {
             [weak self] _ in self?.onAnnotate?(range, .bookmark)
         }
-        let group = UIMenu(title: "", options: .displayInline, children: [note, bookmark])
+        var children: [UIMenuElement] = [note, bookmark]
+        #if POSEY_ENABLE_ASK_POSEY
+        let askPosey = UIAction(title: "Ask Posey", image: UIImage(systemName: "sparkle")) {
+            [weak self] _ in self?.onAskPosey?(range)
+        }
+        children.append(askPosey)
+        #endif
+        let group = UIMenu(title: "", options: .displayInline, children: children)
         return UIMenu(children: [group] + suggestedActions)
     }
 }

@@ -150,6 +150,12 @@ struct ReaderView: View {
                 onOpenImage: { imageID in
                     revealChrome()
                     expandedImageItem = ExpandedImageItem(id: imageID)
+                },
+                onAskPoseyForSelection: { text, hint in
+                    #if POSEY_ENABLE_ASK_POSEY
+                    revealChrome()
+                    openAskPosey(selectionText: text, selectionHint: hint)
+                    #endif
                 }
             )
             .contentShape(Rectangle())
@@ -1257,23 +1263,43 @@ struct ReaderView: View {
     private func openAskPosey(
         initialAnchorStorageID: String? = nil,
         initialQuery: String? = nil,
-        autoSubmitInitialQuery: Bool = false
+        autoSubmitInitialQuery: Bool = false,
+        selectionText: String? = nil,
+        selectionHint: Int = 0
     ) {
         let segments = viewModel.segments
         let active = segments.indices.contains(viewModel.currentSentenceIndex)
             ? segments[viewModel.currentSentenceIndex]
             : segments.first
+
+        // WYSIWYG anchor (Mark, 2026-06-27): a FRESH user-initiated ask anchors to what
+        // the user is pointing at — the selection-menu passage (explicit), or, for the
+        // sparkle, the live selection / glowing band — via the shared `anchorFrom`. The
+        // reopen-existing-thread and programmatic-query paths are unchanged: they leave
+        // `resolved` nil and fall through to the active-sentence anchor exactly as before.
+        let resolved: ResolvedAnnotationAnchor? = {
+            if let selectionText {
+                return viewModel.anchorFrom(explicitText: selectionText, hint: selectionHint)
+            }
+            if initialAnchorStorageID == nil && initialQuery == nil {
+                return viewModel.anchorFrom()          // sparkle: selection → glow → sentence
+            }
+            return nil                                 // reopen / programmatic: sentence below
+        }()
+
         // Captured reading offset at invocation — the anchor marker is
         // always tappable to jump back to where the question was asked.
         // Falls back to 0 when the document has no segments yet (defensive
         // — should never happen in production since the reader is
         // rendering them).
-        let invocationOffset: Int = active?.startOffset ?? 0
+        let invocationOffset: Int = resolved?.start ?? active?.startOffset ?? 0
 
-        // 2026-06-19 — the anchor (current sentence) ALWAYS passes; it is
-        // the conversation's header / link back to the corpus, not a
-        // retrieval gate. nil only in the defensive no-segments case.
-        let anchor: AskPoseyAnchor? = active.map {
+        // 2026-06-19 — the anchor ALWAYS passes; it is the conversation's header / link
+        // back to the corpus, not a retrieval gate. nil only in the defensive no-segments
+        // case. 2026-06-27 — prefers the resolved selection/glow when present.
+        let anchor: AskPoseyAnchor? = resolved.map {
+            AskPoseyAnchor(text: $0.anchorText, plainTextOffset: $0.start)
+        } ?? active.map {
             AskPoseyAnchor(text: $0.text, plainTextOffset: $0.startOffset)
         }
         // Stop playback while the sheet is open so the document
@@ -1515,6 +1541,13 @@ private struct ReaderRemoteControlAnnotationObservers: ViewModifier {
                 viewModel.jumpToOffset(offset)
                 viewModel.noteDraft = body
                 viewModel.saveDraftNoteForCurrentSentence()
+            }
+            // Test-only: set the open note editor's draft WITHOUT jumping (so a stashed
+            // selection anchor survives) — lets the antenna prove note-save-from-selection
+            // end-to-end (SET_NOTE_DRAFT → TAP:notes.save → RESOLVE_GLYPHS).
+            .onReceive(NotificationCenter.default.publisher(for: .remoteSetNoteDraft)) { note in
+                guard let text = note.userInfo?["text"] as? String else { return }
+                viewModel.noteDraft = text
             }
     }
 }
@@ -2355,11 +2388,11 @@ private struct NotesSheet: View {
         NavigationStack {
             ScrollViewReader { listProxy in
             List {
-                Section("Current Position") {
-                    Text(viewModel.currentSentencePreview)
+                Section("Annotating") {
+                    Text(viewModel.pendingNotePreview)
                         .font(.body)
                         .accessibilityIdentifier("notes.currentSentence")
-                    TextField("Add a note for this sentence", text: $viewModel.noteDraft, axis: .vertical)
+                    TextField("Add a note for this passage", text: $viewModel.noteDraft, axis: .vertical)
                         .lineLimit(3...6)
                         .accessibilityIdentifier("notes.draft")
 
@@ -2516,14 +2549,21 @@ private struct NotesSheet: View {
                     }
                     Spacer(minLength: 0)
                 }
+                // A note carries TWO things: the words it's attached to (the primary
+                // label above) and what the user wrote. Show the body beneath — always
+                // (a 2-line snippet collapsed, full when expanded) — so the row reads
+                // "on THESE words, I wrote THIS" at a glance, in a secondary tint so the
+                // marked words stay primary.
                 if entry.kind == .note,
-                   isExpanded,
                    let body = entry.body, !body.isEmpty {
                     Text(body)
                         .font(.callout)
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(.secondary)
                         .padding(.leading, 30)
+                        .lineLimit(isExpanded ? nil : 2)
                         .multilineTextAlignment(.leading)
+                }
+                if entry.kind == .note, isExpanded {
                     HStack {
                         Spacer()
                         Button("Jump to Note") {
@@ -2586,6 +2626,18 @@ private struct NotesSheet: View {
             }
         }
     }
+}
+
+/// A fully-resolved annotation target in plainText space: the durable WORDS to re-find
+/// by, their surrounding context, and the best-known character offsets. Produced by
+/// `ReaderViewModel.anchorFrom(...)` from a selection / glow / sentence, then consumed by
+/// note + bookmark creation. One shape for every entry point (Mark, 2026-06-27).
+struct ResolvedAnnotationAnchor {
+    let start: Int
+    let end: Int
+    let anchorText: String
+    let before: String
+    let after: String
 }
 
 @MainActor
@@ -2998,6 +3050,21 @@ final class ReaderViewModel: ObservableObject {
     @Published var errorMessage = ""
     @Published var noteDraft = ""
     @Published private(set) var notes: [Note] = []
+
+    /// The reader surface installs this so the ViewModel can ask "what is the user
+    /// pointing at right now?" — returning the live SELECTION (preferred) or, failing
+    /// that, the GLOWING read-along band, as (literal text, rough plainText hint). nil
+    /// when neither exists. This is the WYSIWYG bridge: every annotation entry point
+    /// (chrome Note/Bookmark, the sparkle, the selection menu) resolves its target
+    /// through `anchorFrom(...)`, which consults this before falling back to the
+    /// active sentence. Set in `SurfaceReaderHost.Coordinator.wireCallbacks`.
+    var surfaceAnnotationTargetProvider: (() -> (text: String, hint: Int)?)?
+
+    /// A note's target stashed at the MOMENT the user acted (selection menu "Note", or
+    /// the chrome Note button), because the editor sheet steals focus and clears the
+    /// live selection before the user finishes typing — so we can't re-read it at save
+    /// time. nil → the next saved note falls back to `anchorFrom`'s live resolution.
+    var pendingNoteAnchor: ResolvedAnnotationAnchor?
     /// 2026-05-28 — Bumped whenever the per-unit annotation cache is
     /// invalidated (after note insert / delete via UI or antenna).
     /// `annotationFlags(for:)` is a method, not a Published computed,
@@ -3862,24 +3929,38 @@ final class ReaderViewModel: ObservableObject {
         let capture = notesCaptureText()
         noteDraft = ""
         copyToClipboard(capture)
+
+        // Stash WHERE this note will land at the moment the editor opens — the live
+        // selection / glowing band is gone once the sheet steals focus, so we can't
+        // re-read it at save time. selection → glow → sentence (Mark, 2026-06-27).
+        pendingNoteAnchor = anchorFrom()
+    }
+
+    /// A human-readable preview of where the note-in-progress will attach — the stashed
+    /// target (selection / glow), else the active sentence. Drives the editor's honest
+    /// "this is what you're annotating" header.
+    var pendingNotePreview: String {
+        let target = pendingNoteAnchor?.anchorText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let target, !target.isEmpty { return target }
+        return currentSentencePreview
     }
 
     func saveDraftNoteForCurrentSentence() {
         let trimmed = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.isEmpty == false, let segment = currentSegment else {
-            return
-        }
-
-        saveAnnotation(kind: .note, body: trimmed, segment: segment)
+        guard trimmed.isEmpty == false else { return }
+        // Prefer the anchor stashed when the note editor opened (the live selection is
+        // gone by now — the sheet stole focus). Falls back to live resolution, then the
+        // active sentence.
+        guard let anchor = pendingNoteAnchor ?? anchorFrom() else { return }
+        saveAnnotation(kind: .note, body: trimmed, anchor: anchor)
+        pendingNoteAnchor = nil
         noteDraft = ""
     }
 
     func addBookmarkForCurrentSentence() {
-        guard let segment = currentSegment else {
-            return
-        }
-
-        saveAnnotation(kind: .bookmark, body: nil, segment: segment)
+        // Immediate (no editor), so resolve the target live: selection → glow → sentence.
+        guard let anchor = anchorFrom() else { return }
+        saveAnnotation(kind: .bookmark, body: nil, anchor: anchor)
     }
 
     func jump(to note: Note) {
@@ -4697,20 +4778,16 @@ final class ReaderViewModel: ObservableObject {
     func rebuildSavedAnnotations() {
         var entries: [SavedAnnotation] = []
         for note in notes {
-            // 2026-05-07 (punch list #7): for notes with a real body,
-            // show the body in the preview row — that's what the user
-            // wrote and what's most useful to scan at a glance. The
-            // expanded row still shows the body (now redundantly) plus
-            // a Jump button. For bookmarks (no body) and notes that
-            // were saved without a body, fall back to the anchor
-            // sentence at the note's offset (the previous behavior).
+            // Honest preview (Mark, 2026-06-27): the row's primary label is ALWAYS the
+            // WORDS THE USER MARKED (the stored anchorText) — what they see underlined in
+            // the book — so the list never misrepresents a mark as the whole sentence it
+            // sits in (the old `previewText` re-derived the sentence and threw the real
+            // selection away, which is what made "did the right text get saved?" unanswerable).
+            // The note's body is carried separately and shown beneath. Legacy rows with no
+            // stored anchorText fall back to the sentence so they're never blank.
             let isBookmark = note.kind == .bookmark
-            let preview: String
-            if !isBookmark, let body = note.body?.trimmingCharacters(in: .whitespacesAndNewlines), !body.isEmpty {
-                preview = body
-            } else {
-                preview = previewText(for: note)
-            }
+            let marked = (note.anchorText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let preview = marked.isEmpty ? previewText(for: note) : marked
             entries.append(SavedAnnotation(
                 id: "note:\(note.id.uuidString)",
                 kind: isBookmark ? .bookmark : .note,
@@ -4751,28 +4828,58 @@ final class ReaderViewModel: ObservableObject {
         savedAnnotations = entries
     }
 
-    private func saveAnnotation(kind: NoteKind, body: String?, segment: TextSegment) {
+    /// Resolve WHERE an annotation should land, honoring user intent (Mark, 2026-06-27).
+    /// One precedence, used by every entry point so they all behave identically:
+    ///   1. `explicitText` — an exact range handed in by the selection menu (the live
+    ///      selection at the moment the menu item fired).
+    ///   2. the live SELECTION or GLOWING read-along band, via the surface provider —
+    ///      "what you see is what you get" for the chrome buttons + sparkle.
+    ///   3. the active SENTENCE — the floor, so we never grab nothing.
+    /// Steps 1–2 anchor by the literal WORDS (table-robust by construction — surface and
+    /// plainText offsets diverge around attachments, but the words don't); step 3 already
+    /// has plainText offsets. Returns nil only when there's no text to anchor to at all.
+    func anchorFrom(explicitText: String? = nil, hint: Int = 0) -> ResolvedAnnotationAnchor? {
+        let refiner = AnchorRefinder(plainText: document.plainText)
+        // 1) explicit selection-menu range.
+        if let t = explicitText,
+           let c = refiner.captureBySelectedText(t, nearHint: hint) {
+            return ResolvedAnnotationAnchor(start: c.start, end: c.end,
+                                            anchorText: c.anchorText, before: c.before, after: c.after)
+        }
+        // 2) live selection / glowing band.
+        if let target = surfaceAnnotationTargetProvider?(),
+           let c = refiner.captureBySelectedText(target.text, nearHint: target.hint) {
+            return ResolvedAnnotationAnchor(start: c.start, end: c.end,
+                                            anchorText: c.anchorText, before: c.before, after: c.after)
+        }
+        // 3) active-sentence floor.
+        if let segment = currentSegment {
+            let cap = AnchorRefinder.capture(in: document.plainText,
+                                             start: segment.startOffset, end: segment.endOffset)
+            return ResolvedAnnotationAnchor(start: segment.startOffset, end: segment.endOffset,
+                                            anchorText: cap.anchorText, before: cap.before, after: cap.after)
+        }
+        return nil
+    }
+
+    private func saveAnnotation(kind: NoteKind, body: String?, anchor: ResolvedAnnotationAnchor) {
         let now = Date()
-        // Capture the durable anchor (highlighted words + surrounding context) at
-        // creation, against the document's plainText — the one coordinate space the
-        // glyphs resolve in. This is what lets `AnchorRefinder` re-find the mark by its
-        // WORDS after an OCR/AFM rewrite instead of trusting the raw offset (Mark,
-        // 2026-06-26 unification). Previously left nil, which is why notes silently
-        // drifted in the shipping reader.
-        let cap = AnchorRefinder.capture(in: document.plainText,
-                                         start: segment.startOffset, end: segment.endOffset)
+        // The durable anchor (highlighted WORDS + surrounding context) was captured at
+        // resolution time against plainText — the one coordinate space the glyphs resolve
+        // in. `AnchorRefinder` re-finds the mark by its words after an OCR/AFM rewrite
+        // instead of trusting the raw offset (Mark, 2026-06-26 unification).
         let note = Note(
             id: UUID(),
             documentID: document.id,
             createdAt: now,
             updatedAt: now,
             kind: kind,
-            startOffset: segment.startOffset,
-            endOffset: segment.endOffset,
+            startOffset: anchor.start,
+            endOffset: anchor.end,
             body: body,
-            anchorText: cap.anchorText,
-            contextBefore: cap.before,
-            contextAfter: cap.after
+            anchorText: anchor.anchorText,
+            contextBefore: anchor.before,
+            contextAfter: anchor.after
         )
 
         do {

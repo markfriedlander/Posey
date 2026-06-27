@@ -225,6 +225,14 @@ extension Notification.Name {
     /// onTap → image-detect → full-screen viewer path) so image-zoom is testable without
     /// a physical tap.
     static let remoteSurfaceTapImage = Notification.Name("PoseyRemoteSurfaceTapImage")
+    /// `userInfo["start"], ["len"]: Int` (a SURFACE range), `["kind"]: "note"|"bookmark"|
+    /// "ask"`. Sets the open reader's text selection to that surface range and fires the
+    /// REAL selection-menu path (`onAnnotate` / `onAskPosey`) — so the WYSIWYG
+    /// selection→words→anchor pipeline is verifiable without a physical drag + menu tap.
+    static let remoteSimulateAnnotateSelection = Notification.Name("PoseyRemoteSimulateAnnotateSelection")
+    /// `userInfo["text"]: String`. Test-only: sets the open note editor's draft without
+    /// moving the reading position, so a stashed selection anchor survives to save time.
+    static let remoteSetNoteDraft = Notification.Name("PoseyRemoteSetNoteDraft")
     /// `userInfo["x"], ["y"]: Double` (points, window coords). Routes a tap to whatever
     /// is at that point on the open reader — glyph button, image, or text. The general
     /// "tap anywhere a human could" capability (replaces per-feature tap verbs).

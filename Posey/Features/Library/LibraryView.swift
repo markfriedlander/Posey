@@ -3594,6 +3594,36 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted"])
 
+            case "SIMULATE_ANNOTATE_SELECTION":
+                // args: <surfaceStart>:<surfaceLen>:<note|bookmark|ask> — set the open
+                // reader's selection to that SURFACE range and fire the REAL selection-menu
+                // path (onAnnotate / onAskPosey). Verify with RESOLVE_GLYPHS: the new
+                // glyph's anchorText must equal the SELECTED words (a short sub-sentence
+                // span, NOT the whole sentence) — proving WYSIWYG selection anchoring.
+                let parts = (arg ?? "").split(separator: ":", maxSplits: 2).map(String.init)
+                guard parts.count == 3, let selStart = Int(parts[0]), let selLen = Int(parts[1]),
+                      ["note", "bookmark", "ask"].contains(parts[2]) else {
+                    return #"{"error":"Usage: SIMULATE_ANNOTATE_SELECTION:<surfaceStart>:<surfaceLen>:<note|bookmark|ask>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteSimulateAnnotateSelection, object: nil,
+                        userInfo: ["start": selStart, "len": selLen, "kind": parts[2]])
+                }
+                return json(["status": "posted", "start": selStart, "len": selLen, "kind": parts[2]])
+
+            case "SET_NOTE_DRAFT":
+                // Test-only: populate the open note editor's draft (no jump), so
+                // TAP:notes.save then persists a note against the stashed selection anchor.
+                guard let text = arg, !text.isEmpty else {
+                    return #"{"error":"Usage: SET_NOTE_DRAFT:<text>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteSetNoteDraft, object: nil,
+                                                    userInfo: ["text": text])
+                }
+                return json(["status": "posted", "text": text])
+
             case "SET_READALONG_LEVEL":
                 // Set the read-along highlight granularity dial
                 // (word | line | sentence | paragraph) on the open reader at runtime.

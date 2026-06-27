@@ -124,6 +124,8 @@ nonisolated enum AntennaCommandCatalog {
         .init("LIST_CONVERSATION_CITED_PASSAGES", .ask_posey, "LIST_CONVERSATION_CITED_PASSAGES:<doc-id>", "Read-only: every passage a conversation CITED for a doc (offset + owning conversation storage id). The data behind the bidirectional conversation glyphs."),
         .init("RESOLVE_GLYPHS", .ask_posey, "RESOLVE_GLYPHS:<doc-id>", "Read-only: for every glyph (note/bookmark/anchor/cited) report stored offset (raw) vs the offset AnchorRefinder re-finds it to (refined) + moved. Run before/after SIMULATE_FUSION_FIX to prove each glyph tracks its words (the one placement system)."),
         .init("CLEAR_NOTES", .annotations, "CLEAR_NOTES:<doc-id>", "Wipe ALL notes + bookmarks for a doc (clean slate for testing; does not touch conversations)."),
+        .init("SIMULATE_ANNOTATE_SELECTION", .annotations, "SIMULATE_ANNOTATE_SELECTION:<surfaceStart>:<surfaceLen>:<note|bookmark|ask>", "TEST: set the open reader's text selection to that SURFACE range and fire the REAL selection-menu path (Note/Bookmark/Ask Posey). Verify with RESOLVE_GLYPHS that the new glyph's anchorText == the SELECTED words (WYSIWYG selection anchoring)."),
+        .init("SET_NOTE_DRAFT", .annotations, "SET_NOTE_DRAFT:<text>", "TEST: populate the open note editor's draft WITHOUT jumping (preserves a stashed selection anchor) → then TAP:notes.save persists a note on the selection."),
         .init("DB_STATS", .system, "DB_STATS", "Database row counts across tables."),
         .init("CLEAR_ASK_POSEY_CONVERSATION", .ask_posey, "CLEAR_ASK_POSEY_CONVERSATION", "Wipe a doc's Ask Posey conversation (clean memory between A/B arms)."),
         .init("GET_IMAGE", .document, "GET_IMAGE", ""),

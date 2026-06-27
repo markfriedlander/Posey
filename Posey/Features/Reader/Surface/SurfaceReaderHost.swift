@@ -31,6 +31,9 @@ struct SurfaceReaderHost: UIViewRepresentable {
     let onReveal: () -> Void
     /// Tap on an image / table → open the full-screen zoomable viewer (restored cutover behavior).
     let onOpenImage: (String) -> Void
+    /// "Ask Posey" picked from the text-selection menu → open a conversation anchored to
+    /// the EXACT selected passage (text + a rough plainText hint to disambiguate).
+    let onAskPoseyForSelection: (String, Int) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -132,6 +135,56 @@ struct SurfaceReaderHost: UIViewRepresentable {
                     self.parent.onOpenConversation(self.conversationStorageByMarkerID[id])
                 }
             }
+            // WYSIWYG annotation target (Mark, 2026-06-27): tell the ViewModel what the
+            // user is pointing at — the live SELECTION first, else the GLOWING read-along
+            // band — so chrome Note/Bookmark + the sparkle anchor to what's visible, not
+            // a stale reading position. nil → the VM falls back to the active sentence.
+            vm.surfaceAnnotationTargetProvider = { [weak self] in
+                guard let self else { return nil }
+                return self.currentAnnotationTarget()
+            }
+
+            // Selection menu (was dead since the cutover — onAnnotate was never wired).
+            // At fire time the selection is still live, so the provider above resolves it;
+            // the menu items just trigger the same paths the chrome buttons use.
+            surface.onAnnotate = { [weak vm] _, kind in
+                guard let vm else { return }
+                switch kind {
+                case .bookmark:
+                    vm.addBookmarkForCurrentSentence()
+                case .note:
+                    // Stash the target NOW (selection still live) — the editor sheet steals
+                    // focus and clears the selection before the user finishes typing. Same
+                    // entry point the chrome Notes button uses, so behavior is identical.
+                    vm.prepareForNotesEntry()
+                    NotificationCenter.default.post(name: .remoteOpenNotesSheet, object: nil)
+                }
+            }
+            surface.onAskPosey = { [weak self] _ in
+                guard let self else { return }
+                // Capture the selected words + hint NOW; the host hands them to the View,
+                // which opens Ask Posey anchored to that exact passage.
+                if let target = self.currentAnnotationTarget() {
+                    self.parent.onAskPoseyForSelection(target.text, target.hint)
+                }
+            }
+        }
+
+        /// What the user is pointing at for annotation: the live SELECTION (preferred) or
+        /// the GLOWING read-along band, as (literal text, rough plainText hint). nil when
+        /// neither has text — the ViewModel then falls back to the active sentence.
+        func currentAnnotationTarget() -> (text: String, hint: Int)? {
+            let range: NSRange
+            if let sel = surface.currentSelectionRange {
+                range = sel
+            } else if let glow = surface.currentHighlightRange {
+                range = glow
+            } else {
+                return nil
+            }
+            let text = surface.text(inSurfaceRange: range)
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return (text, surface.plainTextHint(forSurfaceRange: range))
         }
 
         /// Subscribe to the real playback service's spoken-word signal (republished by
@@ -203,6 +256,29 @@ struct SurfaceReaderHost: UIViewRepresentable {
                     // Otherwise a text / image tap at that point.
                     if let idx = self.surface.charIndex(at: local) {
                         self.surface.onTap?(idx)
+                    }
+                }
+                .store(in: &cancellables)
+            // WYSIWYG selection-anchor verification (Mark, 2026-06-27): set a known SURFACE
+            // selection and fire the REAL selection-menu path, so the
+            // selection→words→durable-anchor pipeline is provable via RESOLVE_GLYPHS
+            // without a physical drag + edit-menu tap.
+            NotificationCenter.default.publisher(for: .remoteSimulateAnnotateSelection)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] note in
+                    guard let self,
+                          let start = note.userInfo?["start"] as? Int,
+                          let len = note.userInfo?["len"] as? Int,
+                          let kind = note.userInfo?["kind"] as? String else { return }
+                    let tv = self.surface.textView
+                    guard start >= 0, len > 0, start + len <= tv.textStorage.length else { return }
+                    let range = NSRange(location: start, length: len)
+                    tv.selectedRange = range                       // the real selection the provider reads
+                    switch kind {
+                    case "bookmark": self.surface.onAnnotate?(range, .bookmark)
+                    case "note":     self.surface.onAnnotate?(range, .note)
+                    case "ask":      self.surface.onAskPosey?(range)
+                    default: break
                     }
                 }
                 .store(in: &cancellables)
@@ -291,6 +367,24 @@ struct SurfaceReaderHost: UIViewRepresentable {
                 return seg.range
             }
 
+            // True WYSIWYG underline (Mark, 2026-06-27): hug the EXACT annotated WORDS,
+            // not the whole sentence. Find the stored anchorText in the surface, searching
+            // FORWARD from the containing sentence (the words start at `off`, which is in
+            // that sentence). Word-search — not coordinate math — so it's robust to the
+            // surface↔plainText offset divergence around attachments. Falls back to the
+            // sentence range when the words can't be matched (e.g. a post-rewrite mismatch
+            // or a span wider than the window) so a mark is never lost.
+            func surfaceWordRange(words: String?, nearPlainOffset off: Int) -> NSRange? {
+                let sentence = surfaceRange(forPlainOffset: off)
+                guard let words, !words.isEmpty, let sent = sentence else { return sentence }
+                let full = surface.textView.textStorage.string as NSString
+                let winLen = min(full.length - sent.location, max(words.count * 2, 800))
+                guard winLen > 0 else { return sentence }
+                let found = full.range(of: words, options: [],
+                                       range: NSRange(location: sent.location, length: winLen))
+                return found.location != NSNotFound ? found : sentence
+            }
+
             // ONE placement system for every glyph (Mark, 2026-06-26): re-find each
             // mark's spot by its WORDS, not a raw character number, so it survives an
             // OCR/AFM rewrite. Built ONCE per pass (the only O(n) cost); each glyph's
@@ -302,13 +396,19 @@ struct SurfaceReaderHost: UIViewRepresentable {
             for note in vm.notes {
                 let off = refinder.refine(near: note.startOffset, anchorText: note.anchorText,
                                           contextBefore: note.contextBefore, contextAfter: note.contextAfter)
-                guard let r = surfaceRange(forPlainOffset: off) else { continue }
+                guard let r = surfaceWordRange(words: note.anchorText, nearPlainOffset: off) else { continue }
                 noteMarkerIDs.insert(note.id)
                 let isBookmark = note.kind == .bookmark
+                // Differentiating snippet (Mark, 2026-06-27): when several marks share a
+                // gutter line they collapse to a count badge that fans out a menu — each
+                // item needs to say WHICH one it is. A note shows what was written; a
+                // bookmark shows the words it sits on.
+                let snippet = Self.markerSnippet(note.body ?? note.anchorText ?? "")
+                let kind = isBookmark ? "Bookmark" : "Note"
                 markers.append(SurfaceMarker(
                     id: note.id, surfaceRange: r, unsure: false,
                     symbol: isBookmark ? "bookmark.fill" : "square.and.pencil",
-                    label: isBookmark ? "Bookmark" : "Note"))
+                    label: snippet.isEmpty ? kind : "\(kind) · \(snippet)"))
             }
 
             // Document-scope conversations carry a sentinel offset (not tied to a passage),
@@ -341,7 +441,9 @@ struct SurfaceReaderHost: UIViewRepresentable {
             for row in vm.conversationAnchorRows() {
                 guard let raw = row.anchorOffset, raw >= 0, raw <= docContentEnd else { continue }
                 let off = refinder.refinePassage(near: raw, passage: row.content)
-                addConversationMarker(atOffset: off, storageID: row.id, label: "Conversation")
+                let snippet = Self.markerSnippet(row.content)
+                addConversationMarker(atOffset: off, storageID: row.id,
+                                      label: snippet.isEmpty ? "Conversation" : "Conversation · \(snippet)")
             }
 
             // The model's pointers: citations. `cited.offset` is already the DURABLE
@@ -350,10 +452,21 @@ struct SurfaceReaderHost: UIViewRepresentable {
                 guard cited.offset >= 0, cited.offset <= docContentEnd else { continue }
                 let off = refinder.refine(near: cited.offset, anchorText: cited.anchorText,
                                           contextBefore: nil, contextAfter: nil)
-                addConversationMarker(atOffset: off, storageID: cited.turnStorageID, label: "Cited passage")
+                let snippet = Self.markerSnippet(cited.anchorText)
+                addConversationMarker(atOffset: off, storageID: cited.turnStorageID,
+                                      label: snippet.isEmpty ? "Cited passage" : "Cited · \(snippet)")
             }
 
             surface.setMarkers(markers)
+        }
+
+        /// A short, single-line snippet of an annotation's text for the fan-out menu —
+        /// trimmed, newlines collapsed, ellipsised. Lets co-located marks be told apart.
+        private static func markerSnippet(_ s: String, max: Int = 40) -> String {
+            let flat = s.replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard flat.count > max else { return flat }
+            return String(flat.prefix(max)) + "…"
         }
 
         /// A token that changes whenever the rendered DOCUMENT (not the reading

@@ -400,6 +400,28 @@ struct AnchorRefinder {
         return (anchorText, before, after)
     }
 
+    /// Capture an annotation anchor from the LITERAL text the user sees selected/glowing
+    /// (the selection menu's range, or the active read-along highlight). This is the ONE
+    /// capture path for selection- and glow-based annotation: it anchors by the WORDS,
+    /// placing them in plainText by finding that exact substring nearest a position
+    /// `hint`. Anchoring by words (rather than trusting surface→plainText coordinate
+    /// math) is deliberately table-robust — a selection's surface offsets and plainText
+    /// offsets diverge around table/image attachments, but the words don't. The `hint`
+    /// (a rough plainText offset, e.g. the canonical location of the surface range)
+    /// disambiguates a phrase that occurs more than once. Returns nil only when the
+    /// selected words can't be found in plainText at all (e.g. the selection is purely
+    /// an attachment with no prose text) — the caller then falls back to the sentence.
+    func captureBySelectedText(_ selected: String, nearHint hint: Int)
+        -> (start: Int, end: Int, anchorText: String, before: String, after: String)? {
+        let needle = selected.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
+        let safeHint = max(0, min(hint, chars.count))
+        guard let start = locate(needle, before: nil, after: nil, near: safeHint) else { return nil }
+        let end = start + needle.count
+        let cap = AnchorRefinder.capture(in: text, start: start, end: end)
+        return (start, end, cap.anchorText, cap.before, cap.after)
+    }
+
     /// Re-find a glyph's spot. `near` = its best-known plainText offset (a fast hint +
     /// final fallback). `anchorText` = the words to find. Escalating, most-confident
     /// first: exact-at-near → re-find exact words (context-preferred, nearest old spot)

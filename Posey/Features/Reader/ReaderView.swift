@@ -49,6 +49,9 @@ struct ReaderView: View {
     @Environment(\.dismiss) private var dismiss
     private let isTestMode: Bool
     @State private var isShowingNotesSheet = false
+    /// Which note the single-note editor is editing; nil → creating a new one. Set before
+    /// opening the sheet (gutter glyph / navigator tap → edit; chrome button → create).
+    @State private var editingNoteID: UUID? = nil
     @State private var isShowingPreferencesSheet = false
     @State private var isShowingTOCSheet = false
     /// 2026-05-07 (parity #5): test-only modal entry point for the
@@ -132,13 +135,11 @@ struct ReaderView: View {
                 viewModel: viewModel,
                 onOpenNote: { id in
                     revealChrome()
+                    // Tapping a note's gutter glyph opens the single-note editor FOR THAT
+                    // note (view/edit/delete) — the old behavior scrolled a browse list
+                    // that no longer exists (the navigator owns browse).
+                    editingNoteID = id
                     isShowingNotesSheet = true
-                    let entryID = "note:\(id.uuidString)"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                        NotificationCenter.default.post(
-                            name: .remoteScrollSavedAnnotations, object: nil,
-                            userInfo: ["entryID": entryID])
-                    }
                 },
                 onOpenConversation: { storageID in
                     revealChrome()
@@ -507,8 +508,8 @@ struct ReaderView: View {
             // to keep the top-level body modifier chain short enough
             // for the Swift type-checker.
             .modifier(SmartSkipPromptModifier(viewModel: viewModel))
-            .sheet(isPresented: $isShowingNotesSheet) {
-                NotesSheet(viewModel: viewModel)
+            .sheet(isPresented: $isShowingNotesSheet, onDismiss: { editingNoteID = nil }) {
+                NotesSheet(viewModel: viewModel, editingNoteID: editingNoteID)
             }
             .sheet(isPresented: $isShowingPreferencesSheet) {
                 ReaderPreferencesSheet(viewModel: viewModel)
@@ -622,6 +623,7 @@ struct ReaderView: View {
             .modifier(ReaderRemoteControlObservers(
                 viewModel: viewModel,
                 isShowingNotesSheet: $isShowingNotesSheet,
+                editingNoteID: $editingNoteID,
                 isShowingPreferencesSheet: $isShowingPreferencesSheet,
                 isShowingTOCSheet: $isShowingTOCSheet,
                 isShowingVoicePickerSheet: $isShowingVoicePickerSheet
@@ -808,36 +810,6 @@ struct ReaderView: View {
         }
     }
 
-    /// **Reader UI bundle #3 — annotation-glyph tap.** Resolves the
-    /// note this unit's glyph references and opens the Notes sheet
-    /// scrolled to that entry. Looks up `viewModel.notes` for an
-    /// entry of the requested kind whose offset falls within the
-    /// unit's plainText range, then resolves the matching
-    /// `SavedAnnotation.id` so the existing
-    /// `.remoteScrollSavedAnnotations` notification can target it.
-    private func openAnnotationFromGlyph(unit: ContentUnit, kind: NoteKind) {
-        let range = viewModel.plainTextRange(for: unit)
-        let match = viewModel.notes.first { note in
-            note.kind == kind && note.startOffset >= range.lowerBound && note.startOffset < range.upperBound
-        }
-        guard let match else { return }
-        let entry = viewModel.savedAnnotations.first(where: { $0.noteID == match.id })
-        guard let entry else { return }
-        // Open the sheet first; the scroll notification fires only
-        // after the sheet's ScrollViewReader has rendered, so we
-        // post a small delay to land on the right entry.
-        revealChrome()
-        isShowingNotesSheet = true
-        let entryID = entry.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            NotificationCenter.default.post(
-                name: .remoteScrollSavedAnnotations,
-                object: nil,
-                userInfo: ["entryID": entryID]
-            )
-        }
-    }
-
     /// 2026-06-19 — tap the conversation margin glyph → open the Ask Posey
     /// sheet on the conversation anchored in this unit. Finds the anchor row
     /// whose offset falls in the unit's range and passes its storage id as the
@@ -892,10 +864,20 @@ struct ReaderView: View {
                     isShowingTOCSheet = true
                 }
                 Spacer(minLength: 8)
-                chromeGlyphButton(system: "note.text",
-                                  label: "Notes", hook: "reader.notes") {
+                // Note: one job — CREATE a note at the current target (selection / glow /
+                // sentence), opening the single-note editor. Glyph unified to square.and.pencil.
+                chromeGlyphButton(system: "square.and.pencil",
+                                  label: "Add note", hook: "reader.notes") {
+                    editingNoteID = nil
                     viewModel.prepareForNotesEntry()
                     isShowingNotesSheet = true
+                }
+                Spacer(minLength: 8)
+                // Bookmark: one job — one-tap bookmark at the current target (no editor;
+                // bookmarks need none). Replaces the old in-sheet "Bookmark Here".
+                chromeGlyphButton(system: "bookmark",
+                                  label: "Bookmark", hook: "reader.bookmark") {
+                    viewModel.addBookmarkForCurrentSentence()
                 }
                 Spacer(minLength: 8)
                 chromeGlyphButton(system: "magnifyingglass",
@@ -1490,6 +1472,7 @@ private final class TapPassthroughUIView: UIView {
 private struct ReaderRemoteControlObservers: ViewModifier {
     @ObservedObject var viewModel: ReaderViewModel
     @Binding var isShowingNotesSheet: Bool
+    @Binding var editingNoteID: UUID?
     @Binding var isShowingPreferencesSheet: Bool
     @Binding var isShowingTOCSheet: Bool
     @Binding var isShowingVoicePickerSheet: Bool
@@ -1498,7 +1481,8 @@ private struct ReaderRemoteControlObservers: ViewModifier {
         content
             .modifier(ReaderRemoteControlAnnotationObservers(
                 viewModel: viewModel,
-                isShowingNotesSheet: $isShowingNotesSheet
+                isShowingNotesSheet: $isShowingNotesSheet,
+                editingNoteID: $editingNoteID
             ))
             .modifier(ReaderRemoteControlPlaybackObservers(viewModel: viewModel))
             .modifier(ReaderRemoteControlSheetObservers(
@@ -1517,6 +1501,7 @@ private struct ReaderRemoteControlObservers: ViewModifier {
 private struct ReaderRemoteControlAnnotationObservers: ViewModifier {
     @ObservedObject var viewModel: ReaderViewModel
     @Binding var isShowingNotesSheet: Bool
+    @Binding var editingNoteID: UUID?
 
     func body(content: Content) -> some View {
         content
@@ -1529,6 +1514,13 @@ private struct ReaderRemoteControlAnnotationObservers: ViewModifier {
                 viewModel.jumpToOffset(offset)
             }
             .onReceive(NotificationCenter.default.publisher(for: .remoteOpenNotesSheet)) { _ in
+                editingNoteID = nil   // selection-menu / chrome create path → new note
+                isShowingNotesSheet = true
+            }
+            // Navigator tapped a note row → open the single-note editor for that note.
+            .onReceive(NotificationCenter.default.publisher(for: .remoteEditNote)) { note in
+                guard let raw = note.userInfo?["noteID"] as? String, let id = UUID(uuidString: raw) else { return }
+                editingNoteID = id
                 isShowingNotesSheet = true
             }
             .onReceive(NotificationCenter.default.publisher(for: .remoteCreateBookmark)) { note in
@@ -2370,107 +2362,61 @@ struct SavedAnnotation: Identifiable, Equatable {
 private struct NotesSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Per-row expansion state for `.note` entries. Keyed by the
-    /// row's id so collapsing one note doesn't affect others. Lives
-    /// in the sheet (not the view model) because it's purely UI
-    /// affordance; persisted state isn't needed.
-    @State private var expandedNoteIDs: Set<String> = []
+    /// nil → creating a new note (target = the pending selection / glow / sentence);
+    /// set → editing the existing note with this id (tapped in the gutter or navigator).
+    /// Browse moved to the navigator; bookmarks need no editor; conversations have the
+    /// chat — so this sheet is uniquely ONE note (Mark, 2026-06-27).
+    var editingNoteID: UUID? = nil
 
-    /// Task 12 (2026-05-03 — Data Portability): the export URL is
-    /// computed lazily inside a SwiftUI `View` body. We render it
-    /// only when the toolbar `ShareLink` needs it. The exporter
-    /// builds Markdown, writes to a temp .md file, and returns the
-    /// URL the share sheet hands to whichever extension the user
-    /// picks. nil while the database is unavailable.
-    private var annotationsExportURL: URL? {
-        let payload = AnnotationExporter.export(
-            document: viewModel.document,
-            databaseManager: viewModel.databaseManager
-        )
-        return try? payload.temporaryFileURL()
+    private var editingNote: Note? {
+        guard let id = editingNoteID else { return nil }
+        return viewModel.notes.first { $0.id == id }
+    }
+
+    /// The words this note is attached to — shown so the editor is honest about its target.
+    private var targetWords: String {
+        if let n = editingNote {
+            let t = (n.anchorText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? "this passage" : t
+        }
+        return viewModel.pendingNotePreview
     }
 
     var body: some View {
         NavigationStack {
-            ScrollViewReader { listProxy in
-            List {
-                Section("Annotating") {
-                    Text(viewModel.pendingNotePreview)
+            Form {
+                Section("Note on") {
+                    Text(targetWords)
                         .font(.body)
-                        .accessibilityIdentifier("notes.currentSentence")
-                    TextField("Add a note for this passage", text: $viewModel.noteDraft, axis: .vertical)
-                        .lineLimit(3...6)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("notes.target")
+                }
+                Section("Your note") {
+                    TextField("Write your note", text: $viewModel.noteDraft, axis: .vertical)
+                        .lineLimit(4...12)
                         .accessibilityIdentifier("notes.draft")
-
-                    Button("Save Note") {
-                        viewModel.saveDraftNoteForCurrentSentence()
-                    }
-                    .disabled(viewModel.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .remoteRegister("notes.save") {
-                        viewModel.saveDraftNoteForCurrentSentence()
-                    }
-
-                    Button("Bookmark Here") {
-                        viewModel.addBookmarkForCurrentSentence()
-                    }
-                    .remoteRegister("notes.bookmark") {
-                        viewModel.addBookmarkForCurrentSentence()
-                    }
                 }
-
-                Section("Saved Annotations") {
-                    if viewModel.savedAnnotations.isEmpty {
-                        Text("No notes, bookmarks, or conversations yet.")
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("notes.empty")
-                    } else {
-                        ForEach(viewModel.savedAnnotations) { entry in
-                            savedAnnotationRow(entry)
-                                .id(entry.id)
+                Section {
+                    Button(editingNoteID == nil ? "Save Note" : "Update Note") { save() }
+                        .disabled(viewModel.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .remoteRegister("notes.save") { save() }
+                    if editingNoteID != nil {
+                        Button("Jump to Note") {
+                            viewModel.jumpToOffset(editingNote?.startOffset ?? 0); dismiss()
                         }
+                        .remoteRegister("notes.jump") {
+                            viewModel.jumpToOffset(editingNote?.startOffset ?? 0); dismiss()
+                        }
+                        Button("Delete Note", role: .destructive) { deleteIt() }
+                            .remoteRegister("notes.delete") { deleteIt() }
                     }
                 }
             }
-            .onReceive(
-                NotificationCenter.default.publisher(for: .remoteScrollSavedAnnotations)
-            ) { note in
-                guard let entryID = note.userInfo?["entryID"] as? String else { return }
-                if reduceMotion {
-                    listProxy.scrollTo(entryID, anchor: .top)
-                } else {
-                    withAnimation { listProxy.scrollTo(entryID, anchor: .top) }
-                }
-            }
-            } // ScrollViewReader
-            .navigationTitle("Notes")
+            .navigationTitle("Note")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                // Task 12 (2026-05-03 — Data Portability): export
-                // every annotation + Ask Posey conversation tied to
-                // this document as a single Markdown file via the
-                // standard iOS share sheet (Files / Mail / Messages /
-                // AirDrop / etc.). Built lazily on tap so opening
-                // the Notes sheet doesn't pay the rendering cost
-                // for users who never export.
-                ToolbarItem(placement: .topBarLeading) {
-                    if let exportURL = annotationsExportURL {
-                        ShareLink(item: exportURL) {
-                            Label("Export", systemImage: "square.and.arrow.up")
-                        }
-                        .accessibilityLabel("Export annotations and conversations")
-                        .remoteRegister("notes.export") {
-                            // Surface the URL via remote-control for
-                            // automation; share sheet itself is
-                            // user-driven.
-                            _ = exportURL
-                        }
-                    }
-                }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        dismiss()
-                    }
+                    Button("Done") { dismiss() }
                 }
             }
             .onReceive(
@@ -2478,161 +2424,33 @@ private struct NotesSheet: View {
             ) { _ in
                 dismiss()
             }
-            .onReceive(
-                NotificationCenter.default.publisher(for: .remoteTapSavedAnnotation)
-            ) { note in
-                guard let entryID = note.userInfo?["entryID"] as? String,
-                      let entry = viewModel.savedAnnotations.first(where: { $0.id == entryID })
-                else { return }
-                handleSavedAnnotationTap(entry)
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(for: .remoteTapJumpToNote)
-            ) { note in
-                guard let entryID = note.userInfo?["entryID"] as? String,
-                      let entry = viewModel.savedAnnotations.first(where: { $0.id == entryID })
-                else { return }
-                viewModel.jumpToOffset(entry.offset)
-                dismiss()
-            }
             .onAppear {
                 RemoteControlState.shared.presentedSheet = "notes"
-                viewModel.rebuildSavedAnnotations()
+                if let n = editingNote { viewModel.noteDraft = n.body ?? "" }
             }
             .onDisappear {
                 if RemoteControlState.shared.presentedSheet == "notes" {
                     RemoteControlState.shared.presentedSheet = nil
                 }
+                viewModel.noteDraft = ""
             }
         }
     }
 
-    /// Renders one entry in the unified Saved Annotations list. Icon
-    /// + anchor text + tap-to-act behavior depend on the entry kind:
-    /// - `.bookmark` → tap jumps the reader and dismisses.
-    /// - `.note` → tap toggles inline expansion of the note body;
-    ///   "Jump" sub-button navigates the reader without auto-collapsing
-    ///   so the user can keep reading other notes after their reader
-    ///   position has moved.
-    /// - `.conversation` → tap dismisses the Notes sheet and posts a
-    ///   notification with `initialAnchorStorageID` so the Ask Posey
-    ///   sheet opens scrolled to that anchor's row in the thread.
-    @ViewBuilder
-    private func savedAnnotationRow(_ entry: SavedAnnotation) -> some View {
-        let icon: String = {
-            switch entry.kind {
-            case .conversation: return "bubble.left.fill"
-            case .note: return "note.text"
-            case .bookmark: return "bookmark.fill"
-            }
-        }()
-        let kindLabel: String = {
-            switch entry.kind {
-            case .conversation: return "Conversation"
-            case .note: return "Note"
-            case .bookmark: return "Bookmark"
-            }
-        }()
-        let isExpanded = expandedNoteIDs.contains(entry.id)
-
-        Button {
-            handleSavedAnnotationTap(entry)
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: icon)
-                        .imageScale(.medium)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, alignment: .leading)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(kindLabel)
-                            .font(.caption2.smallCaps())
-                            .foregroundStyle(.secondary)
-                        Text(entry.anchorText)
-                            .font(.body)
-                            .foregroundStyle(.primary)
-                            .lineLimit(isExpanded ? nil : 3)
-                            .multilineTextAlignment(.leading)
-                    }
-                    Spacer(minLength: 0)
-                }
-                // A note carries TWO things: the words it's attached to (the primary
-                // label above) and what the user wrote. Show the body beneath — always
-                // (a 2-line snippet collapsed, full when expanded) — so the row reads
-                // "on THESE words, I wrote THIS" at a glance, in a secondary tint so the
-                // marked words stay primary.
-                if entry.kind == .note,
-                   let body = entry.body, !body.isEmpty {
-                    Text(body)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 30)
-                        .lineLimit(isExpanded ? nil : 2)
-                        .multilineTextAlignment(.leading)
-                }
-                if entry.kind == .note, isExpanded {
-                    HStack {
-                        Spacer()
-                        Button("Jump to Note") {
-                            viewModel.jumpToOffset(entry.offset)
-                            dismiss()
-                        }
-                        .font(.caption.weight(.semibold))
-                        .remoteRegister("notes.jump.\(entry.id)") {
-                            viewModel.jumpToOffset(entry.offset)
-                            dismiss()
-                        }
-                    }
-                }
-            }
-            .padding(.vertical, 4)
+    private func save() {
+        if let id = editingNoteID {
+            viewModel.updateNoteBody(id: id, body: viewModel.noteDraft)
+        } else {
+            viewModel.saveDraftNoteForCurrentSentence()
         }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(kindLabel): \(entry.anchorText)")
-        .remoteRegister("notes.row.\(entry.id)") {
-            handleSavedAnnotationTap(entry)
-        }
+        dismiss()
     }
 
-    private func handleSavedAnnotationTap(_ entry: SavedAnnotation) {
-        switch entry.kind {
-        case .bookmark:
-            viewModel.jumpToOffset(entry.offset)
-            dismiss()
-        case .note:
-            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                if expandedNoteIDs.contains(entry.id) {
-                    expandedNoteIDs.remove(entry.id)
-                } else {
-                    expandedNoteIDs.insert(entry.id)
-                }
-            }
-        case .conversation:
-            // Dismiss Notes; the ReaderView's notification observer
-            // for `.openAskPoseyForDocument` constructs the Ask Posey
-            // sheet with `initialAnchorStorageID` so it opens
-            // scrolled to this specific anchor's row in the thread.
-            dismiss()
-            var info: [AnyHashable: Any] = [
-                "documentID": viewModel.document.id,
-                "scope": "passage"
-            ]
-            if let storageID = entry.conversationStorageID {
-                info["initialAnchorStorageID"] = storageID
-            }
-            // Brief delay so Notes-sheet dismiss animation completes
-            // before the Ask Posey sheet presents — back-to-back
-            // sheet transitions otherwise visibly stutter on iPhone.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                NotificationCenter.default.post(
-                    name: .openAskPoseyForDocument,
-                    object: nil,
-                    userInfo: info
-                )
-            }
-        }
+    private func deleteIt() {
+        if let id = editingNoteID { viewModel.deleteAnnotation(noteID: id) }
+        dismiss()
     }
+
 }
 
 /// A fully-resolved annotation target in plainText space: the durable WORDS to re-find
@@ -4374,7 +4192,7 @@ final class ReaderViewModel: ObservableObject {
         }
 
         if segmentNotes.contains(where: { $0.kind == .note }) {
-            return "note.text"
+            return "square.and.pencil"   // notes — unified glyph (Mark)
         }
 
         if segmentNotes.contains(where: { $0.kind == .bookmark }) {
@@ -4779,6 +4597,18 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
+    /// Edit an existing note's body (the single-note editor's Update). Empty body → nil
+    /// (a note with no text is just a marker). Refreshes the gutter + lists.
+    func updateNoteBody(id: UUID, body: String) {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try databaseManager.updateNote(id: id, body: trimmed.isEmpty ? nil : trimmed)
+            loadNotes()
+        } catch {
+            present(error)
+        }
+    }
+
     private func loadNotes() {
         do {
             notes = try databaseManager.notes(for: document.id)
@@ -5094,11 +4924,9 @@ final class ReaderViewModel: ObservableObject {
         unitAnnotationVersion &+= 1
     }
 
-    /// **Reader UI bundle #3.** Return the half-open plainText offset
-    /// range `[unitStart, unitEnd)` for a given unit — the same
-    /// coordinate space `notes.startOffset` uses. Helper for
-    /// `openAnnotationFromGlyph` to find which notes belong to a
-    /// tapped row.
+    /// Return the half-open plainText offset range `[unitStart, unitEnd)` for a given
+    /// unit — the same coordinate space `notes.startOffset` uses. Used by
+    /// `openConversationFromGlyph` to find which marks belong to a tapped unit.
     func plainTextRange(for unit: ContentUnit) -> Range<Int> {
         var cursor = 0
         var firstProseSeen = false
@@ -5307,6 +5135,16 @@ private struct TOCSheet: View {
     @ObservedObject var viewModel: ReaderViewModel
     @Environment(\.dismiss) private var dismiss
 
+    /// Lazily-built Markdown export of every annotation + conversation (Data Portability),
+    /// surfaced by the toolbar ShareLink. nil while the DB is unavailable.
+    private var annotationsExportURL: URL? {
+        let payload = AnnotationExporter.export(
+            document: viewModel.document,
+            databaseManager: viewModel.databaseManager
+        )
+        return try? payload.temporaryFileURL()
+    }
+
     @State private var pageInputText: String = ""
     @State private var pageInputErrorMessage: String? = nil
     @FocusState private var pageInputFocused: Bool
@@ -5442,6 +5280,7 @@ private struct TOCSheet: View {
                                 .background(Capsule().fill(on ? Color.accentColor.opacity(0.18)
                                                               : Color.secondary.opacity(0.12)))
                                 .accessibilityIdentifier("nav.filter.\(f.rawValue)")
+                                .remoteRegister("nav.filter.\(f.rawValue)") { selectedFilter = f }
                         }
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
@@ -5451,6 +5290,17 @@ private struct TOCSheet: View {
             .navigationTitle("Navigate")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // Export every annotation + conversation as one Markdown file. Moved here
+                // from the old Notes sheet — this is the "everything" surface, so export
+                // belongs with it, not on a single-note editor.
+                ToolbarItem(placement: .topBarLeading) {
+                    if let exportURL = annotationsExportURL {
+                        ShareLink(item: exportURL) {
+                            Label("Export", systemImage: "square.and.arrow.up")
+                        }
+                        .accessibilityLabel("Export annotations and conversations")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                 }
@@ -5533,17 +5383,21 @@ private struct TOCSheet: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("nav.row.\(item.id)")
+        .remoteRegister("nav.row.\(item.id)") { jump(to: item) }
 
         // Marks (note/bookmark — they carry a noteID) can be deleted; chapters,
         // conversations and images cannot (conversation delete is a separate decision).
         if let noteID = item.noteID {
-            content.swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                Button(role: .destructive) {
-                    viewModel.deleteAnnotation(noteID: noteID)
-                } label: {
-                    Label("Delete", systemImage: "trash")
+            content
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        viewModel.deleteAnnotation(noteID: noteID)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
                 }
-            }
+                // Antenna can't swipe; register the delete by id so it's self-verifiable.
+                .remoteRegister("nav.delete.\(item.id)") { viewModel.deleteAnnotation(noteID: noteID) }
         } else {
             content
         }
@@ -5596,7 +5450,7 @@ private struct TOCSheet: View {
         switch kind {
         case .bookmark:     return "bookmark.fill"
         case .conversation: return "bubble.left.fill"
-        default:            return "note.text"
+        default:            return "square.and.pencil"   // notes — unified glyph (Mark)
         }
     }
 
@@ -5613,6 +5467,17 @@ private struct TOCSheet: View {
     }
 
     private func jump(to item: NavItem) {
+        // A NOTE opens in the single-note editor (it has content to read/edit); everything
+        // else just navigates. Dismiss first, then post — back-to-back sheet transitions
+        // stutter on iPhone, so let the navigator close before the editor presents.
+        if case .note = item.kind, let noteID = item.noteID {
+            dismiss()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                NotificationCenter.default.post(name: .remoteEditNote, object: nil,
+                                                userInfo: ["noteID": noteID.uuidString])
+            }
+            return
+        }
         if let entry = item.tocEntry {
             viewModel.jumpToTOCEntry(entry)
         } else {

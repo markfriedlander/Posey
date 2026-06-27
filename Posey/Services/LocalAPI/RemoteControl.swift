@@ -237,6 +237,9 @@ extension Notification.Name {
     /// antenna verbs that mutate notes directly in the database (e.g. CLEAR_NOTES) so the
     /// reader's gutter reflects the change — exactly as a real user-driven edit would.
     static let remoteReloadAnnotations = Notification.Name("PoseyRemoteReloadAnnotations")
+    /// `userInfo["noteID"]: String` (UUID). Open the single-note editor for that note —
+    /// posted when a note row is tapped in the navigator, so browse → edit is one tap.
+    static let remoteEditNote = Notification.Name("PoseyRemoteEditNote")
     /// `userInfo["x"], ["y"]: Double` (points, window coords). Routes a tap to whatever
     /// is at that point on the open reader — glyph button, image, or text. The general
     /// "tap anywhere a human could" capability (replaces per-feature tap verbs).

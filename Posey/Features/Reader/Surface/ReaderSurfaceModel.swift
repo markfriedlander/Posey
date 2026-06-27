@@ -427,33 +427,73 @@ struct AnchorRefinder {
         return safeNear
     }
 
+    /// Re-find a glyph anchored to a PASSAGE (conversation anchor / cited) whose stored
+    /// `near` may be a non-durable raw offset. Tolerant to a word changing INSIDE the
+    /// passage (Mark's Scenario 1) WITHOUT stored context: try the passage's HEAD slice,
+    /// then its TAIL slice (adjusted back to the passage start). A single interior change
+    /// breaks at most one slice; the other still locates the passage. Returns the
+    /// passage-start offset, or `near` (floor) if nothing matches. Bounds the slices to
+    /// ~120 chars so the search stays cheap + the fingerprint stays distinctive.
+    func refinePassage(near: Int, passage: String) -> Int {
+        let n = chars.count
+        let safeNear = max(0, min(near, n))
+        let pc = Array(passage.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard pc.count >= 12 else {
+            // too short to slice — fall back to the plain re-find on the whole thing
+            return refine(near: near, anchorText: pc.isEmpty ? nil : String(pc),
+                          contextBefore: nil, contextAfter: nil)
+        }
+        let cap = min(pc.count, 120)
+        let mid = cap / 2
+        let head = String(pc[0..<mid])
+        let tail = String(pc[mid..<cap])
+        // 1) exact head at the stored spot — common case, no search.
+        if safeNear + head.count <= n, String(chars[safeNear..<safeNear + head.count]) == head {
+            return safeNear
+        }
+        // 2) locate the head (its start IS the passage start).
+        if let loc = locate(head, before: nil, after: nil, near: safeNear) { return loc }
+        // 3) locate the tail; the passage starts `mid` chars before it.
+        if let loc = locate(tail, before: nil, after: nil, near: safeNear) {
+            return max(0, loc - mid)
+        }
+        return safeNear
+    }
+
     // Mirrors LayoutMap.locate / locateByContext, but in plainText space. Returns a
     // Character offset (the start of the re-found anchor).
     private func locate(_ needle: String, before: String?, after: String?, near: Int) -> Int? {
         guard !needle.isEmpty else { return nil }
-        var best: (loc: Int, dist: Int)?
+        // Two candidates: the nearest occurrence whose surrounding CONTEXT also matches
+        // (`bestCtx` — disambiguates repeated phrases), and the nearest occurrence
+        // regardless of context (`bestAny` — the fallback). Prefer context, but if the
+        // context drifted (e.g. the words got restructured into a table, separating them
+        // from their old neighbours) we must NOT reject a perfectly good unique match —
+        // fall back to the nearest occurrence. (Loosened 2026-06-27 per Mark's
+        // Scenario-2 question: old behaviour returned nil when context didn't line up.)
+        var bestCtx: (loc: Int, dist: Int)?
+        var bestAny: (loc: Int, dist: Int)?
         var from = text.startIndex
         while let r = text.range(of: needle, range: from..<text.endIndex) {
             let startOff = text.distance(from: text.startIndex, to: r.lowerBound)
-            var ok = true
+            let dist = abs(startOff - near)
+            if bestAny == nil || dist < bestAny!.dist { bestAny = (startOff, dist) }
+            var ctxOK = true
             if let b = before, !b.isEmpty {
                 let bLen = min(b.count, startOff)
                 let preStart = text.index(r.lowerBound, offsetBy: -bLen)
-                if String(text[preStart..<r.lowerBound]) != String(b.suffix(bLen)) { ok = false }
+                if String(text[preStart..<r.lowerBound]) != String(b.suffix(bLen)) { ctxOK = false }
             }
-            if ok, let a = after, !a.isEmpty {
+            if ctxOK, let a = after, !a.isEmpty {
                 let aAvail = text.distance(from: r.upperBound, to: text.endIndex)
                 let aLen = min(a.count, aAvail)
                 let postEnd = text.index(r.upperBound, offsetBy: aLen)
-                if String(text[r.upperBound..<postEnd]) != String(a.prefix(aLen)) { ok = false }
+                if String(text[r.upperBound..<postEnd]) != String(a.prefix(aLen)) { ctxOK = false }
             }
-            if ok {
-                let dist = abs(startOff - near)
-                if best == nil || dist < best!.dist { best = (startOff, dist) }
-            }
+            if ctxOK, bestCtx == nil || dist < bestCtx!.dist { bestCtx = (startOff, dist) }
             from = text.index(after: r.lowerBound)
         }
-        return best?.loc
+        return bestCtx?.loc ?? bestAny?.loc
     }
 
     private func locateByContext(before: String?, after: String?, near: Int) -> Int? {

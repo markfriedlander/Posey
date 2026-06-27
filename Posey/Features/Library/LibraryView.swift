@@ -2671,10 +2671,10 @@ extension LibraryViewModel {
                 }
                 for row in try databaseManager.askPoseyAnchorRows(for: id) {
                     guard let off = row.anchorOffset else { continue }
-                    let fp = AnchorRefinder.fingerprint(row.content)
-                    let refined = refinder.refine(near: off, anchorText: fp, contextBefore: nil, contextAfter: nil)
+                    // Mirror the reader's anchor path exactly: multi-slice refinePassage.
+                    let refined = refinder.refinePassage(near: off, passage: row.content)
                     glyphs.append(["type": "anchor", "raw": off, "refined": refined,
-                                   "moved": refined != off, "anchorText": String(fp.prefix(40))])
+                                   "moved": refined != off, "anchorText": String(row.content.prefix(40))])
                 }
                 for cited in try databaseManager.askPoseyCitedPassages(for: id) {
                     let refined = refinder.refine(near: cited.offset, anchorText: cited.anchorText,
@@ -2683,6 +2683,17 @@ extension LibraryViewModel {
                                    "moved": refined != cited.offset, "anchorText": String(cited.anchorText.prefix(40))])
                 }
                 return json(["documentID": raw, "count": glyphs.count, "glyphs": glyphs])
+
+            case "CLEAR_NOTES":
+                // Wipe ALL notes + bookmarks for a doc — clean slate for testing (no real
+                // users; legacy one-word/empty-anchorText test notes confound durability
+                // checks). Does NOT touch conversations (use CLEAR_ASK_POSEY_CONVERSATION).
+                guard let raw = arg, let id = UUID(uuidString: raw) else {
+                    return #"{"error":"Usage: CLEAR_NOTES:<doc-id>"}"#
+                }
+                let existing = try databaseManager.notes(for: id)
+                for n in existing { try databaseManager.deleteNote(id: n.id) }
+                return json(["documentID": raw, "notesCleared": existing.count])
 
             case "DB_STATS":
                 let docs = try databaseManager.documents()

@@ -318,15 +318,11 @@ struct SurfaceReaderHost: UIViewRepresentable {
             // the wide double-bubble that spilled into the highlighted text.
             let docContentEnd = vm.segments.last?.endOffset ?? Int.max
 
-            // Helper: drop a conversation bubble at the spot whose words are `anchorText`
-            // (re-found via the one placement system), near `rawOffset`, opening the
+            // Helper: drop a conversation bubble at an ALREADY-RESOLVED offset, opening the
             // conversation at `storageID`. `label` is the fan-out menu title when this
-            // bubble shares a line with others. The sentinel check on `rawOffset` skips
-            // document-scope conversations (no passage to point at).
-            func addConversationMarker(rawOffset: Int, anchorText: String?, storageID: String, label: String) {
-                guard rawOffset >= 0, rawOffset <= docContentEnd else { return }
-                let off = refinder.refine(near: rawOffset, anchorText: anchorText,
-                                          contextBefore: nil, contextAfter: nil)
+            // bubble shares a line with others. (`rawOffset > docContentEnd` would have been
+            // a document-scope sentinel — callers screen those before resolving.)
+            func addConversationMarker(atOffset off: Int, storageID: String, label: String) {
                 guard let r = surfaceRange(forPlainOffset: off) else { return }
                 guard seenConversationDoors.insert("\(r.location)#\(storageID)").inserted else { return }
                 let markerID = UUID()
@@ -338,22 +334,23 @@ struct SurfaceReaderHost: UIViewRepresentable {
                     label: label))
             }
 
-            // The user's pointers: anchors. Re-found by a fingerprint of the anchored
-            // passage text (`row.content`), so the bubble tracks its sentence through a
-            // rewrite instead of pinning to a stale raw offset. A document-scope
-            // conversation carries a sentinel offset (> docContentEnd) and is skipped.
+            // The user's pointers: anchors. The stored offset is a RAW (non-durable) one, so
+            // re-find the anchored passage by its WORDS — multi-slice, tolerant to an interior
+            // word change. A document-scope conversation carries a sentinel offset
+            // (> docContentEnd) and is skipped.
             for row in vm.conversationAnchorRows() {
-                guard let off = row.anchorOffset else { continue }
-                addConversationMarker(rawOffset: off,
-                                      anchorText: AnchorRefinder.fingerprint(row.content),
-                                      storageID: row.id, label: "Conversation")
+                guard let raw = row.anchorOffset, raw >= 0, raw <= docContentEnd else { continue }
+                let off = refinder.refinePassage(near: raw, passage: row.content)
+                addConversationMarker(atOffset: off, storageID: row.id, label: "Conversation")
             }
 
-            // The model's pointers: citations. Every passage an answer cited gets the same
-            // bubble, re-found by a fingerprint of the cited passage. NO LIMIT.
+            // The model's pointers: citations. `cited.offset` is already the DURABLE
+            // unit-anchor resolution; the fingerprint just confirms/refines it by content.
             for cited in vm.conversationCitedPassages() {
-                addConversationMarker(rawOffset: cited.offset, anchorText: cited.anchorText,
-                                      storageID: cited.turnStorageID, label: "Cited passage")
+                guard cited.offset >= 0, cited.offset <= docContentEnd else { continue }
+                let off = refinder.refine(near: cited.offset, anchorText: cited.anchorText,
+                                          contextBefore: nil, contextAfter: nil)
+                addConversationMarker(atOffset: off, storageID: cited.turnStorageID, label: "Cited passage")
             }
 
             surface.setMarkers(markers)

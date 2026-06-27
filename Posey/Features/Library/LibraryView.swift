@@ -2693,6 +2693,12 @@ extension LibraryViewModel {
                 }
                 let existing = try databaseManager.notes(for: id)
                 for n in existing { try databaseManager.deleteNote(id: n.id) }
+                // Refresh the open reader so its gutter reflects the wipe (the delete is a
+                // direct DB op; without this the reader keeps drawing the deleted marks —
+                // the stale-glyph artifact that masqueraded as a refresh bug, 2026-06-27).
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteReloadAnnotations, object: nil)
+                }
                 return json(["documentID": raw, "notesCleared": existing.count])
 
             case "DB_STATS":

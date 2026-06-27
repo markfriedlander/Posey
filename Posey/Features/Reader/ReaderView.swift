@@ -882,11 +882,13 @@ struct ReaderView: View {
                     dismiss()
                 }
                 Spacer(minLength: 8)
-                // TOC keeps a CONSTANT position — greyed + disabled when the
-                // document has no entries (Mark: grey-out is enough, no tooltip).
+                // Navigate (combined): chapters + marks + images by position. Constant
+                // position; greyed only when there is genuinely nothing to navigate.
                 chromeGlyphButton(system: "list.bullet.indent",
-                                  label: "Table of contents", hook: "reader.toc",
-                                  enabled: !viewModel.visibleTOCEntries.isEmpty) {
+                                  label: "Navigate", hook: "reader.toc",
+                                  enabled: !viewModel.visibleTOCEntries.isEmpty
+                                           || !viewModel.savedAnnotations.isEmpty
+                                           || viewModel.pageMap.hasPages) {
                     isShowingTOCSheet = true
                 }
                 Spacer(minLength: 8)
@@ -1548,6 +1550,11 @@ private struct ReaderRemoteControlAnnotationObservers: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .remoteSetNoteDraft)) { note in
                 guard let text = note.userInfo?["text"] as? String else { return }
                 viewModel.noteDraft = text
+            }
+            // Antenna verbs that mutate notes directly in the DB (CLEAR_NOTES) post this so
+            // the reader reloads — keeps the test tool faithful to real user experience.
+            .onReceive(NotificationCenter.default.publisher(for: .remoteReloadAnnotations)) { _ in
+                viewModel.reloadAnnotations()
             }
     }
 }
@@ -4756,6 +4763,22 @@ final class ReaderViewModel: ObservableObject {
     // paragraph splitting either — the units pipeline computes
     // sentences at import time via `SentenceIndexer`.
 
+    /// Public reload entry — lets antenna verbs that mutate notes directly in the DB
+    /// (CLEAR_NOTES) bring the reader's in-memory list back in sync, so the gutter
+    /// reflects reality exactly as a real user edit would (test-fidelity, not product).
+    func reloadAnnotations() { loadNotes() }
+
+    /// Delete a note or bookmark by id, then refresh everything (gutter glyphs, the
+    /// per-unit cache, the saved-annotations list). The navigator's swipe-to-delete.
+    func deleteAnnotation(noteID: UUID) {
+        do {
+            try databaseManager.deleteNote(id: noteID)
+            loadNotes()
+        } catch {
+            present(error)
+        }
+    }
+
     private func loadNotes() {
         do {
             notes = try databaseManager.notes(for: document.id)
@@ -5288,17 +5311,19 @@ private struct TOCSheet: View {
     @State private var pageInputErrorMessage: String? = nil
     @FocusState private var pageInputFocused: Bool
 
-    /// 2026-05-13 (A1b) — top-of-sheet tab between Contents (existing
-    /// chapter list) and Images (thumbnails of every visualPlaceholder
-    /// in the doc with the surrounding sentence as context). Hidden
-    /// when the doc has zero images so the picker doesn't appear on
-    /// text-only docs.
-    enum TOCTab: String, CaseIterable, Identifiable {
-        case contents = "Contents"
+    /// 2026-06-27 — ONE combined navigator (Mark): chapters are the backbone; the
+    /// reader's marks (notes, bookmarks, conversations) and images sit in POSITION order
+    /// among them, so there's a single spine to navigate. A filter narrows to one kind.
+    enum NavFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case chapters = "Chapters"
+        case bookmarks = "Bookmarks"
+        case notes = "Notes"
+        case conversations = "Conversations"
         case images = "Images"
         var id: String { rawValue }
     }
-    @State private var selectedTab: TOCTab = .contents
+    @State private var selectedFilter: NavFilter = .all
 
     /// Image entries derived from `.image` units. Each entry pairs the
     /// unit's imageID with the document offset (the next sentence's
@@ -5339,28 +5364,91 @@ private struct TOCSheet: View {
             }
     }
 
+    /// One row of the combined navigator — a chapter, a mark, or an image — carrying its
+    /// plainText `offset` so everything sorts onto the single spine.
+    private struct NavItem: Identifiable {
+        enum Kind { case chapter(level: Int), note, bookmark, conversation, image }
+        let id: String
+        let kind: Kind
+        let title: String        // chapter title / the marked words / image context
+        let subtitle: String?    // note body
+        let offset: Int
+        let imageID: String?
+        let noteID: UUID?        // note/bookmark → enables jump + swipe-delete
+        let tocEntry: StoredTOCEntry?
+    }
+
+    /// Filters actually offered: conversations only when Ask Posey is compiled in; images
+    /// only when the doc has any.
+    private var availableFilters: [NavFilter] {
+        var f: [NavFilter] = [.all, .chapters, .bookmarks, .notes]
+        #if POSEY_ENABLE_ASK_POSEY
+        f.append(.conversations)
+        #endif
+        if !imageEntries.isEmpty { f.append(.images) }
+        return f
+    }
+
+    /// Chapters + marks + images merged and sorted by position (the spine), narrowed by
+    /// the active filter.
+    private var navItems: [NavItem] {
+        var items: [NavItem] = []
+        for e in viewModel.visibleTOCEntries {
+            items.append(NavItem(id: "ch:\(e.compositeID)", kind: .chapter(level: e.level),
+                                 title: e.title, subtitle: nil, offset: e.plainTextOffset,
+                                 imageID: nil, noteID: nil, tocEntry: e))
+        }
+        for a in viewModel.savedAnnotations {
+            let kind: NavItem.Kind
+            switch a.kind {
+            case .note: kind = .note
+            case .bookmark: kind = .bookmark
+            case .conversation: kind = .conversation
+            }
+            items.append(NavItem(id: a.id, kind: kind, title: a.anchorText,
+                                 subtitle: a.kind == .note ? a.body : nil, offset: a.offset,
+                                 imageID: nil, noteID: a.noteID, tocEntry: nil))
+        }
+        for img in imageEntries {
+            items.append(NavItem(id: "img:\(img.id)", kind: .image,
+                                 title: img.contextSentence, subtitle: nil, offset: img.offset,
+                                 imageID: img.imageID, noteID: nil, tocEntry: nil))
+        }
+        return items.filter(matchesFilter).sorted { $0.offset < $1.offset }
+    }
+
+    private func matchesFilter(_ item: NavItem) -> Bool {
+        switch selectedFilter {
+        case .all: return true
+        case .chapters: if case .chapter = item.kind { return true }; return false
+        case .bookmarks: if case .bookmark = item.kind { return true }; return false
+        case .notes: if case .note = item.kind { return true }; return false
+        case .conversations: if case .conversation = item.kind { return true }; return false
+        case .images: if case .image = item.kind { return true }; return false
+        }
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if !imageEntries.isEmpty {
-                    Picker("View", selection: $selectedTab) {
-                        ForEach(TOCTab.allCases) { tab in
-                            Text(tab.rawValue).tag(tab)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(availableFilters) { f in
+                            let on = selectedFilter == f
+                            Button(f.rawValue) { selectedFilter = f }
+                                .font(.subheadline.weight(on ? .semibold : .regular))
+                                .foregroundStyle(on ? Color.accentColor : Color.primary)
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(Capsule().fill(on ? Color.accentColor.opacity(0.18)
+                                                              : Color.secondary.opacity(0.12)))
+                                .accessibilityIdentifier("nav.filter.\(f.rawValue)")
                         }
                     }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                    .accessibilityIdentifier("toc.tabPicker")
+                    .padding(.horizontal, 16).padding(.vertical, 8)
                 }
-
-                if selectedTab == .images && !imageEntries.isEmpty {
-                    imagesList
-                } else {
-                    contentsList
-                }
+                unifiedList
             }
-            .navigationTitle("Contents")
+            .navigationTitle("Navigate")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -5382,6 +5470,7 @@ private struct TOCSheet: View {
                 dismiss()
             }
             .onAppear {
+                viewModel.rebuildSavedAnnotations()   // ensure marks are current when opened
                 RemoteControlState.shared.presentedSheet = "toc"
             }
             .onDisappear {
@@ -5395,100 +5484,141 @@ private struct TOCSheet: View {
     /// 2026-05-13 (A1b) — image-tab list. Small leading thumbnail
     /// (44×44, scaledToFit, rounded) plus the surrounding sentence
     /// as caption. Tap → jumpToOffset + dismiss.
-    private var imagesList: some View {
+    private var unifiedList: some View {
         List {
-            ForEach(imageEntries) { entry in
-                Button {
-                    viewModel.jumpToOffset(entry.offset)
-                    dismiss()
-                } label: {
-                    HStack(alignment: .top, spacing: 12) {
-                        thumbnail(for: entry)
-                            .frame(width: 56, height: 56)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                        Text(entry.contextSentence)
-                            .font(.callout)
-                            .foregroundStyle(.primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .lineLimit(3)
-                            .multilineTextAlignment(.leading)
-                    }
-                    .padding(.vertical, 4)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("toc.image.\(entry.id)")
-                .accessibilityHint("Jump to this image in the document.")
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func thumbnail(for entry: ImageEntry) -> some View {
-        if let imageID = entry.imageID,
-           let data = viewModel.imageData(for: imageID),
-           let uiImage = UIImage(data: data) {
-            Image(uiImage: uiImage)
-                .resizable()
-                .scaledToFill()
-        } else {
-            ZStack {
-                Color.secondary.opacity(0.12)
-                Image(systemName: "photo")
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var contentsList: some View {
-        let entries = viewModel.visibleTOCEntries
-        return List {
-            if entries.isEmpty {
-                // 2026-05-07 (parity #5): real empty state when
-                // no TOC entries are detected. The button that
-                // opens this sheet only appears when there are
-                // entries today, so this is mostly defensive —
-                // the API can still open the sheet on a doc
-                // with no TOC, and visible empty-state copy is
-                // better than a blank list either way.
+            if navItems.isEmpty {
                 Section {
-                    Text("No table of contents in this document.")
+                    Text(emptyMessage)
                         .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("toc.empty")
+                        .accessibilityIdentifier("nav.empty")
                 }
             } else {
-                Section {
-                    // Task 8 (2026-05-03): composite id avoids the
-                    // crash some EPUBs caused when synthesized TOC
-                    // entries shared `playOrder = 0` (e.g. a nav.xhtml
-                    // and a notice.html both starting at 0). Combine
-                    // playOrder + offset + title so duplicates stay
-                    // unique even when one of them is empty.
-                    ForEach(entries, id: \.compositeID) { entry in
-                        Button {
-                            viewModel.jumpToTOCEntry(entry)
-                            dismiss()
-                        } label: {
-                            Text(entry.title)
-                                .foregroundStyle(.primary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
+                ForEach(navItems) { item in
+                    navRow(item)
                 }
             }
-            if viewModel.pageMap.hasPages {
+            // Go-to-page belongs with structural navigation (All / Chapters), not when
+            // the user has filtered down to a mark type.
+            if viewModel.pageMap.hasPages && (selectedFilter == .all || selectedFilter == .chapters) {
                 Section {
                     goToPageRow
                 } header: {
                     Text("Go to page")
                 } footer: {
-                    Text(goToPageFooter)
-                        .font(.caption2)
+                    Text(goToPageFooter).font(.caption2)
                 }
             }
         }
+    }
+
+    private var emptyMessage: String {
+        switch selectedFilter {
+        case .all:           return "Nothing to navigate here yet."
+        case .chapters:      return "No table of contents in this document."
+        case .bookmarks:     return "No bookmarks yet."
+        case .notes:         return "No notes yet."
+        case .conversations: return "No saved conversations yet."
+        case .images:        return "No images in this document."
+        }
+    }
+
+    @ViewBuilder
+    private func navRow(_ item: NavItem) -> some View {
+        let content = Button {
+            jump(to: item)
+        } label: {
+            navRowLabel(item)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("nav.row.\(item.id)")
+
+        // Marks (note/bookmark — they carry a noteID) can be deleted; chapters,
+        // conversations and images cannot (conversation delete is a separate decision).
+        if let noteID = item.noteID {
+            content.swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                Button(role: .destructive) {
+                    viewModel.deleteAnnotation(noteID: noteID)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder
+    private func navRowLabel(_ item: NavItem) -> some View {
+        switch item.kind {
+        case .chapter(let level):
+            // Chapters are the backbone: top-level bold, sub-levels indented + lighter.
+            Text(item.title)
+                .font(level <= 1 ? .body.weight(.semibold) : .body)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, CGFloat(max(0, level - 1)) * 14)
+        case .image:
+            HStack(alignment: .top, spacing: 12) {
+                thumbnailFor(imageID: item.imageID)
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                Text(item.title)
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(3).multilineTextAlignment(.leading)
+            }
+            .padding(.leading, 12)
+        default:
+            // A mark, nested under its chapter: icon + the marked words (+ note body).
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: markIcon(item.kind))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title)
+                        .font(.body).foregroundStyle(.primary)
+                        .lineLimit(2).multilineTextAlignment(.leading)
+                    if let sub = item.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines), !sub.isEmpty {
+                        Text(sub)
+                            .font(.callout).foregroundStyle(.secondary)
+                            .lineLimit(2).multilineTextAlignment(.leading)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 12)
+        }
+    }
+
+    private func markIcon(_ kind: NavItem.Kind) -> String {
+        switch kind {
+        case .bookmark:     return "bookmark.fill"
+        case .conversation: return "bubble.left.fill"
+        default:            return "note.text"
+        }
+    }
+
+    @ViewBuilder
+    private func thumbnailFor(imageID: String?) -> some View {
+        if let imageID, let data = viewModel.imageData(for: imageID), let uiImage = UIImage(data: data) {
+            Image(uiImage: uiImage).resizable().scaledToFill()
+        } else {
+            ZStack {
+                Color.secondary.opacity(0.12)
+                Image(systemName: "photo").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func jump(to item: NavItem) {
+        if let entry = item.tocEntry {
+            viewModel.jumpToTOCEntry(entry)
+        } else {
+            viewModel.jumpToOffset(item.offset)
+        }
+        dismiss()
     }
 
     // MARK: - Go-to-page

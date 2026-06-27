@@ -233,6 +233,10 @@ extension Notification.Name {
     /// `userInfo["text"]: String`. Test-only: sets the open note editor's draft without
     /// moving the reading position, so a stashed selection anchor survives to save time.
     static let remoteSetNoteDraft = Notification.Name("PoseyRemoteSetNoteDraft")
+    /// No userInfo. Tell the open reader to reload its annotations from the DB. Used by
+    /// antenna verbs that mutate notes directly in the database (e.g. CLEAR_NOTES) so the
+    /// reader's gutter reflects the change — exactly as a real user-driven edit would.
+    static let remoteReloadAnnotations = Notification.Name("PoseyRemoteReloadAnnotations")
     /// `userInfo["x"], ["y"]: Double` (points, window coords). Routes a tap to whatever
     /// is at that point on the open reader — glyph button, image, or text. The general
     /// "tap anywhere a human could" capability (replaces per-feature tap verbs).

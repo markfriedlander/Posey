@@ -54,6 +54,28 @@ nonisolated func processAvailableMemoryMB() -> Double {
     #endif
 }
 
+/// Resident memory footprint of THIS process in MB — `phys_footprint`, the
+/// number iOS jetsam accounts against (how much WE are using right now).
+/// Returns 0 when unavailable. Read-only introspection for the dev
+/// embedding-status board's Memory section; pairs with
+/// `processAvailableMemoryMB()` (how much MORE we can use before a kill).
+@inline(__always)
+nonisolated func processFootprintMB() -> Double {
+    #if !os(macOS)
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) { ptr -> kern_return_t in
+        ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+            task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), intPtr, &count)
+        }
+    }
+    guard kr == KERN_SUCCESS else { return 0 }
+    return Double(info.phys_footprint) / (1024.0 * 1024.0)
+    #else
+    return 0
+    #endif
+}
+
 /// Estimated MB the process needs available for a successful MLX load.
 /// `sizeGB` comes from the catalog; unknown models default to 2.5 GB.
 nonisolated func requiredMemoryMBForLoad(sizeGB: Double?) -> Double {

@@ -3805,6 +3805,19 @@ extension DatabaseManager {
         return out
     }
 
+    /// Total on-disk bytes of the SQLite store: main file + WAL + SHM. Drives the
+    /// dev embedding-status board's Storage section (the real disk cost of chunk
+    /// text + every embedder's vectors + RAPTOR summaries). Embedding BLOBs
+    /// dominate it — per backend, embedded-chunk-count × dimension × 4 (Float32).
+    /// Cheap (three file-attribute reads); safe to poll on the board's timer.
+    func databaseFileBytes() -> Int64 {
+        let fm = FileManager.default
+        let base = databaseURL.path
+        return [base, base + "-wal", base + "-shm"].reduce(Int64(0)) { sum, path in
+            sum + (((try? fm.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.int64Value ?? 0)
+        }
+    }
+
     /// 2026-06-19 — SMALL-TO-BIG retrieval. Fetch the LEAF chunks of a document
     /// whose `chunk_index` falls in `[fromIndex, toIndex]`, ordered by index.
     /// Used to expand a retrieved (small, precise) chunk to its neighbors so the

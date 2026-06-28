@@ -25,6 +25,10 @@ struct EmbeddingStatusBoardView: View {
     @State private var rate: Double = 0
     /// id → title, refreshed on the timer so per-doc stage rows can name the book.
     @State private var titles: [UUID: String] = [:]
+    /// Storage + memory diagnostics, refreshed on the timer (all cheap reads).
+    @State private var dbBytes: Int64 = 0
+    @State private var availMB: Double = 0
+    @State private var footprintMB: Double = 0
 
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -49,6 +53,30 @@ struct EmbeddingStatusBoardView: View {
                     Text("Embedding coverage — library-wide totals")
                 } footer: {
                     Text("Totals across EVERY document in your library, summed per embedder — not one title. Step 2 (embedding) is what fills these.")
+                }
+                Section {
+                    LabeledContent("Database on disk", value: formatBytes(dbBytes))
+                    ForEach(coverage, id: \.backend.rawValue) { c in
+                        let bytes = Int64(c.filled) * Int64(c.backend.dimension) * 4
+                        LabeledContent("· \(c.backend.displayName)",
+                                       value: "\(formatBytes(bytes))  ·  \(c.filled) × \(c.backend.dimension)d")
+                    }
+                } header: {
+                    Text("Storage")
+                } footer: {
+                    Text("The database holds chunk text + ALL three embedders' vectors + RAPTOR summaries. Per-embedder estimate = embedded chunks × dimension × 4 bytes — the real cost of keeping every embedder around.")
+                }
+                Section {
+                    LabeledContent("Free to allocate (headroom)",
+                                   value: availMB.isFinite ? "\(Int(availMB)) MB" : "—")
+                    LabeledContent("This app is using",
+                                   value: footprintMB > 0 ? "\(Int(footprintMB)) MB" : "—")
+                    LabeledContent("Device RAM",
+                                   value: formatBytes(Int64(ProcessInfo.processInfo.physicalMemory)))
+                } header: {
+                    Text("Memory")
+                } footer: {
+                    Text("\u{201C}Free to allocate\u{201D} is how much MORE this app can use before iOS force-quits it (jetsam) — the number that matters for not overloading the phone. Per-feature CPU/memory isn't available on iOS, so these are app-wide.")
                 }
                 Section("Device") {
                     LabeledContent("Thermal", value: thermal)
@@ -257,6 +285,9 @@ struct EmbeddingStatusBoardView: View {
     private func refresh() {
         coverage = (try? databaseManager.embeddingCoverage()) ?? coverage
         thermal = thermalDescription()
+        dbBytes = databaseManager.databaseFileBytes()
+        availMB = processAvailableMemoryMB()
+        footprintMB = processFootprintMB()
         // Title lookup for per-doc stage rows (cheap; refreshed each tick so a
         // newly-imported doc names correctly).
         if let docs = try? databaseManager.documents() {
@@ -288,6 +319,12 @@ struct EmbeddingStatusBoardView: View {
 
     private func displayName(_ raw: String) -> String {
         EmbeddingBackend(rawValue: raw)?.displayName ?? raw
+    }
+
+    /// MB under 1 GB, else GB with two decimals. Dev-board readability.
+    private func formatBytes(_ b: Int64) -> String {
+        let mb = Double(b) / (1024.0 * 1024.0)
+        return mb >= 1024 ? String(format: "%.2f GB", mb / 1024.0) : String(format: "%.0f MB", mb)
     }
 
     private func etaString(remaining: Int) -> String {

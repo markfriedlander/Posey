@@ -622,16 +622,23 @@ enum ContentUnitBuilder {
     /// chapter heading, so a boundary test missed exactly CHAPTER 1). Front-
     /// matter headings with no later twin — ETYMOLOGY, EXTRACTS — are preserved.
     /// Genuinely repeated front matter (e.g. Frankenstein's two identical "To
-    /// Mrs. Saville, England." letters) is preserved by the `start < skipOffset`
-    /// guard: those letters are reading CONTENT and sit at/after the skip, so
-    /// they are never demotion candidates.
+    /// Mrs. Saville, England." letters) is preserved by the front-matter guard
+    /// (`sequence < skipSequence`): those letters are reading CONTENT and sit
+    /// at/after the skip unit, so they are never demotion candidates.
     ///
-    /// Offset arithmetic matches the persister's `\n\n`-joined plainText.
+    /// Position by IDENTITY (the Position Rule, ruler migration #3, 2026-06-28):
+    /// the front-matter boundary is the skip UNIT's `sequence`, not a cross-ruler
+    /// character offset. `skipUnitID` is resolved to a sequence once, then every
+    /// test is sequence-vs-sequence — pure document order, one ruler. (Was
+    /// `skipOffset`: an importer-plainText offset (R1) compared against a
+    /// unit-joined running offset (R2) — the same two-ruler drift #2 removed.)
     static func demoteDuplicateListingHeadings(
         _ units: [ContentUnit],
-        skipOffset: Int
+        skipUnitID: UUID?
     ) -> [ContentUnit] {
-        guard skipOffset > 0 else { return units }
+        guard let skipUnitID,
+              let skipSequence = units.first(where: { $0.id == skipUnitID })?.sequence
+        else { return units }
 
         func normalizedTitle(_ unit: ContentUnit) -> String {
             let prefix = unit.metadata.titleLength.map { String(unit.text.prefix($0)) } ?? unit.text
@@ -652,42 +659,25 @@ enum ContentUnitBuilder {
         // only appears EARLIER, in the listing) is never demoted by this
         // asymmetry — no fragile boundary needed.
 
-        // Pass 1 — last (greatest) start offset at which each heading title occurs.
-        var lastHeadingOffsetByTitle: [String: Int] = [:]
-        var offset = 0
-        var firstProseSeen = false
-        for unit in units {
-            let isProseBearing = unit.kind.carriesProseText
-            if isProseBearing {
-                if firstProseSeen { offset += 2 }
-                firstProseSeen = true
-            }
-            if unit.kind == .heading {
-                let t = normalizedTitle(unit)
-                if !t.isEmpty { lastHeadingOffsetByTitle[t] = offset }
-            }
-            if isProseBearing { offset += unit.text.count }
+        // Pass 1 — the last (greatest) sequence at which each heading title
+        // occurs. Units are in document order with monotonically increasing
+        // sequence, so the final write per title is its latest occurrence.
+        var lastHeadingSeqByTitle: [String: Int] = [:]
+        for unit in units where unit.kind == .heading {
+            let t = normalizedTitle(unit)
+            if !t.isEmpty { lastHeadingSeqByTitle[t] = unit.sequence }
         }
 
-        // Pass 2 — identify front-matter headings (start < skipOffset) whose
-        // title recurs in a strictly later heading.
+        // Pass 2 — a front-matter heading (sequence < skipSequence) whose title
+        // recurs in a strictly LATER heading is a listing copy → candidate. The
+        // body copy (its title appears only EARLIER, in the listing) is never a
+        // candidate by this asymmetry. Sequence-vs-sequence only (one ruler).
         var candidateUnitIDs = Set<UUID>()
-        offset = 0
-        firstProseSeen = false
-        for unit in units {
-            let isProseBearing = unit.kind.carriesProseText
-            if isProseBearing {
-                if firstProseSeen { offset += 2 }
-                firstProseSeen = true
+        for unit in units where unit.kind == .heading && unit.sequence < skipSequence {
+            let t = normalizedTitle(unit)
+            if !t.isEmpty, (lastHeadingSeqByTitle[t] ?? unit.sequence) > unit.sequence {
+                candidateUnitIDs.insert(unit.id)
             }
-            let start = offset
-            if unit.kind == .heading, start < skipOffset {
-                let t = normalizedTitle(unit)
-                if !t.isEmpty, (lastHeadingOffsetByTitle[t] ?? start) > start {
-                    candidateUnitIDs.insert(unit.id)
-                }
-            }
-            if isProseBearing { offset += unit.text.count }
         }
 
         // Only act when there's clearly a LISTING — a cluster of duplicated

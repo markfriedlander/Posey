@@ -127,8 +127,12 @@ struct TXTLibraryImporter {
         // front-matter headings with no body copy are preserved. The TOC builder
         // below already excludes the listing from document_toc via the skip
         // gate; this aligns the heading UNITS.
+        // Ruler migration #3 (2026-06-28): translate the R1 skip offset to the
+        // skip UNIT once (against THIS rawUnits list), then demote by identity —
+        // no R1-offset-vs-R2-running-offset comparison inside the helper.
         let demotedUnits = ContentUnitBuilder.demoteDuplicateListingHeadings(
-            rawUnits, skipOffset: skipOffset
+            rawUnits,
+            skipUnitID: ContentUnitBuilder.firstUnit(in: rawUnits, atOrAfterPlainTextOffset: skipOffset)?.id
         )
         // 2026-06-11 heading standard — merge a label-only chapter heading with
         // the title line below it into ONE heading ("CHAPTER I" + "JONATHAN
@@ -149,6 +153,11 @@ struct TXTLibraryImporter {
 
         // ── Map smart-skip plainText offsets to unit ids.
         let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: skipOffset)?.id
+        // The content-start boundary as a unit SEQUENCE (the Position Rule): the
+        // TOC skip-gate below compares heading sequence to this — same skip unit
+        // the reader/chunker window by — instead of an R2 running offset vs the R1
+        // skipOffset. nil (no skip unit) → include every heading. (#3, 2026-06-28)
+        let skipSequence = units.first(where: { $0.id == skipUnitID })?.sequence
         let contentEndUnitID: UUID? = {
             guard contentEndOffset > 0 else { return nil }
             return ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: contentEndOffset)?.id
@@ -170,12 +179,13 @@ struct TXTLibraryImporter {
             guard unit.kind.carriesProseText else { continue }
             if firstProseSeen { runningOffset += 2 /* "\n\n" */ }
             firstProseSeen = true
-            if unit.kind == .heading && runningOffset >= skipOffset {
+            if unit.kind == .heading && (skipSequence.map { unit.sequence >= $0 } ?? true) {
                 // Skip catalog-list entries that live BEFORE the
-                // smart-skip target. Gutenberg books surface "CHAPTER
-                // N. Title." both in the CONTENTS catalog at the top
-                // (133+ entries for Moby) AND at each actual chapter
-                // start in the body. Without this filter the TOC
+                // smart-skip target (now by unit SEQUENCE, not an R2
+                // running offset vs the R1 skipOffset). Gutenberg books
+                // surface "CHAPTER N. Title." both in the CONTENTS catalog
+                // at the top (133+ entries for Moby) AND at each actual
+                // chapter start in the body. Without this filter the TOC
                 // doubles up — the catalog version comes first and
                 // jumps the reader to the catalog, not the chapter.
                 tocEntries.append(StoredTOCEntry(

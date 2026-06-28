@@ -155,8 +155,12 @@ struct HTMLLibraryImporter {
         // BODY twin (same title at/after skip), so the legitimate front-matter
         // headings ETYMOLOGY and EXTRACTS — which have no body copy — are
         // preserved (the earlier region-based attempt wrongly demoted ETYMOLOGY).
+        // Ruler migration #3 (2026-06-28): translate the R1 skip offset to the
+        // skip UNIT once (against THIS promotedUnits list), then demote by
+        // identity — no R1-offset-vs-R2-running-offset comparison in the helper.
         let units = ContentUnitBuilder.demoteDuplicateListingHeadings(
-            promotedUnits, skipOffset: skipOffset
+            promotedUnits,
+            skipUnitID: ContentUnitBuilder.firstUnit(in: promotedUnits, atOrAfterPlainTextOffset: skipOffset)?.id
         )
         // 2026-06-12 (finding #2) — pull contentEnd back past a trailing publisher
         // catalog ad (Grosset & Dunlap reprints). No-op for article HTML / books

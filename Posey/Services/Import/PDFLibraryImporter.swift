@@ -169,10 +169,14 @@ struct PDFLibraryImporter {
         // front matter (now split into one unit per entry by the TOC line-
         // preservation pass) is never promoted to a chapter heading. The
         // chapter headings live in the body, after the skip.
+        // Ruler migration #3b (2026-06-28): translate the R1 TOC-skip offset to
+        // the skip UNIT once (against baseUnits), then gate heading promotion by
+        // identity — no R1-offset-vs-R2-unit-offset comparison inside the helper.
         let units = ContentUnitBuilder.applyHeadingMarkers(
             to: baseUnits,
             headingMarkersByOffset: headingMarkersByOffset,
-            minPromotableOffset: parsed.tocSkipUntilOffset
+            skipUnitID: ContentUnitBuilder.firstUnit(
+                in: baseUnits, atOrAfterPlainTextOffset: parsed.tocSkipUntilOffset)?.id
         )
 
         // ── Sentences from prose-bearing units.

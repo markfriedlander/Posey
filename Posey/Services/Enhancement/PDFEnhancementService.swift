@@ -420,9 +420,11 @@ actor PDFEnhancementService {
         // skip the importer already established.
         let finalSkipOffset = detected.skipOffset > 0 ? detected.skipOffset : inputs.skipOffset
 
-        // Promote headings via the hardened shared path. Pass the skip offset as
-        // minPromotableOffset so a TOC-LISTING entry in the front matter is not
-        // promoted to a chapter heading — only the body occurrences are.
+        // Promote headings via the hardened shared path. Gate promotion by the
+        // skip UNIT (identity) so a TOC-LISTING entry in the front matter is not
+        // promoted to a chapter heading — only the body occurrences are. Ruler
+        // migration #3b (2026-06-28): translate the R1 skip offset to a unit once
+        // (against inputs.units) rather than comparing offsets across two rulers.
         let markersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
             detected.entries.map {
                 ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
@@ -432,7 +434,8 @@ actor PDFEnhancementService {
         let promotedUnits = ContentUnitBuilder.applyHeadingMarkers(
             to: inputs.units,
             headingMarkersByOffset: markersByOffset,
-            minPromotableOffset: finalSkipOffset
+            skipUnitID: ContentUnitBuilder.firstUnit(
+                in: inputs.units, atOrAfterPlainTextOffset: finalSkipOffset)?.id
         )
 
         // Diff: which units became headings? Map by id for a stable compare.

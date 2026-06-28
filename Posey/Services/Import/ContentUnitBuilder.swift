@@ -357,9 +357,9 @@ enum ContentUnitBuilder {
         let title: String?
     }
 
-    /// - Parameter minPromotableOffset: units whose start offset is BELOW this
+    /// - Parameter skipUnitID: units BEFORE this skip unit (by document sequence)
     ///   are never promoted to headings. Used by the PDF path to pass the
-    ///   TOC-skip offset so a TOC-LISTING entry (which lives in the front-matter
+    ///   TOC-skip unit so a TOC-LISTING entry (which lives in the front-matter
     ///   contents region, before the body) is never turned into a chapter
     ///   heading. A TOC-entry marker's intended target is the BODY occurrence of
     ///   the title (that's where `buildEntries` resolved its offset); without
@@ -367,17 +367,29 @@ enum ContentUnitBuilder {
     ///   (so each "Chapter I: The MU-puzzle 33" listing line is its own unit),
     ///   the listing unit is an EXACT title match and gets promoted alongside —
     ///   or instead of — the real body heading, producing duplicate / wrong
-    ///   headings in the skipped front matter (GEB). Default 0 = no restriction,
-    ///   so TXT/RTF/DOCX/HTML/EPUB callers (whose front-matter headings like
-    ///   Moby's EXTRACTS / ETYMOLOGY are legitimate and come from other marker
-    ///   sources) are unaffected. The general front-matter-listing suppression
-    ///   across all formats remains the dedicated Bug G task.
+    ///   headings in the skipped front matter (GEB). `nil` = no restriction, so
+    ///   TXT/RTF/DOCX/HTML/EPUB callers (whose front-matter headings like Moby's
+    ///   EXTRACTS / ETYMOLOGY are legitimate and come from other marker sources)
+    ///   are unaffected.
+    ///
+    ///   Ruler migration #3b (2026-06-28): the boundary is the skip UNIT's
+    ///   SEQUENCE (identity), not a cross-ruler character offset. Was
+    ///   `minPromotableOffset: Int` — an R1 plainText offset compared against each
+    ///   unit's R2 unit-joined start offset (the same two-ruler drift #2/#3
+    ///   removed). The general front-matter-listing suppression across all formats
+    ///   remains the dedicated Bug G task.
     static func applyHeadingMarkers(
         to units: [ContentUnit],
         headingMarkersByOffset: [Int: HeadingMarker],
-        minPromotableOffset: Int = 0
+        skipUnitID: UUID? = nil
     ) -> [ContentUnit] {
         guard !headingMarkersByOffset.isEmpty else { return units }
+        // Resolve the promotion boundary to the skip unit's sequence ONCE; every
+        // per-unit test below is then sequence-vs-sequence (one ruler). nil → no
+        // restriction (non-PDF callers, unchanged).
+        let skipSequence: Int? = skipUnitID.flatMap { id in
+            units.first(where: { $0.id == id })?.sequence
+        }
 
         // 2026-05-31 (ingestion audit, Bug B) — promote by TITLE, with the
         // offset only DISAMBIGUATING. The previous code turned whatever unit a
@@ -481,7 +493,7 @@ enum ContentUnitBuilder {
                 var bestDist = Int.max
                 for i in units.indices where units[i].kind == .prose
                     && startOffsets[i] >= 0
-                    && startOffsets[i] >= minPromotableOffset {
+                    && (skipSequence.map { units[i].sequence >= $0 } ?? true) {
                     // Cheap pre-filter before the char-walk: first non-whitespace
                     // char must match.
                     guard units[i].text.first(where: { !$0.isWhitespace }) == titleFirst else { continue }
@@ -500,7 +512,7 @@ enum ContentUnitBuilder {
                 // range contains the offset (legacy behavior for title-less markers).
                 if let idx = units.indices.first(where: { i in
                     units[i].kind == .prose && startOffsets[i] >= 0
-                        && startOffsets[i] >= minPromotableOffset
+                        && (skipSequence.map { units[i].sequence >= $0 } ?? true)
                         && offset >= startOffsets[i]
                         && offset <= startOffsets[i] + units[i].text.count
                 }) {

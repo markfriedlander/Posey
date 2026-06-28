@@ -34,6 +34,9 @@ struct EmbeddingStatusBoardView: View {
 
     var body: some View {
         NavigationStack {
+            // ScrollViewReader so the antenna can scroll the board to any section
+            // for capture/verification (TAP board.scroll*) — see scroll actions below.
+            ScrollViewReader { proxy in
             List {
                 Section {
                     activityContent
@@ -42,6 +45,7 @@ struct EmbeddingStatusBoardView: View {
                 } footer: {
                     Text("Each title moves through 3 steps:  1 Chunking  →  2 Embedding (\u{201C}reading ahead\u{201D})  →  3 Summary tree (\u{201C}studying up\u{201D} / RAPTOR).  PDFs add a prep OCR pass before step 1.")
                 }
+                .id("board.top")
                 Section("Backfill control") { backfillControl }
                 Section {
                     if coverage.isEmpty {
@@ -66,6 +70,7 @@ struct EmbeddingStatusBoardView: View {
                 } footer: {
                     Text("The database holds chunk text + ALL three embedders' vectors + RAPTOR summaries. Per-embedder estimate = embedded chunks × dimension × 4 bytes — the real cost of keeping every embedder around.")
                 }
+                .id("board.storage")
                 Section {
                     LabeledContent("Free to allocate (headroom)",
                                    value: availMB.isFinite ? "\(Int(availMB)) MB" : "—")
@@ -78,10 +83,12 @@ struct EmbeddingStatusBoardView: View {
                 } footer: {
                     Text("\u{201C}Free to allocate\u{201D} is how much MORE this app can use before iOS force-quits it (jetsam) — the number that matters for not overloading the phone. Per-feature CPU/memory isn't available on iOS, so these are app-wide.")
                 }
+                .id("board.memory")
                 Section("Device") {
                     LabeledContent("Thermal", value: thermal)
                     LabeledContent("Active embedder", value: EmbeddingBackend.current().displayName)
                 }
+                .id("board.device")
             }
             .navigationTitle("Embedding status")
             .navigationBarTitleDisplayMode(.inline)
@@ -92,6 +99,12 @@ struct EmbeddingStatusBoardView: View {
             }
             .onReceive(timer) { _ in refresh() }
             .onAppear { refresh() }
+            // Antenna scroll affordances (capture/verify any section): TAP these ids.
+            .remoteRegister("board.scrollTop") { withAnimation { proxy.scrollTo("board.top", anchor: .top) } }
+            .remoteRegister("board.scrollStorage") { withAnimation { proxy.scrollTo("board.storage", anchor: .top) } }
+            .remoteRegister("board.scrollMemory") { withAnimation { proxy.scrollTo("board.memory", anchor: .top) } }
+            .remoteRegister("board.scrollBottom") { withAnimation { proxy.scrollTo("board.device", anchor: .bottom) } }
+            }
         }
     }
 

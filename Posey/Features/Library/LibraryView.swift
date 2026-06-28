@@ -680,6 +680,10 @@ final class LibraryViewModel: ObservableObject {
     /// swipe-to-delete and the antenna `DELETE_DOCUMENT` verb. (2026-06-28)
     func deleteDocumentOffMain(_ document: Document) async throws {
         let id = document.id
+        // Remove it from the preparation queue too — otherwise a deleted doc
+        // lingers as a "ghost" queue entry (shows as the placeholder "a document"
+        // and would try to prepare a doc that no longer exists). (2026-06-28)
+        await DocumentIndexingQueue.shared.cancel(id)
         // Cancel the separate-actor producers FIRST so neither can re-insert rows
         // (PDF enhancement / RAPTOR run on their own queues, outside FK cascade).
         await PDFEnhancementService.shared.cancel(id)
@@ -1024,6 +1028,8 @@ extension LibraryViewModel {
             case "RESET_ALL":
                 let docs = try databaseManager.documents()
                 let ids = docs.map { $0.id }
+                // Empty the prep queue wholesale (no ghost entries left behind).
+                await DocumentIndexingQueue.shared.expungeAll()
                 // Cancel separate-actor producers first (can't race the cascade).
                 for id in ids { await PDFEnhancementService.shared.cancel(id) }
                 for id in ids { await RaptorTreeService.shared.cancel(id) }
@@ -4573,6 +4579,12 @@ extension LibraryViewModel {
             try data.write(to: tempURL)
             defer { try? FileManager.default.removeItem(at: tempURL) }
 
+            // Snapshot existing ids BEFORE the import so the response can say
+            // plainly whether this CREATED a new document or MATCHED an existing
+            // one (dedup collision). A silent "success" that hid a dedup match is
+            // exactly what led to deleting the wrong document (2026-06-28) — make
+            // the collision loud so an operator never manipulates the wrong doc.
+            let preExistingIDs = Set(((try? databaseManager.documents()) ?? []).map { $0.id })
             let doc: Document
             if ext == "pdf" {
                 // 2026-05-16 (B8) — Same precheck as the user-driven
@@ -4599,9 +4611,15 @@ extension LibraryViewModel {
                 }
             }
             loadDocuments()
+            let matchedExisting = preExistingIDs.contains(doc.id)
             var resp: [String: Any] = ["success": true, "id": doc.id.uuidString,
                          "title": doc.title, "fileType": doc.fileType,
-                         "characterCount": doc.characterCount]
+                         "characterCount": doc.characterCount,
+                         // created == a NEW doc this call; matchedExisting == dedup
+                         // returned a doc already in the library (DON'T delete it
+                         // thinking it's a fresh test copy).
+                         "created": !matchedExisting,
+                         "matchedExisting": matchedExisting]
             #if DEBUG
             stallProbe.stop()
             resp["importMs"] = Int((Double(DispatchTime.now().uptimeNanoseconds &- probeStart) / 1_000_000).rounded())

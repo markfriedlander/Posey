@@ -19,6 +19,9 @@ struct EmbeddingStatusBoardView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var coverage: [DatabaseManager.EmbeddingBackendCoverage] = []
+    /// Per-document coverage for the active embedder, refreshed on the timer —
+    /// answers "which titles still have missing embeds?" (Mark, 2026-06-19).
+    @State private var docCoverage: [DatabaseManager.DocumentEmbeddingCoverage] = []
     @State private var thermal: String = "—"
     /// Rate estimation across refreshes (chunks/sec) for the active backfill.
     @State private var lastProcessed: Int = -1
@@ -33,6 +36,15 @@ struct EmbeddingStatusBoardView: View {
     /// queue's gate. Toggling calls `DocumentIndexingQueue.setBackgroundPrep`
     /// (syncs the actor flag + resumes). Default ON preserves prior behavior.
     @AppStorage(DocumentIndexingQueue.backgroundPrepDefaultsKey) private var backgroundPrepEnabled = true
+    /// Locally-held order of the WAITING embed lane, so the queue rows support
+    /// drag-to-reorder + swipe/Edit-to-remove. Reconciled from the published mirror
+    /// (`indexing.embedQueuePositions`) on appear and on every queue change: when
+    /// the SET of waiting docs is unchanged we KEEP the local order (an in-flight
+    /// drag isn't clobbered); when it changes (enqueue / finish / remove) we adopt
+    /// the mirror's order. Edits write straight through to the queue actor. The
+    /// reconcile is driven by the mirror — never the 2s timer — so there's no
+    /// race that snaps a just-reordered row back. (2026-06-28)
+    @State private var queuedOrder: [UUID] = []
 
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -74,6 +86,18 @@ struct EmbeddingStatusBoardView: View {
                     Text("Totals across EVERY document in your library, summed per embedder — not one title. Step 2 (embedding) is what fills these.")
                 }
                 Section {
+                    if docCoverage.isEmpty {
+                        Text("No documents indexed yet.").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(sortedDocCoverage, id: \.documentID) { perDocCoverageRow($0) }
+                    }
+                } header: {
+                    Text("Per-document coverage — active embedder")
+                } footer: {
+                    Text("Each title's step-2 progress for the LIVE embedder (\(EmbeddingBackend.current().displayName)). Titles with missing embeds are listed first — those are the ones not yet fully Ask-able. A title shows here once it's been chunked (step 1).")
+                }
+                .id("board.perdoc")
+                Section {
                     LabeledContent("Database on disk", value: formatBytes(dbBytes))
                     ForEach(coverage, id: \.backend.rawValue) { c in
                         let bytes = Int64(c.filled) * Int64(c.backend.dimension) * 4
@@ -108,14 +132,21 @@ struct EmbeddingStatusBoardView: View {
             .navigationTitle("Preparation")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // Edit toggles reorder grips + delete circles on the queue rows.
+                ToolbarItem(placement: .topBarLeading) { EditButton() }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
+                    Button("Close") { dismiss() }
                 }
             }
             .onReceive(timer) { _ in refresh() }
-            .onAppear { refresh() }
+            .onAppear { refresh(); reconcileQueuedOrder() }
+            // Reconcile the draggable queue order whenever the published mirror
+            // changes (enqueue / finish / remove). Mirror-driven, NOT timer-driven,
+            // so a just-dragged row never snaps back. (see `queuedOrder`)
+            .onChange(of: indexing.embedQueuePositions) { _, _ in reconcileQueuedOrder() }
             // Antenna scroll affordances (capture/verify any section): TAP these ids.
             .remoteRegister("board.scrollTop") { withAnimation { proxy.scrollTo("board.top", anchor: .top) } }
+            .remoteRegister("board.scrollPerDoc") { withAnimation { proxy.scrollTo("board.perdoc", anchor: .top) } }
             .remoteRegister("board.scrollStorage") { withAnimation { proxy.scrollTo("board.storage", anchor: .top) } }
             .remoteRegister("board.scrollMemory") { withAnimation { proxy.scrollTo("board.memory", anchor: .top) } }
             .remoteRegister("board.scrollBottom") { withAnimation { proxy.scrollTo("board.device", anchor: .bottom) } }
@@ -127,6 +158,22 @@ struct EmbeddingStatusBoardView: View {
             .remoteRegister("board.bgPrepOff") {
                 backgroundPrepEnabled = false
                 Task { await DocumentIndexingQueue.shared.setBackgroundPrep(false) }
+            }
+            // Antenna proof of the queue-steering plumbing (the drag/swipe gestures
+            // can't be TAP'd): remove the first waiting title; rotate the last
+            // waiting title to the front. Both go through the SAME actor methods the
+            // gestures call, so a green here proves the mechanism end-to-end.
+            .remoteRegister("board.queueRemoveFirst") {
+                guard let first = queuedOrder.first else { return }
+                queuedOrder.removeFirst()
+                Task { await DocumentIndexingQueue.shared.removeFromEmbedQueue(first) }
+            }
+            .remoteRegister("board.queueLastToFront") {
+                guard queuedOrder.count > 1, let last = queuedOrder.last else { return }
+                queuedOrder.removeLast()
+                queuedOrder.insert(last, at: 0)
+                let newOrder = queuedOrder
+                Task { await DocumentIndexingQueue.shared.reorderEmbedQueue(newOrder) }
             }
             }
         }
@@ -199,16 +246,39 @@ struct EmbeddingStatusBoardView: View {
         }
 
         // 4) Queue (waiting to start step 2) — show the actual titles + position,
-        //    not just a count, so Mark can see WHICH titles are waiting.
-        let queued = indexing.embedQueuePositions.sorted { $0.value < $1.value }
-        if !queued.isEmpty {
-            Label("\(queued.count) title\(queued.count == 1 ? "" : "s") queued — waiting for step 2 (embedding)",
+        //    not just a count, so Mark can see WHICH titles are waiting, and let him
+        //    STEER it: drag to reorder (tap Edit), swipe or Edit to remove. Edits
+        //    write through to the queue actor; `queuedOrder` is the reconciled mirror.
+        if !queuedOrder.isEmpty {
+            Label("\(queuedOrder.count) title\(queuedOrder.count == 1 ? "" : "s") queued — waiting for step 2 (embedding)",
                   systemImage: "tray.full").foregroundStyle(.secondary).font(.callout.weight(.medium))
-            ForEach(queued, id: \.key) { id, pos in
+            ForEach(queuedOrder, id: \.self) { id in
+                let pos = (queuedOrder.firstIndex(of: id) ?? 0) + 1
                 Text("·  #\(pos)  \(title(id))")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            .onMove { from, to in
+                queuedOrder.move(fromOffsets: from, toOffset: to)
+                let newOrder = queuedOrder
+                Task { await DocumentIndexingQueue.shared.reorderEmbedQueue(newOrder) }
+            }
+            .onDelete { offsets in
+                let ids = offsets.map { queuedOrder[$0] }
+                queuedOrder.remove(atOffsets: offsets)
+                Task { for id in ids { await DocumentIndexingQueue.shared.removeFromEmbedQueue(id) } }
+            }
+            Text("Tap Edit to drag-reorder which title is prepared next, or swipe a row to remove it from the queue. Removing only drops it from preparation — the document and its text are untouched.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
+    }
+
+    /// Adopt the published embed-lane order into `queuedOrder` when the membership
+    /// changes; keep the local order when only the order differs (so an in-flight
+    /// reorder/remove isn't clobbered by the round-trip). See `queuedOrder`.
+    private func reconcileQueuedOrder() {
+        let mirror = indexing.embedQueuePositions
+        if Set(mirror.keys) == Set(queuedOrder) { return }
+        queuedOrder = mirror.sorted { $0.value < $1.value }.map(\.key)
     }
 
     /// A stage row with a fractional bar (0…1) and a free-text detail.
@@ -317,10 +387,47 @@ struct EmbeddingStatusBoardView: View {
         }
     }
 
+    // MARK: - Per-document coverage (active embedder)
+
+    /// Incomplete titles first (most-missing at the top), then complete ones by
+    /// title — so "what still needs embedding?" is answered at a glance.
+    private var sortedDocCoverage: [DatabaseManager.DocumentEmbeddingCoverage] {
+        let col = EmbeddingBackend.current().vectorColumn
+        return docCoverage.sorted { a, b in
+            let am = a.total - (a.filledByColumn[col] ?? 0)
+            let bm = b.total - (b.filledByColumn[col] ?? 0)
+            if am != bm { return am > bm }                       // most-missing first
+            return title(a.documentID) < title(b.documentID)     // then alphabetical
+        }
+    }
+
+    private func perDocCoverageRow(_ c: DatabaseManager.DocumentEmbeddingCoverage) -> some View {
+        let col = EmbeddingBackend.current().vectorColumn
+        let filled = c.filledByColumn[col] ?? 0
+        let missing = max(0, c.total - filled)
+        let complete = missing == 0 && c.total > 0
+        let frac = c.total > 0 ? Double(filled) / Double(c.total) : 0
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title(c.documentID)).font(.callout.weight(.medium)).lineLimit(1)
+                Spacer()
+                if complete {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                } else {
+                    Text("\(missing) missing").font(.caption).foregroundStyle(.orange)
+                }
+            }
+            ProgressView(value: frac).tint(complete ? .green : .blue)
+            Text("\(filled) / \(c.total) chunks embedded  (\(Int((frac * 100).rounded()))%)")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - Refresh + helpers
 
     private func refresh() {
         coverage = (try? databaseManager.embeddingCoverage()) ?? coverage
+        docCoverage = (try? databaseManager.embeddingCoverageByDocument()) ?? docCoverage
         thermal = thermalDescription()
         dbBytes = databaseManager.databaseFileBytes()
         availMB = processAvailableMemoryMB()

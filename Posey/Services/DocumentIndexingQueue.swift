@@ -220,6 +220,39 @@ actor DocumentIndexingQueue {
         postChange()
     }
 
+    /// Remove a WAITING document from the embed lane — the Preparation board's
+    /// per-row "Remove" / swipe-to-delete. Unlike `cancel`, this NEVER touches the
+    /// in-flight pass: it only drops a pending entry, so the user can prune the
+    /// queue without interrupting (or discarding the partial work of) the document
+    /// currently being prepared. If `documentID` is the in-flight doc or isn't
+    /// queued, it's a no-op here (stopping in-flight work is the escape switch's
+    /// job). Idempotent. (2026-06-28)
+    func removeFromEmbedQueue(_ documentID: UUID) {
+        guard embedQueue.contains(documentID) else { return }
+        embedQueue.removeAll { $0 == documentID }
+        dbgLog("DocumentIndexingQueue: removed-from-queue %@ (embed=%d raptor=%d)",
+               documentID.uuidString, embedQueue.count, raptorQueue.count)
+        postChange()
+    }
+
+    /// Reorder the embed lane to match `orderedIDs` — the Preparation board's
+    /// drag-to-reorder. The user steers WHICH waiting title is prepared next.
+    ///
+    /// **Never silently drops work (Rule: never fail silently).** Only IDs still
+    /// actually queued are honored (the view's snapshot can lag a finish/enqueue);
+    /// any queued ID the caller's order omitted is appended at the end, so no
+    /// pending document can vanish because of a stale drag. The in-flight document
+    /// isn't in `embedQueue`, so a reorder can't disturb it. (2026-06-28)
+    func reorderEmbedQueue(_ orderedIDs: [UUID]) {
+        let queued = Set(embedQueue)
+        var newOrder = orderedIDs.filter { queued.contains($0) }
+        for id in embedQueue where !newOrder.contains(id) { newOrder.append(id) }
+        guard newOrder != embedQueue else { return }
+        embedQueue = newOrder
+        dbgLog("DocumentIndexingQueue: reordered embed lane (%d)", embedQueue.count)
+        postChange()
+    }
+
     /// Flip the master "Allow background preparation" switch (the board toggle).
     /// OFF holds the line — no NEW pass starts; the current document finishes,
     /// then the loop stops with both queues intact. ON resumes by re-kicking the

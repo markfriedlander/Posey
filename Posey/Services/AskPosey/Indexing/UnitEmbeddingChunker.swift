@@ -71,58 +71,61 @@ struct UnitEmbeddingChunker {
     /// list. Returns chunks with `embedding = nil`. Callers persist
     /// via `DatabaseManager.replaceAllUnitEmbeddingChunks` then
     /// fill in embeddings asynchronously.
-    /// 2026-05-29 — Exclude editorial front matter from the RAG chunk pool
-    /// by dropping prose units that fall entirely before a confident
-    /// content-start boundary (`playbackSkipUntilOffset`), mirroring the
-    /// reader's smart-skip. Prevents an editorial preface / title page (e.g.
-    /// Saintsbury's preface in Gutenberg's Pride & Prejudice) from being
-    /// retrieved and served as if it were the work (#2 Finding 3).
+    /// Exclude front matter + editorial prose from the RAG/embedding chunk pool.
     ///
-    /// Fires ONLY on a positively-detected content-start (`skipSource`
-    /// "gutenberg"/"heuristic"); read-from-beginning docs (`skipSource` "")
-    /// are returned unchanged. Offset accounting mirrors the persister's
-    /// plainText join exactly (prose units joined with "\n\n"), so the
-    /// importer-computed `skipOffset` aligns. The unit that CONTAINS the
-    /// boundary is kept (content starts mid-unit). Non-prose units pass
-    /// through untouched (they add no plainText and produce no chunks).
-    /// 2026-06-28 — The offset-based TRAILING back-trim was REMOVED. It used the
-    /// document's `contentEndOffset` (computed by the importer in ITS plainText
-    /// space) to drop prose units measured here in the CHUNKER's prose-join space.
-    /// Those two "rulers" are assumed equal but DRIFT per document, so the same
-    /// number points at different units: Dracula's `contentEndOffset` landed on
-    /// Chapter XIII here and the back-trim destroyed chapters 14–27. Cross-ruler
-    /// offset arithmetic is the bug class (see ASK_POSEY_TUNING_PLAN.md "THE RULER
-    /// PROBLEM"). The trailing Project Gutenberg license will instead be dropped
-    /// by IDENTITY — a content-based trailer detector (like `EditorialFrontMatter
-    /// Detector`) returning unit IDs — which is immune to ruler drift. Until that
-    /// lands, a trailing license may leak into the pool; that is the lesser evil
-    /// versus silently deleting real chapters.
-    /// 2026-06-27 — `editorialUnitIDs` additionally drops EDITORIAL prose
-    /// (a critic's/publisher's introduction discussing the book + its author —
-    /// e.g. Saintsbury's preface) identified by `EditorialFrontMatterDetector`.
-    /// Exclusion is by unit IDENTITY (no offset arithmetic), so it's immune to
-    /// the reader-space-vs-prose-space mismatch and works wherever the block
-    /// sits. Authorial front matter (Frankenstein's Letters, Moby's Etymology)
-    /// scores ~0 and is never in the set, so it stays.
+    /// ════════════════════════════════════════════════════════════════════════
+    /// THE POSITION RULE (decided 2026-06-28, Mark + CC) — the law this obeys:
+    ///   **Between layers, a position is referenced by IDENTITY — the content
+    ///   unit's UUID + its `sequence` order — NEVER by a raw character offset.**
+    ///   A character offset is legal ONLY *inside one unit* (e.g. a word range
+    ///   for read-along), never as the currency that crosses between the
+    ///   importer / chunker / reader. Offsets are derived projections (which
+    ///   units count as prose, the "\n\n" join) and DRIFT per document when two
+    ///   layers recompute them differently — that drift destroyed Dracula's
+    ///   chapters 14–27 (the back-trim, removed 2026-06-28). A unit's identity
+    ///   does not drift. See ASK_POSEY_TUNING_PLAN.md "THE RULER PROBLEM".
+    /// ════════════════════════════════════════════════════════════════════════
+    ///
+    /// 2026-06-28 — Front-skip is now IDENTITY-based. We drop prose units ordered
+    /// before `skipUnitID` (the importer's stored content-start anchor — the SAME
+    /// anchor the reader windows on, `ReaderView` filtering sentences by
+    /// `unitSequence < skipUnitSequence`). So the RAG pool's content-start now
+    /// matches the reader's EXACTLY, for every format, by construction — no
+    /// importer-space-vs-chunker-space offset arithmetic. (Replaces the old
+    /// `skipOffset`/`skipSource` path, which compared the importer's plainText
+    /// offset against the chunker's prose-join walk — the front cousin of the
+    /// back-trim bug.) `skipUnitID == nil` (e.g. Markdown, read-from-beginning)
+    /// drops no front matter, matching the reader.
+    ///
+    /// `editorialUnitIDs` (by `EditorialFrontMatterDetector`) additionally drops
+    /// EDITORIAL prose — a critic's/publisher's preface discussing the book + its
+    /// author (e.g. Saintsbury's P&P preface) — wherever it sits. Also identity.
+    /// Authorial front matter (Frankenstein's Letters, Moby's Etymology) scores
+    /// ~0 and is never in the set, so it stays.
+    ///
+    /// The trailing Project Gutenberg license will be dropped by a future
+    /// content-based trailer detector (identity, like the editorial one). Until
+    /// then it may leak into the pool — the lesser evil vs. deleting real chapters.
     nonisolated static func excludingFrontMatter(
         _ units: [ContentUnit],
-        skipOffset: Int,
-        skipSource: String,
+        skipUnitID: UUID?,
         editorialUnitIDs: Set<UUID> = []
     ) -> [ContentUnit] {
-        let confident = (skipSource == "gutenberg" || skipSource == "heuristic")
-        let doFront = confident && skipOffset > 0
+        // Resolve the content-start anchor (identity) to its order. Units before
+        // it are front matter; the anchor unit itself is the first real content.
+        let skipSequence: Int? = skipUnitID.flatMap { id in
+            units.first(where: { $0.id == id })?.sequence
+        }
         let doEditorial = !editorialUnitIDs.isEmpty
-        guard doFront || doEditorial else { return units }
-        var offset = 0
+        guard skipSequence != nil || doEditorial else { return units }
         var kept: [ContentUnit] = []
         kept.reserveCapacity(units.count)
         for unit in units {
-            guard unit.kind.carriesProseText else { kept.append(unit); continue }
-            let unitEnd = offset + unit.text.count
-            offset = unitEnd + 2  // matches the persister's "\n\n" join
-            // Front: drop prose units that end at/before the content-START.
-            if doFront && unitEnd <= skipOffset { continue }
+            // Front: drop prose units ordered before the content-start unit.
+            // (Non-prose pre-skip units produce no chunks, so they pass through.)
+            if let s = skipSequence, unit.kind.carriesProseText, unit.sequence < s {
+                continue
+            }
             // Editorial: drop prose units inside a detected editorial block.
             if doEditorial && editorialUnitIDs.contains(unit.id) { continue }
             kept.append(unit)

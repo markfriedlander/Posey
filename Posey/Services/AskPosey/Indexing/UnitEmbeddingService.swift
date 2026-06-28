@@ -140,14 +140,16 @@ actor UnitEmbeddingService {
             // DatabaseManager is currently main-actor-bound but the
             // actor hop is implicit at the call site.
             let units: [ContentUnit]
-            let skipOffset: Int
-            let skipSource: String
+            let skipUnitID: UUID?
             do {
-                (units, skipOffset, skipSource) = try await MainActor.run {
+                (units, skipUnitID) = try await MainActor.run {
                     let u = try databaseManager.units(for: documentID)
-                    let doc = (try? databaseManager.documents())?
-                        .first(where: { $0.id == documentID })
-                    return (u, doc?.playbackSkipUntilOffset ?? 0, doc?.skipSource ?? "")
+                    // POSITION RULE: front boundary travels as IDENTITY, not an
+                    // offset — the importer's stored content-start unit, the same
+                    // anchor the reader windows on. (See UnitEmbeddingChunker.)
+                    let refs = (try? databaseManager.unitSkipReferences(for: documentID))
+                        ?? (skipUnitID: nil, contentEndUnitID: nil)
+                    return (u, refs.skipUnitID)
                 }
             } catch {
                 return
@@ -178,19 +180,17 @@ actor UnitEmbeddingService {
             let editorialUnitIDs = EditorialFrontMatterDetector.editorialUnitIDs(
                 units: units, authorSurnames: authorSurnames)
 
-            // 2026-05-29 — Front-matter exclusion (RAG). Drop editorial front
-            // matter (prefaces, title pages) that falls before the confident
-            // content-start, plus editorial blocks wherever they sit (by unit ID),
-            // so it can't be retrieved and served as if it were the work — the
-            // Saintsbury-preface contamination caught by real reading (#2 Finding
-            // 3). Safe because author/year answer from structured metadata
-            // (8015eb4), not front-matter prose.
-            // 2026-06-28 — The offset-based TRAILING back-trim was REMOVED here
-            // (cross-ruler offset bug; see UnitEmbeddingChunker + the RULER
-            // PROBLEM note). A trailing-license drop will return as an identity
-            // (unit-ID) detector, not offset arithmetic.
+            // Front-matter exclusion (RAG), all by IDENTITY (the POSITION RULE):
+            // drop units ordered before the content-start unit (`skipUnitID`,
+            // matching the reader's window), plus editorial blocks wherever they
+            // sit (`editorialUnitIDs`), so front matter can't be retrieved and
+            // served as if it were the work — the Saintsbury-preface contamination
+            // caught by real reading (#2 Finding 3). Safe because author/year
+            // answer from structured metadata (8015eb4), not front-matter prose.
+            // (The offset-based back-trim was removed 2026-06-28; a trailing-
+            // license drop will return as an identity detector. See the chunker.)
             let chunkUnits = UnitEmbeddingChunker.excludingFrontMatter(
-                units, skipOffset: skipOffset, skipSource: skipSource,
+                units, skipUnitID: skipUnitID,
                 editorialUnitIDs: editorialUnitIDs)
 
             // Chunking (string-split) stage — board pipeline view. Brief; clears

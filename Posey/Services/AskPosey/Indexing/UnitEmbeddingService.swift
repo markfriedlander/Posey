@@ -165,21 +165,32 @@ actor UnitEmbeddingService {
             // metadata questions answer from structured fields rather than
             // front-matter retrieval (the prerequisite for excluding front
             // matter from RAG).
-            Task { @MainActor in
-                await DocumentMetadataExtractor.extractAndStoreIfNeeded(
-                    documentID: documentID, databaseManager: databaseManager)
+            // 2026-06-27 — Metadata extraction is now a PREREQUISITE (awaited,
+            // not fire-and-forget): the editorial-preface detector needs the
+            // book's OWN author to scope its signal, and structured author/year
+            // answers depend on it too. Idempotent (skips already-extracted
+            // docs), so re-index stays cheap.
+            await DocumentMetadataExtractor.extractAndStoreIfNeeded(
+                documentID: documentID, databaseManager: databaseManager)
+            let authorSurnames: [String] = await MainActor.run {
+                ((try? databaseManager.documentMetadata(for: documentID)) ?? nil)?.authors ?? []
             }
+            // Detect an EDITORIAL block (a critic's preface discussing the book +
+            // its author — e.g. Saintsbury in P&P) and exclude those units by ID.
+            let editorialUnitIDs = EditorialFrontMatterDetector.editorialUnitIDs(
+                units: units, authorSurnames: authorSurnames)
 
             // 2026-05-29 — Front-matter exclusion (RAG). Drop editorial front
             // matter (prefaces, title pages) that falls before the confident
-            // content-start so it can't be retrieved and served as if it were
-            // the work — the Saintsbury-preface contamination caught by real
-            // reading (#2 Finding 3). Safe NOW because author/year answer from
-            // structured metadata (8015eb4), not front-matter prose. Only fires
-            // on a positive content-start detection (gutenberg/heuristic).
+            // content-start (2026-06-27: + past content-END, + editorial blocks
+            // wherever they sit) so it can't be retrieved and served as if it
+            // were the work — the Saintsbury-preface contamination caught by real
+            // reading (#2 Finding 3). Safe because author/year answer from
+            // structured metadata (8015eb4), not front-matter prose.
             let chunkUnits = UnitEmbeddingChunker.excludingFrontMatter(
                 units, skipOffset: skipOffset, skipSource: skipSource,
-                contentEndOffset: contentEndOffset)
+                contentEndOffset: contentEndOffset,
+                editorialUnitIDs: editorialUnitIDs)
 
             // Chunking (string-split) stage — board pipeline view. Brief; clears
             // right after the atomic persist.

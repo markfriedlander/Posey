@@ -96,16 +96,25 @@ struct UnitEmbeddingChunker {
     /// units joined with "\n\n"), the same space the importer's `skipOffset` /
     /// `contentEndOffset` were computed against. The unit CONTAINING either
     /// boundary is kept (content starts/ends mid-unit).
+    /// 2026-06-27 — `editorialUnitIDs` additionally drops EDITORIAL prose
+    /// (a critic's/publisher's introduction discussing the book + its author —
+    /// e.g. Saintsbury's preface) identified by `EditorialFrontMatterDetector`.
+    /// Exclusion is by unit IDENTITY (no offset arithmetic), so it's immune to
+    /// the reader-space-vs-prose-space mismatch and works wherever the block
+    /// sits. Authorial front matter (Frankenstein's Letters, Moby's Etymology)
+    /// scores ~0 and is never in the set, so it stays.
     nonisolated static func excludingFrontMatter(
         _ units: [ContentUnit],
         skipOffset: Int,
         skipSource: String,
-        contentEndOffset: Int = 0
+        contentEndOffset: Int = 0,
+        editorialUnitIDs: Set<UUID> = []
     ) -> [ContentUnit] {
         let confident = (skipSource == "gutenberg" || skipSource == "heuristic")
         let doFront = confident && skipOffset > 0
         let doBack  = contentEndOffset > 0
-        guard doFront || doBack else { return units }
+        let doEditorial = !editorialUnitIDs.isEmpty
+        guard doFront || doBack || doEditorial else { return units }
         var offset = 0
         var kept: [ContentUnit] = []
         kept.reserveCapacity(units.count)
@@ -118,6 +127,8 @@ struct UnitEmbeddingChunker {
             if doFront && unitEnd <= skipOffset { continue }
             // Back: drop prose units that start at/after the content-END.
             if doBack && unitStart >= contentEndOffset { continue }
+            // Editorial: drop prose units inside a detected editorial block.
+            if doEditorial && editorialUnitIDs.contains(unit.id) { continue }
             kept.append(unit)
         }
         return kept

@@ -280,7 +280,7 @@ struct EmbeddingStatusBoardView: View {
                 queuedOrder.remove(atOffsets: offsets)
                 Task { for id in ids { await DocumentIndexingQueue.shared.removeFromEmbedQueue(id) } }
             }
-            Text("Tap Edit to drag-reorder which title is prepared next, or swipe a row to remove it from the queue. Removing only drops it from preparation — the document and its text are untouched.")
+            Text("Tap Reorder to drag which title is prepared next, or swipe a row to remove it from the queue. Removing only drops it from preparation — the document and its text are untouched.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -422,6 +422,11 @@ struct EmbeddingStatusBoardView: View {
         let frac = c.total > 0 ? Double(filled) / Double(c.total) : 0
         let raptorCount = raptorNodes[c.documentID] ?? 0
         let hasTree = raptorCount > 0
+        // Leaf chunks = total rows minus the RAPTOR summary nodes (the per-doc
+        // total includes both). Below the build threshold a tree is never built
+        // ON PURPOSE — so that's a settled "No summary tree", NOT pending work.
+        let leafCount = max(0, c.total - raptorCount)
+        let tooSmallForTree = !hasTree && leafCount < RaptorTreeService.minLeavesForBuild
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title(c.documentID)).font(.callout.weight(.medium)).lineLimit(1)
@@ -438,12 +443,21 @@ struct EmbeddingStatusBoardView: View {
             Text("Step 2 · \(filled) / \(c.total) chunks embedded  (\(Int((frac * 100).rounded()))%)")
                 .font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 4) {
-                Image(systemName: hasTree ? "brain.head.profile" : "brain")
-                    .foregroundStyle(hasTree ? .green : .secondary)
-                Text(hasTree
-                     ? "Step 3 · Summary tree built  (\(raptorCount) nodes)"
-                     : "Step 3 · Summary tree not built yet")
-                    .foregroundStyle(hasTree ? .primary : .secondary)
+                // Three settled states, visually distinct so "too small" never
+                // reads as "needs attention": built (green) / pending (will build
+                // once step 2 finishes) / no tree by design (too small).
+                if hasTree {
+                    Image(systemName: "brain.head.profile").foregroundStyle(.green)
+                    Text("Step 3 · Summary tree built  (\(raptorCount) nodes)")
+                } else if tooSmallForTree {
+                    Image(systemName: "minus.circle").foregroundStyle(.secondary)
+                    Text("Step 3 · No summary tree (too small — under \(RaptorTreeService.minLeavesForBuild) chunks)")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Image(systemName: "clock").foregroundStyle(.secondary)
+                    Text("Step 3 · Summary tree pending")
+                        .foregroundStyle(.secondary)
+                }
             }
             .font(.caption)
         }

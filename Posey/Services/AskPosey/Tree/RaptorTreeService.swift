@@ -57,8 +57,10 @@ actor RaptorTreeService {
 
     /// Minimum embedded leaf chunks before a tree is worth building. Below
     /// this, the handful of leaves are already directly retrievable and an
-    /// abstraction layer adds noise, not signal.
-    private static let minLeavesForBuild = 24
+    /// abstraction layer adds noise, not signal. Internal (not private) so the
+    /// Preparation board can label below-threshold docs "No summary tree (too
+    /// small)" vs genuinely-pending ones, from the SAME number. (2026-06-28)
+    static let minLeavesForBuild = 24
     /// Cap on leaves fed into one build, to bound k-means + the number of
     /// AFM summary calls on very large books. The builder truncates each
     /// cluster's source to its own input budget; this bounds breadth.

@@ -85,17 +85,18 @@ struct UnitEmbeddingChunker {
     /// importer-computed `skipOffset` aligns. The unit that CONTAINS the
     /// boundary is kept (content starts mid-unit). Non-prose units pass
     /// through untouched (they add no plainText and produce no chunks).
-    /// 2026-06-27 — Now ALSO trims TRAILING apparatus past a confident
-    /// content-END boundary (`contentEndOffset`, the Gutenberg `*** END ***`
-    /// marker). The old version was FRONT-ONLY, so a trailing Project Gutenberg
-    /// license (Alice in Wonderland) leaked into the RAG/RAPTOR pool and got
-    /// summarized as if it were the work. The END marker is deterministic and
-    /// independent of the front `skipSource`, so the back-trim fires whenever a
-    /// content-end was recorded — even for a doc with a trailing license but no
-    /// front matter. Offsets are in the persister's prose-join space (prose
-    /// units joined with "\n\n"), the same space the importer's `skipOffset` /
-    /// `contentEndOffset` were computed against. The unit CONTAINING either
-    /// boundary is kept (content starts/ends mid-unit).
+    /// 2026-06-28 — The offset-based TRAILING back-trim was REMOVED. It used the
+    /// document's `contentEndOffset` (computed by the importer in ITS plainText
+    /// space) to drop prose units measured here in the CHUNKER's prose-join space.
+    /// Those two "rulers" are assumed equal but DRIFT per document, so the same
+    /// number points at different units: Dracula's `contentEndOffset` landed on
+    /// Chapter XIII here and the back-trim destroyed chapters 14–27. Cross-ruler
+    /// offset arithmetic is the bug class (see ASK_POSEY_TUNING_PLAN.md "THE RULER
+    /// PROBLEM"). The trailing Project Gutenberg license will instead be dropped
+    /// by IDENTITY — a content-based trailer detector (like `EditorialFrontMatter
+    /// Detector`) returning unit IDs — which is immune to ruler drift. Until that
+    /// lands, a trailing license may leak into the pool; that is the lesser evil
+    /// versus silently deleting real chapters.
     /// 2026-06-27 — `editorialUnitIDs` additionally drops EDITORIAL prose
     /// (a critic's/publisher's introduction discussing the book + its author —
     /// e.g. Saintsbury's preface) identified by `EditorialFrontMatterDetector`.
@@ -107,26 +108,21 @@ struct UnitEmbeddingChunker {
         _ units: [ContentUnit],
         skipOffset: Int,
         skipSource: String,
-        contentEndOffset: Int = 0,
         editorialUnitIDs: Set<UUID> = []
     ) -> [ContentUnit] {
         let confident = (skipSource == "gutenberg" || skipSource == "heuristic")
         let doFront = confident && skipOffset > 0
-        let doBack  = contentEndOffset > 0
         let doEditorial = !editorialUnitIDs.isEmpty
-        guard doFront || doBack || doEditorial else { return units }
+        guard doFront || doEditorial else { return units }
         var offset = 0
         var kept: [ContentUnit] = []
         kept.reserveCapacity(units.count)
         for unit in units {
             guard unit.kind.carriesProseText else { kept.append(unit); continue }
-            let unitStart = offset
             let unitEnd = offset + unit.text.count
             offset = unitEnd + 2  // matches the persister's "\n\n" join
             // Front: drop prose units that end at/before the content-START.
             if doFront && unitEnd <= skipOffset { continue }
-            // Back: drop prose units that start at/after the content-END.
-            if doBack && unitStart >= contentEndOffset { continue }
             // Editorial: drop prose units inside a detected editorial block.
             if doEditorial && editorialUnitIDs.contains(unit.id) { continue }
             kept.append(unit)

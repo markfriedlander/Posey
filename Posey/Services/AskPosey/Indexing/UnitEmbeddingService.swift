@@ -142,14 +142,12 @@ actor UnitEmbeddingService {
             let units: [ContentUnit]
             let skipOffset: Int
             let skipSource: String
-            let contentEndOffset: Int
             do {
-                (units, skipOffset, skipSource, contentEndOffset) = try await MainActor.run {
+                (units, skipOffset, skipSource) = try await MainActor.run {
                     let u = try databaseManager.units(for: documentID)
                     let doc = (try? databaseManager.documents())?
                         .first(where: { $0.id == documentID })
-                    return (u, doc?.playbackSkipUntilOffset ?? 0, doc?.skipSource ?? "",
-                            doc?.contentEndOffset ?? 0)
+                    return (u, doc?.playbackSkipUntilOffset ?? 0, doc?.skipSource ?? "")
                 }
             } catch {
                 return
@@ -182,14 +180,17 @@ actor UnitEmbeddingService {
 
             // 2026-05-29 — Front-matter exclusion (RAG). Drop editorial front
             // matter (prefaces, title pages) that falls before the confident
-            // content-start (2026-06-27: + past content-END, + editorial blocks
-            // wherever they sit) so it can't be retrieved and served as if it
-            // were the work — the Saintsbury-preface contamination caught by real
-            // reading (#2 Finding 3). Safe because author/year answer from
-            // structured metadata (8015eb4), not front-matter prose.
+            // content-start, plus editorial blocks wherever they sit (by unit ID),
+            // so it can't be retrieved and served as if it were the work — the
+            // Saintsbury-preface contamination caught by real reading (#2 Finding
+            // 3). Safe because author/year answer from structured metadata
+            // (8015eb4), not front-matter prose.
+            // 2026-06-28 — The offset-based TRAILING back-trim was REMOVED here
+            // (cross-ruler offset bug; see UnitEmbeddingChunker + the RULER
+            // PROBLEM note). A trailing-license drop will return as an identity
+            // (unit-ID) detector, not offset arithmetic.
             let chunkUnits = UnitEmbeddingChunker.excludingFrontMatter(
                 units, skipOffset: skipOffset, skipSource: skipSource,
-                contentEndOffset: contentEndOffset,
                 editorialUnitIDs: editorialUnitIDs)
 
             // Chunking (string-split) stage — board pipeline view. Brief; clears

@@ -73,6 +73,11 @@ struct EmbeddingStatusBoardView: View {
                     Toggle("Allow background preparation", isOn: $backgroundPrepEnabled)
                         .onChange(of: backgroundPrepEnabled) { _, on in
                             Task { await DocumentIndexingQueue.shared.setBackgroundPrep(on) }
+                            // Master switch governs ALL background prep work — so
+                            // turning it OFF also stops a running backfill (which is
+                            // a separate path). Backfill is resumable, so nothing is
+                            // lost; it just stops heating the phone. (Mark, 2026-06-28)
+                            if !on { EmbeddingBackfillCoordinator.shared.cancel() }
                         }
                         .accessibilityIdentifier("board.bgPrepToggle")
                 } header: {
@@ -81,6 +86,7 @@ struct EmbeddingStatusBoardView: View {
                     Text("ON: Posey works through the queue in the background, paced by the phone's temperature (it won't overheat). OFF: the queue still SHOWS what's waiting, but nothing RUNS until you switch it back on — including after a relaunch. (In-flight work stops after the current document.)")
                 }
                 Section("Backfill control") { backfillControl }
+                    .id("board.backfill")
                 Section {
                     if coverage.isEmpty {
                         Text("Reading…").foregroundStyle(.secondary)
@@ -159,6 +165,7 @@ struct EmbeddingStatusBoardView: View {
             .onChange(of: indexing.embedQueuePositions) { _, _ in reconcileQueuedOrder() }
             // Antenna scroll affordances (capture/verify any section): TAP these ids.
             .remoteRegister("board.scrollTop") { withAnimation { proxy.scrollTo("board.top", anchor: .top) } }
+            .remoteRegister("board.scrollBackfill") { withAnimation { proxy.scrollTo("board.backfill", anchor: .top) } }
             .remoteRegister("board.scrollPerDoc") { withAnimation { proxy.scrollTo("board.perdoc", anchor: .top) } }
             .remoteRegister("board.scrollStorage") { withAnimation { proxy.scrollTo("board.storage", anchor: .top) } }
             .remoteRegister("board.scrollMemory") { withAnimation { proxy.scrollTo("board.memory", anchor: .top) } }
@@ -171,6 +178,7 @@ struct EmbeddingStatusBoardView: View {
             .remoteRegister("board.bgPrepOff") {
                 backgroundPrepEnabled = false
                 Task { await DocumentIndexingQueue.shared.setBackgroundPrep(false) }
+                EmbeddingBackfillCoordinator.shared.cancel()
             }
             // Antenna proof of the queue-steering plumbing (the drag/swipe gestures
             // can't be TAP'd): remove the first waiting title; rotate the last
@@ -321,10 +329,13 @@ struct EmbeddingStatusBoardView: View {
             } label: {
                 Label("Start backfill (fill other embedders)", systemImage: "play.circle.fill")
             }
-            .disabled(EmbeddingBackend.isSwapInProgress || allInactiveComplete)
+            .disabled(EmbeddingBackend.isSwapInProgress || allInactiveComplete || !backgroundPrepEnabled)
             .accessibilityIdentifier("board.startBackfill")
             .remoteRegister("board.startBackfill") { startBackfill() }
-            if allInactiveComplete {
+            if !backgroundPrepEnabled {
+                Text("Turn on \u{201C}Allow background preparation\u{201D} to start backfill — it's background prep work too.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if allInactiveComplete {
                 Text("All other embedders are already complete.")
                     .font(.caption).foregroundStyle(.secondary)
             } else if EmbeddingBackend.isSwapInProgress {
@@ -341,6 +352,9 @@ struct EmbeddingStatusBoardView: View {
     }
 
     private func startBackfill() {
+        // The master switch gates ALL background prep work, backfill included —
+        // refuse here too so neither the button nor the antenna verb can bypass it.
+        guard backgroundPrepEnabled else { return }
         let targets = EmbeddingBackend.allCases.filter { $0 != EmbeddingBackend.current() }
         guard !targets.isEmpty else { return }
         EmbeddingBackfillCoordinator.shared.begin(targets: targets, database: databaseManager)

@@ -99,6 +99,17 @@ actor DocumentIndexingQueue {
     static let embedQueueKey = "posey.indexingQueue.embedQueue"
     static let raptorQueueKey = "posey.indexingQueue.raptorQueue"
 
+    /// UserDefaults key for the master "Allow background preparation" switch (the
+    /// Preparation board's control). Missing = enabled (preserves prior behavior).
+    /// It gates EXECUTION only: OFF holds the run loop (nothing runs / no heat,
+    /// even across a relaunch) while the queue still FILLS to show pending work.
+    static let backgroundPrepDefaultsKey = "posey.backgroundPrepEnabled"
+    /// Nonisolated read of the persisted switch — used to seed the actor's gate at
+    /// construction (and available to any non-actor caller). Missing → true.
+    static var backgroundPrepEnabledDefault: Bool {
+        UserDefaults.standard.object(forKey: backgroundPrepDefaultsKey) as? Bool ?? true
+    }
+
     // MARK: Injected work
 
     private var indexer: DocumentIndexer?
@@ -125,6 +136,14 @@ actor DocumentIndexingQueue {
     /// The `Task` running the in-flight pass. Cancelled by the escape switch /
     /// per-doc cancel so a halt lands fast even mid-pass.
     private var currentJob: Task<Void, Never>?
+
+    /// Master "Allow background preparation" gate (the board toggle / launch
+    /// guard). Checked at the top of the run loop: OFF stops STARTING new passes
+    /// (the current pass finishes, then the loop holds with queues intact); ON
+    /// re-kicks the drain. This is user INTENT — thermal pacing still governs HOW
+    /// fast an allowed pass actually runs (everything stays subject to the
+    /// governor; the user never bypasses the safety valve).
+    private var backgroundPrepEnabled: Bool = DocumentIndexingQueue.backgroundPrepEnabledDefault
 
     /// Internal (not private) so `@testable` unit tests can construct a fresh,
     /// isolated instance per test. Production always uses `.shared`.
@@ -199,6 +218,20 @@ actor DocumentIndexingQueue {
         if currentDocumentID == documentID { currentJob?.cancel() }
         dbgLog("DocumentIndexingQueue: cancelled %@", documentID.uuidString)
         postChange()
+    }
+
+    /// Flip the master "Allow background preparation" switch (the board toggle).
+    /// OFF holds the line — no NEW pass starts; the current document finishes,
+    /// then the loop stops with both queues intact. ON resumes by re-kicking the
+    /// drain. Persisted so a launch honors it (the auto-resume guard). Does NOT
+    /// cancel the in-flight pass — it stops AFTER the current document. Thermal
+    /// pacing is unaffected: it still governs an allowed pass's speed.
+    func setBackgroundPrep(_ enabled: Bool) {
+        guard backgroundPrepEnabled != enabled else { return }
+        backgroundPrepEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: DocumentIndexingQueue.backgroundPrepDefaultsKey)
+        dbgLog("DocumentIndexingQueue: background prep %@", enabled ? "ENABLED" : "DISABLED")
+        if enabled { Task { await drainQueue() } }
     }
 
     /// THE ESCAPE SWITCH. Halt all background indexing immediately: cancel the
@@ -281,6 +314,14 @@ actor DocumentIndexingQueue {
         defer { draining = false }
 
         while !embedQueue.isEmpty || !raptorQueue.isEmpty {
+            // Master switch (user intent): OFF holds the line BETWEEN documents —
+            // leave both queues intact and stop; re-enabling re-kicks this drain.
+            // (Thermal pacing is separate and governs an ALLOWED pass's speed.)
+            if !backgroundPrepEnabled {
+                dbgLog("DocumentIndexingQueue: held — background prep disabled (embed=%d raptor=%d)",
+                       embedQueue.count, raptorQueue.count)
+                break
+            }
             // Embedding always outranks RAPTOR — a newly imported document
             // (embed lane) preempts pending deepening at this boundary.
             let id: UUID

@@ -29,6 +29,10 @@ struct EmbeddingStatusBoardView: View {
     @State private var dbBytes: Int64 = 0
     @State private var availMB: Double = 0
     @State private var footprintMB: Double = 0
+    /// Master "Allow background preparation" switch — persisted; mirrors the
+    /// queue's gate. Toggling calls `DocumentIndexingQueue.setBackgroundPrep`
+    /// (syncs the actor flag + resumes). Default ON preserves prior behavior.
+    @AppStorage(DocumentIndexingQueue.backgroundPrepDefaultsKey) private var backgroundPrepEnabled = true
 
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -46,6 +50,17 @@ struct EmbeddingStatusBoardView: View {
                     Text("Each title moves through 3 steps:  1 Chunking  →  2 Embedding (\u{201C}reading ahead\u{201D})  →  3 Summary tree (\u{201C}studying up\u{201D} / RAPTOR).  PDFs add a prep OCR pass before step 1.")
                 }
                 .id("board.top")
+                Section {
+                    Toggle("Allow background preparation", isOn: $backgroundPrepEnabled)
+                        .onChange(of: backgroundPrepEnabled) { _, on in
+                            Task { await DocumentIndexingQueue.shared.setBackgroundPrep(on) }
+                        }
+                        .accessibilityIdentifier("board.bgPrepToggle")
+                } header: {
+                    Text("Controls")
+                } footer: {
+                    Text("ON: Posey works through the queue in the background, paced by the phone's temperature (it won't overheat). OFF: the queue still SHOWS what's waiting, but nothing RUNS until you switch it back on — including after a relaunch. (In-flight work stops after the current document.)")
+                }
                 Section("Backfill control") { backfillControl }
                 Section {
                     if coverage.isEmpty {
@@ -90,7 +105,7 @@ struct EmbeddingStatusBoardView: View {
                 }
                 .id("board.device")
             }
-            .navigationTitle("Embedding status")
+            .navigationTitle("Preparation")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -104,6 +119,15 @@ struct EmbeddingStatusBoardView: View {
             .remoteRegister("board.scrollStorage") { withAnimation { proxy.scrollTo("board.storage", anchor: .top) } }
             .remoteRegister("board.scrollMemory") { withAnimation { proxy.scrollTo("board.memory", anchor: .top) } }
             .remoteRegister("board.scrollBottom") { withAnimation { proxy.scrollTo("board.device", anchor: .bottom) } }
+            // Antenna control of the master switch (toggles can't be TAP'd reliably).
+            .remoteRegister("board.bgPrepOn") {
+                backgroundPrepEnabled = true
+                Task { await DocumentIndexingQueue.shared.setBackgroundPrep(true) }
+            }
+            .remoteRegister("board.bgPrepOff") {
+                backgroundPrepEnabled = false
+                Task { await DocumentIndexingQueue.shared.setBackgroundPrep(false) }
+            }
             }
         }
     }

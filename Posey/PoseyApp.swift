@@ -141,6 +141,13 @@ struct PoseyApp: App {
                     // builds on COMPLETE data instead of a partial tree it must
                     // rebuild. Skipped during a swap (the swap owns the write
                     // backend and has its own resume).
+                    // Re-enqueue documents with incomplete embedding so the queue
+                    // honestly shows what's pending. The master "Allow background
+                    // preparation" switch does NOT gate this enqueue — it gates
+                    // EXECUTION (the run loop). OFF = the queue fills (shows the
+                    // pending to-do list) but nothing RUNS until the user turns it
+                    // on; that's what stops the launch-restart heat surprise, while
+                    // still telling the user what's waiting.
                     if !EmbeddingBackend.isSwapInProgress {
                         let incomplete = (try? manager.documentIDsNeedingActiveEmbedding()) ?? []
                         if !incomplete.isEmpty {

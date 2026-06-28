@@ -663,37 +663,40 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func deleteDocument(_ document: Document) {
-        do {
-            // 2026-05-23 — Step 8f: explicit cancellation of the
-            // legacy embedding-index in-flight job was removed
-            // here. UnitEmbeddingService is actor-serialized; its
-            // FK-vulnerable writes can't race a delete because the
-            // delete cascades via SQLite's ON DELETE CASCADE
-            // (document_units → unit_embedding_chunks). PDF
-            // enhancement still needs the explicit cancel below
-            // because its Tier 2/3 work runs on a separate actor
-            // queue not bounded by SQLite FK semantics.
-            Task { await PDFEnhancementService.shared.cancel(document.id) }
-            // 2026-06-08 (audit fix #2) — cancel any in-flight RAPTOR build
-            // for the same reason: its build runs on a separate actor queue
-            // and could otherwise re-insert summary rows after the cascade.
-            Task { await RaptorTreeService.shared.cancel(document.id) }
-            try databaseManager.deleteDocument(document)
-            // 2026-05-22 Phase 2.2 Step 5 — drop the source PDF
-            // sidecar (no longer needed once the doc is gone).
-            PDFSourceStore.delete(document.id)
-            loadDocuments()
-            // 2026-05-13 — A4: invalidate any cached audio export
-            // tied to this document. AudioExportCache.shared
-            // listens for this notification and removes the file.
-            NotificationCenter.default.post(
-                name: AudioExportCache.documentDidDelete,
-                object: nil,
-                userInfo: [AudioExportCache.notificationDocumentIDKey: document.id]
-            )
-        } catch {
-            present(error)
+        Task {
+            do { try await deleteDocumentOffMain(document) }
+            catch { present(error) }
         }
+    }
+
+    /// Delete a document WITHOUT blocking the main thread. The SQLite cascade
+    /// (units → sentences/chunks/TOC) is real work; on a large book it must never
+    /// run on the main actor — it froze the UI + antenna and tripped the iOS
+    /// watchdog (2026-06-28). `DatabaseManager` is lock-guarded (`@unchecked
+    /// Sendable`), so the delete + file-sidecar cleanup run on a detached task
+    /// capturing only the Sendable `UUID`; the UI refresh hops back to the main
+    /// actor on return. The companion FK indexes make the cascade itself fast;
+    /// this guarantees it can never freeze the app regardless. Shared by
+    /// swipe-to-delete and the antenna `DELETE_DOCUMENT` verb. (2026-06-28)
+    func deleteDocumentOffMain(_ document: Document) async throws {
+        let id = document.id
+        // Cancel the separate-actor producers FIRST so neither can re-insert rows
+        // (PDF enhancement / RAPTOR run on their own queues, outside FK cascade).
+        await PDFEnhancementService.shared.cancel(id)
+        await RaptorTreeService.shared.cancel(id)
+        let db = databaseManager
+        try await Task.detached(priority: .userInitiated) {
+            try db.deleteDocument(id: id)
+            PageFlagsStore.delete(documentID: id)   // Tier-1/2 calibration sidecar
+            PDFSourceStore.delete(id)               // source-PDF sidecar
+        }.value
+        // Back on the main actor (this method is @MainActor): refresh + notify.
+        loadDocuments()
+        NotificationCenter.default.post(
+            name: AudioExportCache.documentDidDelete,
+            object: nil,
+            userInfo: [AudioExportCache.notificationDocumentIDKey: id]
+        )
     }
 
     func handleImport(result: Result<[URL], Error>) {
@@ -1011,42 +1014,30 @@ extension LibraryViewModel {
                 guard let doc = docs.first(where: { $0.id == id }) else {
                     return #"{"error":"Document not found"}"#
                 }
-                // 2026-05-23 — Step 8f: explicit legacy-index
-                // cancellation removed (see LibraryViewModel
-                // .deleteDocument). PDF enhancement still wants the
-                // explicit cancel — its actor queue isn't bounded
-                // by SQLite cascade semantics.
-                Task { await PDFEnhancementService.shared.cancel(doc.id) }
-                Task { await RaptorTreeService.shared.cancel(doc.id) }  // audit fix #2
-                try databaseManager.deleteDocument(doc)
-                // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecar.
-                PageFlagsStore.delete(documentID: doc.id)
-                // 2026-05-22 Phase 2.2 Step 5 — source PDF sidecar.
-                PDFSourceStore.delete(doc.id)
-                loadDocuments()
-                // 2026-05-13 — A4: invalidate cached audio export.
-                NotificationCenter.default.post(
-                    name: AudioExportCache.documentDidDelete,
-                    object: nil,
-                    userInfo: [AudioExportCache.notificationDocumentIDKey: doc.id]
-                )
+                // Off the main thread (cancels + cascade delete + sidecars +
+                // refresh) — same path as swipe-to-delete. A large book's cascade
+                // must never block the main actor (froze UI/antenna, 2026-06-28).
+                do { try await deleteDocumentOffMain(doc) }
+                catch { return #"{"error":"delete failed"}"# }
                 return json(["deleted": true, "id": id.uuidString])
 
             case "RESET_ALL":
                 let docs = try databaseManager.documents()
-                // 2026-05-23 — Step 8f: explicit legacy-index
-                // cancellation removed (see deleteDocument).
-                Task {
-                    for doc in docs { await PDFEnhancementService.shared.cancel(doc.id) }
-                }
-                Task {  // audit fix #2 — cancel in-flight RAPTOR builds too
-                    for doc in docs { await RaptorTreeService.shared.cancel(doc.id) }
-                }
-                for doc in docs { try databaseManager.deleteDocument(doc) }
-                // 2026-05-22 — Tier 1/2 Phase 1 calibration sidecars.
-                for doc in docs { PageFlagsStore.delete(documentID: doc.id) }
-                // 2026-05-22 Phase 2.2 Step 5 — source PDF sidecars.
-                for doc in docs { PDFSourceStore.delete(doc.id) }
+                let ids = docs.map { $0.id }
+                // Cancel separate-actor producers first (can't race the cascade).
+                for id in ids { await PDFEnhancementService.shared.cancel(id) }
+                for id in ids { await RaptorTreeService.shared.cancel(id) }
+                // Bulk cascade delete + sidecars OFF the main thread — deleting
+                // every doc on the main actor would freeze worse than a single
+                // large book (the same 2026-06-28 main-thread-block bug at scale).
+                let db = databaseManager
+                await Task.detached(priority: .userInitiated) {
+                    for id in ids {
+                        try? db.deleteDocument(id: id)
+                        PageFlagsStore.delete(documentID: id)
+                        PDFSourceStore.delete(id)
+                    }
+                }.value
                 loadDocuments()
                 // 2026-05-13 — A4: nuke the entire audio-export cache
                 // when every document is wiped.

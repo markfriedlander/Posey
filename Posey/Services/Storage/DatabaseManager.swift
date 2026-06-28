@@ -206,11 +206,19 @@ extension DatabaseManager {
     }
 
     func deleteDocument(_ document: Document) throws {
+        try deleteDocument(id: document.id)
+    }
+
+    /// Delete a document by id (cascades to units/sentences/chunks/TOC via the FK
+    /// indexes added 2026-06-28). Id-based so callers can run it on a background
+    /// task capturing only a Sendable `UUID` — the delete MUST be off the main
+    /// thread (it froze the UI + watchdog-crashed on large books, 2026-06-28).
+    func deleteDocument(id: UUID) throws {
         dbLock.lock(); defer { dbLock.unlock() }
         let sql = "DELETE FROM documents WHERE id = ?;"
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
-        try bind(document.id.uuidString, at: 1, for: statement)
+        try bind(id.uuidString, at: 1, for: statement)
         try step(statement)
     }
 
@@ -1977,6 +1985,18 @@ extension DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_document_sentences_playback
             ON document_sentences(document_id, unit_sequence, sentence_index);
             """)
+        // 2026-06-28 — index the unit_id FOREIGN KEY child column. Deleting a
+        // document cascades documents→units, and EACH deleted unit then cascades
+        // units→sentences (FK unit_id ON DELETE CASCADE). Without this index that
+        // per-unit cascade full-scans document_sentences once per unit → O(units ×
+        // rows): a large book (Moby ~2,800 units) blocks the main thread for many
+        // seconds, hanging the antenna and tripping the watchdog (the delete
+        // freeze/crash, 2026-06-28). SQLite's own guidance: index every FK child
+        // column. Also speeds reindex (deletes old rows first).
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_document_sentences_unit
+            ON document_sentences(unit_id);
+            """)
 
         // unit_embedding_chunks — derived cache for RAG retrieval.
         // The unit-aware chunker reads units in order and emits
@@ -2041,6 +2061,20 @@ extension DatabaseManager {
         try execute("""
             CREATE INDEX IF NOT EXISTS idx_unit_embedding_chunks_null
             ON unit_embedding_chunks(document_id) WHERE embedding IS NULL;
+            """)
+        // 2026-06-28 — index the start_unit_id / end_unit_id FOREIGN KEY child
+        // columns (both ON DELETE CASCADE → document_units). As with
+        // document_sentences above, deleting a document cascades through every
+        // unit, and without these the units→chunks cascade full-scans
+        // unit_embedding_chunks twice per unit (start + end) → the O(units × rows)
+        // main-thread block behind the delete freeze/crash. (2026-06-28)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_unit_embedding_chunks_start_unit
+            ON unit_embedding_chunks(start_unit_id);
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS idx_unit_embedding_chunks_end_unit
+            ON unit_embedding_chunks(end_unit_id);
             """)
 
         // 2026-06-17 — PER-BACKEND VECTOR COLUMNS (embedder-swap final design).

@@ -31,19 +31,28 @@ struct EmbeddingStatusBoardView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Now") { activityContent }
+                Section {
+                    activityContent
+                } header: {
+                    Text("Now — live activity, per document")
+                } footer: {
+                    Text("Each title moves through 3 steps:  1 Chunking  →  2 Embedding (\u{201C}reading ahead\u{201D})  →  3 Summary tree (\u{201C}studying up\u{201D} / RAPTOR).  PDFs add a prep OCR pass before step 1.")
+                }
                 Section("Backfill control") { backfillControl }
-                Section("Embedding coverage") {
+                Section {
                     if coverage.isEmpty {
                         Text("Reading…").foregroundStyle(.secondary)
                     } else {
                         ForEach(coverage, id: \.backend.rawValue) { coverageRow($0) }
                     }
+                } header: {
+                    Text("Embedding coverage — library-wide totals")
+                } footer: {
+                    Text("Totals across EVERY document in your library, summed per embedder — not one title. Step 2 (embedding) is what fills these.")
                 }
                 Section("Device") {
                     LabeledContent("Thermal", value: thermal)
-                    LabeledContent("Live reader (active embedder)",
-                                   value: EmbeddingBackend.current().displayName)
+                    LabeledContent("Active embedder", value: EmbeddingBackend.current().displayName)
                 }
             }
             .navigationTitle("Embedding status")
@@ -76,16 +85,17 @@ struct EmbeddingStatusBoardView: View {
                 .foregroundStyle(.secondary)
         }
 
-        // Pipeline order: OCR → chunking → embedding → RAPTOR.
-        // 0a) Tier-2 Vision OCR (PDF page-image rescue).
+        // Pipeline order: OCR (prep, PDF only) → 1 chunking → 2 embedding → 3 RAPTOR.
+        // The "Step N of 3" prefix tells Mark where a given title is at a glance.
+        // 0) Tier-2 Vision OCR (PDF page-image rescue) — a PREP pass before step 1.
         ForEach(ocr, id: \.key) { id, frac in
             let pct = Int((frac * 100).rounded())
-            stageRow(title: "Reading the page images (OCR) — \(title(id))",
+            stageRow(title: "Prep · Reading the page images (OCR) — \(title(id))",
                      systemImage: "doc.viewfinder", fraction: frac, detail: "\(pct)%")
         }
-        // 0b) Chunking (string-split) — brief, no %.
+        // 1) Chunking (string-split) — brief, no %.
         ForEach(chunking, id: \.self) { id in
-            Label("Splitting into chunks — \(title(id))", systemImage: "scissors")
+            Label("Step 1 of 3 · Chunking (splitting into chunks) — \(title(id))", systemImage: "scissors")
                 .font(.callout.weight(.medium))
         }
 
@@ -111,7 +121,7 @@ struct EmbeddingStatusBoardView: View {
 
         // 2) Embedding (per in-flight document — "Reading ahead").
         ForEach(embeds, id: \.key) { id, prog in
-            activityRow(title: "Reading ahead — \(title(id))",
+            activityRow(title: "Step 2 of 3 · Embedding (reading ahead) — \(title(id))",
                         systemImage: "book", processed: prog.processed,
                         total: prog.total, showRate: false)
         }
@@ -119,14 +129,20 @@ struct EmbeddingStatusBoardView: View {
         // 3) RAPTOR (per in-flight document — "Studying up").
         ForEach(raptors, id: \.key) { id, frac in
             let pct = Int((frac * 100).rounded())
-            stageRow(title: "Studying up (RAPTOR) — \(title(id))",
+            stageRow(title: "Step 3 of 3 · Summary tree (studying up / RAPTOR) — \(title(id))",
                      systemImage: "brain", fraction: frac, detail: "\(pct)%")
         }
 
-        // 4) Queue depth (waiting to embed).
-        if queuedCount > 0 {
-            Label("\(queuedCount) document\(queuedCount == 1 ? "" : "s") queued to embed",
-                  systemImage: "tray.full").foregroundStyle(.secondary).font(.callout)
+        // 4) Queue (waiting to start step 2) — show the actual titles + position,
+        //    not just a count, so Mark can see WHICH titles are waiting.
+        let queued = indexing.embedQueuePositions.sorted { $0.value < $1.value }
+        if !queued.isEmpty {
+            Label("\(queued.count) title\(queued.count == 1 ? "" : "s") queued — waiting for step 2 (embedding)",
+                  systemImage: "tray.full").foregroundStyle(.secondary).font(.callout.weight(.medium))
+            ForEach(queued, id: \.key) { id, pos in
+                Text("·  #\(pos)  \(title(id))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 

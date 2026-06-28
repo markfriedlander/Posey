@@ -2182,6 +2182,144 @@ extension LibraryViewModel {
                    let s = String(data: data, encoding: .utf8) { return s }
                 return #"{"error":"RAPTOR_SUMMARIZE_TEST serialization failed"}"#
 
+            case "DUMP_RAPTOR_TREE":
+                // DUMP_RAPTOR_TREE:<doc-id>[,<doc-id>...] | all
+                //
+                // 2026-06-27 — read-only FULL-TEXT dump of every RAPTOR summary
+                // node (chunk_index >= raptorSummaryIndexBase) for ONE doc, a
+                // comma-separated GROUP, or `all`, so trees can be audited for
+                // contamination (e.g. front-matter / other-book text leaking into
+                // the summaries) and for factual/relationship errors. Unlike
+                // RAG_DEBUG (160-char previews of whatever ranks for a query) this
+                // returns the whole text of whole trees, no model, no query.
+                let dumpIDs: [UUID]
+                if (arg ?? "").trimmingCharacters(in: .whitespaces).lowercased() == "all" {
+                    dumpIDs = ((try? databaseManager.documents()) ?? []).map { $0.id }
+                } else {
+                    dumpIDs = (arg ?? "").split(separator: ",")
+                        .compactMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespaces)) }
+                }
+                guard !dumpIDs.isEmpty else {
+                    return #"{"error":"Usage: DUMP_RAPTOR_TREE:<doc-id>[,<doc-id>...] | all"}"#
+                }
+                let dumpTitles = Dictionary(uniqueKeysWithValues:
+                    ((try? databaseManager.documents()) ?? []).map { ($0.id, $0.title) })
+                var dumpDocs: [[String: Any]] = []
+                for id in dumpIDs {
+                    let summaryNodes = ((try? databaseManager.unitEmbeddingChunks(for: id)) ?? [])
+                        .filter { $0.chunkIndex >= DatabaseManager.raptorSummaryIndexBase }
+                        .sorted { $0.chunkIndex < $1.chunkIndex }
+                    let nodeRowsD: [[String: Any]] = summaryNodes.map { n in
+                        [
+                            "node": n.chunkIndex - DatabaseManager.raptorSummaryIndexBase,
+                            "chunkIndex": n.chunkIndex,
+                            "chars": n.text.count,
+                            "embedded": n.embedding != nil,
+                            "text": n.text
+                        ]
+                    }
+                    dumpDocs.append([
+                        "documentID": id.uuidString,
+                        "title": dumpTitles[id] ?? "(unknown)",
+                        "summaryNodeCount": summaryNodes.count,
+                        "nodes": nodeRowsD
+                    ])
+                }
+                return json(["documentCount": dumpDocs.count, "documents": dumpDocs])
+
+            case "RAPTOR_TREE_STATS":
+                // RAPTOR_TREE_STATS
+                //
+                // 2026-06-27 — read-only library-wide audit: per-document
+                // embedded-leaf count + RAPTOR summary-node count, so we can see
+                // at a glance which docs have trees (and their size) before
+                // dumping any one. The triage step for "do the OTHER documents
+                // have the same contamination?"
+                let allDocsR = (try? databaseManager.documents()) ?? []
+                var statRows: [[String: Any]] = []
+                for d in allDocsR {
+                    let leaves = (try? databaseManager.embeddedLeafChunkCount(for: d.id)) ?? -1
+                    let summaries = (try? databaseManager.raptorSummaryNodeCount(for: d.id)) ?? -1
+                    statRows.append([
+                        "documentID": d.id.uuidString,
+                        "title": d.title,
+                        "embeddedLeaves": leaves,
+                        "summaryNodes": summaries
+                    ])
+                }
+                return json(["documentCount": allDocsR.count, "documents": statRows])
+
+            case "CLEAR_RAPTOR_TREE":
+                // CLEAR_RAPTOR_TREE:<doc-id>[,<doc-id>...] | all
+                //
+                // 2026-06-27 — remove ALL RAPTOR summary nodes for one doc, a
+                // comma-separated GROUP, or `all` (leaves untouched) and cancel
+                // any in-flight/queued build so it can't resurrect the rows. Use
+                // to test a front-matter fix on a clean slate before REBUILD.
+                let clearIDs: [UUID]
+                if (arg ?? "").trimmingCharacters(in: .whitespaces).lowercased() == "all" {
+                    clearIDs = ((try? databaseManager.documents()) ?? []).map { $0.id }
+                } else {
+                    clearIDs = (arg ?? "").split(separator: ",")
+                        .compactMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespaces)) }
+                }
+                guard !clearIDs.isEmpty else {
+                    return #"{"error":"Usage: CLEAR_RAPTOR_TREE:<doc-id>[,<doc-id>...] | all"}"#
+                }
+                var clearResults: [[String: Any]] = []
+                for id in clearIDs {
+                    await RaptorTreeService.shared.cancel(id)
+                    var ok = true
+                    do { try databaseManager.replaceSummaryNodes([], for: id) }
+                    catch { ok = false }
+                    let remainingC = (try? databaseManager.raptorSummaryNodeCount(for: id)) ?? -1
+                    clearResults.append([
+                        "documentID": id.uuidString,
+                        "cleared": ok,
+                        "summaryNodesRemaining": remainingC
+                    ])
+                }
+                return json(["documentCount": clearResults.count, "results": clearResults])
+
+            case "REBUILD_RAPTOR_TREE":
+                // REBUILD_RAPTOR_TREE:<doc-id>[,<doc-id>...] | all
+                //
+                // 2026-06-27 — for one doc, a comma-separated GROUP, or `all`:
+                // clear existing summary nodes, then enqueue the PRODUCTION
+                // RaptorTreeService build (real params/recursion + verification) —
+                // NOT the BUILD_RAPTOR_TREE debug slice. The service's queue
+                // drains builds ONE AT A TIME, thermally paced, so a group/all
+                // rebuild can't stack heavy work. Builds under the active answer
+                // model + writes summary vectors to the active embedder column;
+                // run BACKFILL_EMBEDDINGS:all afterward to fill the other
+                // embedder columns. Poll RAPTOR_TREE_STATS.
+                let rebuildIDs: [UUID]
+                if (arg ?? "").trimmingCharacters(in: .whitespaces).lowercased() == "all" {
+                    rebuildIDs = ((try? databaseManager.documents()) ?? []).map { $0.id }
+                } else {
+                    rebuildIDs = (arg ?? "").split(separator: ",")
+                        .compactMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespaces)) }
+                }
+                guard !rebuildIDs.isEmpty else {
+                    return #"{"error":"Usage: REBUILD_RAPTOR_TREE:<doc-id>[,<doc-id>...] | all"}"#
+                }
+                var rebuildResults: [[String: Any]] = []
+                for id in rebuildIDs {
+                    var ok = true
+                    do { try databaseManager.replaceSummaryNodes([], for: id) }
+                    catch { ok = false }
+                    if ok { await RaptorTreeService.shared.enqueue(id) }
+                    rebuildResults.append([
+                        "documentID": id.uuidString,
+                        "rebuildEnqueued": ok
+                    ])
+                }
+                return json([
+                    "documentCount": rebuildResults.count,
+                    "results": rebuildResults,
+                    "note": "Production RAPTOR builds enqueued (serial, thermally paced). Poll RAPTOR_TREE_STATS; then BACKFILL_EMBEDDINGS:all for the other embedder columns."
+                ])
+
             case "EXPORT_EMBEDDINGS":
                 // EXPORT_EMBEDDINGS:<doc-id>[:<maxCount>]
                 //

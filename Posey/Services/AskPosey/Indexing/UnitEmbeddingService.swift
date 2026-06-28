@@ -142,12 +142,14 @@ actor UnitEmbeddingService {
             let units: [ContentUnit]
             let skipOffset: Int
             let skipSource: String
+            let contentEndOffset: Int
             do {
-                (units, skipOffset, skipSource) = try await MainActor.run {
+                (units, skipOffset, skipSource, contentEndOffset) = try await MainActor.run {
                     let u = try databaseManager.units(for: documentID)
                     let doc = (try? databaseManager.documents())?
                         .first(where: { $0.id == documentID })
-                    return (u, doc?.playbackSkipUntilOffset ?? 0, doc?.skipSource ?? "")
+                    return (u, doc?.playbackSkipUntilOffset ?? 0, doc?.skipSource ?? "",
+                            doc?.contentEndOffset ?? 0)
                 }
             } catch {
                 return
@@ -176,7 +178,8 @@ actor UnitEmbeddingService {
             // structured metadata (8015eb4), not front-matter prose. Only fires
             // on a positive content-start detection (gutenberg/heuristic).
             let chunkUnits = UnitEmbeddingChunker.excludingFrontMatter(
-                units, skipOffset: skipOffset, skipSource: skipSource)
+                units, skipOffset: skipOffset, skipSource: skipSource,
+                contentEndOffset: contentEndOffset)
 
             // Chunking (string-split) stage — board pipeline view. Brief; clears
             // right after the atomic persist.

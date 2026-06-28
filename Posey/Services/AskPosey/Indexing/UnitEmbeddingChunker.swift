@@ -85,21 +85,40 @@ struct UnitEmbeddingChunker {
     /// importer-computed `skipOffset` aligns. The unit that CONTAINS the
     /// boundary is kept (content starts mid-unit). Non-prose units pass
     /// through untouched (they add no plainText and produce no chunks).
+    /// 2026-06-27 — Now ALSO trims TRAILING apparatus past a confident
+    /// content-END boundary (`contentEndOffset`, the Gutenberg `*** END ***`
+    /// marker). The old version was FRONT-ONLY, so a trailing Project Gutenberg
+    /// license (Alice in Wonderland) leaked into the RAG/RAPTOR pool and got
+    /// summarized as if it were the work. The END marker is deterministic and
+    /// independent of the front `skipSource`, so the back-trim fires whenever a
+    /// content-end was recorded — even for a doc with a trailing license but no
+    /// front matter. Offsets are in the persister's prose-join space (prose
+    /// units joined with "\n\n"), the same space the importer's `skipOffset` /
+    /// `contentEndOffset` were computed against. The unit CONTAINING either
+    /// boundary is kept (content starts/ends mid-unit).
     nonisolated static func excludingFrontMatter(
         _ units: [ContentUnit],
         skipOffset: Int,
-        skipSource: String
+        skipSource: String,
+        contentEndOffset: Int = 0
     ) -> [ContentUnit] {
         let confident = (skipSource == "gutenberg" || skipSource == "heuristic")
-        guard confident, skipOffset > 0 else { return units }
+        let doFront = confident && skipOffset > 0
+        let doBack  = contentEndOffset > 0
+        guard doFront || doBack else { return units }
         var offset = 0
         var kept: [ContentUnit] = []
         kept.reserveCapacity(units.count)
         for unit in units {
             guard unit.kind.carriesProseText else { kept.append(unit); continue }
+            let unitStart = offset
             let unitEnd = offset + unit.text.count
-            if unitEnd > skipOffset { kept.append(unit) }
             offset = unitEnd + 2  // matches the persister's "\n\n" join
+            // Front: drop prose units that end at/before the content-START.
+            if doFront && unitEnd <= skipOffset { continue }
+            // Back: drop prose units that start at/after the content-END.
+            if doBack && unitStart >= contentEndOffset { continue }
+            kept.append(unit)
         }
         return kept
     }

@@ -22,6 +22,9 @@ struct EmbeddingStatusBoardView: View {
     /// Per-document coverage for the active embedder, refreshed on the timer —
     /// answers "which titles still have missing embeds?" (Mark, 2026-06-19).
     @State private var docCoverage: [DatabaseManager.DocumentEmbeddingCoverage] = []
+    /// Per-document RAPTOR summary-node counts (step 3), refreshed on the timer.
+    /// > 0 = the title's summary tree is built. (Mark, 2026-06-28)
+    @State private var raptorNodes: [UUID: Int] = [:]
     @State private var thermal: String = "—"
     /// Rate estimation across refreshes (chunks/sec) for the active backfill.
     @State private var lastProcessed: Int = -1
@@ -45,6 +48,10 @@ struct EmbeddingStatusBoardView: View {
     /// reconcile is driven by the mirror — never the 2s timer — so there's no
     /// race that snaps a just-reordered row back. (2026-06-28)
     @State private var queuedOrder: [UUID] = []
+    /// Drives the queue list's edit mode via a custom "Reorder"/"Done" button
+    /// (clearer than the system "Edit" — Mark, 2026-06-28). Edit mode is what
+    /// reveals the drag handles + red remove circles on the queue rows.
+    @State private var editMode: EditMode = .inactive
 
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -94,7 +101,7 @@ struct EmbeddingStatusBoardView: View {
                 } header: {
                     Text("Per-document coverage — active embedder")
                 } footer: {
-                    Text("Each title's step-2 progress for the LIVE embedder (\(EmbeddingBackend.current().displayName)). Titles with missing embeds are listed first — those are the ones not yet fully Ask-able. A title shows here once it's been chunked (step 1).")
+                    Text("Each title's step-2 (embedding, for the LIVE embedder \(EmbeddingBackend.current().displayName)) and step-3 (summary tree / RAPTOR) progress. Titles with missing embeds are listed first — those are the ones not yet fully Ask-able. The summary tree builds AFTER embedding finishes, so \u{201C}not built yet\u{201D} is normal until step 2 completes. A title shows here once it's been chunked (step 1).")
                 }
                 .id("board.perdoc")
                 Section {
@@ -131,9 +138,15 @@ struct EmbeddingStatusBoardView: View {
             }
             .navigationTitle("Preparation")
             .navigationBarTitleDisplayMode(.inline)
+            .environment(\.editMode, $editMode)
             .toolbar {
-                // Edit toggles reorder grips + delete circles on the queue rows.
-                ToolbarItem(placement: .topBarLeading) { EditButton() }
+                // "Reorder" (clearer than "Edit") toggles the queue rows' drag
+                // handles + red remove circles; flips to "Done" while editing.
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(editMode.isEditing ? "Done" : "Reorder") {
+                        withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Close") { dismiss() }
                 }
@@ -407,6 +420,8 @@ struct EmbeddingStatusBoardView: View {
         let missing = max(0, c.total - filled)
         let complete = missing == 0 && c.total > 0
         let frac = c.total > 0 ? Double(filled) / Double(c.total) : 0
+        let raptorCount = raptorNodes[c.documentID] ?? 0
+        let hasTree = raptorCount > 0
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title(c.documentID)).font(.callout.weight(.medium)).lineLimit(1)
@@ -418,8 +433,19 @@ struct EmbeddingStatusBoardView: View {
                 }
             }
             ProgressView(value: frac).tint(complete ? .green : .blue)
-            Text("\(filled) / \(c.total) chunks embedded  (\(Int((frac * 100).rounded()))%)")
+            // Step 2 (embedding) on top, step 3 (summary tree) beneath — the two
+            // background passes a title goes through, at a glance.
+            Text("Step 2 · \(filled) / \(c.total) chunks embedded  (\(Int((frac * 100).rounded()))%)")
                 .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Image(systemName: hasTree ? "brain.head.profile" : "brain")
+                    .foregroundStyle(hasTree ? .green : .secondary)
+                Text(hasTree
+                     ? "Step 3 · Summary tree built  (\(raptorCount) nodes)"
+                     : "Step 3 · Summary tree not built yet")
+                    .foregroundStyle(hasTree ? .primary : .secondary)
+            }
+            .font(.caption)
         }
     }
 
@@ -428,6 +454,7 @@ struct EmbeddingStatusBoardView: View {
     private func refresh() {
         coverage = (try? databaseManager.embeddingCoverage()) ?? coverage
         docCoverage = (try? databaseManager.embeddingCoverageByDocument()) ?? docCoverage
+        raptorNodes = (try? databaseManager.raptorSummaryNodeCountsByDocument()) ?? raptorNodes
         thermal = thermalDescription()
         dbBytes = databaseManager.databaseFileBytes()
         availMB = processAvailableMemoryMB()

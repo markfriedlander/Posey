@@ -3949,6 +3949,27 @@ extension DatabaseManager {
         return Int(sqlite3_column_int(stmt, 0))
     }
 
+    /// RAPTOR summary-node count per document, in ONE grouped query (the batch
+    /// form of `raptorSummaryNodeCount`) — for the Preparation board's per-doc
+    /// step-3 status. A document absent from the result has no tree yet (0 nodes);
+    /// node count > 0 means its summary tree is built. (2026-06-28)
+    func raptorSummaryNodeCountsByDocument() throws -> [UUID: Int] {
+        dbLock.lock(); defer { dbLock.unlock() }
+        let stmt = try prepareStatement(sql: """
+            SELECT document_id, COUNT(*) FROM unit_embedding_chunks
+            WHERE chunk_index >= ? GROUP BY document_id;
+            """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(Self.raptorSummaryIndexBase))
+        var counts: [UUID: Int] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let idCStr = sqlite3_column_text(stmt, 0),
+                  let id = UUID(uuidString: String(cString: idCStr)) else { continue }
+            counts[id] = Int(sqlite3_column_int(stmt, 1))
+        }
+        return counts
+    }
+
     /// Fetch every chunk row for `documentID` (including embedding,
     /// possibly nil). Used by the semantic-pass side of the RRF
     /// hybrid retriever — Swift-side cosine over every row's vector.

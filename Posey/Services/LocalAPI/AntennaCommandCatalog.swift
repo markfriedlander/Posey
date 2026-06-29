@@ -166,6 +166,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("READ_TREE", .ui_nav, "READ_TREE", "Dump the live UI VIEW hierarchy (windows + presented sheets) for tap-target discovery. NOTE: this is the UIKit view tree, NOT the RAPTOR summary tree — for that use DUMP_RAPTOR_TREE."),
         .init("SCREENSHOT", .system, "SCREENSHOT", "Capture the current screen (returns image)."),
         .init("SCREENSHOT_STABLE", .system, "SCREENSHOT_STABLE", "Capture the screen AFTER it stops moving — waits out chrome fade, search-bar slide, scroll, any in-flight animation, then snaps. Use for ALL UI verification; a plain SCREENSHOT can catch a mid-transition composite no user sees."),
+        .init("SCREENSHOT_REAL", .system, "SCREENSHOT_REAL", "REAL photo of the display via ReplayKit video frames (actual composited pixels) — NOT a drawHierarchy re-render, so it can't false-green a black/frozen screen. First call starts the capture session (tap 'Allow recording' once on the phone) and may block until you do; reuses the TTS capture session if already warm; end with TTS_VERIFY_CAPTURE_STOP. DEBUG-only."),
         .init("TAP_CITATION", .ui_nav, "TAP_CITATION:<n>", ""),
         .init("TAP_ASKPOSEY_ANCHOR", .ui_nav, "TAP_ASKPOSEY_ANCHOR:<storageID>", ""),
         .init("TAP_SAVED_ANNOTATION", .annotations, "TAP_SAVED_ANNOTATION:<entryID>", ""),

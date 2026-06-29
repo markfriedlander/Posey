@@ -3418,6 +3418,48 @@ extension LibraryViewModel {
                 }
                 return json(["bytes": data.count, "base64": data.base64EncodedString(), "stable": true])
 
+            case "SCREENSHOT_REAL":
+                // REAL composited-pixel capture via ReplayKit `.video` frames —
+                // an actual photo of what the phone draws, NOT a `drawHierarchy`
+                // re-render of the view tree (which can look fine while the
+                // physical screen is black/frozen — the documented blind spot).
+                // Reuses the shared capture session: if a TTS capture is already
+                // warm we just grab its latest frame; otherwise we start the
+                // session (one-time 'Allow recording' consent on the phone) and
+                // leave it warm. End it with TTS_VERIFY_CAPTURE_STOP. The first
+                // call may block on the consent alert until you tap Allow.
+                // DEBUG-only (Release ships an inert harness).
+                #if DEBUG
+                let startRes: (Bool, String?) = await withCheckedContinuation { cont in
+                    Task { @MainActor in
+                        if TTSVerifyHarness.shared.captureActive {
+                            cont.resume(returning: (true, nil))
+                        } else {
+                            TTSVerifyHarness.shared.startCapture { ok, err in
+                                cont.resume(returning: (ok, err))
+                            }
+                        }
+                    }
+                }
+                guard startRes.0 else {
+                    return json(["error": "ReplayKit capture unavailable: \(startRes.1 ?? "unknown")",
+                                 "hint": "tap 'Allow recording' on the phone, then retry"])
+                }
+                var realPNG: Data? = nil
+                for _ in 0..<40 {   // up to ~4s for the first frame to land
+                    realPNG = await MainActor.run { TTSVerifyHarness.shared.latestScreenshotPNG() }
+                    if realPNG != nil { break }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                guard let data = realPNG else {
+                    return #"{"error":"capture active but no video frame yet (consent denied, or no frames delivered)"}"#
+                }
+                return json(["bytes": data.count, "base64": data.base64EncodedString(),
+                             "real": true, "method": "replaykit-video"])
+                #else
+                return #"{"error":"SCREENSHOT_REAL is DEBUG-only"}"#
+                #endif
+
             case "TAP_CITATION":
                 guard let raw = arg, let n = Int(raw), n >= 1 else {
                     return #"{"error":"Usage: TAP_CITATION:<n>"}"#

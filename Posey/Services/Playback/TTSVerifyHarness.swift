@@ -1,7 +1,9 @@
 import AVFoundation
+import CoreImage
 import CoreMedia
 import Foundation
 import QuartzCore
+import UIKit
 #if canImport(ReplayKit)
 import ReplayKit
 #endif
@@ -162,6 +164,43 @@ final class TTSCaptureSink: @unchecked Sendable {
 }
 // ===== BLOCK 02: OFF-MAIN CAPTURE SINK - END =====
 
+// ===== BLOCK 02b: REAL-SCREEN VIDEO FRAME HOLDER - START =====
+// Retains the latest `.video` frame from the SAME ReplayKit capture session the
+// audio sink already runs under, and converts it to a PNG on demand. This is a
+// REAL composited frame of the app's screen — the actual pixels the device
+// draws — unlike the antenna's `drawHierarchy` screenshot, which RE-RENDERS the
+// view tree and can look perfect while the physical display is black or frozen
+// (the documented blind spot). Exactly one frame is held at a time: ARC retains
+// the newest CVPixelBuffer and releases the previous on each update, so we never
+// pin more than a single buffer from ReplayKit's pool. The (cheap-to-keep, not-
+// cheap-to-run) CIImage→CGImage→PNG conversion happens ONLY when a screenshot is
+// actually requested, so steady-state capture cost is just the pointer swap.
+final class ScreenFrameHolder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: CVPixelBuffer?
+    private let ciContext = CIContext(options: nil)
+
+    /// Called on ReplayKit's background queue for every `.video` buffer.
+    func update(_ sb: CMSampleBuffer) {
+        guard CMSampleBufferDataIsReady(sb),
+              let px = CMSampleBufferGetImageBuffer(sb) else { return }
+        lock.lock(); latest = px; lock.unlock()
+    }
+
+    /// Convert the most recent frame to PNG (RGB). Nil until the session has
+    /// delivered at least one frame.
+    func pngData() -> Data? {
+        lock.lock(); let px = latest; lock.unlock()
+        guard let px else { return nil }
+        let ci = CIImage(cvPixelBuffer: px)
+        guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return nil }
+        return UIImage(cgImage: cg).pngData()
+    }
+
+    func clear() { lock.lock(); latest = nil; lock.unlock() }
+}
+// ===== BLOCK 02b: REAL-SCREEN VIDEO FRAME HOLDER - END =====
+
 // ===== BLOCK 03: HARNESS (DEBUG REAL) - START =====
 @MainActor
 final class TTSVerifyHarness {
@@ -179,6 +218,7 @@ final class TTSVerifyHarness {
     private(set) var lastAudioBytes: Int = 0
 
     private let sink = TTSCaptureSink()
+    private let frameHolder = ScreenFrameHolder()
     private var samplesAbs: [(absT: Double, index: Int, offset: Int)] = []
     private var playedSegments: [(index: Int, startOffset: Int, endOffset: Int, text: String)] = []
     private var startSentence = 0
@@ -224,12 +264,16 @@ final class TTSVerifyHarness {
         // Capture the Sendable sink locally — the handler runs on a background
         // queue and must NOT touch the @MainActor harness's `self`.
         let sink = self.sink
+        let frameHolder = self.frameHolder
         recorder.startCapture(handler: { sampleBuffer, bufferType, error in
             guard error == nil else { return }
             if bufferType == .audioApp {
                 sink.handleAudioApp(sampleBuffer)
+            } else if bufferType == .video {
+                // Real composited screen pixels — kept for SCREENSHOT_REAL.
+                frameHolder.update(sampleBuffer)
             }
-            // .video / .audioMic ignored (mic disabled; video unused).
+            // .audioMic ignored (mic disabled).
         }, completionHandler: { [weak self] error in
             // outer-weak + guard-let → the Task captures a local strong `let self`
             // (no implicit-strong-outer warning, no captured-var-in-concurrent warning).
@@ -393,6 +437,12 @@ final class TTSVerifyHarness {
         }
     }
 
+    /// Most recent REAL composited screen frame (ReplayKit `.video`) as PNG.
+    /// Nil until the active capture session has delivered at least one frame.
+    /// Drives the SCREENSHOT_REAL antenna verb (a true photo of the display,
+    /// not a `drawHierarchy` re-render).
+    func latestScreenshotPNG() -> Data? { frameHolder.pngData() }
+
     func statusSnapshot() -> [String: Any] {
         #if canImport(ReplayKit)
         let recorderIsRecording = RPScreenRecorder.shared().isRecording
@@ -507,6 +557,7 @@ final class TTSVerifyHarness {
                numSentences: Int, onStop: @escaping () -> Void) -> Bool { false }
     func recordHighlight(index: Int, offset: Int) {}
     func end(reason: String) {}
+    func latestScreenshotPNG() -> Data? { nil }
     func statusSnapshot() -> [String: Any] { [:] }
     func fetchPayload(runID requested: String?) -> [String: Any]? { nil }
     func probeEngineTap(completion: @escaping ([String: Any]) -> Void) { completion([:]) }

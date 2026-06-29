@@ -3099,16 +3099,20 @@ final class ReaderViewModel: ObservableObject {
     /// filtered segments range) or read aloud the license boilerplate
     /// the content-end detector already trimmed away.
     ///
-    /// Filter: `offset >= playbackSkipUntilOffset` AND
-    /// `offset < contentEndOffset` (when set; 0 means no trailer cap).
+    /// **Ruler / Position Rule (2026-06-29) — identity filter.** An
+    /// entry is visible iff its durable unit id survived the reader's
+    /// skip / content-end window. `sentencesByUnit` is built from the
+    /// already-filtered sentence list (`computeContentFromUnits` drops
+    /// every sentence whose `unitSequence` is `< skipSeq` or `>= endSeq`),
+    /// so a front-matter (pre-skip) or trailing (post-content-end)
+    /// entry's unit is simply absent as a key — no character-offset
+    /// comparison, no per-doc ruler drift. Headings are prose-bearing
+    /// (`carriesProseText == true`), so every real chapter entry has
+    /// sentences and is a key when in-window. Empty until content loads
+    /// (the reader shows its "Opening…" overlay during that window),
+    /// which is correct: there's nothing to navigate to yet.
     var visibleTOCEntries: [StoredTOCEntry] {
-        let skip = document.playbackSkipUntilOffset
-        let end = document.contentEndOffset
-        return tocEntries.filter { entry in
-            guard entry.plainTextOffset >= skip else { return false }
-            if end > 0 { return entry.plainTextOffset < end }
-            return true
-        }
+        return tocEntries.filter { sentencesByUnit[$0.unitID] != nil }
     }
     /// Page-number → plainText offset map for the Go-to-page input in
     /// the TOC sheet. Empty for formats with no page concept (TXT, MD,
@@ -4993,28 +4997,30 @@ final class ReaderViewModel: ObservableObject {
 
     // ========== BLOCK VM-TOC: TABLE OF CONTENTS NAVIGATION - START ==========
 
-    /// Jumps playback and scroll position to the chapter heading at a
-    /// TOC entry's plainTextOffset. Stops any active playback before
-    /// jumping.
+    /// Jumps playback and scroll position to the chapter a TOC entry
+    /// points at. Stops any active playback before jumping.
     ///
-    /// 2026-05-22 — Two changes over the previous behavior:
-    /// 1. Pick the first segment at-or-AFTER the TOC offset (not
-    ///    at-or-before). The TOC offset points to the chapter heading;
-    ///    `at-or-before` lands the user on the last sentence of the
-    ///    PREVIOUS chapter, which is the opposite of what "jump to
-    ///    Chapter II" should do. Page-jumps and TOC-walker offsets
-    ///    use the same convention: the offset is the START of the
-    ///    target region, so the first segment whose startOffset >= it
-    ///    is what the user wants.
-    /// 2. Request `.top` scroll anchor so the chapter heading pins to
-    ///    the top of the visible area rather than centering.
-    ///    Navigation should feel like navigation.
+    /// **Ruler / Position Rule (2026-06-29) — identity navigation.**
+    /// The entry carries a durable unit id (resolved at import to the
+    /// heading unit that starts the chapter). Resolve it to the FIRST
+    /// sentence of that unit in the current filtered list and snap
+    /// there — no stored character offset, so a chapter tap lands
+    /// correctly even after text shifts. The heading is the start of
+    /// the chapter, so its first sentence is the chapter's first line;
+    /// `.top` anchor pins that heading to the top (navigation should
+    /// feel like navigation). This preserves the prior landing exactly
+    /// (the old `firstIndex(startOffset >= headingOffset)` also resolved
+    /// to that heading's first sentence) while dropping the offset.
+    ///
+    /// Callers only pass `visibleTOCEntries`, whose units are guaranteed
+    /// keys in `sentencesByUnit`, so the guard's `else` is purely
+    /// defensive — and doing nothing on an out-of-window unit is the
+    /// honest behavior (no faked jump to a position that doesn't exist).
     func jumpToTOCEntry(_ entry: StoredTOCEntry) {
+        guard let first = sentencesByUnit[entry.unitID]?.first,
+              let targetIndex = sentences.firstIndex(where: { $0.id == first.id }) else { return }
         stopPlayback()
         nextScrollAnchor = .top
-        let target = entry.plainTextOffset
-        let targetIndex = segments.firstIndex(where: { $0.startOffset >= target })
-            ?? max(0, segments.count - 1)
         currentSentenceIndex = targetIndex
         persistPosition()
     }
@@ -5269,8 +5275,22 @@ private struct TOCSheet: View {
     private var navItems: [NavItem] {
         var items: [NavItem] = []
         for e in viewModel.visibleTOCEntries {
+            // **Ruler / Position Rule (2026-06-29).** Sort the chapter onto
+            // the SAME reader-segment spine as notes / bookmarks / images by
+            // resolving the entry's durable unit id → its first sentence's
+            // current segment offset (identity → fresh offset), instead of
+            // the importer-side `plainTextOffset` (a separately-computed
+            // ruler that can drift from the reader's). This is the only
+            // remaining place the reader touched a stored TOC offset; the
+            // jump itself already goes through `jumpToTOCEntry` by identity.
+            let spineOffset: Int = {
+                guard let first = viewModel.sentencesByUnit[e.unitID]?.first,
+                      let segIdx = viewModel.sentences.firstIndex(where: { $0.id == first.id }),
+                      viewModel.segments.indices.contains(segIdx) else { return 0 }
+                return viewModel.segments[segIdx].startOffset
+            }()
             items.append(NavItem(id: "ch:\(e.compositeID)", kind: .chapter(level: e.level),
-                                 title: e.title, subtitle: nil, offset: e.plainTextOffset,
+                                 title: e.title, subtitle: nil, offset: spineOffset,
                                  imageID: nil, noteID: nil, tocEntry: e))
         }
         for a in viewModel.savedAnnotations {

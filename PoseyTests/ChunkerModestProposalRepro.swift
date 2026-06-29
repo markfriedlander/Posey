@@ -270,6 +270,75 @@ final class ChunkerModestProposalRepro: XCTestCase {
             "a BODY TOC entry resolved to a non-heading — offset→identity drifted: \(offenders.prefix(3))")
     }
 
+    /// **Ruler CONSUMER side (2026-06-29).** The reader's `visibleTOCEntries`
+    /// filter and `jumpToTOCEntry` now navigate by the entry's durable unit id
+    /// instead of its stored `plainTextOffset`. This oracle proves the migration
+    /// is behavior-PRESERVING: the new identity filter (an entry is visible iff
+    /// its unit survives the reader's skip/content-end window — i.e. has a
+    /// sentence in `[skipSeq, endSeq)`, exactly how `sentencesByUnit` is built)
+    /// must select the SAME entries the OLD offset filter did
+    /// (`offset >= skipOffset && offset < endOffset`). Divergence would mean the
+    /// old offset filter was already drifting cross-ruler. It also proves every
+    /// visible entry is JUMP-resolvable: its unit has at least one sentence, so
+    /// `jumpToTOCEntry`'s `sentencesByUnit[unit]?.first` always lands.
+    /// Real corpus (Rule 7): `02701_moby-dick.txt`.
+    func testMobyDick_tocConsumerIdentityFilterMatchesOffsetFilter_rulerConsumer() throws {
+        let src = Self.corpusDir.appendingPathComponent("02701_moby-dick.txt")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: src.path), "corpus file missing")
+        let dbURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("posey.sqlite")
+        let db = try DatabaseManager(databaseURL: dbURL)
+        let doc = try TXTLibraryImporter(databaseManager: db).importDocument(from: src)
+        let units = try db.units(for: doc.id)
+        let sentences = try db.sentences(for: doc.id)
+        let toc = try db.tocEntries(for: doc.id)
+        let refs = try db.unitSkipReferences(for: doc.id)
+        let seqByID = Dictionary(units.map { ($0.id, $0.sequence) }, uniquingKeysWith: { a, _ in a })
+        let skipSeq = refs.skipUnitID.flatMap { seqByID[$0] }
+        let endSeq = refs.contentEndUnitID.flatMap { seqByID[$0] }
+
+        // Replicate `sentencesByUnit`'s key set: units with ≥1 sentence in the
+        // reader's filtered window (same predicate as computeContentFromUnits).
+        var keptUnitIDs = Set<UUID>()
+        for s in sentences {
+            if let sk = skipSeq, s.unitSequence < sk { continue }
+            if let en = endSeq, s.unitSequence >= en { continue }
+            keptUnitIDs.insert(s.unitID)
+        }
+        // NEW identity filter (what `visibleTOCEntries` now does).
+        let visibleNew = toc.filter { keptUnitIDs.contains($0.unitID) }
+        // OLD offset filter (what `visibleTOCEntries` did before this change).
+        let skipOff = doc.playbackSkipUntilOffset
+        let endOff = doc.contentEndOffset
+        let visibleOld = toc.filter { e in
+            guard e.plainTextOffset >= skipOff else { return false }
+            if endOff > 0 { return e.plainTextOffset < endOff }
+            return true
+        }
+
+        let newIDs = Set(visibleNew.map { $0.unitID })
+        let oldIDs = Set(visibleOld.map { $0.unitID })
+        let onlyNew = visibleNew.filter { !oldIDs.contains($0.unitID) }
+        let onlyOld = visibleOld.filter { !newIDs.contains($0.unitID) }
+
+        var out = "════════ 02701_moby-dick.txt — TOC RULER (consumer: identity vs offset filter) ════════\n"
+        out += "  toc=\(toc.count)  visibleNew=\(visibleNew.count)  visibleOld=\(visibleOld.count)\n"
+        out += "  skipSeq=\(String(describing: skipSeq))  endSeq=\(String(describing: endSeq))  skipOff=\(skipOff)  endOff=\(endOff)\n"
+        for e in onlyNew.prefix(5) { out += "  ONLY-NEW: '\(e.title.prefix(40))' off=\(e.plainTextOffset)\n" }
+        for e in onlyOld.prefix(5) { out += "  ONLY-OLD: '\(e.title.prefix(40))' off=\(e.plainTextOffset)\n" }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/ruler_toc_consumer_diag.txt"), atomically: true, encoding: .utf8)
+
+        XCTAssertGreaterThan(visibleNew.count, 100, "Moby should expose a substantial visible TOC")
+        XCTAssertEqual(newIDs, oldIDs,
+            "identity filter must select the SAME entries the offset filter did — onlyNew=\(onlyNew.count) onlyOld=\(onlyOld.count)")
+        // Every visible entry is jump-resolvable (its unit has a sentence).
+        for e in visibleNew {
+            XCTAssertTrue(keptUnitIDs.contains(e.unitID),
+                "visible entry '\(e.title.prefix(30))' has no sentence — jumpToTOCEntry would no-op")
+        }
+    }
+
     /// Ruler step 2 regression (2026-06-28): the chunker's FRONT-skip is now
     /// identity-based — it drops prose units ordered before `skipUnitID` (the
     /// importer's stored content-start anchor, the SAME anchor the reader

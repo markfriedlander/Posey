@@ -29,12 +29,15 @@ final class ChunkerModestProposalRepro: XCTestCase {
         let units = try db.units(for: doc.id)
         let skipOffset = doc.playbackSkipUntilOffset
         let skipSource = doc.skipSource
+        // Ruler migration (df81416 / Position Rule): excludingFrontMatter now
+        // takes the content-start UNIT IDENTITY (UUID), not a character offset.
+        let skipUnitID = try db.unitSkipReferences(for: doc.id).skipUnitID
 
         let proseUnits = units.filter { $0.kind.carriesProseText }
         let totalProseChars = proseUnits.reduce(0) { $0 + $1.text.count }
 
         let kept = UnitEmbeddingChunker.excludingFrontMatter(
-            units, skipOffset: skipOffset, skipSource: skipSource)
+            units, skipUnitID: skipUnitID)
         let keptProse = kept.filter { $0.kind.carriesProseText }
         let keptProseChars = keptProse.reduce(0) { $0 + $1.text.count }
 
@@ -76,7 +79,7 @@ final class ChunkerModestProposalRepro: XCTestCase {
         let doc = try TXTLibraryImporter(databaseManager: db).importDocument(from: src)
         let units = try db.units(for: doc.id)
         let kept = UnitEmbeddingChunker.excludingFrontMatter(
-            units, skipOffset: doc.playbackSkipUntilOffset, skipSource: doc.skipSource)
+            units, skipUnitID: try db.unitSkipReferences(for: doc.id).skipUnitID)
         let chunks = UnitEmbeddingChunker.chunks(for: doc.id, units: kept)
 
         XCTAssertGreaterThan(chunks.count, 100, "expected a substantial chunk set")

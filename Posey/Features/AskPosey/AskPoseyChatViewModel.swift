@@ -933,6 +933,15 @@ private extension AskPoseyChatViewModel {
         // numeric band than the 0.40 cosine threshold the floor was
         // calibrated for, and the dedup-as-fabrication-guard already
         // happens via Layer-2 prompt rules + the anti-confab guard.
+        //
+        // ⚠️ KNOWN ISSUE (investigate in tuning) — this filter APPEARS TO BE A NO-OP.
+        // Every retrieved chunk gets the negative `startOffset` sentinel, so the first
+        // clause is always true; and `relevance` is an RRF score (~0.11 max) compared
+        // against a 0.40 cosine threshold, so the second clause is never true. Net:
+        // nothing is filtered here. Whether the real gating lives in `isWeakRetrieval`
+        // (and what THIS floor should actually do) is a retrieval-QUALITY question —
+        // settle it with before/after answer testing, not a blind edit. The sentinel
+        // is also a TYPE-flag disguised as a position. See RetrievedChunk.startOffset.
         let winners = translated
             .filter { $0.startOffset < 0 || $0.relevance >= 0.40 }
             .sorted { $0.relevance > $1.relevance }

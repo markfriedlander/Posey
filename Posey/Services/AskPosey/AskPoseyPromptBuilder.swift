@@ -15,6 +15,22 @@ nonisolated struct RetrievedChunk: Sendable, Equatable, Codable {
     /// "this chunk is located by its paragraph identity, not a global offset". The
     /// actual jump-back resolves `startUnitID` to a CURRENT offset (below) — never
     /// this field.
+    ///
+    /// ⚠️ KNOWN ISSUE — INVESTIGATE IN THE RETRIEVAL-TUNING PHASE (Mark, 2026-06-29):
+    /// this field is OVERLOADED and, on a full trace, more than cosmetic. (1) A magic
+    /// negative value (`kUnitAnchoredStartOffsetSentinel`) is stuffed into a field
+    /// whose NAME says "location" — a flag disguised as a position (a prior CC's
+    /// "without a schema change" shortcut). (2) The retriever sets that sentinel on
+    /// EVERY retrieved chunk (not just summaries), so the relevance-floor filter in
+    /// `AskPoseyChatViewModel` — `startOffset < 0 || relevance >= 0.40` — has an
+    /// ALWAYS-TRUE first clause; and `relevance` is an RRF score (~0.016–0.11), so
+    /// the 0.40 (cosine-calibrated) clause is never true either. So that floor
+    /// appears to be a NO-OP — it passes everything. That matches the "disabled the
+    /// gate entirely" note on `isWeakRetrieval` below; the real gating (if any) is
+    /// `isWeakRetrieval`. DO NOT blindly swap this to `chunkID >= raptorSummaryIndex
+    /// Base` — that would CHANGE which passages pass; the floor's intended behavior
+    /// is the whole thing to settle, with before/after answer testing on real
+    /// questions. Cleanup (un-disguise the flag) + floor behavior are intertwined.
     let startOffset: Int
     /// The cited passage's DURABLE home in the document (the POSITION RULE): the unit
     /// it starts in (`startUnitID`) + the character offset WITHIN that unit's text

@@ -10,19 +10,22 @@ nonisolated struct RetrievedChunk: Sendable, Equatable, Codable {
     /// The chunk's row id in `document_chunks`, used by source
     /// attribution to jump back to the citation in the reader.
     let chunkID: Int
-    /// Character offset of the chunk's start in `Document.plainText`.
-    /// Stored alongside `chunkID` so jump-back doesn't need a SQL
-    /// round-trip when the user taps a "Sources" pill.
+    /// NOT a position of record. The weak-retrieval / floor-exemption gate keys on
+    /// `startOffset < 0` (the named `kUnitAnchoredStartOffsetSentinel`), which marks
+    /// "this chunk is located by its paragraph identity, not a global offset". The
+    /// actual jump-back resolves `startUnitID` to a CURRENT offset (below) — never
+    /// this field.
     let startOffset: Int
-    /// The cited passage's DURABLE home in the document: the unit it starts in and
-    /// the character offset within that unit's text. The retriever knows this (the
-    /// chunk is anchored to it); we carry it through so a persisted turn can resolve
-    /// a citation / margin glyph to a CURRENT document offset at display time —
-    /// surviving Tier-2/3 reprocessing that shifts global offsets. `nil` for rows
-    /// persisted before this field existed (they decode cleanly) and for results with
-    /// no unit anchor. `var … = nil` keeps the memberwise init backward-compatible.
-    var startUnitID: UUID? = nil
-    var startIntraOffset: Int? = nil
+    /// The cited passage's DURABLE home in the document (the POSITION RULE): the unit
+    /// it starts in (`startUnitID`) + the character offset WITHIN that unit's text
+    /// (`startIntraOffset`). A persisted turn resolves a citation / margin glyph to a
+    /// CURRENT document offset at display time from THIS — surviving Tier-2/3
+    /// reprocessing that shifts global offsets (proven by the SIMULATE_FUSION_FIX
+    /// drift test: a 946-edit shift, the tap still landed on the exact passage).
+    /// Required: every chunk row stores a non-optional `start_unit_id` (NOT NULL), so
+    /// it is ALWAYS present — there is no anchorless/legacy chunk to defend.
+    let startUnitID: UUID
+    let startIntraOffset: Int
     /// The chunk text actually rendered into the prompt. Persisted so
     /// the user can see exactly which passage informed the answer.
     let text: String

@@ -156,16 +156,20 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
 
     /// Resolve a cited chunk to a CURRENT reader offset for jump-to-passage.
     /// Uses the chunk's durable unit-anchor against the live document when present
-    /// (so it survives Tier-2/3 text reprocessing); falls back to the stored
-    /// `startOffset` for legacy rows that carry no anchor.
+    /// Resolves the passage's DURABLE paragraph identity to a CURRENT offset at
+    /// tap-time (the Position Rule), so the jump survives Tier-2/3 text reprocessing.
     func citedChunkOffset(_ chunk: RetrievedChunk) -> Int {
-        if let uid = chunk.startUnitID, let db = databaseManager,
-           let off = try? db.plainTextOffset(forUnitID: uid,
-                                             intraOffset: chunk.startIntraOffset ?? 0,
-                                             in: documentID) {
-            return off
+        // `startUnitID` is always present (start_unit_id is NOT NULL) — no raw-offset
+        // fallback to defend a legacy/anchorless chunk (none exist). A nil here is a
+        // genuine error (db gone / unit deleted), not a legacy shape; degrade to the
+        // document start rather than a stale global offset.
+        guard let db = databaseManager,
+              let off = try? db.plainTextOffset(forUnitID: chunk.startUnitID,
+                                                intraOffset: chunk.startIntraOffset,
+                                                in: documentID) else {
+            return 0
         }
-        return chunk.startOffset
+        return off
     }
 
     /// 2026-05-12 — Closure the View sets at construction time so the

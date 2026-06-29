@@ -1461,12 +1461,12 @@ extension DatabaseManager {
             // a bubble for EVERY injected chunk, so the book had bubbles the
             // conversation had no chip for.
             for chunk in RetrievedChunk.topSources(from: chunks) {
-                // Only chunks that carry a durable unit-anchor can be placed. Rows
-                // persisted before this field (and anchor-less results) are skipped —
-                // their location was not recorded, so we honestly show no glyph rather
-                // than guess. New conversations record it going forward.
-                guard let uid = chunk.startUnitID, let base = unitStart[uid] else { continue }
-                let intra = max(0, min(chunk.startIntraOffset ?? 0, unitLen[uid] ?? 0))
+                // Place by the chunk's durable paragraph identity (always present).
+                // Skip only when the unit isn't in this resolution's offset map (e.g.
+                // outside the current window) — honestly show no glyph rather than guess.
+                let uid = chunk.startUnitID
+                guard let base = unitStart[uid] else { continue }
+                let intra = max(0, min(chunk.startIntraOffset, unitLen[uid] ?? 0))
                 let offset = base + intra
                 // One glyph per (turn, passage): a turn can cite the same spot via
                 // overlapping chunks.

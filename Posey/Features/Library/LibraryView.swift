@@ -4941,12 +4941,9 @@ extension LibraryViewModel {
                     "semanticScore": chunk.semanticScore ?? -1
                 ]
                 // 2026-06-26 — also surface the chunk's DURABLE document home
-                // (unit anchor) so this debug readout matches what's persisted.
-                // Without it the readout omitted the field, which falsely read
-                // as "no anchor" even though storage had it correctly (the
-                // conversation-glyph source). nil ⇒ chunk carried no unit anchor.
-                if let uid = chunk.startUnitID { d["startUnitID"] = uid.uuidString }
-                if let intra = chunk.startIntraOffset { d["startIntraOffset"] = intra }
+                // (paragraph identity) so this debug readout matches what's persisted.
+                d["startUnitID"] = chunk.startUnitID.uuidString
+                d["startIntraOffset"] = chunk.startIntraOffset
                 return d
             }
         } else if viewModel.lastError != nil {

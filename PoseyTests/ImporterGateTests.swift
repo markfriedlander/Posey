@@ -1,4 +1,5 @@
 import XCTest
+import PDFKit
 @testable import Posey
 
 /// **THE REIMPORT GATE (2026-06-29).** Before the corpus is reimported and
@@ -110,6 +111,96 @@ final class ImporterGateTests: XCTestCase {
         let db = try freshDB()
         let doc = try await EPUBLibraryImporter(databaseManager: db).importDocument(from: try src("01661_adventures-of-sherlock-holmes.epub"))
         try assess(db, doc, format: "EPUB", file: "01661_adventures-of-sherlock-holmes.epub", assertClean: true)
+    }
+
+    // ── FEASIBILITY PROBE (answer "CAN it be done?" before designing HOW).
+    //    The rebuild needs to chop PDFs at real seams on the EXISTING unit-identity
+    //    ruler. That requires structural signal from PDFKit: (a) an embedded
+    //    outline (titles + page destinations), (b) font-size info to tell a
+    //    heading from body, (c) position info to tell paragraph breaks. Probe what
+    //    PDFKit actually exposes — if the signal isn't there, the approach is dead. ──
+
+    private func probeFeasibility(_ file: String, samplePages: [Int]) throws -> String {
+        let url = try src(file)
+        guard let doc = PDFDocument(url: url) else { return "  \(file): UNREADABLE\n" }
+        var out = "════════ [FEASIBILITY] \(file) — pages=\(doc.pageCount) ════════\n"
+        // (a) Embedded outline.
+        if let root = doc.outlineRoot, root.numberOfChildren > 0 {
+            var n = 0, withDest = 0
+            func walk(_ node: PDFOutline) {
+                for i in 0..<node.numberOfChildren {
+                    guard let c = node.child(at: i) else { continue }
+                    n += 1
+                    if let p = c.destination?.page, doc.index(for: p) != NSNotFound { withDest += 1 }
+                    walk(c)
+                }
+            }
+            walk(root)
+            out += "  OUTLINE: yes — \(n) entries, \(withDest) with a resolvable page destination\n"
+        } else {
+            out += "  OUTLINE: NONE (this PDF has no embedded outline)\n"
+        }
+        // (b)+(c) Font sizes + line positions on sample pages.
+        for pageIdx in samplePages where pageIdx < doc.pageCount {
+            guard let page = doc.page(at: pageIdx) else { continue }
+            let attr = page.attributedString
+            var sizes: [Double: Int] = [:]   // font point size → run char count
+            attr?.enumerateAttribute(.font, in: NSRange(location: 0, length: attr?.length ?? 0)) { val, range, _ in
+                if let f = val as? NSObject, f.responds(to: NSSelectorFromString("pointSize")) {
+                    let sz = (f.value(forKey: "pointSize") as? Double).map { ($0 * 10).rounded() / 10 } ?? -1
+                    sizes[sz, default: 0] += range.length
+                }
+            }
+            let sizeSummary = sizes.sorted { $0.key > $1.key }.prefix(6)
+                .map { "\($0.key)pt×\($0.value)" }.joined(separator: " ")
+            // Line Y positions from character bounds → vertical gaps.
+            let nchars = page.numberOfCharacters
+            var lastY = -1.0, gaps = 0, lines = 0
+            for i in stride(from: 0, to: min(nchars, 4000), by: 25) {
+                let b = page.characterBounds(at: i)
+                let y = Double(b.origin.y.rounded())
+                if abs(y - lastY) > 1 { lines += 1; if lastY >= 0 && abs(y - lastY) > Double(b.height) * 1.6 { gaps += 1 }; lastY = y }
+            }
+            out += "  page \(pageIdx): fonts[\(sizes.count) distinct sizes: \(sizeSummary)]  sampledLines=\(lines) bigVerticalGaps=\(gaps)\n"
+        }
+        return out
+    }
+
+    /// Confirm the font-size signal is REAL: dump the actual text of large-font
+    /// runs on GEB (no outline → font is our heading source). If the big-font
+    /// text IS chapter/section headings, font-based detection is feasible for the
+    /// no-outline case. (Corroborates the size HISTOGRAM with the size→text mapping.)
+    func testFeasibility_GEB_largeFontText() throws {
+        let url = try src("GEBen.pdf")
+        guard let doc = PDFDocument(url: url) else { return XCTFail("unreadable") }
+        var out = "════════ [FEASIBILITY] GEB — text at large fonts (heading source w/o outline) ════════\n"
+        for pageIdx in [38, 39, 40, 41, 60, 80] where pageIdx < doc.pageCount {
+            guard let page = doc.page(at: pageIdx), let attr = page.attributedString else { continue }
+            var runs: [(Double, String)] = []
+            attr.enumerateAttribute(.font, in: NSRange(location: 0, length: attr.length)) { val, range, _ in
+                guard let f = val as? NSObject, f.responds(to: NSSelectorFromString("pointSize")),
+                      let sz = f.value(forKey: "pointSize") as? Double, sz >= 13.5 else { return }
+                let t = (attr.string as NSString).substring(with: range)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { runs.append((sz, t)) }
+            }
+            if !runs.isEmpty {
+                out += "  page \(pageIdx):\n"
+                for (sz, t) in runs.prefix(6) { out += "     \(sz)pt  '\(t.prefix(50))'\n" }
+            }
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/geb_fonts.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
+    func testFeasibility_PDF_structureSignals() throws {
+        var out = ""
+        out += try probeFeasibility("attention-is-all-you-need_arxiv.pdf", samplePages: [2, 5])
+        out += try probeFeasibility("GEBen.pdf", samplePages: [40, 100])
+        out += try probeFeasibility("Cryptography for Dummies.pdf", samplePages: [30, 60])
+        out += try probeFeasibility("scanned-toc-test.pdf", samplePages: [0, 1])
+        try? out.write(to: URL(fileURLWithPath: "/tmp/pdf_feasibility.txt"), atomically: true, encoding: .utf8)
+        print(out)
     }
 
     // ── PDF DEEP-DIVE diagnostics: dump the parser's TOC offsets + the actual

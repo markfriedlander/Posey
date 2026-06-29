@@ -193,6 +193,40 @@ final class ImporterGateTests: XCTestCase {
         print(out)
     }
 
+    /// Validate Mark's idea: read a chapter title, search the WHOLE body for it,
+    /// and check that the real heading occurrence is findable + distinguishable
+    /// from the contents-page and index occurrences. Lists every occurrence of a
+    /// few GEB titles (offset + snippet) so we can SEE whether judgment (which one
+    /// is the heading) is recoverable. Pairs with the font signal (the heading
+    /// occurrence is the big-font one).
+    func testValidate_titleSearchFindsHeading() throws {
+        let url = try src("GEBen.pdf")
+        let parsed = try PDFDocumentImporter().loadDocument(from: url)
+        let ns = parsed.displayText as NSString
+        let titles = ["The MU-puzzle", "Figure and Ground", "Recursive Structures", "Brains and Thoughts"]
+        var out = "════════ [VALIDATE Mark's idea] GEB — every occurrence of each chapter title ════════\n"
+        for title in titles {
+            out += "  '\(title)':\n"
+            var searchFrom = 0
+            var count = 0
+            while searchFrom < ns.length, count < 8 {
+                let r = ns.range(of: title, options: .caseInsensitive,
+                                 range: NSRange(location: searchFrom, length: ns.length - searchFrom))
+                if r.location == NSNotFound { break }
+                count += 1
+                let ctxStart = max(0, r.location - 16)
+                let ctxLen = min(60, ns.length - ctxStart)
+                let ctx = ns.substring(with: NSRange(location: ctxStart, length: ctxLen))
+                    .replacingOccurrences(of: "\n", with: "⏎")
+                out += "     @\(r.location)  …\(ctx)…\n"
+                searchFrom = r.location + r.length
+            }
+            out += "     (\(count) occurrence\(count == 1 ? "" : "s"))\n"
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/title_search.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
     func testFeasibility_PDF_structureSignals() throws {
         var out = ""
         out += try probeFeasibility("attention-is-all-you-need_arxiv.pdf", samplePages: [2, 5])

@@ -214,6 +214,61 @@ final class ImporterGateTests: XCTestCase {
         print(out)
     }
 
+    /// **Observe the SUSPECTED orphan-on-rewrite deterministically, off-device**
+    /// (no models, no antenna). Simulate Tier 2 by calling the exact function it
+    /// uses — `DatabaseManager.replaceUnitsForPage` — on a page a TOC entry
+    /// anchors to, then check whether that entry's stored `unitID` survives. If it
+    /// doesn't, the contents link is orphaned and the reader's identity filter
+    /// (`sentencesByUnit[unitID] != nil`) would drop it / `jumpToTOCEntry` would
+    /// no-op. This is method 2 corroborating the code read (replaceUnitsForPage
+    /// DELETEs old units + mints new ids).
+    func testDive_PDF_tier2RewriteOrphansTOCEntry() throws {
+        let db = try freshDB()
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("attention-is-all-you-need_arxiv.pdf"))
+        let unitsBefore = try db.units(for: doc.id)
+        let toc = try db.tocEntries(for: doc.id)
+        let idsBefore = Set(unitsBefore.map { $0.id })
+        // Pick a TOC entry whose anchor unit resolves to a real unit, and find the
+        // page it lives on (nearest preceding pageBreak's pageNumber).
+        let byIndex = Dictionary(unitsBefore.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
+        guard let entry = toc.first(where: { idsBefore.contains($0.unitID) }),
+              let uIdx = byIndex[entry.unitID] else {
+            return XCTFail("no TOC entry resolves to a unit pre-rewrite")
+        }
+        var pageNumber: Int? = nil
+        for i in stride(from: uIdx, through: 0, by: -1) {
+            if unitsBefore[i].kind == .pageBreak { pageNumber = unitsBefore[i].metadata.pageNumber; break }
+        }
+        guard let page = pageNumber else { return XCTFail("could not find page for entry") }
+
+        // Simulate Tier 2 rewriting that page with corrected text.
+        _ = try db.replaceUnitsForPage(
+            documentID: doc.id, pageNumber: page,
+            newPageText: "Corrected paragraph one.\n\nCorrected paragraph two.",
+            sourceTier: "tier2")
+
+        let unitsAfter = try db.units(for: doc.id)
+        let idsAfter = Set(unitsAfter.map { $0.id })
+        let survived = idsAfter.contains(entry.unitID)
+
+        var out = "════════ [ORPHAN TEST] Attention — Tier-2 rewrite of page \(page) ════════\n"
+        out += "  TOC entry '\(entry.title.prefix(30))' unitID=\(entry.unitID.uuidString.prefix(8))\n"
+        out += "  unitID present BEFORE rewrite: \(idsBefore.contains(entry.unitID))\n"
+        out += "  unitID present AFTER  rewrite: \(survived)\n"
+        out += "  units \(unitsBefore.count)→\(unitsAfter.count)\n"
+        out += survived
+            ? "  RESULT: entry SURVIVED (no orphan on this page)\n"
+            : "  RESULT: entry ORPHANED — its anchor unit was deleted+replaced; re-find is NOT applied to TOC → link dead\n"
+        try? out.write(to: URL(fileURLWithPath: "/tmp/pdf_orphan.txt"), atomically: true, encoding: .utf8)
+        print(out)
+
+        // The point of the test is to OBSERVE the behavior, recorded above. The
+        // orphan is the predicted outcome; assert it so a future fix that adds
+        // re-find-for-TOC will flip this red→green and prove it.
+        XCTAssertFalse(survived,
+            "EXPECTED orphan: Tier-2 page rewrite deletes the anchor unit and the TOC entry's unitID is not re-found. If this FAILS (entry survived), the orphan mechanism does not bite this case — update the diagnosis.")
+    }
+
     // ── PDFs: MEASURE-ONLY (book-PDF structure is the known deep-dive) ───────
 
     func testGate_PDF_attention_bornDigital() throws {

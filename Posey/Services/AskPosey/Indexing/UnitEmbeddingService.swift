@@ -141,15 +141,17 @@ actor UnitEmbeddingService {
             // actor hop is implicit at the call site.
             let units: [ContentUnit]
             let skipUnitID: UUID?
+            let contentEndUnitID: UUID?
             do {
-                (units, skipUnitID) = try await MainActor.run {
+                (units, skipUnitID, contentEndUnitID) = try await MainActor.run {
                     let u = try databaseManager.units(for: documentID)
-                    // POSITION RULE: front boundary travels as IDENTITY, not an
-                    // offset — the importer's stored content-start unit, the same
-                    // anchor the reader windows on. (See UnitEmbeddingChunker.)
+                    // POSITION RULE: BOTH boundaries travel as IDENTITY, not
+                    // offsets — the importer's stored content-start AND content-end
+                    // units, the same anchors the reader windows on. (See
+                    // UnitEmbeddingChunker.)
                     let refs = (try? databaseManager.unitSkipReferences(for: documentID))
                         ?? (skipUnitID: nil, contentEndUnitID: nil)
-                    return (u, refs.skipUnitID)
+                    return (u, refs.skipUnitID, refs.contentEndUnitID)
                 }
             } catch {
                 return
@@ -187,10 +189,12 @@ actor UnitEmbeddingService {
             // served as if it were the work — the Saintsbury-preface contamination
             // caught by real reading (#2 Finding 3). Safe because author/year
             // answer from structured metadata (8015eb4), not front-matter prose.
-            // (The offset-based back-trim was removed 2026-06-28; a trailing-
-            // license drop will return as an identity detector. See the chunker.)
+            // The trailing apparatus (Gutenberg license) is now ALSO dropped by
+            // identity via `contentEndUnitID` — the safe back-trim that replaced
+            // the removed offset one (2026-06-28). See the chunker.
             let chunkUnits = UnitEmbeddingChunker.excludingFrontMatter(
                 units, skipUnitID: skipUnitID,
+                contentEndUnitID: contentEndUnitID,
                 editorialUnitIDs: editorialUnitIDs)
 
             // Chunking (string-split) stage — board pipeline view. Brief; clears

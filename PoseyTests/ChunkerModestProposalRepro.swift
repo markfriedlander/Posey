@@ -145,6 +145,52 @@ final class ChunkerModestProposalRepro: XCTestCase {
             "ch-27 closing Note ('\(needle)') missing from chunks — the back-trim regressed.")
     }
 
+    /// Trailing-apparatus detector — the SAFE back-trim (2026-06-28). With the
+    /// content-end unit passed (identity), `excludingFrontMatter` drops prose
+    /// at/after it — the Gutenberg license that Step 1's removal of the *offset*
+    /// back-trim left leaking (the step-1 diag found "…subscribe to our email
+    /// newsletter…" in the LAST chunk). Proof on real Dracula: that license tail
+    /// must now be in NO chunk, while ch-27's close ("a brave and gallant woman")
+    /// stays IN — i.e. the trim drops the license without slicing real chapters
+    /// (the failure mode that destroyed ch 14–27). Real corpus (Rule 7).
+    func testDracula_trailingLicenseDropped_byIdentity() throws {
+        let src = Self.corpusDir.appendingPathComponent("dracula_345.txt")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: src.path),
+                          "corpus file missing")
+        let dbURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("posey.sqlite")
+        let db = try DatabaseManager(databaseURL: dbURL)
+        let doc = try TXTLibraryImporter(databaseManager: db).importDocument(from: src)
+        let units = try db.units(for: doc.id)
+        let refs = try db.unitSkipReferences(for: doc.id)
+        XCTAssertNotNil(refs.contentEndUnitID,
+            "Dracula should have a content-end unit (the Gutenberg END marker).")
+
+        let kept = UnitEmbeddingChunker.excludingFrontMatter(
+            units, skipUnitID: refs.skipUnitID, contentEndUnitID: refs.contentEndUnitID)
+        let chunks = UnitEmbeddingChunker.chunks(for: doc.id, units: kept)
+
+        let content = "brave and gallant woman"            // ch 27 — real, must stay
+        let license = "subscribe to our email newsletter"  // trailing license — must go
+        let contentIn = chunks.contains { $0.text.localizedCaseInsensitiveContains(content) }
+        let licenseIn = chunks.contains { $0.text.localizedCaseInsensitiveContains(license) }
+
+        let lastTail = chunks.last.map { String($0.text.suffix(90)) } ?? "<none>"
+        var out = "════════ dracula — TRAILING-APPARATUS DETECTOR (safe back-trim) ════════\n"
+        out += "  contentEndUnitID set: \(refs.contentEndUnitID != nil)  chunks=\(chunks.count)\n"
+        out += "  real ch-27 content (\"\(content)\") still in a chunk: \(contentIn)\n"
+        out += "  license tail (\"\(license)\") in any chunk: \(licenseIn)\n"
+        out += "  last chunk tail: …\(lastTail.replacingOccurrences(of: "\n", with: "⏎"))\n"
+        try? out.write(to: URL(fileURLWithPath: "/tmp/ruler_trailing_diag.txt"),
+                       atomically: true, encoding: .utf8)
+
+        XCTAssertTrue(contentIn,
+            "real ch-27 content was dropped — the back-trim sliced too far (the ch-14–27 failure).")
+        XCTAssertFalse(licenseIn,
+            "Gutenberg license still in the chunk pool — the identity back-trim did not fire.")
+    }
+
     /// Ruler step 2 regression (2026-06-28): the chunker's FRONT-skip is now
     /// identity-based — it drops prose units ordered before `skipUnitID` (the
     /// importer's stored content-start anchor, the SAME anchor the reader

@@ -103,12 +103,15 @@ struct UnitEmbeddingChunker {
     /// Authorial front matter (Frankenstein's Letters, Moby's Etymology) scores
     /// ~0 and is never in the set, so it stays.
     ///
-    /// The trailing Project Gutenberg license will be dropped by a future
-    /// content-based trailer detector (identity, like the editorial one). Until
-    /// then it may leak into the pool — the lesser evil vs. deleting real chapters.
+    /// `contentEndUnitID` is the SAFE back-trim (2026-06-28): it drops the trailing
+    /// apparatus (the Project Gutenberg license) at/after the content-end unit, by
+    /// identity — the Position-Rule replacement for the removed offset back-trim
+    /// (which drifted and destroyed Dracula ch 14–27). Same boundary the reader
+    /// windows to; `nil` (no marker / DOCX/RTF/MD/PDF) drops no trailing matter.
     nonisolated static func excludingFrontMatter(
         _ units: [ContentUnit],
         skipUnitID: UUID?,
+        contentEndUnitID: UUID? = nil,
         editorialUnitIDs: Set<UUID> = []
     ) -> [ContentUnit] {
         // Resolve the content-start anchor (identity) to its order. Units before
@@ -116,14 +119,32 @@ struct UnitEmbeddingChunker {
         let skipSequence: Int? = skipUnitID.flatMap { id in
             units.first(where: { $0.id == id })?.sequence
         }
+        // Resolve the content-END anchor (identity) to its order. This is the SAFE
+        // back-trim (2026-06-28) — the Position-Rule replacement for the removed
+        // offset back-trim that drifted and destroyed Dracula's ch 14–27. It drops
+        // prose units ordered AT/AFTER the content-end unit, the SAME boundary the
+        // reader windows to (`sentence.unitSequence >= contentEndUnitSequence` →
+        // excluded). For a Gutenberg book the content-end unit is the "*** END OF
+        // THE PROJECT GUTENBERG EBOOK ***" unit, so the trailing LICENSE never
+        // enters the RAG pool. A unit's identity can't drift, so this can never
+        // again slice into real chapters. `nil` → no back bound (DOCX/RTF/MD/PDF,
+        // or no marker found) — exactly like the reader.
+        let contentEndSequence: Int? = contentEndUnitID.flatMap { id in
+            units.first(where: { $0.id == id })?.sequence
+        }
         let doEditorial = !editorialUnitIDs.isEmpty
-        guard skipSequence != nil || doEditorial else { return units }
+        guard skipSequence != nil || contentEndSequence != nil || doEditorial else { return units }
         var kept: [ContentUnit] = []
         kept.reserveCapacity(units.count)
         for unit in units {
             // Front: drop prose units ordered before the content-start unit.
             // (Non-prose pre-skip units produce no chunks, so they pass through.)
             if let s = skipSequence, unit.kind.carriesProseText, unit.sequence < s {
+                continue
+            }
+            // Back: drop prose units ordered at/after the content-end unit — the
+            // trailing apparatus (Gutenberg license, etc.) the reader also hides.
+            if let e = contentEndSequence, unit.kind.carriesProseText, unit.sequence >= e {
                 continue
             }
             // Editorial: drop prose units inside a detected editorial block.

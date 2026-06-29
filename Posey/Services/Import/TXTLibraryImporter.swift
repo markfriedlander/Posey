@@ -191,6 +191,7 @@ struct TXTLibraryImporter {
                 tocEntries.append(StoredTOCEntry(
                     title: unit.text,
                     plainTextOffset: runningOffset,
+                    unitID: unit.id,                 // the heading IS this unit (Position Rule)
                     playOrder: tocEntries.count + 1,
                     level: unit.metadata.headingLevel ?? 1
                 ))

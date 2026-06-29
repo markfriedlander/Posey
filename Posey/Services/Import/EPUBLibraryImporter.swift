@@ -158,13 +158,17 @@ struct EPUBLibraryImporter {
         // ── Sentences.
         let sentences = SentenceIndexer.sentences(for: units)
 
-        // ── TOC entries (pass-through; offsets already in plainText space).
-        let tocEntries: [StoredTOCEntry] = parsed.tocEntries.map {
-            StoredTOCEntry(
-                title: $0.title,
-                plainTextOffset: $0.plainTextOffset,
-                playOrder: $0.playOrder,
-                level: $0.level
+        // ── TOC entries. Resolve each heading's offset → its durable paragraph
+        // identity (same ruler, at import); drop an entry that can't anchor (Position Rule).
+        let tocEntries: [StoredTOCEntry] = parsed.tocEntries.compactMap { e in
+            guard let uid = ContentUnitBuilder.firstUnit(
+                in: units, atOrAfterPlainTextOffset: e.plainTextOffset)?.id else { return nil }
+            return StoredTOCEntry(
+                title: e.title,
+                plainTextOffset: e.plainTextOffset,
+                unitID: uid,
+                playOrder: e.playOrder,
+                level: e.level
             )
         }
 

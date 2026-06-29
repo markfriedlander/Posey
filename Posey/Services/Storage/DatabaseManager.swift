@@ -844,15 +844,22 @@ extension DatabaseManager {
 struct StoredTOCEntry {
     let title: String
     let plainTextOffset: Int
+    /// The DURABLE home of this chapter (the Position Rule): the content unit the
+    /// heading lives in. Resolved at IMPORT time from the heading's offset (when
+    /// offsets and units share one ruler and can't drift), then used downstream —
+    /// the reader's `visibleTOCEntries` filter AND tap-to-jump — by IDENTITY, never
+    /// by `plainTextOffset`. The reader resolves it to a CURRENT offset at use-time.
+    let unitID: UUID
     let playOrder: Int
     /// Heading level (1 = top, 6 = deepest). Used by the reader to
     /// pick the right typographic weight for the heading row. Importers
     /// that lack a real signal pass 1.
     let level: Int
 
-    init(title: String, plainTextOffset: Int, playOrder: Int, level: Int = 1) {
+    init(title: String, plainTextOffset: Int, unitID: UUID, playOrder: Int, level: Int = 1) {
         self.title = title
         self.plainTextOffset = plainTextOffset
+        self.unitID = unitID
         self.playOrder = playOrder
         self.level = max(1, min(6, level))
     }
@@ -870,8 +877,8 @@ extension DatabaseManager {
         dbLock.lock(); defer { dbLock.unlock() }
         try execute("DELETE FROM document_toc WHERE document_id = '\(documentID.uuidString)';")
         let sql = """
-        INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level)
-        VALUES (?, ?, ?, ?, ?);
+        INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level, unit_id)
+        VALUES (?, ?, ?, ?, ?, ?);
         """
         // Deduplicate on (title, plainTextOffset) so NCX sub-navPoints that reference
         // the same position don't insert redundant rows.
@@ -886,6 +893,7 @@ extension DatabaseManager {
             try bind(entry.title, at: 3, for: statement)
             sqlite3_bind_int(statement, 4, Int32(entry.plainTextOffset))
             sqlite3_bind_int(statement, 5, Int32(entry.level))
+            try bind(entry.unitID.uuidString, at: 6, for: statement)
             try step(statement)
         }
     }
@@ -893,7 +901,7 @@ extension DatabaseManager {
     func tocEntries(for documentID: UUID) throws -> [StoredTOCEntry] {
         dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
-        SELECT title, plain_text_offset, play_order, level
+        SELECT title, plain_text_offset, play_order, level, unit_id
         FROM document_toc
         WHERE document_id = ?
         ORDER BY play_order;
@@ -907,9 +915,14 @@ extension DatabaseManager {
             let offset = Int(sqlite3_column_int(statement, 1))
             let order  = Int(sqlite3_column_int(statement, 2))
             let level  = Int(sqlite3_column_int(statement, 3))
+            // unit_id is NOT NULL by schema; skip any row that can't yield a real
+            // UUID (defensive — there is no anchorless entry to honor).
+            guard let uidStr = sqliteString(statement, index: 4),
+                  let unitID = UUID(uuidString: uidStr) else { continue }
             entries.append(StoredTOCEntry(
                 title: title,
                 plainTextOffset: offset,
+                unitID: unitID,
                 playOrder: order,
                 level: level == 0 ? 1 : level
             ))
@@ -1710,20 +1723,27 @@ extension DatabaseManager {
         // is one PRAGMA + an optional DROP — runs once per app launch
         // and short-circuits cleanly when the schema is already current.
         var hasLevelColumn = true
+        var hasUnitIDColumn = true
         let pragmaSQL = "PRAGMA table_info(document_toc);"
         if let pragma = try? prepareStatement(sql: pragmaSQL) {
             defer { sqlite3_finalize(pragma) }
             var foundTable = false
             var foundLevel = false
+            var foundUnitID = false
             while sqlite3_step(pragma) == SQLITE_ROW {
                 foundTable = true
-                if let name = sqliteString(pragma, index: 1), name == "level" {
-                    foundLevel = true
+                if let name = sqliteString(pragma, index: 1) {
+                    if name == "level" { foundLevel = true }
+                    if name == "unit_id" { foundUnitID = true }
                 }
             }
             hasLevelColumn = !foundTable || foundLevel
+            hasUnitIDColumn = !foundTable || foundUnitID
         }
-        if !hasLevelColumn {
+        // Either required column missing → drop and let re-import repopulate (the
+        // TOC is fully regenerated on import; dev data is fungible). 2026-06-29 —
+        // added `unit_id`, the chapter's durable paragraph identity (Position Rule).
+        if !hasLevelColumn || !hasUnitIDColumn {
             try execute("DROP TABLE IF EXISTS document_toc;")
         }
         try execute("""
@@ -1733,6 +1753,7 @@ extension DatabaseManager {
                 play_order INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 plain_text_offset INTEGER NOT NULL,
+                unit_id TEXT NOT NULL,
                 level INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
@@ -3080,8 +3101,8 @@ extension DatabaseManager {
     /// transaction.
     private func insertTOCEntry(_ entry: StoredTOCEntry, for documentID: UUID) throws {
         let sql = """
-        INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level)
-        VALUES (?, ?, ?, ?, ?);
+        INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level, unit_id)
+        VALUES (?, ?, ?, ?, ?, ?);
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -3090,6 +3111,7 @@ extension DatabaseManager {
         try bind(entry.title, at: 3, for: statement)
         sqlite3_bind_int64(statement, 4, sqlite3_int64(entry.plainTextOffset))
         sqlite3_bind_int64(statement, 5, sqlite3_int64(entry.level))
+        try bind(entry.unitID.uuidString, at: 6, for: statement)
         try step(statement)
     }
 
@@ -3190,8 +3212,8 @@ extension DatabaseManager {
             // 1 — replace TOC. Dedup on (title, offset) like insertTOCEntries.
             try execute("DELETE FROM document_toc WHERE document_id = '\(documentID.uuidString)';")
             let tocSQL = """
-            INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level)
-            VALUES (?, ?, ?, ?, ?);
+            INSERT INTO document_toc (document_id, play_order, title, plain_text_offset, level, unit_id)
+            VALUES (?, ?, ?, ?, ?, ?);
             """
             var seen = Set<String>()
             for entry in tocEntries {
@@ -3204,6 +3226,7 @@ extension DatabaseManager {
                 try bind(entry.title, at: 3, for: stmt)
                 sqlite3_bind_int(stmt, 4, Int32(entry.plainTextOffset))
                 sqlite3_bind_int(stmt, 5, Int32(entry.level))
+                try bind(entry.unitID.uuidString, at: 6, for: stmt)
                 try step(stmt)
             }
 

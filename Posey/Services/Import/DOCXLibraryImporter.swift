@@ -194,11 +194,15 @@ struct DOCXLibraryImporter {
         // ── Sentences.
         let sentences = SentenceIndexer.sentences(for: units)
 
-        // ── TOC entries (same shape as before).
-        let tocEntries: [StoredTOCEntry] = headings.enumerated().map { (idx, h) in
-            StoredTOCEntry(
+        // ── TOC entries. Resolve each heading's offset → its durable paragraph
+        // identity (same ruler, at import); drop an entry that can't anchor (Position Rule).
+        let tocEntries: [StoredTOCEntry] = headings.enumerated().compactMap { (idx, h) in
+            guard let uid = ContentUnitBuilder.firstUnit(
+                in: units, atOrAfterPlainTextOffset: h.plainTextOffset)?.id else { return nil }
+            return StoredTOCEntry(
                 title: h.title,
                 plainTextOffset: h.plainTextOffset,
+                unitID: uid,
                 playOrder: idx + 1,
                 level: h.level
             )

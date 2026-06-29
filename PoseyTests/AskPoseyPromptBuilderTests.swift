@@ -172,6 +172,7 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
         let chunk = RetrievedChunk(
             chunkID: 42,
             startOffset: 1024,
+            startUnitID: UUID(), startIntraOffset: 0,
             text: "A document chunk's worth of relevant prose.",
             relevance: 0.87
         )
@@ -262,6 +263,7 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
             RetrievedChunk(
                 chunkID: i,
                 startOffset: i * 100,
+                startUnitID: UUID(), startIntraOffset: 0,
                 text: String(repeating: "y", count: 800),  // ~228 tokens each
                 relevance: Double(11 - i) / 10.0
             )

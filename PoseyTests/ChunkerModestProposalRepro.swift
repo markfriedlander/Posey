@@ -191,6 +191,85 @@ final class ChunkerModestProposalRepro: XCTestCase {
             "Gutenberg license still in the chunk pool — the identity back-trim did not fire.")
     }
 
+    /// TOC ruler migration (2026-06-29): every chapter entry now carries a DURABLE
+    /// paragraph identity (`StoredTOCEntry.unitID`), resolved from its offset AT IMPORT
+    /// (one ruler, no drift), so the reader can filter + jump by identity. Proof on
+    /// Moby TXT: every entry's `unitID` resolves to a real HEADING unit in the doc,
+    /// and (TXT builds the entry FROM that unit) its text matches the title. Real
+    /// corpus (Rule 7): `02701_moby-dick.txt`.
+    func testMobyDick_tocEntriesCarryParagraphID_tocRuler() throws {
+        let src = Self.corpusDir.appendingPathComponent("02701_moby-dick.txt")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: src.path), "corpus file missing")
+        let dbURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("posey.sqlite")
+        let db = try DatabaseManager(databaseURL: dbURL)
+        let doc = try TXTLibraryImporter(databaseManager: db).importDocument(from: src)
+        let units = try db.units(for: doc.id)
+        let toc = try db.tocEntries(for: doc.id)
+        let byID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
+        var dangling = 0, nonHeading = 0, textMismatch = 0
+        for e in toc {
+            guard let u = byID[e.unitID] else { dangling += 1; continue }
+            if u.kind != .heading { nonHeading += 1 }
+            if u.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                != e.title.trimmingCharacters(in: .whitespacesAndNewlines) { textMismatch += 1 }
+        }
+        var out = "════════ 02701_moby-dick.txt — TOC RULER (entries carry paragraph-ID) ════════\n"
+        out += "  toc entries=\(toc.count)  dangling=\(dangling)  nonHeading=\(nonHeading)  textMismatch=\(textMismatch)\n"
+        try? out.write(to: URL(fileURLWithPath: "/tmp/ruler_toc_diag.txt"), atomically: true, encoding: .utf8)
+
+        XCTAssertGreaterThan(toc.count, 100, "Moby should have a substantial TOC")
+        XCTAssertEqual(dangling, 0, "TOC entries whose unitID resolves to NO unit")
+        XCTAssertEqual(nonHeading, 0, "TOC entries pointing at a non-heading unit")
+        XCTAssertEqual(textMismatch, 0, "TOC entry text != its paragraph's text")
+    }
+
+    /// The NON-tautological half: HTML resolves each heading's OFFSET → a unit
+    /// independently (`firstUnit(atOrAfterPlainTextOffset:)`). If that resolution
+    /// drifts, it lands on a prose unit instead of the heading. Proof on Moby HTML:
+    /// every entry's `unitID` resolves to a HEADING unit. Real corpus: `02701_moby-dick.html`.
+    func testMobyDickHTML_tocResolvesToHeadingByOffset_tocRuler() async throws {
+        let src = Self.corpusDir.appendingPathComponent("02701_moby-dick.html")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: src.path), "corpus file missing")
+        let dbURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("posey.sqlite")
+        let db = try DatabaseManager(databaseURL: dbURL)
+        let doc = try await HTMLLibraryImporter(databaseManager: db).importDocument(from: src)
+        let units = try db.units(for: doc.id)
+        let toc = try db.tocEntries(for: doc.id)
+        let byID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
+        // A non-heading resolution is only legitimate in FRONT MATTER (e.g. the book
+        // title's <h1> maps to the title-page PROSE unit — valid paragraph-ID, and
+        // the reader's `visibleTOCEntries` filter hides it anyway). A non-heading in
+        // the BODY (at/after the skip boundary) WOULD be a real offset→identity drift.
+        let refs = try db.unitSkipReferences(for: doc.id)
+        let seqByID = Dictionary(units.map { ($0.id, $0.sequence) }, uniquingKeysWith: { a, _ in a })
+        let skipSeq = refs.skipUnitID.flatMap { seqByID[$0] }
+        var dangling = 0, nonHeadingFront = 0, nonHeadingInBody = 0
+        var offenders: [String] = []
+        for e in toc {
+            guard let u = byID[e.unitID] else { dangling += 1; continue }
+            if u.kind != .heading {
+                let inBody = (skipSeq.map { u.sequence >= $0 } ?? true)
+                if inBody { nonHeadingInBody += 1 } else { nonHeadingFront += 1 }
+                offenders.append("title='\(e.title.prefix(30))' -> kind=\(u.kind) text='\(u.text.prefix(24))' inBody=\(inBody)")
+            }
+        }
+        var out = "════════ 02701_moby-dick.html — TOC RULER (offset→identity) ════════\n"
+        out += "  toc entries=\(toc.count)  dangling=\(dangling)  nonHeadingFront=\(nonHeadingFront)  nonHeadingInBody=\(nonHeadingInBody)\n"
+        for o in offenders.prefix(5) { out += "  non-heading: \(o)\n" }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/ruler_toc_html_diag.txt"), atomically: true, encoding: .utf8)
+
+        XCTAssertGreaterThan(toc.count, 100, "Moby HTML should have a substantial TOC")
+        XCTAssertEqual(dangling, 0, "HTML TOC entries whose unitID resolves to NO unit")
+        XCTAssertEqual(nonHeadingInBody, 0,
+            "a BODY TOC entry resolved to a non-heading — offset→identity drifted: \(offenders.prefix(3))")
+    }
+
     /// Ruler step 2 regression (2026-06-28): the chunker's FRONT-skip is now
     /// identity-based — it drops prose units ordered before `skipUnitID` (the
     /// importer's stored content-start anchor, the SAME anchor the reader

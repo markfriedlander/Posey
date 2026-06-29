@@ -457,12 +457,17 @@ actor PDFEnhancementService {
             in: inputs.units, atOrAfterPlainTextOffset: finalSkipOffset
         )?.id
 
-        let storedTOC: [StoredTOCEntry] = detected.entries.map {
-            StoredTOCEntry(
-                title: $0.title,
-                plainTextOffset: $0.plainTextOffset,
-                playOrder: $0.playOrder,
-                level: $0.level
+        let storedTOC: [StoredTOCEntry] = detected.entries.compactMap { e in
+            // Resolve to the durable paragraph identity (same ruler); drop one that
+            // can't anchor (Position Rule).
+            guard let uid = ContentUnitBuilder.firstUnit(
+                in: inputs.units, atOrAfterPlainTextOffset: e.plainTextOffset)?.id else { return nil }
+            return StoredTOCEntry(
+                title: e.title,
+                plainTextOffset: e.plainTextOffset,
+                unitID: uid,
+                playOrder: e.playOrder,
+                level: e.level
             )
         }
 

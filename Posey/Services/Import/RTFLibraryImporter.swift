@@ -134,12 +134,15 @@ struct RTFLibraryImporter {
         // ── Pre-compute sentences per unit.
         let sentences = SentenceIndexer.sentences(for: units)
 
-        // ── TOC entries from the headings (offsets stay in plainText
-        // ── space; consistent with persistParsedDocument's join).
-        let tocEntries: [StoredTOCEntry] = headings.enumerated().map { (idx, h) in
-            StoredTOCEntry(
+        // ── TOC entries from the headings. Resolve each heading's offset → its durable
+        // paragraph identity (same ruler, at import); drop one that can't anchor (Position Rule).
+        let tocEntries: [StoredTOCEntry] = headings.enumerated().compactMap { (idx, h) in
+            guard let uid = ContentUnitBuilder.firstUnit(
+                in: units, atOrAfterPlainTextOffset: h.plainTextOffset)?.id else { return nil }
+            return StoredTOCEntry(
                 title: h.title,
                 plainTextOffset: h.plainTextOffset,
+                unitID: uid,
                 playOrder: idx + 1,
                 level: h.level
             )

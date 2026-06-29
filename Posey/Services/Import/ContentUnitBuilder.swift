@@ -758,12 +758,12 @@ enum ContentUnitBuilder {
     ) -> [StoredTOCEntry] {
         guard !toc.isEmpty else { return toc }
 
-        struct Anchor { let offset: Int; let text: String }
+        struct Anchor { let offset: Int; let text: String; let unitID: UUID }
         var anchors: [Anchor] = []
         var cumulative = 0
         for unit in units {
             if unit.kind == .heading {
-                anchors.append(Anchor(offset: cumulative, text: unit.text))
+                anchors.append(Anchor(offset: cumulative, text: unit.text, unitID: unit.id))
             }
             if unit.kind.carriesProseText {
                 cumulative += unit.text.count + 2 // "\n\n" — matches ReaderView + persister
@@ -797,6 +797,7 @@ enum ContentUnitBuilder {
             return StoredTOCEntry(
                 title: anchors[b].text.trimmingCharacters(in: .whitespacesAndNewlines),
                 plainTextOffset: anchors[b].offset,
+                unitID: anchors[b].unitID,           // the body heading this entry points to
                 playOrder: entry.playOrder,
                 level: entry.level
             )

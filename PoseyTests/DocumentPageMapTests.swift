@@ -118,9 +118,9 @@ final class DocumentPageMapTests: XCTestCase {
     /// offsets. Expected map matches the entries verbatim.
     func testEPUBPageTitledTOCBuildsDenseMap() {
         let entries: [StoredTOCEntry] = [
-            .init(title: "Page 1", plainTextOffset: 0,    playOrder: 1),
-            .init(title: "Page 2", plainTextOffset: 1500, playOrder: 2),
-            .init(title: "Page 3", plainTextOffset: 3000, playOrder: 3),
+            .init(title: "Page 1", plainTextOffset: 0,    unitID: UUID(), playOrder: 1),
+            .init(title: "Page 2", plainTextOffset: 1500, unitID: UUID(), playOrder: 2),
+            .init(title: "Page 3", plainTextOffset: 3000, unitID: UUID(), playOrder: 3),
         ]
         let map = DocumentPageMap.buildForEPUB(tocEntries: entries)
         XCTAssertEqual(map.pageCount, 3)
@@ -132,9 +132,9 @@ final class DocumentPageMapTests: XCTestCase {
     /// Out-of-order TOC entries must produce a sorted page map.
     func testEPUBOutOfOrderEntriesAreSorted() {
         let entries: [StoredTOCEntry] = [
-            .init(title: "Page 3", plainTextOffset: 3000, playOrder: 3),
-            .init(title: "Page 1", plainTextOffset: 0,    playOrder: 1),
-            .init(title: "Page 2", plainTextOffset: 1500, playOrder: 2),
+            .init(title: "Page 3", plainTextOffset: 3000, unitID: UUID(), playOrder: 3),
+            .init(title: "Page 1", plainTextOffset: 0,    unitID: UUID(), playOrder: 1),
+            .init(title: "Page 2", plainTextOffset: 1500, unitID: UUID(), playOrder: 2),
         ]
         let map = DocumentPageMap.buildForEPUB(tocEntries: entries)
         XCTAssertEqual(map.offset(forPage: 1), 0)
@@ -147,10 +147,10 @@ final class DocumentPageMapTests: XCTestCase {
     /// jumps somewhere reasonable.
     func testEPUBGapsBackfillWithPreviousOffset() {
         let entries: [StoredTOCEntry] = [
-            .init(title: "Page 1", plainTextOffset: 0,    playOrder: 1),
-            .init(title: "Page 2", plainTextOffset: 1500, playOrder: 2),
+            .init(title: "Page 1", plainTextOffset: 0,    unitID: UUID(), playOrder: 1),
+            .init(title: "Page 2", plainTextOffset: 1500, unitID: UUID(), playOrder: 2),
             // No "Page 3" entry — gap.
-            .init(title: "Page 4", plainTextOffset: 4500, playOrder: 4),
+            .init(title: "Page 4", plainTextOffset: 4500, unitID: UUID(), playOrder: 4),
         ]
         let map = DocumentPageMap.buildForEPUB(tocEntries: entries)
         XCTAssertEqual(map.pageCount, 4)
@@ -164,9 +164,9 @@ final class DocumentPageMapTests: XCTestCase {
     /// affordance.
     func testEPUBChapterOnlyTOCProducesEmptyMap() {
         let entries: [StoredTOCEntry] = [
-            .init(title: "Introduction",        plainTextOffset: 0,    playOrder: 1),
-            .init(title: "Chapter One",         plainTextOffset: 5000, playOrder: 2),
-            .init(title: "Chapter Two: Onward", plainTextOffset: 9000, playOrder: 3),
+            .init(title: "Introduction",        plainTextOffset: 0,    unitID: UUID(), playOrder: 1),
+            .init(title: "Chapter One",         plainTextOffset: 5000, unitID: UUID(), playOrder: 2),
+            .init(title: "Chapter Two: Onward", plainTextOffset: 9000, unitID: UUID(), playOrder: 3),
         ]
         XCTAssertFalse(DocumentPageMap.buildForEPUB(tocEntries: entries).hasPages)
     }
@@ -181,8 +181,8 @@ final class DocumentPageMapTests: XCTestCase {
     /// scanned EPUBs.
     func testEPUBWordBoundaryRespected() {
         let entries: [StoredTOCEntry] = [
-            .init(title: "Pageant of Empire",  plainTextOffset: 0,    playOrder: 1),
-            .init(title: "Backstage Pages 5",  plainTextOffset: 1500, playOrder: 2),
+            .init(title: "Pageant of Empire",  plainTextOffset: 0,    unitID: UUID(), playOrder: 1),
+            .init(title: "Backstage Pages 5",  plainTextOffset: 1500, unitID: UUID(), playOrder: 2),
         ]
         let map = DocumentPageMap.buildForEPUB(tocEntries: entries)
         XCTAssertFalse(map.hasPages,
@@ -194,9 +194,9 @@ final class DocumentPageMapTests: XCTestCase {
     /// at offset -1.
     func testEPUBSkipsEntriesWithUnresolvedOffset() {
         let entries: [StoredTOCEntry] = [
-            .init(title: "Page 1", plainTextOffset: 0,    playOrder: 1),
-            .init(title: "Page 2", plainTextOffset: -1,   playOrder: 2),
-            .init(title: "Page 3", plainTextOffset: 3000, playOrder: 3),
+            .init(title: "Page 1", plainTextOffset: 0,    unitID: UUID(), playOrder: 1),
+            .init(title: "Page 2", plainTextOffset: -1,   unitID: UUID(), playOrder: 2),
+            .init(title: "Page 3", plainTextOffset: 3000, unitID: UUID(), playOrder: 3),
         ]
         let map = DocumentPageMap.buildForEPUB(tocEntries: entries)
         // Page 2 was skipped; gap-fill applies — Page 2 backfills

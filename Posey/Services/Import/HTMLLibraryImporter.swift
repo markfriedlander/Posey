@@ -198,7 +198,16 @@ struct HTMLLibraryImporter {
         // (moby-dick.html, tale-of-two-cities, Wikipedia-P&P c5). Filtered ONLY
         // from the nav TOC — the upstream resolvedHeadings still drive skip /
         // promotion / demote logic unchanged, so this is a c5-only cleanup.
-        let tocEntries = resolvedHeadings.filter { !Self.isHTMLNavApparatus($0.title) }
+        // Resolve each draft to its durable paragraph identity now that `units`
+        // exists (same ruler, at import); drop one that can't anchor (Position Rule).
+        let tocEntries: [StoredTOCEntry] = resolvedHeadings
+            .filter { !Self.isHTMLNavApparatus($0.title) }
+            .compactMap { d in
+                guard let uid = ContentUnitBuilder.firstUnit(
+                    in: units, atOrAfterPlainTextOffset: d.plainTextOffset)?.id else { return nil }
+                return StoredTOCEntry(title: d.title, plainTextOffset: d.plainTextOffset,
+                                      unitID: uid, playOrder: d.playOrder, level: d.level)
+            }
 
         let parsedDoc = ParsedDocument(
             id: documentID,
@@ -279,11 +288,16 @@ struct HTMLLibraryImporter {
     }
 
     /// rather than offsets so we have to search.
+    /// A heading resolved to its plainText offset, BEFORE units exist (units are
+    /// built later, FROM these). The caller resolves each to its durable paragraph
+    /// identity (`unitID`) once units are available — see the `tocEntries` build.
+    private struct TOCDraft { let title: String; let plainTextOffset: Int; let playOrder: Int; let level: Int }
+
     private func resolveHeadingOffsets(
         _ headings: [HTMLDocumentImporter.HTMLHeadingEntry],
         in plainText: String
-    ) -> [StoredTOCEntry] {
-        var out: [StoredTOCEntry] = []
+    ) -> [TOCDraft] {
+        var out: [TOCDraft] = []
         var cursor = plainText.startIndex
         var order = 0
         for h in headings {
@@ -311,7 +325,7 @@ struct HTMLLibraryImporter {
             }
             let offset = plainText.distance(from: plainText.startIndex, to: range.lowerBound)
             order += 1
-            out.append(StoredTOCEntry(
+            out.append(TOCDraft(
                 title: needle,
                 plainTextOffset: offset,
                 playOrder: order,

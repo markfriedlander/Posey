@@ -188,13 +188,17 @@ struct PDFLibraryImporter {
         let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: skipOffset)?.id
         let skipSource = skipOffset > 0 ? "heuristic" : ""
 
-        // ── TOC pass-through.
-        let tocEntries: [StoredTOCEntry] = parsed.tocEntries.map {
-            StoredTOCEntry(
-                title: $0.title,
-                plainTextOffset: $0.plainTextOffset,
-                playOrder: $0.playOrder,
-                level: $0.level
+        // ── TOC pass-through. Resolve each heading's offset → its durable paragraph
+        // identity (same ruler, at import); drop an entry that can't anchor (Position Rule).
+        let tocEntries: [StoredTOCEntry] = parsed.tocEntries.compactMap { e in
+            guard let uid = ContentUnitBuilder.firstUnit(
+                in: units, atOrAfterPlainTextOffset: e.plainTextOffset)?.id else { return nil }
+            return StoredTOCEntry(
+                title: e.title,
+                plainTextOffset: e.plainTextOffset,
+                unitID: uid,
+                playOrder: e.playOrder,
+                level: e.level
             )
         }
 

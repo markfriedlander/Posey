@@ -95,9 +95,14 @@ struct MarkdownLibraryImporter {
         // ── as we kept block text bit-identical (we did).
         let tocEntries: [StoredTOCEntry] = parsed.blocks.enumerated().compactMap { (idx, block) in
             guard case .heading(let level) = block.kind else { return nil }
+            // Resolve to the durable paragraph identity (same ruler, at import);
+            // drop a heading that can't anchor (Position Rule).
+            guard let uid = ContentUnitBuilder.firstUnit(
+                in: units, atOrAfterPlainTextOffset: block.startOffset)?.id else { return nil }
             return StoredTOCEntry(
                 title: block.text,
                 plainTextOffset: block.startOffset,
+                unitID: uid,
                 playOrder: idx + 1,
                 level: level
             )

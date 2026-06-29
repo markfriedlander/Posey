@@ -13,12 +13,13 @@ import Foundation
 /// `displayText` string.
 ///
 /// Phase 2.2 background enhancement (Tier 2 Vision + Tier 3 AFM)
-/// is **still enqueued for unit-based PDFs in this commit**, and
-/// **still operates on the legacy `plain_text` / `document_chunks`
-/// stores**. The persister populates those stores by joining unit
-/// text, so Tier 2/3 see coherent input. A follow-up commit in the
-/// same rebuild slice rewrites Tier 2/3 to mutate units directly;
-/// at that point the legacy stores get retired.
+/// mutates the document's UNITS directly: Tier 2 rewrites a corrected
+/// page's units via `DatabaseManager.replaceUnitsForPage`; Tier 3 swaps
+/// fusion-repair tokens via `replaceTokenInUnits`. The legacy
+/// `plain_text` / `display_text` columns were retired (Step 10) — both
+/// text forms now derive from `document_units` on demand. The
+/// unit-anchored embedding chunker re-runs at end-of-enhancement so the
+/// chunk set reflects the corrected units.
 ///
 /// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct PDFLibraryImporter {
@@ -249,9 +250,9 @@ struct PDFLibraryImporter {
     }
 
     /// 2026-05-22 Phase 2.2 Step 4 — bridge to the background
-    /// `PDFEnhancementService`. Unchanged in shape during the
-    /// rebuild; Tier 2/3 still operate on plain_text / chunks
-    /// until the follow-up commit retargets them onto units.
+    /// `PDFEnhancementService`. Marks the doc enhancement-pending and
+    /// hands it to the service queue; Tier 2/3 mutate the units directly
+    /// (see the type-level doc above).
     private func enqueueEnhancement(documentID: UUID, pageFlags: [PDFPageFlags]) {
         do {
             try databaseManager.updateEnhancementState(

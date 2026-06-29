@@ -219,6 +219,19 @@ final class ImporterGateTests: XCTestCase {
         try dumpPDFOffsets("GEBen.pdf", tag: "geb")
     }
 
+    /// Generalize across the PDF family (Rule 10): a scanned-TOC fixture and a
+    /// second real book-PDF — confirm the known failure modes recur and surface
+    /// any NEW mode before we design the rebuild.
+    func testDive_PDF_scannedToc_offsets() throws {
+        try dumpPDFOffsets("scanned-toc-test.pdf", tag: "scanned")
+    }
+    func testDive_PDF_measure_offsets() throws {
+        try dumpPDFOffsets("Measure What Matters - John Doerr.pdf", tag: "measure")
+    }
+    func testDive_PDF_crypto_offsets() throws {
+        try dumpPDFOffsets("Cryptography for Dummies.pdf", tag: "crypto")
+    }
+
     /// Corroborate the GEB wrong-offset hypothesis by a SECOND method (no single
     /// observations): for each TOC title, compare where it RESOLVED to where it
     /// FIRST appears in the text (unconstrained). The monotonic forward-only

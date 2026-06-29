@@ -62,15 +62,29 @@ struct ReaderProgressEstimate: Equatable {
         if charactersRemaining <= 0 {
             return ReaderProgressEstimate(fraction: 1.0, minutesRemaining: nil)
         }
-        let baseWPM: Double = 155.0
-        let pct = max(50.0, min(200.0, Double(ratePercentage > 0 ? ratePercentage : 100)))
-        let effectiveWPM = baseWPM * (pct / 100.0)
-        let words = Double(charactersRemaining) / 5.0
-        let minutes = max(0, Int((words / effectiveWPM).rounded()))
+        let minutes = readingMinutes(charactersRemaining: charactersRemaining,
+                                     ratePercentage: ratePercentage)
         return ReaderProgressEstimate(
             fraction: min(1.0, max(0.0, frac)),
             minutesRemaining: minutes
         )
+    }
+
+    /// THE single reading-time formula (Mark, 2026-06-28). The reader pill (this
+    /// type) AND the library card (`LibraryReadingTimeLabel`) BOTH call this one
+    /// block, so they can never again drift to different finish lines. (They had:
+    /// the pill measured remaining chars to `characterCount` — which INCLUDES the
+    /// trailing Project Gutenberg license — while the card measured to
+    /// `contentEndOffset`, the real end. Same 155-wpm math, two finish lines →
+    /// mismatched "time left".) Callers pass `charactersRemaining` measured to the
+    /// SAME content-end boundary, and apply their own floor / Done special-casing.
+    /// 155 wpm baseline, 5 chars/word, user rate as a percentage (clamped 50–200).
+    static func readingMinutes(charactersRemaining: Int, ratePercentage: Float) -> Int {
+        let baseWPM: Double = 155.0
+        let pct = max(50.0, min(200.0, Double(ratePercentage > 0 ? ratePercentage : 100)))
+        let effectiveWPM = baseWPM * (pct / 100.0)
+        let words = Double(max(0, charactersRemaining)) / 5.0
+        return Int((words / effectiveWPM).rounded())
     }
 }
 // ========== BLOCK 01: PROGRESS MODEL - END ==========
@@ -105,7 +119,14 @@ struct ReaderProgressMeter: View {
                 return 0
             }
             let segStart = segs[idx].startOffset
-            return max(0, viewModel.document.characterCount - segStart)
+            // Measure to the REAL end of the book (content-end), NOT the file end:
+            // characterCount includes the trailing Gutenberg license/colophon, which
+            // the pill must not count as "still to read". Same finish line the
+            // library card uses (`LibraryReadingTimeLabel`) → the two now agree.
+            let endOffset = viewModel.document.contentEndOffset > 0
+                ? viewModel.document.contentEndOffset
+                : viewModel.document.characterCount
+            return max(0, endOffset - segStart)
         }()
         return ReaderProgressEstimate.compute(
             currentSentenceIndex: idx,

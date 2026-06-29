@@ -559,14 +559,20 @@ extension DatabaseManager {
     /// (by design, so a re-reader isn't deflected), which makes the "early line"
     /// A/B probes impossible to set up without this. Driven by the antenna
     /// SET_READING_POSITION verb; never called from the reading UI.
-    func forceReadingPosition(_ offset: Int, for documentID: UUID) throws {
+    ///
+    /// `sentenceIndex` reproduces the segment ordinal the reader itself
+    /// persists (`currentSentenceIndex`) — needed to exercise the library
+    /// card's identity-based "Completed" verdict, which reads the position's
+    /// `sentence_index`, not its offset.
+    func forceReadingPosition(_ offset: Int, sentenceIndex: Int = 0, for documentID: UUID) throws {
         dbLock.lock(); defer { dbLock.unlock() }
         let sql = """
         INSERT INTO reading_positions (document_id, updated_at, character_offset, sentence_index, furthest_character_offset)
-        VALUES (?, ?, ?, 0, ?)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(document_id) DO UPDATE SET
             updated_at = excluded.updated_at,
             character_offset = excluded.character_offset,
+            sentence_index = excluded.sentence_index,
             furthest_character_offset = excluded.furthest_character_offset;
         """
         let statement = try prepareStatement(sql: sql)
@@ -574,7 +580,8 @@ extension DatabaseManager {
         try bind(documentID.uuidString, at: 1, for: statement)
         sqlite3_bind_double(statement, 2, Date().timeIntervalSince1970)
         sqlite3_bind_int64(statement, 3, sqlite3_int64(offset))
-        sqlite3_bind_int64(statement, 4, sqlite3_int64(offset))
+        sqlite3_bind_int64(statement, 4, sqlite3_int64(sentenceIndex))
+        sqlite3_bind_int64(statement, 5, sqlite3_int64(offset))
         try step(statement)
     }
 
@@ -2831,6 +2838,54 @@ extension DatabaseManager {
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
         try bind(documentID.uuidString, at: 1, for: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    /// Number of *playable* sentences in the reader's window for a document:
+    /// the sentences whose unit lies at/after the skip boundary and strictly
+    /// before the content-end boundary. This is the SAME
+    /// `[skipUnitSequence, contentEndUnitSequence)` window the reader uses to
+    /// build its `segments` array (see `ReaderViewModel.computeContentFromUnits`),
+    /// so the returned count **minus one** is the index of the last playable
+    /// segment — i.e. the value the reading position's `sentenceIndex` holds
+    /// when the reader is on the final sentence of the book.
+    ///
+    /// Identity-based by design (Position Rule): the skip / content-end
+    /// boundaries are resolved from the stored **unit IDs** to their sequence
+    /// order, never from character offsets. Lets the "Completed" verdict be
+    /// decided by sequence identity instead of comparing a reading offset
+    /// against a character total — the no-content-end fallback otherwise mixed
+    /// the R2 reading offset against the R1 `characterCount` (different rulers
+    /// that drift per document). A NULL skip / content-end boundary degrades to
+    /// "no bound" via COALESCE, exactly matching the reader's `?.sequence`-nil
+    /// filter. Returns 0 when the document has no sentence rows.
+    func playbackSentenceCount(for documentID: UUID) throws -> Int {
+        // unitSkipReferences takes dbLock itself; call it BEFORE locking
+        // (NSLock is not reentrant).
+        let refs = try unitSkipReferences(for: documentID)
+        dbLock.lock(); defer { dbLock.unlock() }
+        let sql = """
+        SELECT COUNT(*) FROM document_sentences
+        WHERE document_id = ?1
+          AND unit_sequence >= COALESCE(
+                (SELECT sequence FROM document_units WHERE id = ?2), unit_sequence)
+          AND unit_sequence <  COALESCE(
+                (SELECT sequence FROM document_units WHERE id = ?3), unit_sequence + 1);
+        """
+        let statement = try prepareStatement(sql: sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(documentID.uuidString, at: 1, for: statement)
+        if let skip = refs.skipUnitID {
+            try bind(skip.uuidString, at: 2, for: statement)
+        } else {
+            sqlite3_bind_null(statement, 2)
+        }
+        if let end = refs.contentEndUnitID {
+            try bind(end.uuidString, at: 3, for: statement)
+        } else {
+            sqlite3_bind_null(statement, 3)
+        }
         guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int64(statement, 0))
     }

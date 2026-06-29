@@ -1641,17 +1641,32 @@ extension LibraryViewModel {
                 // 2026-06-17 — Spoiler firewall test support. FORCE the reading
                 // position (current + furthest) to an exact offset so the A/B
                 // probes can set the spoiler line precisely (the furthest offset
-                // is otherwise max()-sticky). Usage: SET_READING_POSITION:<doc>:<offset>
-                let parts = (arg ?? "").split(separator: ":", maxSplits: 1).map(String.init)
-                guard parts.count == 2, let id = UUID(uuidString: parts[0]), let off = Int(parts[1]) else {
-                    return #"{"error":"Usage: SET_READING_POSITION:<doc-id>:<offset>"}"#
+                // is otherwise max()-sticky).
+                // 2026-06-28 — optional 3rd arg sets the segment ordinal too,
+                // so the library card's identity "Completed" verdict can be
+                // exercised (it keys on sentence_index, not offset).
+                // Usage: SET_READING_POSITION:<doc>:<offset>[:<sentenceIndex>]
+                let parts = (arg ?? "").split(separator: ":", maxSplits: 2).map(String.init)
+                guard parts.count >= 2, let id = UUID(uuidString: parts[0]), let off = Int(parts[1]) else {
+                    return #"{"error":"Usage: SET_READING_POSITION:<doc-id>:<offset>[:<sentenceIndex>]"}"#
                 }
+                let sentenceIndex = parts.count >= 3 ? (Int(parts[2]) ?? 0) : 0
                 do {
-                    try databaseManager.forceReadingPosition(off, for: id)
+                    try databaseManager.forceReadingPosition(off, sentenceIndex: sentenceIndex, for: id)
                 } catch {
                     return #"{"error":"Failed to set reading position: \#(error)"}"#
                 }
-                return json(["status": "ok", "documentID": id.uuidString, "offset": off])
+                // Echo the reader-window sentence count so a test can read the
+                // identity "Completed" boundary (sentenceIndex == count - 1) in
+                // one round trip.
+                let windowCount = (try? databaseManager.playbackSentenceCount(for: id)) ?? 0
+                return json([
+                    "status": "ok",
+                    "documentID": id.uuidString,
+                    "offset": off,
+                    "sentenceIndex": sentenceIndex,
+                    "playbackSentenceCount": windowCount
+                ])
 
             case "REINDEX_DOCUMENT":
                 // 2026-05-23 — Step 8f: rewired to the new

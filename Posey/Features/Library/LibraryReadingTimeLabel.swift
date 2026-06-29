@@ -42,38 +42,62 @@ struct LibraryReadingTimeEstimate: Equatable {
     /// - `contentEndOffset`: 0 means use characterCount as the end
     /// - `ratePercentage`: TTS rate as a percentage (75–150 typical;
     ///   100 for Best Available)
+    /// - `positionSentenceIndex`: the reading position's segment ordinal — the
+    ///   reader's index into its `[skip, contentEnd)` window of sentences.
+    /// - `playbackSentenceCount`: the number of sentences in that same window
+    ///   (`DatabaseManager.playbackSentenceCount`). 0 means "unknown" — no
+    ///   sentence rows to judge by — and the verdict falls back to the offset
+    ///   compare.
+    ///
+    /// **The "Completed" verdict is decided by IDENTITY** (Position Rule):
+    /// the reader builds `segments` by filtering sentences to the `[skip unit,
+    /// content-end unit)` sequence window; `sentenceIndex` is the ordinal in
+    /// that window. Reaching its last entry == finished the book — independent
+    /// of any character ruler. This replaces the old offset comparison, whose
+    /// no-content-end fallback compared the **R2** reading offset against the
+    /// **R1** `characterCount` (different rulers, drift per document). The
+    /// reading-time MINUTES stay a count (offset-based estimate), as intended.
     static func compute(
         characterCount: Int,
         currentOffset: Int,
         contentEndOffset: Int,
-        ratePercentage: Float
+        ratePercentage: Float,
+        positionSentenceIndex: Int,
+        playbackSentenceCount: Int
     ) -> LibraryReadingTimeEstimate {
         let endOffset = contentEndOffset > 0 ? contentEndOffset : characterCount
         guard characterCount > 0, endOffset > 0 else {
             return LibraryReadingTimeEstimate(state: .unstarted(totalMinutes: 0))
         }
 
-        let baseWPM: Double = 155.0
-        let pct = max(50.0, min(200.0, Double(ratePercentage > 0 ? ratePercentage : 100)))
-        let effectiveWPM = baseWPM * (pct / 100.0)
-
-        // Completed: at or past end (with a small buffer for sentence-
-        // boundary rounding).
-        if currentOffset >= max(0, endOffset - 1) {
-            return LibraryReadingTimeEstimate(state: .completed)
-        }
-
-        // Unstarted: zero offset → total reading time.
+        // Unstarted: zero offset → total reading time. Checked first so a
+        // freshly-imported doc (position at offset 0 / sentence 0) reads as
+        // "total time", never as a false "Completed" on a one-sentence window.
         if currentOffset <= 0 {
-            let words = Double(endOffset) / 5.0
-            let minutes = max(1, Int((words / effectiveWPM).rounded()))
+            // ONE shared formula with the reader pill (Mark, 2026-06-28) → no drift.
+            let minutes = max(1, ReaderProgressEstimate.readingMinutes(
+                charactersRemaining: endOffset, ratePercentage: ratePercentage))
             return LibraryReadingTimeEstimate(state: .unstarted(totalMinutes: minutes))
         }
 
-        // In progress: minutes remaining from current position to end.
+        // Completed — IDENTITY: the reading position's segment ordinal has
+        // reached the last sentence of the reader's window. When we have no
+        // sentence rows to judge by (`playbackSentenceCount == 0`, legacy /
+        // edge), fall back to the old offset compare (small buffer for
+        // sentence-boundary rounding).
+        if playbackSentenceCount > 0 {
+            if positionSentenceIndex >= playbackSentenceCount - 1 {
+                return LibraryReadingTimeEstimate(state: .completed)
+            }
+        } else if currentOffset >= max(0, endOffset - 1) {
+            return LibraryReadingTimeEstimate(state: .completed)
+        }
+
+        // In progress: minutes remaining from current position to end — SAME
+        // shared formula + SAME content-end finish line as the reader pill.
         let charsRemaining = max(0, endOffset - currentOffset)
-        let words = Double(charsRemaining) / 5.0
-        let minutes = max(1, Int((words / effectiveWPM).rounded()))
+        let minutes = max(1, ReaderProgressEstimate.readingMinutes(
+            charactersRemaining: charsRemaining, ratePercentage: ratePercentage))
         return LibraryReadingTimeEstimate(state: .inProgress(minutesRemaining: minutes))
     }
 
@@ -118,6 +142,8 @@ struct LibraryReadingTimeLabel: View {
 
     @State private var ratePercentage: Float = 100
     @State private var positionOffset: Int = 0
+    @State private var positionSentenceIndex: Int = 0
+    @State private var playbackSentenceCount: Int = 0
 
     var body: some View {
         Text(estimate.label)
@@ -126,6 +152,7 @@ struct LibraryReadingTimeLabel: View {
             .onAppear {
                 refreshRate()
                 refreshPosition()
+                refreshPlaybackCount()
             }
             .onReceive(NotificationCenter.default.publisher(
                 for: UserDefaults.didChangeNotification
@@ -137,9 +164,11 @@ struct LibraryReadingTimeLabel: View {
             // doesn't change the position, but a re-import does).
             .onChange(of: document.id) { _, _ in
                 refreshPosition()
+                refreshPlaybackCount()
             }
             .onChange(of: document.characterCount) { _, _ in
                 refreshPosition()
+                refreshPlaybackCount()
             }
     }
 
@@ -148,7 +177,9 @@ struct LibraryReadingTimeLabel: View {
             characterCount: document.characterCount,
             currentOffset: positionOffset,
             contentEndOffset: document.contentEndOffset,
-            ratePercentage: ratePercentage
+            ratePercentage: ratePercentage,
+            positionSentenceIndex: positionSentenceIndex,
+            playbackSentenceCount: playbackSentenceCount
         )
     }
 
@@ -164,6 +195,14 @@ struct LibraryReadingTimeLabel: View {
     private func refreshPosition() {
         let pos = try? databaseManager.readingPosition(for: document.id)
         positionOffset = pos?.characterOffset ?? 0
+        positionSentenceIndex = pos?.sentenceIndex ?? 0
+    }
+
+    // The reader window's sentence count is fixed per import (it changes only
+    // when the document is re-imported, which also changes characterCount), so
+    // it's fetched alongside the position rather than on every recompute.
+    private func refreshPlaybackCount() {
+        playbackSentenceCount = (try? databaseManager.playbackSentenceCount(for: document.id)) ?? 0
     }
 }
 

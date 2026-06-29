@@ -112,6 +112,78 @@ final class ImporterGateTests: XCTestCase {
         try assess(db, doc, format: "EPUB", file: "01661_adventures-of-sherlock-holmes.epub", assertClean: true)
     }
 
+    // ── PDF DEEP-DIVE diagnostics: dump the parser's TOC offsets + the actual
+    //    displayText sitting at each, to SEE why import-time entries collapse
+    //    onto shared prose units (Rule 5: look at the artifact, don't guess). ──
+
+    private func dumpPDFOffsets(_ file: String, tag: String) throws {
+        let url = try src(file)
+        let parsed = try PDFDocumentImporter().loadDocument(from: url)
+        let text = parsed.displayText
+        let nsText = text as NSString
+        var out = "════════ [PDF DEEP-DIVE] \(file) ════════\n"
+        out += "  displayText.count=\(text.count)  tocEntries=\(parsed.tocEntries.count)  tocSkipUntilOffset=\(parsed.tocSkipUntilOffset)\n"
+        out += "  ── each entry: playOrder | level | plainTextOffset | title  →  text AT that offset ──\n"
+        for e in parsed.tocEntries.prefix(30) {
+            let off = max(0, min(e.plainTextOffset, nsText.length - 1))
+            let snipLen = min(48, nsText.length - off)
+            let snip = snipLen > 0 ? nsText.substring(with: NSRange(location: off, length: snipLen)) : ""
+            let clean = snip.replacingOccurrences(of: "\n", with: "⏎")
+            out += "  #\(e.playOrder) L\(e.level) @\(e.plainTextOffset)  '\(e.title.prefix(34))'  →  '\(clean)'\n"
+        }
+        // Distinct-offset check: how many entries share an offset?
+        let offsets = parsed.tocEntries.map { $0.plainTextOffset }
+        let distinct = Set(offsets).count
+        out += "  offsets: \(offsets.count) entries, \(distinct) DISTINCT (collapsed=\(offsets.count - distinct))\n"
+        try? out.write(to: URL(fileURLWithPath: "/tmp/pdfdive_\(tag).txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
+    func testDive_PDF_attention_offsets() throws {
+        try dumpPDFOffsets("attention-is-all-you-need_arxiv.pdf", tag: "attention")
+    }
+
+    /// Pin the EXACT failure stage: import Attention via the FULL PDFLibraryImporter,
+    /// then dump (a) every imported unit — index, kind, computed plainText offset,
+    /// first chars — and (b) each TOC entry → which unit index its stored unitID
+    /// resolves to, and that unit's offset. If every entry resolves to unit 0,
+    /// the units aren't split at headings. If entries resolve to DISTINCT later
+    /// units but the reader still lands at 0, the bug is downstream (jump/resolve).
+    func testDive_PDF_attention_unitMapping() throws {
+        let db = try freshDB()
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("attention-is-all-you-need_arxiv.pdf"))
+        let units = try db.units(for: doc.id)
+        let toc = try db.tocEntries(for: doc.id)
+        // Compute each unit's plainText offset the way the resolver does.
+        var offsetByIndex: [Int] = []
+        var cum = 0
+        for u in units {
+            offsetByIndex.append(cum)
+            if u.kind.carriesProseText { cum += u.text.count + 2 }
+        }
+        let indexByID = Dictionary(units.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
+
+        var out = "════════ [PDF UNIT-MAP] attention — units=\(units.count) toc=\(toc.count) ════════\n"
+        out += "── UNITS (index | kind | offset | firstChars) ──\n"
+        for (i, u) in units.enumerated() {
+            out += "  [\(i)] \(u.kind) @\(offsetByIndex[i]) lvl=\(u.metadata.headingLevel.map(String.init) ?? "-") '\(u.text.prefix(40).replacingOccurrences(of: "\n", with: "⏎"))'\n"
+        }
+        out += "── TOC → resolved unit ──\n"
+        for e in toc {
+            let idx = indexByID[e.unitID]
+            let uoff = idx.map { offsetByIndex[$0] } ?? -1
+            out += "  '\(e.title.prefix(30))' @\(e.plainTextOffset)  →  unit[\(idx.map(String.init) ?? "MISSING")] @\(uoff)\n"
+        }
+        let resolvedIdxs = toc.compactMap { indexByID[$0.unitID] }
+        out += "── TOC resolves to \(Set(resolvedIdxs).count) DISTINCT units (of \(toc.count) entries; \(toc.count - resolvedIdxs.count) MISSING) ──\n"
+        try? out.write(to: URL(fileURLWithPath: "/tmp/pdf_unitmap.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
+    func testDive_PDF_geb_offsets() throws {
+        try dumpPDFOffsets("GEBen.pdf", tag: "geb")
+    }
+
     // ── PDFs: MEASURE-ONLY (book-PDF structure is the known deep-dive) ───────
 
     func testGate_PDF_attention_bornDigital() throws {

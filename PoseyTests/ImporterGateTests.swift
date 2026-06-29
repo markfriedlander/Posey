@@ -184,6 +184,36 @@ final class ImporterGateTests: XCTestCase {
         try dumpPDFOffsets("GEBen.pdf", tag: "geb")
     }
 
+    /// Corroborate the GEB wrong-offset hypothesis by a SECOND method (no single
+    /// observations): for each TOC title, compare where it RESOLVED to where it
+    /// FIRST appears in the text (unconstrained). The monotonic forward-only
+    /// resolver (PDFTextStructureDetector.buildEntries) predicts that once the
+    /// cursor leaps into the back-of-book index, later titles resolve FAR LATER
+    /// than their first (body) occurrence — a measurable cascade.
+    func testDive_PDF_geb_firstOccurrenceVsResolved() throws {
+        let url = try src("GEBen.pdf")
+        let parsed = try PDFDocumentImporter().loadDocument(from: url)
+        let text = parsed.displayText
+        let ns = text as NSString
+        var out = "════════ [GEB cascade] firstOccurrence vs resolved (text.count=\(text.count)) ════════\n"
+        var cascaded = 0
+        for e in parsed.tocEntries {
+            // First unconstrained occurrence of the bare title.
+            let bare = e.title.split(separator: " ", maxSplits: 1).last.map(String.init) ?? e.title
+            let firstFull = ns.range(of: e.title, options: .caseInsensitive)
+            let firstBare = ns.range(of: bare, options: .caseInsensitive)
+            let first = firstFull.location != NSNotFound ? firstFull.location
+                      : (firstBare.location != NSNotFound ? firstBare.location : -1)
+            let gap = first >= 0 ? e.plainTextOffset - first : 0
+            // "cascaded" = resolved much later than where it first appears.
+            if first >= 0 && gap > 5000 { cascaded += 1 }
+            out += "  #\(e.playOrder) '\(e.title.prefix(30))'  resolved=@\(e.plainTextOffset)  firstSeen=@\(first)  gap=\(gap)\(gap > 5000 ? "  ⟵CASCADE" : "")\n"
+        }
+        out += "── \(cascaded) of \(parsed.tocEntries.count) entries resolved >5000 chars AFTER their first appearance ──\n"
+        try? out.write(to: URL(fileURLWithPath: "/tmp/geb_cascade.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
     // ── PDFs: MEASURE-ONLY (book-PDF structure is the known deep-dive) ───────
 
     func testGate_PDF_attention_bornDigital() throws {

@@ -143,6 +143,41 @@ final class ImporterGateTests: XCTestCase {
         try dumpPDFOffsets("attention-is-all-you-need_arxiv.pdf", tag: "attention")
     }
 
+    /// Pin the off-by-one: is it constant (a harmless +1) or GROWING cross-ruler
+    /// drift (a real time-bomb that craters fine-grained units)? Hypothesis: the
+    /// outline resolver computes offsets in `joined` space (pages joined with
+    /// "\n\n", 2 chars) but the reader's units come from `displayText` (pages
+    /// joined with a single form-feed). So the stored offset drifts +1 per page
+    /// boundary. Measure drift = storedOffset − trueDisplayTextPosition per entry;
+    /// if it climbs with page number, the rulers diverge and it MUST be fixed
+    /// before chopping into small units. Method 2 corroborating the code read.
+    func testDive_PDF_attention_offsetDriftGrows() throws {
+        let url = try src("attention-is-all-you-need_arxiv.pdf")
+        let parsed = try PDFDocumentImporter().loadDocument(from: url)
+        let disp = parsed.displayText as NSString
+        // Count form-feeds before a given displayText offset = page index there.
+        func pageAt(_ off: Int) -> Int {
+            let sub = disp.substring(to: min(off, disp.length))
+            return sub.components(separatedBy: "\u{000C}").count - 1
+        }
+        var out = "════════ [OFF-BY-ONE] attention — stored offset vs true position in displayText ════════\n"
+        var prevDrift: Int? = nil
+        for e in parsed.tocEntries {
+            // True position: exact (case-insensitive) match of the title in displayText.
+            let r = disp.range(of: e.title, options: .caseInsensitive)
+            if r.location == NSNotFound {
+                out += "  #\(e.playOrder) '\(e.title.prefix(26))' stored=@\(e.plainTextOffset)  (title not found verbatim)\n"
+                continue
+            }
+            let drift = e.plainTextOffset - r.location
+            let delta = prevDrift.map { drift - $0 }
+            prevDrift = drift
+            out += "  #\(e.playOrder) '\(e.title.prefix(26))' stored=@\(e.plainTextOffset) true=@\(r.location) page≈\(pageAt(r.location)) DRIFT=\(drift)\(delta.map { "  (Δ\($0))" } ?? "")\n"
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/pdf_drift.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
     /// Pin the EXACT failure stage: import Attention via the FULL PDFLibraryImporter,
     /// then dump (a) every imported unit — index, kind, computed plainText offset,
     /// first chars — and (b) each TOC entry → which unit index its stored unitID

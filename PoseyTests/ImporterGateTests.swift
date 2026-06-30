@@ -357,6 +357,100 @@ final class ImporterGateTests: XCTestCase {
         try dumpPDFOffsets("Cryptography for Dummies.pdf", tag: "crypto")
     }
 
+    /// PDF rebuild (2026-06-29) — RECONCILE probe vs app. My macOS probe saw
+    /// Crypto p15 "Chapter 1: A Primer…" at f14 BOLD, but the in-app deriver says
+    /// "not located". Dump what the APP's `PDFLineExtractor` actually produces on
+    /// the failing pages, so I debug reality, not a guess (Rule 5 + corroborate).
+    func testDive_PDF_extractorReality() throws {
+        var out = ""
+        // Crypto p15 — the chapter-1 page; do we see the f14 bold heading?
+        if let doc = PDFDocument(url: try src("Cryptography for Dummies.pdf")), let p = doc.page(at: 15) {
+            out += "════ Crypto p15 — ALL app-extracted lines ════\n"
+            for l in PDFLineExtractor.lines(from: p, pageIndex: 15) {
+                out += String(format: "  f%.1f%@%@ x%.0f | %@\n", l.fontSize, l.isBold ? "B" : " ",
+                              l.isAllCaps ? "C" : " ", l.indentX, l.text.prefix(64).description)
+            }
+        }
+        // GEB — across the first 130 sheets, every BIG-font line (≥14pt): are the
+        // real chapter headings (like "The MU-puzzle") actually extracted?
+        if let doc = PDFDocument(url: try src("GEBen.pdf")) {
+            out += "\n════ GEB — all lines ≥14pt in sheets 0–130 ════\n"
+            for pg in 0..<min(doc.pageCount, 130) {
+                guard let page = doc.page(at: pg) else { continue }
+                for l in PDFLineExtractor.lines(from: page, pageIndex: pg) where l.fontSize >= 14 {
+                    out += String(format: "  p%d f%.1f%@ | %@\n", pg, l.fontSize, l.isBold ? "B" : " ",
+                                  l.text.prefix(50).description)
+                }
+            }
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/extractor_reality.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
+    /// PDF rebuild (2026-06-29, MARK'S METHOD) — derive each book's heading "key"
+    /// by CONSENSUS across its own chapters. For several known titles, gather
+    /// every appearance in the text, keep the WEIGHTIEST (most prominent), and if
+    /// independent chapters' weightiest appearances AGREE on a signature, that's
+    /// the key. Different key per book, same tool. Measure-only print (Rule 5);
+    /// asserts a key is derived for the books with a clear typographic signal.
+    func testDive_PDF_headingKeySignals() throws {
+        // REAL chapter titles (not front matter), as a reader sees them in the body.
+        struct Book { let file: String; let titles: [String]; let cap: Int; let expectKey: Bool }
+        let books: [Book] = [
+            Book(file: "attention-is-all-you-need_arxiv.pdf",
+                 titles: ["Scaled Dot-Product Attention", "Multi-Head Attention",
+                          "Position-wise Feed-Forward Networks", "Why Self-Attention", "Training"],
+                 cap: 15, expectKey: false),
+            Book(file: "Cryptography for Dummies.pdf",
+                 titles: ["A Primer on Crypto Basics", "Major League Algorithms",
+                          "Deciding What You Really Need", "Locks and Keys"],
+                 cap: 130, expectKey: true),
+            Book(file: "Measure What Matters - John Doerr.pdf",
+                 titles: ["Google, Meet OKRs", "The Father of OKRs", "Operation Crush",
+                          "Focus: The Remind Story", "Commit: The Nuna Story"],
+                 cap: 130, expectKey: true),
+            Book(file: "GEBen.pdf",
+                 titles: ["The MU-puzzle", "Sonata for Unaccompanied Achilles",
+                          "Figure and Ground", "Contracrostipunctus", "Two-Part Invention"],
+                 cap: 130, expectKey: true),
+        ]
+        var out = ""
+        for b in books {
+            let url = try src(b.file)
+            guard let doc = PDFDocument(url: url) else { continue }
+            let titles = b.titles
+            // all reconstructed lines up to the page cap (covers front matter + early chapters).
+            var allLines: [PDFTextLine] = []
+            for p in 0..<min(doc.pageCount, b.cap) {
+                if let page = doc.page(at: p) { allLines += PDFLineExtractor.lines(from: page, pageIndex: p) }
+            }
+            out += "════ \(b.file) — \(titles.count) titles, \(allLines.count) lines (≤\(b.cap)pp) ════\n"
+            let key = PDFHeadingKeyDeriver.derive(titles: titles, allLines: allLines)
+            // show the per-title weightiest appearance (transparency).
+            let body = PDFHeadingKeyDeriver.bodyFontSize(of: allLines)
+            for t in titles.prefix(5) {
+                let top = PDFHeadingKeyDeriver.appearances(of: t, in: allLines, bodyFont: body)
+                    .max { $0.score < $1.score }
+                if let top {
+                    out += String(format: "  '%@' → weightiest f%.1f%@%@ score%.1f | %@\n",
+                                  t.prefix(26).description, top.line.fontSize,
+                                  top.line.isBold ? " BOLD" : "", top.line.isAllCaps ? " CAPS" : "",
+                                  top.score, top.line.text.prefix(40).description)
+                } else { out += "  '\(t.prefix(26))' → (not located)\n" }
+            }
+            if let key {
+                out += String(format: "  ★ KEY: font %.1f%@%@ (body %.1f) — %d/%d chapters agree\n\n",
+                              key.fontSize, key.isBold ? " BOLD" : "", key.isAllCaps ? " CAPS" : "",
+                              key.bodyFontSize, key.votes, key.sampled)
+            } else {
+                out += "  ★ KEY: none derived (no consensus)\n\n"
+            }
+            if b.expectKey { XCTAssertNotNil(key, "[\(b.file)] expected a derivable heading key") }
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/heading_key_signals.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
     /// PDF rebuild Piece 1 corroboration (2026-06-29) — the PAGE ruler.
     /// Hypothesis (from code-read + standalone PDFKit probe): `pageBreak.pageNumber`
     /// is the form-feed-segment ORDINAL (blank pages dropped, text+image pages

@@ -13,7 +13,7 @@ import UIKit
 /// size + ALL-CAPS, the Transformer paper uses a numbered standalone line at body
 /// size. The tool reads these per-line signals so a later step can DERIVE each
 /// book's own `HeadingProfile` and apply it (a "style-inference engine").
-struct PDFTextLine: Equatable, Hashable {
+struct PDFTextLine: Equatable, Hashable, Sendable {
     /// The line's text (clean, reading-order — from PDFKit's own line selection).
     let text: String
     /// The line's representative font size (length-weighted mode of its runs).

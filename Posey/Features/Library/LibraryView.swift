@@ -1800,6 +1800,20 @@ extension LibraryViewModel {
                 IndexingEscapeController.shared.rebuildNow()
                 return json(["rebuilding": true])
 
+            case "SET_BACKGROUND_PREP":
+                // Gentle, NON-destructive pause/resume of background prep (embedding
+                // + RAPTOR) — the SAME master toggle as the board's "Allow background
+                // preparation" switch, NOT the heavy HALT (which clears the suspect
+                // index). Lets CC quiet the phone before an install / before driving
+                // the UI for a screenshot, then resume — so background work never
+                // collides with foreground control and hangs the device (Mark,
+                // 2026-06-29). Writes the AppStorage key too so the UI toggle + the
+                // launch default stay in sync.
+                let on = ["on", "true", "1", "yes"].contains((arg ?? "").lowercased())
+                UserDefaults.standard.set(on, forKey: DocumentIndexingQueue.backgroundPrepDefaultsKey)
+                await DocumentIndexingQueue.shared.setBackgroundPrep(on)
+                return json(["backgroundPrep": on ? "on" : "off"])
+
             case "ENHANCE_CHUNK_NOW":
                 // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).
                 _ = arg

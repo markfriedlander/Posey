@@ -93,6 +93,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("THERMAL_STATE", .system, "THERMAL_STATE", "Device thermal state (nominal/fair/serious/critical)."),
         .init("HALT_INDEXING", .indexing, "HALT_INDEXING", "Escape switch: halt all background indexing + clear the suspect index."),
         .init("REBUILD_INDEXING", .indexing, "REBUILD_INDEXING", "Re-enqueue all pending docs through the paced queue (after a halt)."),
+        .init("SET_BACKGROUND_PREP", .indexing, "SET_BACKGROUND_PREP:<on|off>", "Gentle, NON-destructive pause/resume of background prep (same master toggle as the board switch; NOT the heavy HALT). Quiet the phone before an install/screenshot, then resume."),
         .init("ENHANCE_CHUNK_NOW", .enhancement, "ENHANCE_CHUNK_NOW", ""),
         .init("RETRY_REFUSED", .retrieval, "RETRY_REFUSED", ""),
         .init("LIST_REFUSED_CHUNKS", .document, "LIST_REFUSED_CHUNKS", ""),

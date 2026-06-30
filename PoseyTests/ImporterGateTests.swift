@@ -357,6 +357,54 @@ final class ImporterGateTests: XCTestCase {
         try dumpPDFOffsets("Cryptography for Dummies.pdf", tag: "crypto")
     }
 
+    /// PDF rebuild Piece 1 corroboration (2026-06-29) — the PAGE ruler.
+    /// Hypothesis (from code-read + standalone PDFKit probe): `pageBreak.pageNumber`
+    /// is the form-feed-segment ORDINAL (blank pages dropped, text+image pages
+    /// doubled, hyphen-merge can drop a separator), NOT the TRUE PDFKit page index
+    /// that the outline's chapter destinations use. If so, the two rulers diverge
+    /// on docs with blank/image pages, and anchoring a chapter by page mis-maps.
+    /// Measure-only: prints the proof so it's VISIBLE (Rule 5), asserts nothing.
+    func testDive_PDF_pageRulerAlignment() throws {
+        for file in ["attention-is-all-you-need_arxiv.pdf",
+                     "Measure What Matters - John Doerr.pdf",
+                     "Cryptography for Dummies.pdf"] {
+            let url = try src(file)
+            // TRUE page facts straight from PDFKit.
+            guard let raw = PDFDocument(url: url) else { continue }
+            let truePageCount = raw.pageCount
+            var outlineDests: [(String, Int)] = []
+            func walk(_ n: PDFOutline) {
+                for k in 0..<n.numberOfChildren {
+                    guard let c = n.child(at: k) else { continue }
+                    if let l = c.label, !l.isEmpty, let d = c.destination, let p = d.page {
+                        outlineDests.append((l, raw.index(for: p)))
+                    }
+                    walk(c)
+                }
+            }
+            if let root = raw.outlineRoot { walk(root) }
+
+            // What the IMPORTER produced.
+            let db = try freshDB()
+            let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: url)
+            let units = try db.units(for: doc.id)
+            let breaks = units.filter { $0.kind == .pageBreak }
+            let breakPages = breaks.compactMap { $0.metadata.pageNumber }.sorted()
+            let maxBreakPage = breakPages.last ?? -1
+            // Does every outline destination page have a matching pageBreak?
+            let breakPageSet = Set(breakPages)
+            let destsWithoutBreak = outlineDests.filter { !breakPageSet.contains($0.1) }
+
+            var out = "════════ [pageRuler] \(file) ════════\n"
+            out += "  TRUE PDFKit pages: \(truePageCount)   pageBreak units: \(breaks.count)   max pageBreak.pageNumber: \(maxBreakPage)\n"
+            out += "  → pageBreak count \(breaks.count == truePageCount ? "==" : "!=") truePageCount, maxBreakPage \(maxBreakPage == truePageCount - 1 ? "==" : "!=") truePageCount-1\n"
+            out += "  outline dests: \(outlineDests.count)   dests with NO matching pageBreak (would dangle/mis-anchor): \(destsWithoutBreak.count)\n"
+            for d in destsWithoutBreak.prefix(8) { out += "    • '\(d.0.prefix(34))' → true page \(d.1) (no pageBreak with that number)\n" }
+            try? out.write(to: URL(fileURLWithPath: "/tmp/pageruler_\(file.prefix(6)).txt"), atomically: true, encoding: .utf8)
+            print(out)
+        }
+    }
+
     /// Corroborate the GEB wrong-offset hypothesis by a SECOND method (no single
     /// observations): for each TOC title, compare where it RESOLVED to where it
     /// FIRST appears in the text (unconstrained). The monotonic forward-only

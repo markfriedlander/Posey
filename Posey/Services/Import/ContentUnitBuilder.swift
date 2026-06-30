@@ -245,6 +245,64 @@ enum ContentUnitBuilder {
         return units
     }
 
+    /// PDF rebuild Piece A (2026-06-29) — build content units from the CLEAN
+    /// line stream (`PDFLineExtractor`, PDFKit-native), not the form-feed string.
+    /// Per page: a `pageBreak` unit (sheet index, for the page map — never an
+    /// anchor), then `.heading` units for lines the caller's `isHeading` marks,
+    /// and `.prose` units for paragraphs grouped from consecutive body lines
+    /// (split on a notably-larger-than-leading vertical gap). The caller supplies
+    /// `isHeading` / `headingLevel` from the derived `HeadingProfile` so this
+    /// builder stays decoupled from per-book heading inference.
+    ///
+    /// NOTE (follow-up): cross-page paragraph STITCHING (a paragraph spanning a
+    /// page break = one unit) is a read-along-smoothness refinement tracked
+    /// separately; this first version flushes at page end. Chapter navigation
+    /// (the heading units) does not depend on it.
+    static func unitsFromPDFLines(
+        _ linesByPage: [[PDFTextLine]],
+        documentID: UUID,
+        isHeading: (PDFTextLine) -> Bool,
+        headingLevel: (PDFTextLine) -> Int = { _ in 1 }
+    ) -> [ContentUnit] {
+        var units: [ContentUnit] = []
+        var sequence = 10
+        func add(_ kind: ContentUnitKind, _ text: String, _ meta: ContentUnitMetadata = .empty) {
+            units.append(ContentUnit(documentID: documentID, sequence: sequence, kind: kind,
+                                     text: text, metadata: meta))
+            sequence += 10
+        }
+
+        for page in linesByPage {
+            guard let pageIndex = page.first?.pageIndex else { continue }
+            add(.pageBreak, "", ContentUnitMetadata(pageNumber: pageIndex))
+
+            // A paragraph break is a vertical gap notably larger than the page's
+            // typical line leading. Use the median positive gap as the baseline.
+            let gaps = page.map { $0.gapAbove }.filter { $0 > 0 }.sorted()
+            let typicalGap = gaps.isEmpty ? 0 : gaps[gaps.count / 2]
+            let paraThreshold = typicalGap > 0 ? typicalGap * 1.6 : .greatestFiniteMagnitude
+
+            var buffer: [String] = []
+            func flushParagraph() {
+                let text = buffer.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty { add(.prose, text) }
+                buffer.removeAll(keepingCapacity: true)
+            }
+
+            for line in page {
+                if isHeading(line) {
+                    flushParagraph()
+                    add(.heading, line.text, ContentUnitMetadata(headingLevel: headingLevel(line)))
+                } else {
+                    if !buffer.isEmpty, line.gapAbove >= paraThreshold { flushParagraph() }
+                    buffer.append(line.text)
+                }
+            }
+            flushParagraph()
+        }
+        return units
+    }
+
     /// Single-block conversion, exposed so formats with mixed
     /// content (image interleaving, page breaks) can call it from
     /// their own loops.

@@ -108,6 +108,24 @@ enum PDFHeadingKeyDeriver {
         return s
     }
 
+    /// The set of lines that ARE chapter headings — each known title's weightiest
+    /// appearance, kept only if it stands out from body (Mark's "small prequalified
+    /// pool": choose among a title's own appearances, never scan blind). The unit
+    /// builder marks exactly these lines as `.heading` units, anchoring each
+    /// chapter to its real heading by identity. (Outline-first / profile path;
+    /// fuzzy + numbering modes layer on later.)
+    static func headingLines(titles: [String], allLines: [PDFTextLine]) -> Set<PDFTextLine> {
+        let bodyFont = bodyFontSize(of: allLines)
+        var result: Set<PDFTextLine> = []
+        for title in titles {
+            let apps = appearances(of: title, in: allLines, bodyFont: bodyFont)
+            if let top = apps.max(by: { $0.score < $1.score }), standsOut(top.line, bodyFont: bodyFont) {
+                result.insert(top.line)
+            }
+        }
+        return result
+    }
+
     /// Does this line stand out from body text — i.e. could it be a heading at
     /// all? Bigger font, OR bold, OR ALL-CAPS. A plain body-font, non-bold,
     /// non-caps line is a mention, not a heading, and must not vote for the key.

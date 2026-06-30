@@ -357,6 +357,46 @@ final class ImporterGateTests: XCTestCase {
         try dumpPDFOffsets("Cryptography for Dummies.pdf", tag: "crypto")
     }
 
+    /// PDF rebuild Piece A+B (2026-06-29) — full NEW pipeline on a real book:
+    /// clean lines → resolve heading lines (per-title weightiest) → build units.
+    /// Confirms chapters become `.heading` units (the thing the play-head can land
+    /// on). Cryptography: 14pt-bold chapter headings against 8.5 body.
+    func testDive_PDF_unitsFromLines() throws {
+        let titles = ["A Primer on Crypto Basics", "Major League Algorithms",
+                      "Deciding What You Really Need", "Locks and Keys"]
+        guard let doc = PDFDocument(url: try src("Cryptography for Dummies.pdf")) else {
+            XCTFail("open"); return
+        }
+        var linesByPage: [[PDFTextLine]] = []
+        for p in 0..<min(doc.pageCount, 130) {
+            if let page = doc.page(at: p) {
+                let ls = PDFLineExtractor.lines(from: page, pageIndex: p)
+                if !ls.isEmpty { linesByPage.append(ls) }
+            }
+        }
+        let headingSet = PDFHeadingKeyDeriver.headingLines(titles: titles, allLines: linesByPage.flatMap { $0 })
+        let units = ContentUnitBuilder.unitsFromPDFLines(
+            linesByPage, documentID: UUID(),
+            isHeading: { headingSet.contains($0) })
+
+        let headingUnits = units.filter { $0.kind == .heading }
+        var out = "════ Crypto — new pipeline ════\n"
+        out += "  pages=\(linesByPage.count)  units=\(units.count)  heading-units=\(headingUnits.count)  resolved-heading-lines=\(headingSet.count)\n"
+        for h in headingUnits.prefix(12) { out += "  [H] \(h.text.prefix(48))\n" }
+        // sample: the units right around the first chapter heading
+        if let idx = units.firstIndex(where: { $0.kind == .heading && $0.text.contains("Primer") }) {
+            out += "  — around 'Primer' heading —\n"
+            for u in units[max(0,idx-1)...min(units.count-1, idx+2)] {
+                out += "    \(u.kind) | \(u.text.prefix(50))\n"
+            }
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/units_from_lines.txt"), atomically: true, encoding: .utf8)
+        print(out)
+        XCTAssertGreaterThanOrEqual(headingUnits.count, 3, "expected the resolved chapter headings to become .heading units")
+        XCTAssertTrue(headingUnits.contains { $0.text.contains("Primer on Crypto") },
+                      "'A Primer on Crypto Basics' should be a heading unit")
+    }
+
     /// PDF rebuild (2026-06-29) — RECONCILE probe vs app. My macOS probe saw
     /// Crypto p15 "Chapter 1: A Primer…" at f14 BOLD, but the in-app deriver says
     /// "not located". Dump what the APP's `PDFLineExtractor` actually produces on

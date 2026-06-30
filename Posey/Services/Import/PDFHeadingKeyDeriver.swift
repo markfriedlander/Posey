@@ -84,13 +84,8 @@ enum PDFHeadingKeyDeriver {
         guard !titleWords.isEmpty else { return [] }
         let titleSet = Set(titleWords)
         var out: [TitleAppearance] = []
-        for line in lines {
-            let lw = Set(words(line.text))
-            guard !lw.isEmpty else { continue }
-            let overlap = Double(titleSet.intersection(lw).count) / Double(titleSet.count)
-            if overlap >= 0.6 {
-                out.append(TitleAppearance(line: line, score: prominence(line, bodyFont: bodyFont)))
-            }
+        for line in lines where titleMatches(titleSet: titleSet, text: line.text) {
+            out.append(TitleAppearance(line: line, score: prominence(line, bodyFont: bodyFont)))
         }
         return out
     }
@@ -143,6 +138,24 @@ enum PDFHeadingKeyDeriver {
     /// non-caps line is a mention, not a heading, and must not vote for the key.
     static func standsOut(_ line: PDFTextLine, bodyFont: Double) -> Bool {
         line.fontSize > bodyFont + 0.5 || line.isBold || line.isAllCaps
+    }
+
+    /// Does `text` (a candidate heading line / unit) match `title`? Two ways:
+    /// (a) the text covers ≥60% of the TITLE's words — short titles whose heading
+    /// is the whole title ("3. Strikes" → "3. STRIKES"); or (b) the text is (the
+    /// start of) a long WRAPPED title — ≥3 words and ≥80% of the text's words are
+    /// in the title. A 20-word legal title (§4) has a single-line body heading
+    /// carrying only its first ~7 words; (a) misses it (7/20<0.6) but the line is
+    /// fully contained in the title, so (b) catches it on the line side.
+    static func titleMatches(title: String, text: String) -> Bool {
+        titleMatches(titleSet: Set(words(title)), text: text)
+    }
+    static func titleMatches(titleSet: Set<String>, text: String) -> Bool {
+        let lw = Set(words(text))
+        guard !titleSet.isEmpty, !lw.isEmpty else { return false }
+        let inter = titleSet.intersection(lw).count
+        return Double(inter) / Double(titleSet.count) >= 0.6
+            || (lw.count >= 3 && inter >= 3 && Double(inter) / Double(lw.count) >= 0.8)
     }
 
     // MARK: - helpers

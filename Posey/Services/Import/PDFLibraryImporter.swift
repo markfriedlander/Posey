@@ -180,8 +180,15 @@ struct PDFLibraryImporter {
                 if let lineText = lineTextByTitle[e.title], let id = headingUnitIDByText[lineText] {
                     uid = id
                 } else {
-                    let want = e.title.lowercased()
-                    uid = units.first { $0.kind.carriesProseText && $0.text.lowercased().contains(want) }?.id
+                    // Fallback: a HEADING unit matching the title — never the
+                    // contents-listing prose (where every title's words appear).
+                    // If none matches, drop the entry rather than dump it on the
+                    // contents page (which clustered §1/§4/§7/§8 there). Position
+                    // Rule: an entry that can't anchor by identity is dropped.
+                    uid = units.first {
+                        $0.kind == .heading &&
+                        PDFHeadingKeyDeriver.titleMatches(title: e.title, text: $0.text)
+                    }?.id
                 }
                 guard let unitID = uid else { return nil }
                 return StoredTOCEntry(title: e.title, plainTextOffset: e.plainTextOffset,

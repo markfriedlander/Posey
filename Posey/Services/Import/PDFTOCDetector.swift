@@ -154,53 +154,72 @@ struct PDFTOCDetector {
     /// the playback-skip region is the primary value of detection; entries
     /// are a secondary navigation aid.
     static func parseEntries(in tocText: String) -> [Entry] {
-        // Strip the anchor header so it doesn't confuse the entry scan.
-        let cleaned = tocText.replacingOccurrences(of: "Table of Contents",
-                                                   with: " ",
-                                                   options: .caseInsensitive)
-        // The regex breaks the text at label markers and captures
-        // (label) (title-with-dots) (page number).
-        // Title content is allowed to include letters, digits, common
-        // punctuation, and embedded periods (e.g., "v." in "RIAA v. mp3.com").
-        // Lookahead requires the ENTRY end (digits then label-marker or end).
-        let pattern = #"""
-        (?xs)
-        (?<![A-Za-z])                                  # label is not glued to a word
-        ([IVXLCDM]+|[A-Z]|\d+|[a-z])                   # 1: label
-        \.                                             # literal "."
-        \s+
-        ([A-Z][^.…]*?(?:[.…][^.…]*?)*?)                # 2: title — allow embedded dots
-        \s*[.…]{0,}\s*                                 # optional dot leaders
-        (\d{1,4})                                      # 3: page number
-        (?=\s+(?:[IVXLCDM]+|[A-Z]|\d+|[a-z])\.\s|\s*$) # next label or end
-        """#
+        // LINE-BASED STITCHING PARSE (2026-06-29, rebuild). The prior single
+        // regex over the whole concatenated TOC could not handle entries whose
+        // TITLE WRAPS across multiple lines — common in legal docs, textbooks,
+        // and manuals (the SAG-AFTRA Codified Basic Agreement dropped §4/§7/§8/
+        // §11/§25/§26/§31 because their titles span 2–3 lines, often with embedded
+        // numbers like "January 31, 1960" that confused the page-number capture).
+        //
+        // The robust, general signal: a TOC entry ENDS at a line carrying
+        // dot-leaders followed by a page number; any line WITHOUT that is a
+        // wrapped continuation of the current title. We accumulate lines into a
+        // buffer, emit on a terminator line, and start a fresh entry whenever a
+        // line begins with a label ("N." / "N.N." / Roman) — which discards
+        // page-header junk that precedes the first real entry.
+        let lines = tocText
+            .split(whereSeparator: { $0.isNewline })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
 
-        guard let regex = try? NSRegularExpression(pattern: pattern,
-                                                   options: [.allowCommentsAndWhitespace]) else {
-            return []
+        guard
+            // Dot-leader terminator: ≥1 dot/ellipsis then a trailing page number.
+            let termDots = try? NSRegularExpression(pattern: #"[.…]+\s*(\d{1,4})\s*$"#),
+            // A bare trailing page number (no dot leaders) — only trusted on a
+            // line that itself starts with a label (a complete single-line entry
+            // like "28. Injuries … Safety 84"). Wrapped continuation lines never
+            // start with a label, so this can't false-terminate a multi-line title.
+            let endNum = try? NSRegularExpression(pattern: #"\s(\d{1,4})\s*$"#),
+            // Label start: "N." / "N.N." / Roman numeral, then a space + content.
+            let label = try? NSRegularExpression(pattern: #"^(?:\d+(?:\.\d+)?|[IVXLCDM]+)\.\s+\S"#)
+        else { return [] }
+        func match(_ re: NSRegularExpression, _ s: String) -> NSTextCheckingResult? {
+            re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s))
         }
-        let range = NSRange(cleaned.startIndex..., in: cleaned)
+        // The page number a line ends an entry at, or nil if it's a continuation.
+        func terminatorPage(_ s: String, isLabelStart: Bool) -> Int? {
+            if let m = match(termDots, s), let r = Range(m.range(at: 1), in: s) { return Int(s[r]) }
+            if isLabelStart, let m = match(endNum, s), let r = Range(m.range(at: 1), in: s) { return Int(s[r]) }
+            return nil
+        }
+
         var entries: [Entry] = []
-        regex.enumerateMatches(in: cleaned, range: range) { match, _, _ in
-            guard let match,
-                  match.numberOfRanges == 4,
-                  let labelRange = Range(match.range(at: 1), in: cleaned),
-                  let titleRange = Range(match.range(at: 2), in: cleaned),
-                  let pageRange  = Range(match.range(at: 3), in: cleaned) else { return }
-            let label = String(cleaned[labelRange])
-            var title = String(cleaned[titleRange]).trimmingCharacters(in: .whitespaces)
-            // Strip trailing dot-leader fragments and run-on of next entry's
-            // start (defense in depth — the lookahead should already catch this).
-            title = title.replacingOccurrences(of: #"[.…\s]+$"#,
-                                               with: "",
-                                               options: .regularExpression)
-            guard let page = Int(cleaned[pageRange]),
-                  !title.isEmpty,
-                  title.count < 200
-            else { return }
-            // Compose the displayed entry like "I. Introduction" — keeping
-            // the label preserves context for the navigation list.
-            entries.append(Entry(title: "\(label). \(title)", pageNumber: page))
+        var buffer: [String] = []
+        for line in lines {
+            let isLabelStart = match(label, line) != nil
+            // A new labelled entry begins: drop any unterminated buffer (page-header
+            // junk / a malformed prior fragment) so it doesn't pollute this title.
+            if isLabelStart, !buffer.isEmpty,
+               terminatorPage(buffer.joined(separator: " "),
+                              isLabelStart: match(label, buffer[0]) != nil) == nil {
+                buffer.removeAll(keepingCapacity: true)
+            }
+            buffer.append(line)
+
+            if let page = terminatorPage(line, isLabelStart: isLabelStart), page > 0 {
+                let joined = buffer.joined(separator: " ")
+                let title = joined
+                    .replacingOccurrences(of: #"[.…]*\s*\d{1,4}\s*$"#, with: "",
+                                          options: .regularExpression)
+                    .trimmingCharacters(in: .whitespaces)
+                // Keep an entry that either is labelled or was stitched from a
+                // wrapped title (>1 line); reject stray single junk lines.
+                if !title.isEmpty, title.count < 300,
+                   (match(label, title) != nil || buffer.count > 1) {
+                    entries.append(Entry(title: title, pageNumber: page))
+                }
+                buffer.removeAll(keepingCapacity: true)
+            }
         }
         return entries
     }

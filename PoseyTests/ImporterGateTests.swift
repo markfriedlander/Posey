@@ -87,6 +87,34 @@ final class ImporterGateTests: XCTestCase {
         return u
     }
 
+    /// PDF rebuild (2026-06-29) — DEBUG the CBA TOC anchoring. For each stored
+    /// TOC entry, show what its unitID resolved to (kind + sequence + text) and
+    /// whether it's sentence-bearing (visible in the navigator). Reveals why the
+    /// near-duplicate long legal titles (§4/§7/§8) mis-anchor and which sections
+    /// are hidden. Points at the real CBA on disk (skips if absent).
+    func testDive_CBA_anchoring() throws {
+        let path = "/Users/markfriedlander/Desktop/Posey-backup-before-history-rewrite-20260519-222856/Posey Test Materials/2005 Codified Basic Agreement - Theatrical Motion Pictures.pdf"
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: path), "CBA not on disk")
+        let db = try freshDB()
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: URL(fileURLWithPath: path))
+        let units = try db.units(for: doc.id)
+        let byID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let sentenceUnitIDs = Set((try? db.sentences(for: doc.id))?.map { $0.unitID } ?? [])
+        let toc = try db.tocEntries(for: doc.id)
+        var out = "════ CBA anchoring — \(toc.count) entries, \(units.count) units ════\n"
+        for e in toc.prefix(40) {
+            let u = byID[e.unitID]
+            let vis = sentenceUnitIDs.contains(e.unitID) ? "VIS" : "hid"
+            let kind = u.map { "\($0.kind)" } ?? "NIL"
+            let seq = u.map { String($0.sequence) } ?? "-"
+            let utext = u?.text.prefix(30) ?? "—"
+            out += String(format: "  [%@] %-26@ → seq%@ %@ '%@'\n",
+                          vis, e.title.prefix(26).description, seq, kind, utext.description)
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/cba_anchoring.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
     // ── Well-behaved formats: assert clean ──────────────────────────────────
 
     func testGate_MD_pandocManual() throws {

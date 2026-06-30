@@ -271,6 +271,63 @@ final class ImporterGateTests: XCTestCase {
         print("✓ attention no-regression: \(breakUnits.count) breaks == \(textPages) text pages, \(proseUnits.count) prose units, \(toc.count) TOC entries, 0 dangling")
     }
 
+    // ── Academic numbered-section headings ───────────────────────────────────
+
+    /// PDF rebuild — the Transformer paper's section headings ("3.1 Encoder and
+    /// Decoder Stacks") are body-font, so the style-inference engine missed them
+    /// (10 nonHeadingInBody after the line rebuild). With numbered-section
+    /// acceptance in `resolveHeadings`, each KNOWN outline title that resolves to a
+    /// numbered body line becomes a heading unit. Assert TOC body entries now
+    /// resolve to real heading units; print any stragglers.
+    func testNumbering_PDF_attentionNumberedSections() throws {
+        let db = try freshDB()
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("attention-is-all-you-need_arxiv.pdf"))
+        let units = try db.units(for: doc.id)
+        let byID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let refs = try db.unitSkipReferences(for: doc.id)
+        let skipSeq = refs.skipUnitID.flatMap { id in units.first(where: { $0.id == id })?.sequence }
+        let toc = try db.tocEntries(for: doc.id)
+
+        var nhBody = 0
+        var offenders: [String] = []
+        for e in toc {
+            guard let u = byID[e.unitID] else { continue }   // dangling covered elsewhere
+            if u.kind != .heading {
+                let inBody = (skipSeq.map { u.sequence >= $0 } ?? true)
+                if inBody { nhBody += 1; offenders.append("'\(e.title.prefix(34))' → \(u.kind) '\(u.text.prefix(28))'") }
+            }
+        }
+        print("Attention: toc=\(toc.count), nonHeadingInBody=\(nhBody)")
+        offenders.prefix(12).forEach { print("   ✗ \($0)") }
+        XCTAssertEqual(nhBody, 0, "numbered sections should all resolve to heading units; \(nhBody) stragglers: \(offenders.prefix(6))")
+    }
+
+    /// PDF rebuild — Rule 10 (generalize): the numbered-section acceptance must not
+    /// REGRESS the word-titled books. GEB + Crypto headings already stand out by
+    /// font and their titles aren't numbered, so nonHeadingInBody must stay at its
+    /// post-rebuild baseline (GEB 0). Promotion is monotonic — this confirms it.
+    func testNumbering_PDF_wordTitledBooksNoRegression() throws {
+        func nhBody(_ file: String) throws -> (toc: Int, nh: Int) {
+            let db = try freshDB()
+            let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src(file))
+            let units = try db.units(for: doc.id)
+            let byID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            let refs = try db.unitSkipReferences(for: doc.id)
+            let skipSeq = refs.skipUnitID.flatMap { id in units.first(where: { $0.id == id })?.sequence }
+            let toc = try db.tocEntries(for: doc.id)
+            var nh = 0
+            for e in toc {
+                guard let u = byID[e.unitID], u.kind != .heading else { continue }
+                if (skipSeq.map { u.sequence >= $0 } ?? true) { nh += 1 }
+            }
+            return (toc.count, nh)
+        }
+        let geb = try nhBody("GEBen.pdf")
+        let crypto = try nhBody("Cryptography for Dummies.pdf")
+        print("GEB: toc=\(geb.toc) nonHeadingInBody=\(geb.nh) | Crypto: toc=\(crypto.toc) nonHeadingInBody=\(crypto.nh)")
+        XCTAssertEqual(geb.nh, 0, "GEB nonHeadingInBody regressed from its post-rebuild baseline of 0")
+    }
+
     // ── Well-behaved formats: assert clean ──────────────────────────────────
 
     func testGate_MD_pandocManual() throws {

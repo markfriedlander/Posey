@@ -124,13 +124,32 @@ enum PDFHeadingKeyDeriver {
         var used: Set<PDFTextLine> = []
         for title in titles {
             let apps = appearances(of: title, in: allLines, bodyFont: bodyFont)
+            // Accept the weightiest appearance if it STANDS OUT typographically OR
+            // it's a NUMBERED academic section line (the numbering is the prominence
+            // — see `isNumberedSectionLine`). We're confirming a KNOWN outline title,
+            // not scanning blind, so the body-font numbered heading is safe to take.
             guard let top = apps.max(by: { $0.score < $1.score }),
-                  standsOut(top.line, bodyFont: bodyFont),
+                  standsOut(top.line, bodyFont: bodyFont) || isNumberedSectionLine(top.line),
                   !used.contains(top.line) else { continue }
             used.insert(top.line)
             out.append((title, top.line))
         }
         return out
+    }
+
+    /// A flat-layout academic heading carries its prominence in its NUMBERING, not
+    /// its font: the Transformer paper's "3.1 Encoder and Decoder Stacks" is
+    /// body-size and non-bold, so `standsOut` misses it and the section never
+    /// becomes a heading unit. When a KNOWN outline title resolves to a line that
+    /// opens with a section number ("1", "3.1", "3.2.1", optional trailing dot) and
+    /// is short/standalone, the numbering is sufficient evidence it's the real
+    /// heading. This only ever CONFIRMS a title we already have (via `appearances`'
+    /// ≥60% word match) — it never scans blind, so a numbered prose/list line that
+    /// doesn't match a section title is not affected.
+    static func isNumberedSectionLine(_ line: PDFTextLine) -> Bool {
+        guard line.text.count <= 80 else { return false }
+        return line.text.range(of: #"^\s*\d{1,3}(?:\.\d{1,3}){0,3}\.?\s+\p{L}"#,
+                               options: .regularExpression) != nil
     }
 
     /// Does this line stand out from body text — i.e. could it be a heading at

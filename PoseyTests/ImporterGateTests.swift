@@ -169,6 +169,111 @@ final class ImporterGateTests: XCTestCase {
         print("✓ Crypto: \(units.count) units, 0 carry the ChmMagic banner")
     }
 
+    /// Watermark stripping — GENERALIZED (Rule 10) + no false positives.
+    /// CC#15 only proved Crypto; Mark: one file is not done. Recon 2026-06-30
+    /// across the WHOLE PDF corpus (PDFKit probe): only "Cryptography for
+    /// Dummies" carries a converter banner (ChmMagic, 340/341 pages); every
+    /// other PDF is brand-free. So the real generalization is two-sided:
+    ///   (a) NO FALSE POSITIVE — the brand-narrow stripper must never eat real
+    ///       prose from the many clean docs (content identical, modulo the
+    ///       stripper's intentional whitespace collapse);
+    ///   (b) POSITIVE — the watermarked doc comes out with zero banner survivors.
+    /// Faithful pure-function test on PDFKit page text; the per-LINE import path
+    /// is covered by testGate_PDF_cryptoWatermarkStripped above.
+    func testGate_PDF_watermarkStripGeneralizesNoFalsePositive() throws {
+        // Compare CONTENT, not whitespace: collapse runs + trim on both sides.
+        func contentOnly(_ s: String) -> String {
+            s.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+             .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // (a) clean docs lose NO content (sample first 40 text pages → big books stay fast)
+        let cleanDocs = [
+            "attention-is-all-you-need_arxiv.pdf",
+            "Measure What Matters - John Doerr.pdf",
+            "GEBen.pdf",
+            "before the model part1 expanded.pdf",
+            "IRS-Publication-17.pdf",
+        ]
+        for file in cleanDocs {
+            let pdf = PDFDocument(url: try src(file))
+            XCTAssertNotNil(pdf, "unreadable: \(file)")
+            var pagesChecked = 0
+            for i in 0..<min(pdf?.pageCount ?? 0, 40) {
+                guard let raw = pdf?.page(at: i)?.string, !raw.isEmpty else { continue }
+                pagesChecked += 1
+                XCTAssertEqual(contentOnly(PDFWatermarkStripper.strip(raw)), contentOnly(raw),
+                               "\(file) p\(i): watermark stripper REMOVED real content (false positive)")
+            }
+            XCTAssertGreaterThan(pagesChecked, 0, "\(file): no text pages sampled")
+        }
+
+        // (b) the watermarked doc: banner present before, zero survivors after
+        let crypto = PDFDocument(url: try src("Cryptography for Dummies.pdf"))
+        XCTAssertNotNil(crypto)
+        var bannerPagesBefore = 0, survivedAfter = 0
+        for i in 0..<min(crypto?.pageCount ?? 0, 60) {
+            guard let raw = crypto?.page(at: i)?.string, !raw.isEmpty else { continue }
+            let low = raw.lowercased()
+            if low.contains("chmmagic") || low.contains("bisenter") { bannerPagesBefore += 1 }
+            let after = PDFWatermarkStripper.strip(raw).lowercased()
+            if after.contains("chmmagic") || after.contains("bisenter") { survivedAfter += 1 }
+        }
+        XCTAssertGreaterThan(bannerPagesBefore, 10, "expected ChmMagic banner on many Crypto pages (recon: 340/341)")
+        XCTAssertEqual(survivedAfter, 0, "ChmMagic banner SURVIVED stripping on \(survivedAfter) Crypto pages")
+        print("✓ watermark generalize: \(cleanDocs.count) clean docs content-preserved; Crypto banner \(bannerPagesBefore)→0")
+    }
+
+    /// Page FURNITURE removal — GENERAL (Mark, 2026-06-30): a watermark stripper,
+    /// not a "ChmMagic stripper". Recurring running headers / footers / stamps /
+    /// page numbers must be gone from the reader + RAG text — found by position +
+    /// recurrence + a fixed numeric anchor (no hardcoded strings) — WITHOUT eating
+    /// body content, and PRESERVING a title's one legit instance (keep-first).
+    /// Verified off-device across 8 real PDFs: ANTIFA header / OCR-garbled DOCID
+    /// stamp (every spelling, via the constant-number anchor) / browser-print junk
+    /// cleaned; GEB·Doerr·Crypto untouched (0%); body lines containing a recurring
+    /// year preserved. This is the in-suite FULL-importer oracle on fast docs.
+    func testGate_PDF_pageFurnitureRemoved() throws {
+        // (1) Declassification stamp "DOCID: 3803783" — gone in ALL its OCR
+        //     spellings (DOClD / DocrD / OOClO …) via the constant-number anchor.
+        do {
+            let db = try freshDB()
+            let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("Learning_from_the_Enemy.pdf"))
+            let units = try db.units(for: doc.id)
+            let offenders = units.filter { $0.text.contains("3803783") }
+            XCTAssertEqual(offenders.count, 0,
+                           "DOCID stamp survived in \(offenders.count) units: \(offenders.prefix(2).map { $0.text.prefix(30) })")
+            XCTAssertGreaterThan(units.count, 0, "no units imported")
+        }
+        // (2) Web-archive furniture: under iOS extraction the Wayback-Machine URL
+        //     header recurs on EVERY page (89–114 chars but ≤5 words — the case the
+        //     old char cap let through; the PHONE caught it 2026-06-30). It must be
+        //     removed. The doc title appears only a couple times (NOT a per-page
+        //     header) → it survives. NOTE: the simulator uses the SAME iOS PDF engine
+        //     as the phone, so this asserts the REAL on-device furniture — not the
+        //     macOS extraction, which produced different (and misleading) text.
+        do {
+            let db = try freshDB()
+            let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("The Internet Steps to the Beat.pdf"))
+            let units = try db.units(for: doc.id)
+            let wayback = units.filter { $0.text.contains("web.archive.org") }
+            let titleUnits = units.filter { $0.text.contains("The Internet Steps to the Beat") }
+            XCTAssertLessThanOrEqual(wayback.count, 1,
+                                     "Wayback-Machine URL running header survived in \(wayback.count) units (should be removed)")
+            XCTAssertGreaterThanOrEqual(titleUnits.count, 1, "doc title should survive (not furniture)")
+        }
+        // (3) NO REGRESSION on a clean doc — real body survives furniture removal.
+        do {
+            let db = try freshDB()
+            let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("attention-is-all-you-need_arxiv.pdf"))
+            let units = try db.units(for: doc.id)
+            let joined = units.map { $0.text }.joined(separator: " ").lowercased()
+            XCTAssertTrue(joined.contains("scaled dot-product") || joined.contains("multi-head attention"),
+                          "clean-doc body content missing → furniture removal ate prose")
+        }
+        print("✓ furniture: DOCID stamp + browser-print header/footer removed; clean-doc body intact")
+    }
+
     // ── Cross-page paragraph stitching ───────────────────────────────────────
 
     /// Build a synthetic PDF line. Right edge is `2*midX - indentX`; full-width
@@ -326,6 +431,81 @@ final class ImporterGateTests: XCTestCase {
         let crypto = try nhBody("Cryptography for Dummies.pdf")
         print("GEB: toc=\(geb.toc) nonHeadingInBody=\(geb.nh) | Crypto: toc=\(crypto.toc) nonHeadingInBody=\(crypto.nh)")
         XCTAssertEqual(geb.nh, 0, "GEB nonHeadingInBody regressed from its post-rebuild baseline of 0")
+    }
+
+    /// PDF rebuild — SEE GEB dialogue turn structure before coding the split
+    /// (Rule 5/7). GEB's Socratic dialogues are Achilles/Tortoise/Crab/... turns.
+    /// Question: after the line rebuild, is each turn its OWN prose unit (gaps
+    /// already split them) or are several turns glued into one blob? Dump prose
+    /// units near a dialogue heading + count speaker labels per unit.
+    func testDive_PDF_gebDialogueTurns() throws {
+        let db = try freshDB()
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("GEBen.pdf"))
+        let units = try db.units(for: doc.id)
+        // Speaker label at the START of a turn, e.g. "Achilles:" / "Tortoise:".
+        let speakerRE = try NSRegularExpression(pattern: #"\b(Achilles|Tortoise|Crab|Anteater|Author|Sloth|Genie|Babbage|Turing|Zeno)\s*:"#)
+        func speakerCount(_ s: String) -> Int {
+            speakerRE.numberOfMatches(in: s, range: NSRange(s.startIndex..., in: s))
+        }
+        // Find a dialogue chapter heading.
+        let dialogTitles = ["Contracrostipunctus", "Two-Part Invention", "Three-Part Invention",
+                            "Sonata for Unaccompanied Achilles", "Little Harmonic Labyrinth", "Crab Canon"]
+        var out = "════ GEB dialogue turns — \(units.count) units ════\n"
+        var blobUnits = 0, multiSpeakerExamples: [String] = []
+        for u in units where u.kind == .prose {
+            let n = speakerCount(u.text)
+            if n >= 2 { blobUnits += 1
+                if multiSpeakerExamples.count < 4 { multiSpeakerExamples.append("(\(n) speakers) \(u.text.prefix(110))") }
+            }
+        }
+        out += "prose units containing >=2 speaker labels (BLOBS): \(blobUnits)\n"
+        for ex in multiSpeakerExamples { out += "   • \(ex)\n" }
+        // Sample the units right after a known dialogue heading.
+        if let idx = units.firstIndex(where: { u in u.kind == .heading && dialogTitles.contains(where: { u.text.contains($0) }) }) {
+            out += "— units after dialogue heading '\(units[idx].text.prefix(40))' —\n"
+            for u in units[idx...min(units.count-1, idx+6)] {
+                out += "   [\(u.kind)] (\(speakerCount(u.text)) spk) \(u.text.prefix(90))\n"
+            }
+        } else {
+            out += "(no dialogue heading found among \(dialogTitles))\n"
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/geb_dialogue.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
+    /// PDF rebuild — Crypto page-break distribution (Mark: "page lengths look
+    /// extremely irregular, not sure it's cutting correctly"). Confirm one
+    /// pageBreak unit per PDF page (no pages lost/merged by stitching) and measure
+    /// the text length between consecutive breaks vs PDFKit's raw per-page sizes —
+    /// to separate "source is genuinely irregular" from "stitching amplified it".
+    func testDive_PDF_cryptoPageBreaks() throws {
+        let db = try freshDB()
+        let url = try src("Cryptography for Dummies.pdf")
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: url)
+        let units = try db.units(for: doc.id)
+        let breaks = units.filter { $0.kind == .pageBreak }
+        // text chars between consecutive pageBreak units (the reader "page" length)
+        var perPage: [Int] = []
+        var acc = 0
+        var started = false
+        for u in units {
+            if u.kind == .pageBreak { if started { perPage.append(acc) }; acc = 0; started = true }
+            else { acc += u.text.count }
+        }
+        if started { perPage.append(acc) }
+        let sorted = perPage.sorted()
+        func pct(_ p: Double) -> Int { sorted.isEmpty ? 0 : sorted[min(sorted.count-1, Int(Double(sorted.count)*p))] }
+        let pdfPages = PDFDocument(url: url)?.pageCount ?? -1
+        let emptyPages = perPage.filter { $0 < 50 }.count
+        let report = """
+        CRYPTO page breaks: \(breaks.count) break units, PDF pageCount=\(pdfPages)
+          per-page text chars: min=\(sorted.first ?? 0) p10=\(pct(0.1)) median=\(pct(0.5)) p90=\(pct(0.9)) max=\(sorted.last ?? 0)
+          near-empty 'pages' (<50 chars, incl deferred-break clusters): \(emptyPages) of \(perPage.count)
+        """
+        try? report.write(to: URL(fileURLWithPath: "/tmp/crypto_pb.txt"), atomically: true, encoding: .utf8)
+        print(report)
+        // Sanity: one break per text-bearing page (not wildly off).
+        XCTAssertGreaterThan(breaks.count, pdfPages / 2, "should have a break unit for most pages")
     }
 
     // ── Well-behaved formats: assert clean ──────────────────────────────────

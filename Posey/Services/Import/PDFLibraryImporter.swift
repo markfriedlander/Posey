@@ -152,7 +152,19 @@ struct PDFLibraryImporter {
             // standout appearance — Mark's "pool the appearances, keep the
             // weightiest") → that line becomes a `.heading` unit → the TOC entry
             // anchors to it by UUID. No page numbers, no cross-layer offsets.
-            let allLines = parsed.linesByPage.flatMap { $0 }
+            // Strip recurring page furniture (running headers/footers, page-number
+            // stamps, banners) BEFORE deriving headings or building units, so the
+            // font profile isn't polluted and furniture never becomes a prose unit.
+            // General + safe (position+recurrence); see PDFPageFurnitureDetector.
+            let furniture = PDFPageFurnitureDetector.detect(in: parsed.linesByPage)
+            let cleanLinesByPage = furniture.cleaned
+            if !furniture.removed.isEmpty {
+                let summary = furniture.removed.prefix(5)
+                    .map { "\"\($0.sample.prefix(40))\"×\($0.pages)" }.joined(separator: ", ")
+                print("🧹 PDF furniture removed (\(furniture.removed.count) signatures): \(summary)")
+            }
+
+            let allLines = cleanLinesByPage.flatMap { $0 }
             let resolved = PDFHeadingKeyDeriver.resolveHeadings(
                 titles: parsed.tocEntries.map { $0.title }, allLines: allLines)
             let headingLineSet = Set(resolved.map { $0.line })
@@ -162,7 +174,7 @@ struct PDFLibraryImporter {
             for r in resolved { levelByLineText[r.line.text] = levelByTitle[r.title] ?? 1 }
 
             units = ContentUnitBuilder.unitsFromPDFLines(
-                parsed.linesByPage, documentID: documentID,
+                cleanLinesByPage, documentID: documentID,
                 isHeading: { headingLineSet.contains($0) },
                 headingLevel: { levelByLineText[$0.text] ?? 1 })
 

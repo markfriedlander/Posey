@@ -115,15 +115,27 @@ enum PDFHeadingKeyDeriver {
     /// chapter to its real heading by identity. (Outline-first / profile path;
     /// fuzzy + numbering modes layer on later.)
     static func headingLines(titles: [String], allLines: [PDFTextLine]) -> Set<PDFTextLine> {
+        Set(resolveHeadings(titles: titles, allLines: allLines).map { $0.line })
+    }
+
+    /// Resolve each known title to its heading LINE (weightiest standout
+    /// appearance), preserving the title→line mapping so the importer can anchor
+    /// each TOC entry to the heading unit that line becomes. A title with no
+    /// standout appearance is omitted (caller decides the fallback — never fail
+    /// silently). The line is returned once even if two titles resolve to it.
+    static func resolveHeadings(titles: [String], allLines: [PDFTextLine]) -> [(title: String, line: PDFTextLine)] {
         let bodyFont = bodyFontSize(of: allLines)
-        var result: Set<PDFTextLine> = []
+        var out: [(title: String, line: PDFTextLine)] = []
+        var used: Set<PDFTextLine> = []
         for title in titles {
             let apps = appearances(of: title, in: allLines, bodyFont: bodyFont)
-            if let top = apps.max(by: { $0.score < $1.score }), standsOut(top.line, bodyFont: bodyFont) {
-                result.insert(top.line)
-            }
+            guard let top = apps.max(by: { $0.score < $1.score }),
+                  standsOut(top.line, bodyFont: bodyFont),
+                  !used.contains(top.line) else { continue }
+            used.insert(top.line)
+            out.append((title, top.line))
         }
-        return result
+        return out
     }
 
     /// Does this line stand out from body text — i.e. could it be a heading at

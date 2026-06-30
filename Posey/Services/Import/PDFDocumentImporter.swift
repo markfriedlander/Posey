@@ -36,6 +36,10 @@ struct ParsedPDFDocument: Sendable {
     /// this phase — nothing branches on `needsTier2` yet.** See
     /// `PDFPageConfidenceDetector` + DECISIONS.md (2026-05-22 late).
     let pageFlags: [PDFPageFlags]
+    /// PDF rebuild Piece A (2026-06-29) — clean reading-order lines per sheet
+    /// (PDFKit-native, `PDFLineExtractor`), the source for line-based unit
+    /// construction + heading resolution. Empty sheets (image/blank) omitted.
+    let linesByPage: [[PDFTextLine]]
     // 2026-05-27 — `contentBoundaries` field removed. PDFEnhancementService
     // now reads via DatabaseManager.contentBoundaries(for:), which derives
     // from pageBreak units on demand. The importer no longer pre-computes
@@ -498,6 +502,17 @@ extension PDFDocumentImporter {
             }
         }
 
+        // PDF rebuild Piece A (2026-06-29) — extract clean reading-order lines
+        // per sheet for the line-based unit builder + heading resolver. PDFKit's
+        // own line selections (not glyph bucketing). Empty sheets omitted.
+        var linesByPage: [[PDFTextLine]] = []
+        for i in 0..<document.pageCount {
+            if let page = document.page(at: i) {
+                let ls = PDFLineExtractor.lines(from: page, pageIndex: i)
+                if !ls.isEmpty { linesByPage.append(ls) }
+            }
+        }
+
         return ParsedPDFDocument(
             title: title,
             displayText: displayText,
@@ -505,7 +520,8 @@ extension PDFDocumentImporter {
             images: imageRecords,
             tocSkipUntilOffset: tocSkipUntilOffset,
             tocEntries: tocEntries,
-            pageFlags: pageFlags
+            pageFlags: pageFlags,
+            linesByPage: linesByPage
         )
     }
 

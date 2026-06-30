@@ -141,67 +141,83 @@ struct PDFLibraryImporter {
             filename: titleFallback
         )
 
-        // ── Build units from displayText (preserves form-feed
-        // ── page boundaries as pageBreak units, image markers as
-        // ── image units, paragraph runs as prose units).
-        let baseUnits = ContentUnitBuilder.unitsFromPDFDisplayText(
-            parsed.displayText,
-            documentID: documentID
-        )
-        // ── Step 9 prerequisite — promote heading paragraphs into
-        // ── `.heading` units using PDFTOCDetector output. Helper
-        // ── skips non-prose units (pageBreak / image) and only
-        // ── advances the offset cursor on prose-bearing kinds —
-        // ── matches the persister's plain_text join scheme.
-        // 2026-05-31 (ingestion audit): tolerate duplicate offsets. Two TOC
-        // entries CAN resolve to the same plainTextOffset (front-matter titles
-        // with no unique body location, repeated titles, or unresolved entries
-        // defaulting to the same anchor). `Dictionary(uniqueKeysWithValues:)`
-        // FATAL-ERRORS on a duplicate key — this crashed GEB import
-        // (EXC_BREAKPOINT) the moment the run-on TOC detector emitted entries.
-        // Keep the first marker at each offset; never trap on a collision.
-        let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
-            parsed.tocEntries.map {
-                ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
-            },
-            uniquingKeysWith: { first, _ in first }
-        )
-        // 2026-05-31 — pass the TOC-skip offset so a TOC-LISTING entry in the
-        // front matter (now split into one unit per entry by the TOC line-
-        // preservation pass) is never promoted to a chapter heading. The
-        // chapter headings live in the body, after the skip.
-        // Ruler migration #3b (2026-06-28): translate the R1 TOC-skip offset to
-        // the skip UNIT once (against baseUnits), then gate heading promotion by
-        // identity — no R1-offset-vs-R2-unit-offset comparison inside the helper.
-        let units = ContentUnitBuilder.applyHeadingMarkers(
-            to: baseUnits,
-            headingMarkersByOffset: headingMarkersByOffset,
-            skipUnitID: ContentUnitBuilder.firstUnit(
-                in: baseUnits, atOrAfterPlainTextOffset: parsed.tocSkipUntilOffset)?.id
-        )
+        // ── Build content units.
+        let units: [ContentUnit]
+        let tocEntries: [StoredTOCEntry]
+
+        if !parsed.linesByPage.isEmpty {
+            // PDF rebuild (2026-06-29): line-based construction + identity heading
+            // anchoring. Clean PDFKit-native lines → paragraph + heading units;
+            // each known title resolved to its real heading LINE (the weightiest
+            // standout appearance — Mark's "pool the appearances, keep the
+            // weightiest") → that line becomes a `.heading` unit → the TOC entry
+            // anchors to it by UUID. No page numbers, no cross-layer offsets.
+            let allLines = parsed.linesByPage.flatMap { $0 }
+            let resolved = PDFHeadingKeyDeriver.resolveHeadings(
+                titles: parsed.tocEntries.map { $0.title }, allLines: allLines)
+            let headingLineSet = Set(resolved.map { $0.line })
+            let levelByTitle = Dictionary(parsed.tocEntries.map { ($0.title, $0.level) },
+                                          uniquingKeysWith: { a, _ in a })
+            var levelByLineText: [String: Int] = [:]
+            for r in resolved { levelByLineText[r.line.text] = levelByTitle[r.title] ?? 1 }
+
+            units = ContentUnitBuilder.unitsFromPDFLines(
+                parsed.linesByPage, documentID: documentID,
+                isHeading: { headingLineSet.contains($0) },
+                headingLevel: { levelByLineText[$0.text] ?? 1 })
+
+            // Anchor each TOC entry to its heading unit by identity (the heading
+            // unit's text == the resolved line's text). Fallback (never fail
+            // silently): first prose-bearing unit containing the title; else drop.
+            var headingUnitIDByText: [String: UUID] = [:]
+            for u in units where u.kind == .heading {
+                if headingUnitIDByText[u.text] == nil { headingUnitIDByText[u.text] = u.id }
+            }
+            let lineTextByTitle = Dictionary(resolved.map { ($0.title, $0.line.text) },
+                                             uniquingKeysWith: { a, _ in a })
+            tocEntries = parsed.tocEntries.compactMap { e in
+                let uid: UUID?
+                if let lineText = lineTextByTitle[e.title], let id = headingUnitIDByText[lineText] {
+                    uid = id
+                } else {
+                    let want = e.title.lowercased()
+                    uid = units.first { $0.kind.carriesProseText && $0.text.lowercased().contains(want) }?.id
+                }
+                guard let unitID = uid else { return nil }
+                return StoredTOCEntry(title: e.title, plainTextOffset: e.plainTextOffset,
+                                      unitID: unitID, playOrder: e.playOrder, level: e.level)
+            }
+        } else {
+            // Legacy displayText path — pure-OCR / image-text docs that yield no
+            // clean line stream. Heading promotion + TOC anchoring by offset.
+            let baseUnits = ContentUnitBuilder.unitsFromPDFDisplayText(
+                parsed.displayText, documentID: documentID)
+            // Tolerate duplicate offsets (front-matter / repeated titles); never trap.
+            let headingMarkersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
+                parsed.tocEntries.map {
+                    ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
+                },
+                uniquingKeysWith: { first, _ in first })
+            units = ContentUnitBuilder.applyHeadingMarkers(
+                to: baseUnits,
+                headingMarkersByOffset: headingMarkersByOffset,
+                skipUnitID: ContentUnitBuilder.firstUnit(
+                    in: baseUnits, atOrAfterPlainTextOffset: parsed.tocSkipUntilOffset)?.id)
+            tocEntries = parsed.tocEntries.compactMap { e in
+                guard let uid = ContentUnitBuilder.firstUnit(
+                    in: units, atOrAfterPlainTextOffset: e.plainTextOffset)?.id else { return nil }
+                return StoredTOCEntry(title: e.title, plainTextOffset: e.plainTextOffset,
+                                      unitID: uid, playOrder: e.playOrder, level: e.level)
+            }
+        }
 
         // ── Sentences from prose-bearing units.
         let sentences = SentenceIndexer.sentences(for: units)
 
-        // ── Smart-skip: PDF's tocSkipUntilOffset is a plainText
-        // ── offset (PDFTOCDetector heuristic). Map to a unit.
+        // ── Smart-skip: map the plainText skip offset to a unit (best-effort).
         let skipOffset = parsed.tocSkipUntilOffset
         let skipUnitID = ContentUnitBuilder.firstUnit(in: units, atOrAfterPlainTextOffset: skipOffset)?.id
         let skipSource = skipOffset > 0 ? "heuristic" : ""
-
-        // ── TOC pass-through. Resolve each heading's offset → its durable paragraph
-        // identity (same ruler, at import); drop an entry that can't anchor (Position Rule).
-        let tocEntries: [StoredTOCEntry] = parsed.tocEntries.compactMap { e in
-            guard let uid = ContentUnitBuilder.firstUnit(
-                in: units, atOrAfterPlainTextOffset: e.plainTextOffset)?.id else { return nil }
-            return StoredTOCEntry(
-                title: e.title,
-                plainTextOffset: e.plainTextOffset,
-                unitID: uid,
-                playOrder: e.playOrder,
-                level: e.level
-            )
-        }
 
         let parsedDoc = ParsedDocument(
             id: documentID,

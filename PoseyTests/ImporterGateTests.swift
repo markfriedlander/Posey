@@ -115,6 +115,60 @@ final class ImporterGateTests: XCTestCase {
         print(out)
     }
 
+    /// PDF rebuild Piece "watermark" (2026-06-29) — Mark: "we have a watermark
+    /// remover now." We do (`PDFWatermarkStripper`, built for Crypto's ChmMagic
+    /// banner), but the NEW line path doesn't call it. Before wiring it in, SEE how
+    /// the banner appears in the clean `PDFLineExtractor` line stream (one line? two?
+    /// where?) and whether the EXISTING stripper catches it PER LINE. Rule 5: look
+    /// at the real artifact before coding the fix.
+    func testDive_PDF_cryptoWatermarkLines() throws {
+        let url = try src("Cryptography for Dummies.pdf")
+        guard let doc = PDFDocument(url: url) else { return XCTFail("crypto unreadable") }
+        var out = "════ Crypto watermark in the clean line stream — pages=\(doc.pageCount) ════\n"
+        for pageIdx in [10, 20, 40] {
+            guard pageIdx < doc.pageCount, let page = doc.page(at: pageIdx) else { continue }
+            let lines = PDFLineExtractor.lines(from: page, pageIndex: pageIdx)
+            out += "\n── page \(pageIdx): \(lines.count) lines ──\n"
+            for (i, l) in lines.prefix(6).enumerated() {
+                let strippedLine = PDFWatermarkStripper.strip(l.text)
+                let caught = strippedLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && !l.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                out += String(format: "  L%02d f%4.1f%@ y%5.0f | %@%@\n",
+                              i, l.fontSize, l.isBold ? "B" : " ", l.yTop,
+                              caught ? "‹PER-LINE-STRIP-CLEARS› " : "",
+                              l.text.prefix(72).description)
+            }
+        }
+        // Also: does strip() catch the banner when the page's lines are JOINED?
+        if let page = doc.page(at: 20) {
+            let lines = PDFLineExtractor.lines(from: page, pageIndex: 20)
+            let joined = lines.map { $0.text }.joined(separator: "\n")
+            let strippedJoined = PDFWatermarkStripper.strip(joined)
+            out += "\n── page 20 JOINED strip delta: \(joined.count) → \(strippedJoined.count) chars "
+            out += (strippedJoined.count < joined.count ? "(banner removed ✓)" : "(NO match ✗)") + "\n"
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/crypto_watermark.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
+    /// PDF rebuild — END-TO-END proof the watermark is gone from IMPORTED UNITS
+    /// after wiring the existing `PDFWatermarkStripper` into `PDFLineExtractor`.
+    /// Before the fix: the ChmMagic banner imported as a prose unit on ~every page.
+    /// After: zero units carry it. Real doc (Rule 7), full importer path.
+    func testGate_PDF_cryptoWatermarkStripped() throws {
+        let db = try freshDB()
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("Cryptography for Dummies.pdf"))
+        let units = try db.units(for: doc.id)
+        let offenders = units.filter {
+            let t = $0.text.lowercased()
+            return t.contains("bisenter") || t.contains("chmmagic")
+        }
+        let sample = offenders.prefix(3).map { "seq\($0.sequence) '\($0.text.prefix(60))'" }.joined(separator: " | ")
+        XCTAssertEqual(offenders.count, 0,
+                       "ChmMagic watermark still in \(offenders.count) units: \(sample)")
+        print("✓ Crypto: \(units.count) units, 0 carry the ChmMagic banner")
+    }
+
     // ── Well-behaved formats: assert clean ──────────────────────────────────
 
     func testGate_MD_pandocManual() throws {

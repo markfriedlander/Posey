@@ -58,7 +58,15 @@ enum PDFLineExtractor {
         var lines: [PDFTextLine] = []
         var prevBottom: Double? = nil
         for lineSel in pageSel.selectionsByLine() {
-            let text = (lineSel.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let raw = (lineSel.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            // Reuse the EXISTING PDFWatermarkStripper (built 2026-05-22 for Crypto's
+            // ChmMagic converter banner). The old displayText path stripped it
+            // (PDFDocumentImporter); the new line path bypassed it, so the watermark
+            // survived as a prose unit. A converter watermark is its OWN complete line
+            // (verified Crypto, 2 methods: L0, body font ~8.5pt, top of EVERY page —
+            // never a heading) → strips to empty → dropped by the guard below. The
+            // patterns are narrow + brand-anchored, so real prose is never touched.
+            let text = PDFWatermarkStripper.strip(raw)
             guard !text.isEmpty else { continue }
             let bounds = lineSel.bounds(for: page)
             let yTop = Double(bounds.maxY)

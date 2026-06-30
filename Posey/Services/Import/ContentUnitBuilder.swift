@@ -247,17 +247,23 @@ enum ContentUnitBuilder {
 
     /// PDF rebuild Piece A (2026-06-29) — build content units from the CLEAN
     /// line stream (`PDFLineExtractor`, PDFKit-native), not the form-feed string.
-    /// Per page: a `pageBreak` unit (sheet index, for the page map — never an
-    /// anchor), then `.heading` units for lines the caller's `isHeading` marks,
-    /// and `.prose` units for paragraphs grouped from consecutive body lines
-    /// (split on a notably-larger-than-leading vertical gap). The caller supplies
-    /// `isHeading` / `headingLevel` from the derived `HeadingProfile` so this
-    /// builder stays decoupled from per-book heading inference.
+    /// Emits a `pageBreak` unit per page (sheet index, for the page map — never an
+    /// anchor), `.heading` units for lines the caller's `isHeading` marks, and
+    /// `.prose` units for paragraphs grouped from consecutive body lines (split on
+    /// a notably-larger-than-leading vertical gap). The caller supplies `isHeading`
+    /// / `headingLevel` from the derived `HeadingProfile` so this builder stays
+    /// decoupled from per-book heading inference.
     ///
-    /// NOTE (follow-up): cross-page paragraph STITCHING (a paragraph spanning a
-    /// page break = one unit) is a read-along-smoothness refinement tracked
-    /// separately; this first version flushes at page end. Chapter navigation
-    /// (the heading units) does not depend on it.
+    /// **CROSS-PAGE STITCHING (Mark's requirement):** a paragraph that starts at the
+    /// bottom of one page and continues at the top of the next is ONE prose unit, not
+    /// two. We run the lines as a CONTINUOUS stream (no flush at page end) and, at a
+    /// page boundary, STITCH when the prior page's last line ran full-width with no
+    /// terminal punctuation AND the next page's first line reads like a continuation
+    /// (flush-left or lowercase start) and isn't a heading. When we stitch, the next
+    /// page's `pageBreak` marker is DEFERRED until just after the straddling
+    /// paragraph flushes — so the page map stays complete (`DocumentPageMap.buildForPDF`
+    /// tolerates this: a page's offset = where its first OWN paragraph begins) and the
+    /// sentence is never torn. Multi-page paragraphs defer multiple breaks in order.
     static func unitsFromPDFLines(
         _ linesByPage: [[PDFTextLine]],
         documentID: UUID,
@@ -272,21 +278,49 @@ enum ContentUnitBuilder {
             sequence += 10
         }
 
-        for page in linesByPage {
-            guard let pageIndex = page.first?.pageIndex else { continue }
-            add(.pageBreak, "", ContentUnitMetadata(pageNumber: pageIndex))
+        // Continuous paragraph buffer carried ACROSS page boundaries for stitching.
+        var buffer: [String] = []
+        var lastBufferedLine: PDFTextLine? = nil
+        var pendingPageBreaks: [Int] = []          // page indices whose break we deferred (straddle)
+        func flushParagraph() {
+            let text = buffer.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { add(.prose, text) }
+            buffer.removeAll(keepingCapacity: true)
+            lastBufferedLine = nil
+            // A deferred page break lands right after the paragraph that straddled
+            // into it — "page N begins at its first own paragraph."
+            for p in pendingPageBreaks { add(.pageBreak, "", ContentUnitMetadata(pageNumber: p)) }
+            pendingPageBreaks.removeAll(keepingCapacity: true)
+        }
 
-            // A paragraph break is a vertical gap notably larger than the page's
-            // typical line leading. Use the median positive gap as the baseline.
+        // Geometry of the page we just finished (for the full-width test on its last line).
+        var priorMaxRight: Double = 0
+        var priorLeftMargin: Double = 0
+
+        for (pageIdx, page) in linesByPage.enumerated() {
+            guard let pageIndex = page.first?.pageIndex else { continue }
+
+            // Per-page geometry + paragraph threshold.
             let gaps = page.map { $0.gapAbove }.filter { $0 > 0 }.sorted()
             let typicalGap = gaps.isEmpty ? 0 : gaps[gaps.count / 2]
             let paraThreshold = typicalGap > 0 ? typicalGap * 1.6 : .greatestFiniteMagnitude
+            let leftMargin = page.map { $0.indentX }.min() ?? 0
+            let maxRight = page.map { 2 * $0.midX - $0.indentX }.max() ?? 0
 
-            var buffer: [String] = []
-            func flushParagraph() {
-                let text = buffer.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty { add(.prose, text) }
-                buffer.removeAll(keepingCapacity: true)
+            // Page-break placement: stitch decision at the boundary.
+            if pageIdx == 0 {
+                add(.pageBreak, "", ContentUnitMetadata(pageNumber: pageIndex))
+            } else if let prev = lastBufferedLine, !buffer.isEmpty,
+                      let first = page.first, !isHeading(first),
+                      lineRanFullWidth(prev, maxRight: priorMaxRight, leftMargin: priorLeftMargin),
+                      !endsWithSentenceTerminator(prev.text),
+                      lineIsContinuation(first, leftMargin: leftMargin) {
+                // STITCH: carry the paragraph; defer this page's break until it flushes.
+                pendingPageBreaks.append(pageIndex)
+            } else {
+                // Clean boundary: complete the prior paragraph, then mark the page.
+                flushParagraph()
+                add(.pageBreak, "", ContentUnitMetadata(pageNumber: pageIndex))
             }
 
             for line in page {
@@ -296,11 +330,43 @@ enum ContentUnitBuilder {
                 } else {
                     if !buffer.isEmpty, line.gapAbove >= paraThreshold { flushParagraph() }
                     buffer.append(line.text)
+                    lastBufferedLine = line
                 }
             }
-            flushParagraph()
+            // NB: NO flush here — the buffer carries to the next page for stitching.
+            priorMaxRight = maxRight
+            priorLeftMargin = leftMargin
         }
+        flushParagraph()       // final paragraph + any trailing deferred breaks
         return units
+    }
+
+    /// Did this line run essentially to the right margin (text wrapped because it
+    /// ran out of room, not because the paragraph ended)? Right edge derived as
+    /// `2*midX - indentX` (we store midX + left edge, not the right edge).
+    private static func lineRanFullWidth(_ line: PDFTextLine, maxRight: Double, leftMargin: Double) -> Bool {
+        let rightX = 2 * line.midX - line.indentX
+        let textWidth = maxRight - leftMargin
+        guard textWidth > 0 else { return false }
+        return rightX >= maxRight - 0.08 * textWidth        // within 8% of the right margin
+    }
+
+    /// Does this line end a sentence (so the paragraph may have ended at the page
+    /// bottom)? Conservative: only the clear sentence terminators. A line ending
+    /// WITHOUT one is mid-sentence → a stitch candidate.
+    private static func endsWithSentenceTerminator(_ text: String) -> Bool {
+        // Ignore trailing closing quotes/brackets, then test the last real char.
+        let trimmed = text.trimmingCharacters(in: CharacterSet(charactersIn: " \t\"'”’)]»"))
+        guard let last = trimmed.last else { return false }
+        return ".!?…".contains(last)
+    }
+
+    /// Does this line read like the CONTINUATION of a paragraph from the previous
+    /// page — flush-left (not paragraph-indented) OR starting lowercase (mid-sentence)?
+    private static func lineIsContinuation(_ line: PDFTextLine, leftMargin: Double) -> Bool {
+        let flushLeft = line.indentX <= leftMargin + 2.0
+        let lowercaseStart = line.text.first.map { $0.isLowercase } ?? false
+        return flushLeft || lowercaseStart
     }
 
     /// Single-block conversion, exposed so formats with mixed

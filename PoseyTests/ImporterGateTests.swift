@@ -169,6 +169,108 @@ final class ImporterGateTests: XCTestCase {
         print("✓ Crypto: \(units.count) units, 0 carry the ChmMagic banner")
     }
 
+    // ── Cross-page paragraph stitching ───────────────────────────────────────
+
+    /// Build a synthetic PDF line. Right edge is `2*midX - indentX`; full-width
+    /// lines hug the right margin (midX≈306 for a 72…540 text box), short/ending
+    /// lines fall short (small midX).
+    private func ln(_ text: String, page: Int, indentX: Double = 72, midX: Double,
+                    gapAbove: Double = 14) -> PDFTextLine {
+        PDFTextLine(text: text, fontSize: 12, isBold: false, isAllCaps: false,
+                    indentX: indentX, midX: midX, yTop: 0, yBottom: 0,
+                    gapAbove: gapAbove, pageIndex: page)
+    }
+
+    /// PDF rebuild — DETERMINISTIC proof of cross-page stitching (Mark's
+    /// requirement: a paragraph spanning a page boundary is ONE unit). Synthetic
+    /// fixture justified (Rule 7): I need a KNOWN straddle to assert the exact unit
+    /// shape; the real-doc no-regression check is the companion test below.
+    func testStitch_PDF_crossPageParagraph() throws {
+        // Page 0 ends mid-sentence, full-width, no terminal punctuation.
+        let pageA = [
+            ln("The cipher described above is one of the oldest known to scholars", page: 0, midX: 306),
+            ln("and it continues to be discussed by historians who note that it", page: 0, midX: 306) // full-width, ends "it"
+        ]
+        // Page 1 first line continues (flush-left, lowercase), then a NEW paragraph.
+        // Enough normal-leading lines that the median gap is the LEADING (~14), not
+        // the paragraph gap — otherwise the threshold is too high to split.
+        let pageB = [
+            ln("was used widely in the classical world for military dispatches and", page: 1, midX: 306, gapAbove: 0),
+            ln("other sensitive communications sent across very great distances by", page: 1, midX: 306, gapAbove: 14),
+            ln("couriers who had memorized the secret keys they carried with them.", page: 1, midX: 200, gapAbove: 14), // short → sentence end
+            ln("A wholly separate paragraph now begins on this page entirely.", page: 1, indentX: 108, midX: 306, gapAbove: 44) // indented + big gap
+        ]
+        let units = ContentUnitBuilder.unitsFromPDFLines([pageA, pageB], documentID: UUID(),
+                                                         isHeading: { _ in false })
+        let prose = units.filter { $0.kind == .prose }
+        let breaks = units.filter { $0.kind == .pageBreak }
+
+        // Exactly TWO paragraphs: the stitched straddler + the second one.
+        XCTAssertEqual(prose.count, 2, "expected 2 prose units (1 stitched straddler + 1), got \(prose.count): \(prose.map { $0.text.prefix(30) })")
+        // The straddling paragraph is ONE unit carrying text from BOTH pages.
+        XCTAssertTrue(prose[0].text.contains("continues to be discussed") && prose[0].text.contains("was used widely"),
+                      "straddling paragraph should span both pages in one unit: '\(prose[0].text)'")
+        XCTAssertTrue(prose[1].text.contains("wholly separate paragraph"), "second paragraph kept distinct")
+        // Both page-break markers survive (page map intact) and page 1's break is
+        // DEFERRED to just after the straddling paragraph.
+        XCTAssertEqual(Set(breaks.compactMap { $0.metadata.pageNumber }), [0, 1], "both pages marked")
+        let break1 = breaks.first { $0.metadata.pageNumber == 1 }!
+        XCTAssertGreaterThan(break1.sequence, prose[0].sequence, "page-1 break deferred to after the straddling paragraph")
+        print("✓ stitch: 2 prose units, straddler spans pages, page-1 break deferred after it")
+    }
+
+    /// PDF rebuild — NON-stitch control: when page 0 ends a sentence (terminal '.'),
+    /// the paragraphs stay SEPARATE and the page break is NOT deferred. Guards
+    /// against over-stitching (merging genuinely separate paragraphs).
+    func testStitch_PDF_noStitchWhenSentenceEnds() throws {
+        let pageA = [
+            ln("The first paragraph is complete and ends cleanly right here.", page: 0, midX: 306) // ends with '.'
+        ]
+        let pageB = [
+            ln("The second paragraph starts fresh on the next page entirely.", page: 1, midX: 306, gapAbove: 0)
+        ]
+        let units = ContentUnitBuilder.unitsFromPDFLines([pageA, pageB], documentID: UUID(),
+                                                         isHeading: { _ in false })
+        let prose = units.filter { $0.kind == .prose }
+        XCTAssertEqual(prose.count, 2, "sentence-terminated boundary must NOT stitch")
+        // page-1 break comes BEFORE the second paragraph (clean boundary).
+        let break1 = units.first { $0.kind == .pageBreak && $0.metadata.pageNumber == 1 }!
+        let secondPara = prose[1]
+        XCTAssertLessThan(break1.sequence, secondPara.sequence, "clean boundary: break precedes page-1 content")
+        print("✓ no-stitch: terminal sentence keeps paragraphs separate, break not deferred")
+    }
+
+    /// PDF rebuild — REAL-DOC no-regression: stitching must not lose page-break
+    /// markers (page map) or break chapter anchoring. Import the real Transformer
+    /// paper; assert every text-bearing page still has a break unit and TOC entries
+    /// still resolve (dangling==0). Companion to the deterministic logic test.
+    func testStitch_PDF_attentionNoRegression() throws {
+        let db = try freshDB()
+        let url = try src("attention-is-all-you-need_arxiv.pdf")
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: url)
+        let units = try db.units(for: doc.id)
+        let breakUnits = units.filter { $0.kind == .pageBreak }
+        let proseUnits = units.filter { $0.kind == .prose }
+
+        // Count pages that actually yield text lines (the importer only appends
+        // non-empty pages), and require one break unit per such page.
+        var textPages = 0
+        if let pdf = PDFDocument(url: url) {
+            for i in 0..<pdf.pageCount {
+                if let p = pdf.page(at: i), !PDFLineExtractor.lines(from: p, pageIndex: i).isEmpty { textPages += 1 }
+            }
+        }
+        XCTAssertEqual(breakUnits.count, textPages,
+                       "every text-bearing page keeps a break unit (page map intact): \(breakUnits.count) vs \(textPages)")
+
+        // Chapter anchoring not regressed: no TOC entry dangles.
+        let byID = Dictionary(units.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let toc = try db.tocEntries(for: doc.id)
+        let dangling = toc.filter { byID[$0.unitID] == nil }.count
+        XCTAssertEqual(dangling, 0, "stitching must not orphan TOC entries")
+        print("✓ attention no-regression: \(breakUnits.count) breaks == \(textPages) text pages, \(proseUnits.count) prose units, \(toc.count) TOC entries, 0 dangling")
+    }
+
     // ── Well-behaved formats: assert clean ──────────────────────────────────
 
     func testGate_MD_pandocManual() throws {

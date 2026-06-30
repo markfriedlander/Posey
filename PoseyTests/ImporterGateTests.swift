@@ -271,7 +271,34 @@ final class ImporterGateTests: XCTestCase {
             XCTAssertTrue(joined.contains("scaled dot-product") || joined.contains("multi-head attention"),
                           "clean-doc body content missing → furniture removal ate prose")
         }
-        print("✓ furniture: DOCID stamp + browser-print header/footer removed; clean-doc body intact")
+        // (4) Antifa handbook — a WORD-PHRASE running header ("ANTIFA" on ~47 pages).
+        //     keep-first leaves the title's one legit instance; the rest are removed.
+        //     (Accepted residual: the inconsistently-extracted "MARK BRAY" footer is
+        //     deliberately left — see PDFPageFurnitureDetector.) Confirmed on the
+        //     PHONE's iOS engine (ANTIFA 47→1), asserted here on the same engine.
+        do {
+            let db = try freshDB()
+            let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("Antifa, The Anti-Fascist Handbook.pdf"))
+            let units = try db.units(for: doc.id)
+            let antifaHeader = units.filter { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == "ANTIFA" }
+            let body = units.map { $0.text }.joined(separator: " ").lowercased()
+            XCTAssertLessThanOrEqual(antifaHeader.count, 3,
+                                     "ANTIFA running header not removed: \(antifaHeader.count) standalone units (raw ~47)")
+            XCTAssertTrue(body.contains("anti-fascis") || body.contains("durruti") || body.contains("mark bray"),
+                          "Antifa body content missing → furniture removal ate prose")
+        }
+        // (5) NO OVER-STRIP on a big clean book — GEB has no document-wide recurring
+        //     furniture; its real content (dialogue characters, the MU-puzzle) must
+        //     all survive. Guards the conservative threshold from eating real text.
+        do {
+            let db = try freshDB()
+            let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: try src("GEBen.pdf"))
+            let units = try db.units(for: doc.id)
+            let body = units.map { $0.text }.joined(separator: " ").lowercased()
+            XCTAssertTrue(body.contains("achilles") || body.contains("tortoise") || body.contains("mu-puzzle"),
+                          "GEB body content missing → furniture removal over-stripped a clean doc")
+        }
+        print("✓ furniture: DOCID + Wayback + ANTIFA headers removed; Attention/GEB clean-doc body intact")
     }
 
     // ── Cross-page paragraph stitching ───────────────────────────────────────

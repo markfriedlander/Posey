@@ -551,15 +551,31 @@ final class ImporterGateTests: XCTestCase {
         // Reconstruct the EXACT input the unit builder sees.
         let parsed = try PDFDocumentImporter().loadDocument(from: url)
         let cleaned = PDFPageFurnitureDetector.detect(in: parsed.linesByPage).cleaned
-        func strip(_ s: String) -> String { s.filter { !$0.isWhitespace } }
+        // Compare LETTER content: ignore whitespace (space-join) AND line-break
+        // hyphens (`-` / `¬`), which the builder intentionally removes when it
+        // rejoins a wrapped word ("ac-"+"tion"→"action"). The invariant is
+        // "no letters lost", which survives both space-join and hyphen-rejoin.
+        func strip(_ s: String) -> String {
+            s.filter { !$0.isWhitespace && $0 != "-" && $0 != "\u{00AC}" }
+        }
         let inputText = strip(cleaned.flatMap { $0 }.map { $0.text }.joined())
 
         // Import for real and gather the built units.
         let db = try freshDB()
         let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: url)
         let units = try db.units(for: doc.id)
-        let outputText = strip(units.filter { $0.kind == .prose || $0.kind == .heading }
-                                    .map { $0.text }.joined())
+        let proseHeading = units.filter { $0.kind == .prose || $0.kind == .heading }
+        let outputText = strip(proseHeading.map { $0.text }.joined())
+
+        // Line-break hyphen artifact: "<letter>- <lowercase>" (a wrapped word that
+        // wasn't rejoined). A real spaced dash ("word - word") has a space BEFORE
+        // the hyphen and won't match. After the rejoin fix this should be 0.
+        let hyphenArtifactRE = try NSRegularExpression(pattern: #"[A-Za-z]- [a-z]"#)
+        var hyphenArtifacts = 0
+        for u in proseHeading {
+            hyphenArtifacts += hyphenArtifactRE.numberOfMatches(
+                in: u.text, range: NSRange(u.text.startIndex..., in: u.text))
+        }
 
         // Census sparse reader "pages": chars between consecutive pageBreak units.
         var perPage: [(page: Int?, chars: Int)] = []
@@ -578,21 +594,25 @@ final class ImporterGateTests: XCTestCase {
         let sparse = perPage.filter { $0.chars < 50 }
 
         let report = """
-        CRYPTO no-drop + sparse census:
-          input clean-line chars (ws-stripped)  = \(inputText.count)
-          output unit-text chars (ws-stripped)  = \(outputText.count)
-          identical text set (no drop)          = \(inputText == outputText)
+        CRYPTO no-drop + sparse census + hyphen rejoin:
+          input letters (ws+hyphen-stripped)    = \(inputText.count)
+          output letters (ws+hyphen-stripped)   = \(outputText.count)
+          same letter content (no drop)         = \(inputText == outputText)
           reader 'pages' total                  = \(perPage.count)
           near-empty (<50 chars)                = \(sparse.count)
           near-empty page numbers               = \(sparse.compactMap { $0.page }.prefix(40))
+          line-break hyphen artifacts ("ac- t") = \(hyphenArtifacts)
         """
         try? report.write(to: URL(fileURLWithPath: "/tmp/crypto_nodrop.txt"),
                           atomically: true, encoding: .utf8)
         print(report)
 
-        // The core proof Mark asked for: stitching rearranges, never drops.
+        // The core proof Mark asked for: the builder rearranges/rejoins, never drops.
         XCTAssertEqual(inputText, outputText,
-                       "stitching must not drop or add text (Δ=\(outputText.count - inputText.count) chars)")
+                       "no letters dropped or added (Δ=\(outputText.count - inputText.count))")
+        // The rejoin fix worked: no wrapped-word hyphen artifacts survive.
+        XCTAssertEqual(hyphenArtifacts, 0,
+                       "line-break hyphens must be rejoined ('ac- tion'→'action'); \(hyphenArtifacts) left")
     }
 
     // ── Well-behaved formats: assert clean ──────────────────────────────────

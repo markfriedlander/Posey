@@ -283,7 +283,18 @@ enum ContentUnitBuilder {
         var lastBufferedLine: PDFTextLine? = nil
         var pendingPageBreaks: [Int] = []          // page indices whose break we deferred (straddle)
         func flushParagraph() {
-            let text = buffer.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            // Rejoin words split by a line-break hyphen. The line stream keeps each
+            // visual line's own text, so a word wrapped as "ac-" / "tion" arrives as
+            // two lines and joins to "ac- tion". The old displayText path ran
+            // TextNormalizer.stripLineBreakHyphens; the line path skipped it (Mark
+            // spotted "ar- tion" on Antifa, 2026-06-30). The rule only rejoins a
+            // hyphen FOLLOWED by whitespace + a lowercase continuation, so real
+            // compounds ("anti-fascist", no space after the hyphen) are preserved.
+            // Accepted parity limitation (Mark): a genuine compound that itself wraps
+            // at its hyphen ("anti-" / "fascist") merges to "antifascist" — same as
+            // the old path; rare, and not worth extra heuristics.
+            let joined = TextNormalizer.stripLineBreakHyphens(buffer.joined(separator: " "))
+            let text = joined.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty { add(.prose, text) }
             buffer.removeAll(keepingCapacity: true)
             lastBufferedLine = nil

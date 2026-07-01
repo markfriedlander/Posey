@@ -323,10 +323,16 @@ enum ContentUnitBuilder {
                 add(.pageBreak, "", ContentUnitMetadata(pageNumber: pageIndex))
             } else if let prev = lastBufferedLine, !buffer.isEmpty,
                       let first = page.first, !isHeading(first),
-                      lineRanFullWidth(prev, maxRight: priorMaxRight, leftMargin: priorLeftMargin),
                       !endsWithSentenceTerminator(prev.text),
+                      (endsWithLineBreakHyphen(prev.text)
+                       || lineRanFullWidth(prev, maxRight: priorMaxRight, leftMargin: priorLeftMargin)),
                       lineIsContinuation(first, leftMargin: leftMargin) {
                 // STITCH: carry the paragraph; defer this page's break until it flushes.
+                // Stitch when the prior page's last line either ran full-width OR ENDS IN
+                // A LINE-BREAK HYPHEN ("…into ac-"). The hyphen is a definitive "this word
+                // continues" signal even when that last line is short (a page's last line
+                // usually is), so a word split across the page break ("ac-"/"tion") gets
+                // stitched and flushParagraph's stripLineBreakHyphens rejoins it → "action".
                 pendingPageBreaks.append(pageIndex)
             } else {
                 // Clean boundary: complete the prior paragraph, then mark the page.
@@ -350,6 +356,16 @@ enum ContentUnitBuilder {
         }
         flushParagraph()       // final paragraph + any trailing deferred breaks
         return units
+    }
+
+    /// A line ending in a line-break hyphen ("…into ac-") — a definitive "this word
+    /// continues" signal, independent of whether the line reached the right margin (a
+    /// page's last line usually doesn't). Used to stitch a word split across a page
+    /// boundary so `stripLineBreakHyphens` in `flushParagraph` rejoins it. Matches the
+    /// two markers that pass handles (`-` and `¬`, U+00AC).
+    private static func endsWithLineBreakHyphen(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        return t.hasSuffix("-") || t.hasSuffix("\u{00AC}")
     }
 
     /// Did this line run essentially to the right margin (text wrapped because it

@@ -403,6 +403,35 @@ final class ImporterGateTests: XCTestCase {
         print("✓ attention no-regression: \(breakUnits.count) breaks == \(textPages) text pages, \(proseUnits.count) prose units, \(toc.count) TOC entries, 0 dangling")
     }
 
+    /// PDF rebuild — CROSS-PAGE hyphen rejoin (Mark spotted "ac-"/"tion" on Antifa,
+    /// device, 2026-06-30). A word split across a PAGE break lands "ac-" at the end
+    /// of one prose unit and "tion" at the start of the next — invisible to the
+    /// within-unit hyphen check, so it needs a cross-unit oracle. After the fix, no
+    /// prose unit should END in a line-break hyphen whose NEXT prose unit starts with
+    /// a lowercase continuation (the unresolved-split signature): those are stitched
+    /// into one unit and de-hyphenated. Real doc (Rule 7).
+    func testStitch_PDF_antifaCrossPageHyphenRejoined() throws {
+        let db = try freshDB()
+        let doc = try PDFLibraryImporter(databaseManager: db)
+            .importDocument(from: try src("Antifa, The Anti-Fascist Handbook.pdf"))
+        let prose = try db.units(for: doc.id).filter { $0.kind == .prose }
+        func endsInBreakHyphen(_ s: String) -> Bool {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.hasSuffix("-") || t.hasSuffix("\u{00AC}")
+        }
+        var dangling: [String] = []
+        for i in 0..<(prose.count - 1) {
+            let next = prose[i + 1].text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if endsInBreakHyphen(prose[i].text), let f = next.first, f.isLowercase {
+                dangling.append("…\(prose[i].text.suffix(24)) ⇢ \(next.prefix(24))…")
+            }
+        }
+        print("Antifa cross-page dangling hyphens: \(dangling.count)")
+        dangling.prefix(8).forEach { print("   ✗ \($0)") }
+        XCTAssertEqual(dangling.count, 0,
+                       "cross-page hyphenated words must be stitched + rejoined; \(dangling.count) left")
+    }
+
     // ── Academic numbered-section headings ───────────────────────────────────
 
     /// PDF rebuild — the Transformer paper's section headings ("3.1 Encoder and

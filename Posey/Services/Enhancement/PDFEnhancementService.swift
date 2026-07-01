@@ -250,8 +250,13 @@ actor PDFEnhancementService {
             try await MainActor.run {
                 try db.updateEnhancementState(documentID: documentID, status: "complete", error: nil)
             }
-            // Source PDF no longer needed once enhancement is done.
-            PDFSourceStore.delete(documentID)
+            // Source PDF no longer needed once enhancement is done — UNLESS the
+            // user chose to keep originals (Mark, 2026-06-30), which retains the
+            // source so any phase can be re-run later (REPARSE_PDF etc.). Deleting
+            // the DOCUMENT still drops its source regardless (that path is separate).
+            if !DocumentIndexingQueue.keepOriginalsDefault {
+                PDFSourceStore.delete(documentID)
+            }
 
             // 2026-05-23 — Step 8f: the unit-anchored chunker runs
             // at end-of-enhancement. The corrected units are the

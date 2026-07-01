@@ -39,6 +39,11 @@ struct EmbeddingStatusBoardView: View {
     /// queue's gate. Toggling calls `DocumentIndexingQueue.setBackgroundPrep`
     /// (syncs the actor flag + resumes). Default ON preserves prior behavior.
     @AppStorage(DocumentIndexingQueue.backgroundPrepDefaultsKey) private var backgroundPrepEnabled = true
+    /// "Keep original documents" — persisted (Mark, 2026-06-30). ON retains each
+    /// PDF's saved source after enhancement so any phase can be re-run from it
+    /// (re-parse / re-embed / rebuild summary tree). Default ON for now; roughly
+    /// doubles a document's storage, so it's a user choice as the library grows.
+    @AppStorage(DocumentIndexingQueue.keepOriginalsDefaultsKey) private var keepOriginals = true
     /// Locally-held order of the WAITING embed lane, so the queue rows support
     /// drag-to-reorder + swipe/Edit-to-remove. Reconciled from the published mirror
     /// (`indexing.embedQueuePositions`) on appear and on every queue change: when
@@ -80,10 +85,12 @@ struct EmbeddingStatusBoardView: View {
                             if !on { EmbeddingBackfillCoordinator.shared.cancel() }
                         }
                         .accessibilityIdentifier("board.bgPrepToggle")
+                    Toggle("Keep original documents", isOn: $keepOriginals)
+                        .accessibilityIdentifier("board.keepOriginalsToggle")
                 } header: {
                     Text("Controls")
                 } footer: {
-                    Text("ON: Posey works through the queue in the background, paced by the phone's temperature (it won't overheat). OFF: the queue still SHOWS what's waiting, but nothing RUNS until you switch it back on — including after a relaunch. (In-flight work stops after the current document.)")
+                    Text("ON: Posey works through the queue in the background, paced by the phone's temperature (it won't overheat). OFF: the queue still SHOWS what's waiting, but nothing RUNS until you switch it back on — including after a relaunch. (In-flight work stops after the current document.)\n\nKeep original documents ON: Posey saves each document's original file so it can rebuild its text, index, or summary later. It roughly doubles a document's storage — worth it while tuning, worth turning off once the library is large.")
                 }
                 Section("Backfill control") { backfillControl }
                     .id("board.backfill")
@@ -142,7 +149,7 @@ struct EmbeddingStatusBoardView: View {
                 }
                 .id("board.device")
             }
-            .navigationTitle("Preparation")
+            .navigationTitle("Advanced")
             .navigationBarTitleDisplayMode(.inline)
             .environment(\.editMode, $editMode)
             .toolbar {

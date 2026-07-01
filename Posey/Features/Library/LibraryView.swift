@@ -1696,6 +1696,46 @@ extension LibraryViewModel {
                     "note": "Re-chunking + re-embedding dispatched in background. Poll LIST_UNIT_CHUNKS for completion."
                 ])
 
+            case "REPARSE_PDF":
+                // 2026-06-30 (Mark) — re-run the IMPORT (unit-construction) phase on
+                // an already-imported PDF from its SAVED source bytes, replacing the
+                // old units/sentences/TOC in place under the SAME document id. Lets us
+                // verify an importer fix (e.g. the line-break hyphen rejoin) on a doc
+                // already in the library WITHOUT re-sending the file. Completes the
+                // "re-run any phase, dispose the old result, write a new one" set:
+                // REPARSE_PDF (units) · REINDEX_DOCUMENT (embeddings) ·
+                // REBUILD_RAPTOR_TREE (summary tree). persistParsedDocument deletes the
+                // doc's existing units/sentences/toc before re-insert, so this REPLACES
+                // (never duplicates); the shared import path also re-saves images/flags/
+                // source and re-enqueues enhancement (gated by the prep switch).
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: REPARSE_PDF:<doc-id>"}"#
+                }
+                let allDocs = try databaseManager.documents()
+                guard let existing = allDocs.first(where: { $0.id == id }) else {
+                    return #"{"error":"Document not found"}"#
+                }
+                guard existing.fileType.lowercased() == "pdf" else {
+                    return #"{"error":"REPARSE_PDF is PDF-only; this doc is \#(existing.fileType)"}"#
+                }
+                guard let bytes = PDFSourceStore.read(id) else {
+                    return #"{"error":"No saved PDF source for this doc (can't re-parse without it)"}"#
+                }
+                let unitsBefore = (try? databaseManager.units(for: id).count) ?? -1
+                let result = try PDFLibraryImporter(databaseManager: databaseManager)
+                    .importDocument(title: existing.title, fileName: existing.fileName,
+                                    rawData: bytes, fileType: existing.fileType)
+                let unitsAfter = (try? databaseManager.units(for: id).count) ?? -1
+                return json([
+                    "reparsed": true,
+                    "requestedID": id.uuidString,
+                    "resultID": result.id.uuidString,
+                    "sameID": result.id == id,      // must be true (content-hash dedup → same id)
+                    "unitsBefore": unitsBefore,
+                    "unitsAfter": unitsAfter,
+                    "note": "Units rebuilt in place. Re-open the doc to see the new text. Re-embed/RAPTOR via REINDEX_DOCUMENT / REBUILD_RAPTOR_TREE."
+                ])
+
             case "RESET_DOCUMENT_METADATA":
                 // 2026-05-23 — Step 8f: removed alongside the
                 // synthetic-metadata / DocumentMetadataService surface.
@@ -1813,6 +1853,17 @@ extension LibraryViewModel {
                 UserDefaults.standard.set(on, forKey: DocumentIndexingQueue.backgroundPrepDefaultsKey)
                 await DocumentIndexingQueue.shared.setBackgroundPrep(on)
                 return json(["backgroundPrep": on ? "on" : "off"])
+
+            case "SET_KEEP_ORIGINALS":
+                // "Keep original documents" toggle (Mark, 2026-06-30) — same AppStorage
+                // key the Advanced screen's switch binds to. ON = retain a PDF's saved
+                // source after enhancement so phases can be re-run (REPARSE_PDF etc.).
+                let keep = ["on", "true", "1", "yes"].contains((arg ?? "").lowercased())
+                UserDefaults.standard.set(keep, forKey: DocumentIndexingQueue.keepOriginalsDefaultsKey)
+                return json(["keepOriginals": keep ? "on" : "off"])
+
+            case "GET_KEEP_ORIGINALS":
+                return json(["keepOriginals": DocumentIndexingQueue.keepOriginalsDefault ? "on" : "off"])
 
             case "ENHANCE_CHUNK_NOW":
                 // 2026-05-23 — Step 8f: removed (legacy chunk/metadata/scheduler verb).

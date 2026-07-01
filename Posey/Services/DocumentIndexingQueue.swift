@@ -110,6 +110,21 @@ actor DocumentIndexingQueue {
         UserDefaults.standard.object(forKey: backgroundPrepDefaultsKey) as? Bool ?? true
     }
 
+    /// UserDefaults key for "Keep original documents" (Mark, 2026-06-30). When ON,
+    /// a PDF's saved source is NOT deleted after enhancement completes, so any phase
+    /// can be re-run later from source (REPARSE_PDF / REINDEX_DOCUMENT /
+    /// REBUILD_RAPTOR_TREE). Costs ~the source's bytes per doc (roughly doubles a
+    /// PDF's footprint) — cheap now, grows with the library, hence a user choice.
+    /// Missing → true (keep) FOR NOW: small library + we're actively re-verifying
+    /// importer fixes. [DECISION] When this screen becomes user-facing, flip the
+    /// default to false (don't silently double a stranger's storage). Deleting a
+    /// document ALWAYS drops its source regardless of this switch.
+    static let keepOriginalsDefaultsKey = "posey.keepOriginalDocuments"
+    /// Nonisolated read of the switch. Missing → true (keep). See the key's note.
+    static var keepOriginalsDefault: Bool {
+        UserDefaults.standard.object(forKey: keepOriginalsDefaultsKey) as? Bool ?? true
+    }
+
     // MARK: Injected work
 
     private var indexer: DocumentIndexer?

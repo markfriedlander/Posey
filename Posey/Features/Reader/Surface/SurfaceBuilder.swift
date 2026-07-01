@@ -168,9 +168,14 @@ enum SurfaceBuilder {
             return -1
 
         case .pageBreak:
-            let n = (unit.metadata.pageNumber ?? 0) + 1
-            appendCentered("page \(n)", into: body, size: bodyPointSize * 0.7,
-                           color: .secondaryLabel, spacingBefore: 14, spacingAfter: 14)
+            // [DECISION Mark 2026-06-30] Page markers are kept in the model for
+            // INTERNAL use only — go-to-page navigation (DocumentPageMap),
+            // content boundaries, per-page re-scan/OCR (PDFEnhancementService,
+            // replaceUnitsForPage), and furniture stripping — but are NOT drawn.
+            // PDFs read as one continuous flow like every other format, which
+            // also dissolves the "sparse page" artifact (text was never lost by
+            // the cross-page glue, only shifted across the divider). Contributes
+            // no surface range (return -1), so hiding it shifts no anchor.
             return -1
 
         case .horizontalRule:

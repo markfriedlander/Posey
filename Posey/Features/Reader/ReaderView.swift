@@ -3212,10 +3212,6 @@ final class ReaderViewModel: ObservableObject {
         /// Sentence index → image-unit id. Drives pause-at-image when
         /// playback reaches the first sentence following an image.
         let visualPauseUnitIDsBySentenceIndex: [Int: UUID]
-        /// Reader UI bundle #4 — sentence indices that begin a new
-        /// page (first prose sentence after a `pageBreak` unit).
-        /// Playback applies a brief preUtteranceDelay to each.
-        let pageBreakPauseSentenceIndices: Set<Int>
         /// 2026-06-15 — Segment/sentence indices whose owning unit is a
         /// `.table` (rendered as an image). TTS glides PAST these — the head
         /// moves to the other side of the table like it does an image —
@@ -3381,27 +3377,6 @@ final class ReaderViewModel: ObservableObject {
             }
         }
 
-        // **Reader UI bundle #4 — page-break TTS pauses.** Same
-        // pattern as the visual-pause map: for every `.pageBreak`
-        // unit, locate the first sentence in the next prose unit
-        // and record its index. The playback service applies a
-        // ~0.4s preUtteranceDelay to those utterances. PageBreak
-        // units carry no text and never enter the sentences array,
-        // so they're never spoken or highlighted by construction.
-        var pageBreakPauseSentenceIndices: Set<Int> = []
-        for (uIdx, unit) in filteredUnits.enumerated() where unit.kind == .pageBreak {
-            for j in (uIdx + 1)..<filteredUnits.count {
-                let candidate = filteredUnits[j]
-                guard candidate.kind.carriesProseText else { continue }
-                let firstSentence = filteredSentences.first { $0.unitID == candidate.id }
-                if let s = firstSentence,
-                   let sentenceIndex = filteredSentences.firstIndex(of: s) {
-                    pageBreakPauseSentenceIndices.insert(sentenceIndex)
-                }
-                break
-            }
-        }
-
         // 2026-06-15 — Table visual-block maps (tables mirror images during
         // playback, governed by the unified `visualHandling` preference).
         // `filteredSentences` is parallel to `segments`, so its index IS the
@@ -3447,7 +3422,6 @@ final class ReaderViewModel: ObservableObject {
             units: filteredUnits,
             sentences: filteredSentences,
             visualPauseUnitIDsBySentenceIndex: visualPauseUnitIDsBySentenceIndex,
-            pageBreakPauseSentenceIndices: pageBreakPauseSentenceIndices,
             tableSegmentIndices: tableSegmentIndices,
             tablePauseUnitIDsBySentenceIndex: tablePauseUnitIDsBySentenceIndex,
             tableAnnounceSentenceIndices: tableAnnounceSentenceIndices,
@@ -3537,7 +3511,6 @@ final class ReaderViewModel: ObservableObject {
                 units: [],
                 sentences: [],
                 visualPauseUnitIDsBySentenceIndex: [:],
-                pageBreakPauseSentenceIndices: [],
                 tableSegmentIndices: [],
                 tablePauseUnitIDsBySentenceIndex: [:],
                 tableAnnounceSentenceIndices: [],
@@ -3575,10 +3548,6 @@ final class ReaderViewModel: ObservableObject {
         self.units = computed.units
         self.sentences = computed.sentences
         self.visualPauseUnitIDsBySentenceIndex = computed.visualPauseUnitIDsBySentenceIndex
-        // Reader UI bundle #4 — hand the playback service the
-        // sentence indices that follow a page break so it can apply
-        // a brief preUtteranceDelay to each.
-        self.playbackService.pageBreakPauseSentenceIndices = computed.pageBreakPauseSentenceIndices
         // Store the table visual-block maps; the actual skip/pause/announce
         // wiring is applied by applyVisualBlockMotionPolicy() (below) based on
         // the `visualHandling` preference — not unconditionally here.

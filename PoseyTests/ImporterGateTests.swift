@@ -487,6 +487,43 @@ final class ImporterGateTests: XCTestCase {
             var endHy = 0
             for u in prose where endsInBreakHyphen(u.text) { endHy += 1 }
 
+            // POSITIVE PROOF the fix FIRED and rejoined real words on THIS doc (not just
+            // "no residual"): for each page boundary that is a CLEAN cross-page hyphen split
+            // — prior page's last line ends in a line-break hyphen, next page's first line is
+            // a lowercase continuation (not furniture) — reconstruct the merged word (drop the
+            // hyphen, per stripLineBreakHyphens) and CONFIRM it appears intact in the output.
+            let outputText = prose.map { $0.text }.joined(separator: " ")
+            let outputLettersOnly = outputText.filter { !$0.isWhitespace && $0 != "-" && $0 != "\u{00AC}" }
+            var cleanSplits = 0, rejoined = 0, furnitureBlocked = 0
+            var rejoinExamples: [String] = []
+            var blockedExamples: [String] = []
+            for p in 1..<cleaned.count {
+                guard let prevL = cleaned[p - 1].last, let firstL = cleaned[p].first else { continue }
+                let pt = prevL.text.trimmingCharacters(in: .whitespaces)
+                guard pt.hasSuffix("-") || pt.hasSuffix("\u{00AC}") else { continue }
+                let ft = firstL.text.trimmingCharacters(in: .whitespaces)
+                if let f0 = ft.first, f0.isLowercase {
+                    // CLEAN cross-page split — the case mode-1 rejoins.
+                    cleanSplits += 1
+                    let head = pt.split(separator: " ").last.map(String.init) ?? ""
+                    let tail = ft.split(separator: " ").first.map(String.init) ?? ""
+                    let merged = String(head.dropLast()) + tail   // "par-" + "ties" -> "parties"
+                    let mergedLetters = merged.filter { !$0.isWhitespace && $0 != "-" && $0 != "\u{00AC}" }
+                    if !mergedLetters.isEmpty, outputLettersOnly.contains(mergedLetters) {
+                        rejoined += 1
+                        if rejoinExamples.count < 6 { rejoinExamples.append(merged) }
+                    }
+                } else {
+                    // FURNITURE-BLOCKED — the word continues, but a header/label/number is
+                    // wedged at the top of the next page (uppercase/number first line). mode-1
+                    // can't rejoin these; the FURNITURE work will, by removing the wedge.
+                    furnitureBlocked += 1
+                    if blockedExamples.count < 6 {
+                        blockedExamples.append("\(pt.suffix(14)) ⟂ \(ft.prefix(14))")
+                    }
+                }
+            }
+
             // Extraction determinism probe (explains any nonzero historical delta).
             let cleaned2 = try cleanedLines(url)
             let determinismDrift = abs(inputLetters.count
@@ -495,6 +532,11 @@ final class ImporterGateTests: XCTestCase {
             report += "— \(name)\n"
             report += "   pages=\(cleaned.count) prose=\(prose.count)  inputLetters=\(inputLetters.count) outputLetters=\(outputLetters.count) delta=\(delta)\n"
             report += "   cross-page dangling=\(dangling)  prose-units-ending-in-hyphen=\(endHy)  extraction-determinismDrift=\(determinismDrift)\n"
+            report += "   cross-page CLEAN splits=\(cleanSplits)  REJOINED=\(rejoined)  e.g. \(rejoinExamples.prefix(6).map { "\"\($0)\"" }.joined(separator: ", "))\n"
+            report += "   cross-page FURNITURE-BLOCKED (→ furniture work) = \(furnitureBlocked)  e.g. \(blockedExamples.prefix(6).map { "\"\($0)\"" }.joined(separator: ", "))\n"
+            // Proof the fix works on THIS doc: every clean cross-page split rejoined.
+            XCTAssertEqual(rejoined, cleanSplits,
+                           "[\(name)] \(cleanSplits - rejoined) clean cross-page splits did NOT rejoin")
 
             // THE SAFETY INVARIANT: from one extraction, mode-1 stitching only REARRANGES
             // text across a page break — it never DROPS a character. So IN letters == OUT

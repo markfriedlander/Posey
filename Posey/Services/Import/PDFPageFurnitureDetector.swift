@@ -21,33 +21,44 @@ import Foundation
 ///   • Normalize a candidate line to a SIGNATURE: lowercase, digit-runs → "#"
 ///     (so "Page 12" / "Page 13" and bare "12" / "13" collapse to one signature),
 ///     every non-alphanumeric folded to a single space.
-///   • A signature recurring in a margin band on ≥ `minFraction` of pages AND on
-///     ≥ `minPages` pages is furniture → those band lines are dropped.
+///   • A signature recurring in a margin band on ≥ `runnerMinPages` pages (an
+///     ABSOLUTE floor, not a fraction of the book) is furniture → those band lines
+///     are dropped.
+///
+/// WHY AN ABSOLUTE FLOOR (CC#19, 2026-07-02, Mark-approved): the old rule needed
+/// a signature on ≥30% of the WHOLE book. A per-CHAPTER running header ("Strange
+/// Loops…" atop every page of one GEB chapter, "Introduction"/"NOTES"/"APPENDIX A"
+/// atop each section of Antifa) only appears within its own section, so it never
+/// reaches a document-wide fraction and survived — littering the reader and the RAG
+/// index. But a real body line is NEVER the identical ≤`maxHeaderWords`-word first/
+/// last line on 6+ pages. So the recurrence COUNT itself is the signal; the fraction
+/// was overly conservative on long books. Page numbers ride the same net: bare "12"/
+/// "13" collapse to the "#" signature, which recurs far past the floor.
 ///
 /// SAFETY — this project's worst scar is eating real content (Dracula ch14–27).
 /// Every guard favors under-stripping over over-stripping:
 ///   • short docs (< `minDocPages`) are left entirely untouched — recurrence is
 ///     unreliable there;
-///   • only margin-band lines are ever removed, never body lines;
-///   • removal requires IDENTICAL normalized text recurring across many pages — a
-///     real body line is never the identical first/last line on a third of pages;
-///   • per-CHAPTER running headers (the title changes each chapter) never reach the
-///     document-wide fraction, so they survive — only document-CONSTANT furniture
-///     (one signature across the whole book) is removed.
+///   • only margin-band lines (first/last `bandSize`) are ever removed, never body;
+///   • removal requires IDENTICAL normalized text recurring across ≥ `runnerMinPages`
+///     pages — a real body sentence never repeats verbatim as a margin line that often;
+///   • KEEP-FIRST: a pure word-phrase title keeps its earliest occurrence, so a
+///     section/book title that exists ONLY as a running header is never lost entirely
+///     — only its repeats are stripped. (Cost: one header copy per signature survives.)
 ///
 /// Note: Crypto's ChmMagic banner is already stripped per-line in
 /// `PDFLineExtractor` (brand stripper) before these arrays exist, so this detector
 /// never sees it — the two layers compose (brand net + general recurrence net).
 ///
-/// ACCEPTED RESIDUAL (Mark, 2026-06-30): low-frequency furniture that the source
-/// PDF extracts INCONSISTENTLY is deliberately left. E.g. the Antifa handbook's
-/// "MARK BRAY" author footer is isolated as its own line on only ~13 of 286 pages
-/// (iOS merges it into body text on the rest), well under the 30% threshold. We do
-/// NOT lower the threshold to grab it — that would also remove this book's real
-/// recurring structure ("NOTES" section headers, "***" scene breaks). An LLM
-/// header/footer judge was considered to catch this long tail and rejected as not
-/// worth the hallucination / eat-real-headings risk for a cosmetic, unnoticed
-/// residual. Under-strip ≫ over-strip remains the rule.
+/// RESIDUAL (CC#19, 2026-07-02): with the absolute floor, the Antifa "MARK BRAY"
+/// footer (~13 pages) and the per-section headers ("NOTES" ×17, "INTRODUCTION" ×7,
+/// "APPENDIX A" ×5) now qualify and are stripped — KEEP-FIRST leaves ONE copy of
+/// each word-phrase title (safe: never lose a title entirely). "***" scene breaks
+/// are non-alphanumeric → empty signature → never tallied, so untouched. The only
+/// remaining residual is that single kept copy per running-header signature, which
+/// can still block a cross-page hyphen rejoin on the page it lands (honest, minor).
+/// Under-strip ≫ over-strip remains the rule; the letter-count no-body-lost check
+/// (ImporterGateTests) guards every change.
 enum PDFPageFurnitureDetector {
 
     /// One furniture signature that was removed, with how many pages carried it
@@ -65,8 +76,7 @@ enum PDFPageFurnitureDetector {
 
     static func detect(in linesByPage: [[PDFTextLine]],
                        bandSize: Int = 2,
-                       minFraction: Double = 0.30,
-                       minPages: Int = 5,
+                       runnerMinPages: Int = 6,
                        minDocPages: Int = 6,
                        maxHeaderWords: Int = 8) -> Result {
         let pageCount = linesByPage.count
@@ -121,8 +131,10 @@ enum PDFPageFurnitureDetector {
             }
         }
 
-        // A key is furniture iff it clears BOTH the fraction and the absolute floor.
-        let need = max(minPages, Int((Double(pageCount) * minFraction).rounded(.up)))
+        // A key is furniture iff it recurs on ≥ the absolute floor of pages. No
+        // fraction: a per-section running header only spans its own section but is
+        // still furniture (see WHY AN ABSOLUTE FLOOR above).
+        let need = runnerMinPages
         var furniture = Set<String>()
         var removed: [Removal] = []
         for (key, pages) in pagesForSignature where pages.count >= need {
@@ -130,15 +142,22 @@ enum PDFPageFurnitureDetector {
             removed.append(Removal(signature: key, pages: pages.count,
                                    sample: sampleForSignature[key] ?? key))
         }
-        guard !furniture.isEmpty else { return Result(cleaned: linesByPage, removed: []) }
+        // NB: do NOT early-return when `furniture` is empty — lone page numbers (below)
+        // are removed unconditionally, independent of the recurrence set.
 
-        // Drop furniture lines — ONLY in a margin band. KEEP THE FIRST occurrence
-        // when removal is driven by a pure WORD-PHRASE signature (Mark, 2026-06-30):
-        // a running header that IS the document's real title must keep its one legit
-        // first appearance. Numeric/structural furniture (a "#"-bearing signature, or
-        // a fixed numeric-anchor stamp) has no legit single instance → remove ALL.
-        // Walking pages then lines in order visits reading order, so `keptFirst`
-        // keeps the earliest title instance.
+        // Drop furniture lines — ONLY in a margin band. Two mechanisms:
+        //   (a) LONE PAGE NUMBERS — a band line that is nothing but a page number
+        //       (pure digits, or a strict Roman numeral like "xix") is ALWAYS furniture,
+        //       no recurrence needed, remove ALL. Critical: a Roman page number varies
+        //       per page ("xiv","xv"…) so it never recurs into the signature set, yet if
+        //       left it corrupts a cross-page hyphen rejoin ("move-" + "xix" → "movexix"
+        //       once the interposed running header is stripped — caught on device
+        //       2026-07-02).
+        //   (b) RECURRENCE furniture — signatures over the absolute floor. KEEP THE FIRST
+        //       occurrence of a pure WORD-PHRASE title (never lose a title entirely);
+        //       numeric/"#"/anchor-stamp furniture has no legit single instance → remove
+        //       ALL. Walking pages then lines visits reading order, so `keptFirst` keeps
+        //       the earliest title instance.
         var cleaned: [[PDFTextLine]] = []
         cleaned.reserveCapacity(linesByPage.count)
         var keptFirst = Set<String>()
@@ -147,18 +166,19 @@ enum PDFPageFurnitureDetector {
             var out: [PDFTextLine] = []
             out.reserveCapacity(page.count)
             for (i, line) in page.enumerated() {
-                if band.contains(i), wordCount(line.text) <= maxHeaderWords {
-                    let sig = signature(line.text)
-                    let anchor = numericAnchor(line.text)
-                    let byWord = furniture.contains(sig)
-                    let byAnchor = anchor.map { furniture.contains($0) } ?? false
-                    if byWord || byAnchor {
-                        // keep-first ONLY for a pure word-phrase title: matched by a
-                        // word signature, no "#", not a numeric-anchor stamp.
-                        if byWord, !byAnchor, !sig.contains("#"), keptFirst.insert(sig).inserted {
-                            out.append(line)   // legit first title instance survives
+                if band.contains(i) {
+                    if isLonePageNumber(line.text) { continue }   // (a) always furniture
+                    if wordCount(line.text) <= maxHeaderWords {
+                        let sig = signature(line.text)
+                        let anchor = numericAnchor(line.text)
+                        let byWord = furniture.contains(sig)
+                        let byAnchor = anchor.map { furniture.contains($0) } ?? false
+                        if byWord || byAnchor {
+                            if byWord, !byAnchor, !sig.contains("#"), keptFirst.insert(sig).inserted {
+                                out.append(line)   // (b) legit first title instance survives
+                            }
+                            continue               // everything else removed
                         }
-                        continue               // everything else removed
                     }
                 }
                 out.append(line)
@@ -213,6 +233,28 @@ enum PDFPageFurnitureDetector {
     /// Whitespace-separated word count (rough — collapses runs).
     static func wordCount(_ text: String) -> Int {
         text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).count
+    }
+
+    /// A band line that is NOTHING but a page number — pure digits ("246"), or a
+    /// strict Roman numeral 3–7 chars ("xix", "mcmlxxxiv"). Always furniture. Roman
+    /// numerals need explicit handling because they vary per page and so never recur
+    /// into the signature set. The STRICT pattern (proper Roman ordering, anchored)
+    /// rejects real words that only use those letters — "civil", "mill", "did". We
+    /// require length ≥3: 1-char ("i","v","x") and 2-char ("vi","xi","mi","li","di")
+    /// Roman numerals overlap too many real words / initials / list markers to strip
+    /// safely; 3+ char Roman words are vanishingly rare as a lone margin line, so the
+    /// under-strip ≫ over-strip rule holds. (Front-matter pages i–xx below 3 chars are
+    /// left — harmless.)
+    static func isLonePageNumber(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return false }
+        if t.allSatisfy({ $0.isNumber }) { return true }
+        guard t.count >= 3, t.count <= 7 else { return false }
+        let roman = "^m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$"
+        guard let re = try? NSRegularExpression(pattern: roman, options: [.caseInsensitive]) else {
+            return false
+        }
+        return re.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) != nil
     }
 }
 

@@ -432,19 +432,83 @@ final class ImporterGateTests: XCTestCase {
                        "cross-page hyphenated words must be stitched + rejoined; \(dangling.count) left")
     }
 
-    /// GENERALIZE the cross-page hyphen fix across the PDF family (Rule 10) AND prove
-    /// it never drops text (Mark's two questions, 2026-07-02). For each real PDF, from a
-    /// SINGLE extraction: build the units the exact way `PDFLibraryImporter` does
-    /// (furniture-clean → resolveHeadings → `unitsFromPDFLines`) and compare the
-    /// non-whitespace/non-hyphen character count IN (cleaned lines) vs OUT (units).
-    ///
-    /// **Why one extraction (CC#19 correction):** an earlier version of this test
-    /// extracted each PDF TWICE — once for the input, once inside `importDocument` for
-    /// the output — and reported GEB "losing 56 letters." That was a TEST ARTIFACT:
-    /// PDFKit's extraction of an 800-page math book (GEB) is not byte-identical run to
-    /// run, so it compared extraction-A's input against extraction-B's output. Using ONE
-    /// extraction for both isolates the builder. A `determinismDrift` probe (two loads)
-    /// is reported so the non-determinism is visible, not mistaken for a pipeline bug.
+    /// UNIT TEST (CC#19, 2026-07-02) — `isLonePageNumber` must catch page numbers
+    /// (arabic + strict Roman ≥3 chars) but NEVER a real word that happens to use Roman
+    /// letters. Guards the fix for the "movexix" corruption (a Roman page number wedged
+    /// mid-word after furniture removal) without eating content.
+    func testUnit_isLonePageNumber() throws {
+        let pageNumbers = ["1", "42", "246", "1999", "xix", "xiv", "xxi", "viii",
+                           "xiii", "iii", "xxx", "xlii", "lxxx", "clx"]
+        for p in pageNumbers {
+            XCTAssertTrue(PDFPageFurnitureDetector.isLonePageNumber(p), "'\(p)' should be a page number")
+        }
+        let realWords = ["civil", "mill", "did", "mid", "dim", "lid", "vivid", "livid",
+                         "mimic", "civic", "dill", "mild", "id", "index", "the", "and",
+                         "vi", "xi", "mi", "di", "li", "Introduction", "NOTES", "MARK BRAY"]
+        for w in realWords {
+            XCTAssertFalse(PDFPageFurnitureDetector.isLonePageNumber(w), "'\(w)' must NOT be treated as a page number")
+        }
+    }
+
+    /// FURNITURE AFTER + SAFETY (CC#19, 2026-07-02) — verifies the absolute-floor
+    /// furniture change. For each real PDF: (1) report what the detector now REMOVES and
+    /// the TAIL of margin lines still surviving; (2) SAFETY — no body text eaten: compare
+    /// the letter count of ALL raw lines vs the furniture-cleaned lines (the delta is the
+    /// furniture removed) and ASSERT a known real BODY sentence is still present in the
+    /// cleaned output. The detector only ever drops ≤8-word margin-band lines, so the
+    /// delta must be small and body prose intact (Dracula-scar guard, Rule 12/13).
+    func testDiag_PDF_furnitureAfterAndSafety() throws {
+        // doc → a real body sentence fragment that MUST survive furniture removal.
+        let docs: [(String, String)] = [
+            ("Antifa, The Anti-Fascist Handbook.pdf", "pushed into ac"),
+            ("GEBen.pdf", "MU-puzzle"),
+            ("Learning_from_the_Enemy.pdf", "intelligence")
+        ]
+        func letters(_ s: String) -> String { s.filter { !$0.isWhitespace && $0 != "-" && $0 != "\u{00AC}" } }
+        var report = "════ FURNITURE AFTER + SAFETY (absolute floor) ════\n"
+        for (name, bodyNeedle) in docs {
+            let url: URL
+            do { url = try src(name) } catch { report += "— \(name): MISSING\n"; continue }
+            let lines = try PDFDocumentImporter().loadDocument(from: url).linesByPage
+            let rawLetters = letters(lines.flatMap { $0 }.map { $0.text }.joined())
+            let result = PDFPageFurnitureDetector.detect(in: lines)
+            let cleanedText = result.cleaned.flatMap { $0 }.map { $0.text }.joined()
+            let cleanedLetters = letters(cleanedText)
+            let removedLetters = rawLetters.count - cleanedLetters.count
+            let pct = rawLetters.count > 0 ? Double(removedLetters) / Double(rawLetters.count) * 100 : 0
+
+            report += "— \(name): pages=\(lines.count)\n"
+            report += "   REMOVED \(result.removed.count) signatures, \(removedLetters) letters (\(String(format: "%.2f", pct))% of \(rawLetters.count))\n"
+            report += "   top removals: \(result.removed.prefix(8).map { "\"\($0.sample.prefix(22))\"×\($0.pages)" }.joined(separator: ", "))\n"
+
+            // Surviving recurring margin lines (band=2, ≥4 pages) — the remaining tail.
+            func band(_ n: Int) -> Set<Int> {
+                var s = Set<Int>(); for i in 0..<min(2, n) { s.insert(i) }
+                for i in max(0, n - 2)..<n { s.insert(i) }; return s
+            }
+            var pagesFor: [String: (Int, String)] = [:]
+            for page in result.cleaned {
+                var seen = Set<String>()
+                for i in band(page.count) {
+                    let t = page[i].text
+                    guard t.split(whereSeparator: { $0 == " " }).count <= 8 else { continue }
+                    let sig = PDFPageFurnitureDetector.signature(t)
+                    guard !sig.isEmpty, seen.insert(sig).inserted else { continue }
+                    let cur = pagesFor[sig]?.0 ?? 0
+                    pagesFor[sig] = (cur + 1, pagesFor[sig]?.1 ?? t)
+                }
+            }
+            let survivors = pagesFor.filter { $0.value.0 >= 4 }.sorted { $0.value.0 > $1.value.0 }
+            report += "   still surviving (≥4 pages): \(survivors.prefix(8).map { "\"\($0.value.1.prefix(18))\"×\($0.value.0)" }.joined(separator: ", "))\n"
+
+            // SAFETY assertion: a real body sentence must survive furniture removal.
+            XCTAssertTrue(cleanedText.contains(bodyNeedle),
+                          "[\(name)] furniture removal ate real body text — '\(bodyNeedle)' missing")
+        }
+        try? report.write(to: URL(fileURLWithPath: "/tmp/furniture_after.txt"), atomically: true, encoding: .utf8)
+        print(report)
+    }
+
     /// SEVERITY PROBE (CC#19, 2026-07-02) for the Learning "his- tory" within-page
     /// non-rejoin. Import Learning through the REAL importer, then for every prose unit
     /// find WITHIN-unit "letter- <space> lowercase" artifacts (a wrapped word the
@@ -481,6 +545,11 @@ final class ImporterGateTests: XCTestCase {
         print(out)
     }
 
+    /// GENERALIZE the cross-page hyphen fix across the PDF family (Rule 10) AND prove it
+    /// never drops text. For each real PDF, from a SINGLE extraction, build units the way
+    /// `PDFLibraryImporter` does and compare letter counts IN vs OUT (delta must be 0).
+    /// (Single extraction because PDFKit's GEB extraction isn't byte-identical run to run;
+    /// an earlier two-extraction version falsely reported GEB "losing 56 letters".)
     func testStitch_PDF_crossPageHyphen_multiDocFamily() throws {
         let docs = ["Cryptography for Dummies.pdf", "attention-is-all-you-need_arxiv.pdf",
                     "Measure What Matters - John Doerr.pdf", "GEBen.pdf",

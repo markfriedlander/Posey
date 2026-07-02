@@ -432,6 +432,91 @@ final class ImporterGateTests: XCTestCase {
                        "cross-page hyphenated words must be stitched + rejoined; \(dangling.count) left")
     }
 
+    /// CROSS-PAGE STITCH DIAGNOSIS + FIXTURE CAPTURE (CC#19, 2026-07-02). The HEAD
+    /// `endsWithLineBreakHyphen` stitch (721c823) passed the SYNTHETIC harness but is
+    /// REFUTED on real Antifa (~27 residual split-hyphens). This test is the honest
+    /// instrument: it re-creates the EXACT input `unitsFromPDFLines` sees (real iOS
+    /// PDFKit extraction → furniture-cleaned), writes it to the harness fixture so the
+    /// fix can be iterated off-device in ~11s, and — for every page boundary where the
+    /// prior page's last line ends in a line-break hyphen — prints which stitch
+    /// sub-condition FAILS. That reveals the real mechanism instead of guessing (Rule 5/10).
+    /// Not an assertion test; it's a capture+trace. Run once on the sim.
+    func testDiag_PDF_antifaCrossPageStitchTrace() throws {
+        let url = try src("Antifa, The Anti-Fascist Handbook.pdf")
+        let parsed = try PDFDocumentImporter().loadDocument(from: url)
+        let cleaned = PDFPageFurnitureDetector.detect(in: parsed.linesByPage).cleaned
+
+        // Confirm whether heading detection matters here (NEXT.md: Antifa has 0 headings).
+        let allLines = cleaned.flatMap { $0 }
+        let resolved = PDFHeadingKeyDeriver.resolveHeadings(
+            titles: parsed.tocEntries.map { $0.title }, allLines: allLines)
+        let headingLineSet = Set(resolved.map { $0.line })
+
+        // Write the fixture for the off-device harness (repo-local, gitignored tools/).
+        let fixtureDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("tools/pdf-logic-harness/fixtures")
+        try? FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
+        let fixtureURL = fixtureDir.appendingPathComponent("antifa.json")
+        let enc = JSONEncoder()
+        try enc.encode(cleaned).write(to: fixtureURL)
+
+        // Local copies of the private stitch helpers (mirror ContentUnitBuilder).
+        func endsHyphen(_ s: String) -> Bool {
+            let t = s.trimmingCharacters(in: .whitespaces)
+            return t.hasSuffix("-") || t.hasSuffix("\u{00AC}")
+        }
+        func endsTerminator(_ s: String) -> Bool {
+            let t = s.trimmingCharacters(in: CharacterSet(charactersIn: " \t\"'”’)]»"))
+            guard let last = t.last else { return false }
+            return ".!?…".contains(last)
+        }
+        func ranFullWidth(_ line: PDFTextLine, maxRight: Double, leftMargin: Double) -> Bool {
+            let rightX = 2 * line.midX - line.indentX
+            let textWidth = maxRight - leftMargin
+            guard textWidth > 0 else { return false }
+            return rightX >= maxRight - 0.08 * textWidth
+        }
+        func isContinuation(_ line: PDFTextLine, leftMargin: Double) -> Bool {
+            let flushLeft = line.indentX <= leftMargin + 2.0
+            let lower = line.text.first.map { $0.isLowercase } ?? false
+            return flushLeft || lower
+        }
+
+        var out = "════ Antifa cross-page stitch trace ════\n"
+        out += "pages(cleaned)=\(cleaned.count)  resolvedHeadingLines=\(headingLineSet.count)\n\n"
+        var hyphenBoundaries = 0, wouldStitch = 0
+        for idx in 1..<cleaned.count {
+            let prior = cleaned[idx - 1], cur = cleaned[idx]
+            guard let prev = prior.last, let first = cur.first else { continue }
+            guard endsHyphen(prev.text) else { continue }   // only the split-word cases
+            hyphenBoundaries += 1
+            let priorMaxRight = prior.map { 2 * $0.midX - $0.indentX }.max() ?? 0
+            let priorLeft = prior.map { $0.indentX }.min() ?? 0
+            let curLeft = cur.map { $0.indentX }.min() ?? 0
+            let cHeading = headingLineSet.contains(first)
+            let cTerm = endsTerminator(prev.text)
+            let cHyph = endsHyphen(prev.text)
+            let cFull = ranFullWidth(prev, maxRight: priorMaxRight, leftMargin: priorLeft)
+            let cCont = isContinuation(first, leftMargin: curLeft)
+            let stitch = !cHeading && !cTerm && (cHyph || cFull) && cCont
+            if stitch { wouldStitch += 1 }
+            out += "— boundary page \(idx-1)→\(idx)  stitch=\(stitch)\n"
+            out += "   prev.last : '\(prev.text.suffix(40))'\n"
+            out += "     endsHyphen=\(cHyph) endsTerm=\(cTerm) ranFullWidth=\(cFull) indentX=\(prev.indentX) midX=\(prev.midX)\n"
+            out += "   next.first: '\(first.text.prefix(40))'\n"
+            out += "     isHeading=\(cHeading) isContinuation=\(cCont) indentX=\(first.indentX) curLeft=\(curLeft) firstChar='\(first.text.first ?? " ")'\n"
+            // Show the next 2 lines too, in case furniture sits above the real continuation.
+            for extra in cur.dropFirst().prefix(2) {
+                out += "     next+: '\(extra.text.prefix(40))' indentX=\(extra.indentX)\n"
+            }
+        }
+        out += "\nSUMMARY: hyphen-ending boundaries=\(hyphenBoundaries)  wouldStitch=\(wouldStitch)  wouldFAIL=\(hyphenBoundaries - wouldStitch)\n"
+        out += "fixture: \(fixtureURL.path)\n"
+        try? out.write(to: URL(fileURLWithPath: "/tmp/antifa_stitch_trace.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
     // ── Academic numbered-section headings ───────────────────────────────────
 
     /// PDF rebuild — the Transformer paper's section headings ("3.1 Encoder and

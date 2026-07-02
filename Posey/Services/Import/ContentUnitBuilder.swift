@@ -318,52 +318,25 @@ enum ContentUnitBuilder {
             let leftMargin = page.map { $0.indentX }.min() ?? 0
             let maxRight = page.map { 2 * $0.midX - $0.indentX }.max() ?? 0
 
-            // Page-break placement: stitch decision at the boundary.
-            //
-            // `stitchedIntoThisPage`: we deferred this page's break to carry a straddling
-            // paragraph. `skipLeadingLines`: leading lines on this page that are PAGE
-            // FURNITURE wedged mid-word (see the hyphen-split case below) and must be
-            // dropped so the split word rejoins cleanly.
+            // Page-break placement: stitch decision at the boundary. `stitchedIntoThisPage`
+            // records that we deferred this page's break to carry a straddling paragraph.
             var stitchedIntoThisPage = false
-            var skipLeadingLines = 0
             if pageIdx == 0 {
                 add(.pageBreak, "", ContentUnitMetadata(pageNumber: pageIndex))
             } else if let prev = lastBufferedLine, !buffer.isEmpty,
-                      !endsWithSentenceTerminator(prev.text) {
-                // The prior page's last line either ENDS IN A LINE-BREAK HYPHEN ("…into
-                // ac-") — a definitive "this word continues" signal even when that last
-                // line is short (a page's last line usually is) — or RAN FULL-WIDTH (it
-                // wrapped, so the paragraph continues). Both mean the paragraph straddles
-                // the break and should be ONE unit.
-                let hyphenSplit = endsWithLineBreakHyphen(prev.text)
-                // Continuation candidate. Normally it's `page.first`. But when a word is
-                // split by a hyphen across the break, a running header / section label /
-                // page number can be wedged BETWEEN the two halves ("…move-" | INTRODUCTION
-                // | xix | "ment…"; "…nine-" | MARK BRAY | "ties…"). Real content cannot sit
-                // mid-word, so any non-body line above the continuation is provably furniture
-                // — skip to the first FLUSH-LEFT LOWERCASE line (the word's tail always is).
-                // GATED OFF when the broken line looks like a URL (contains "/"): endnote
-                // citation URLs carry MEANINGFUL hyphens, and rejoining would silently drop
-                // one ("…city-have-" + "skyrocketed" → a corrupted URL). Leave those.
-                var contIdx = 0
-                if hyphenSplit, !prev.text.contains("/"),
-                   let idx = midWordContinuationIndex(in: page, leftMargin: leftMargin) {
-                    contIdx = idx
-                }
-                if contIdx < page.count, !isHeading(page[contIdx]),
-                   (hyphenSplit || lineRanFullWidth(prev, maxRight: priorMaxRight, leftMargin: priorLeftMargin)),
-                   lineIsContinuation(page[contIdx], leftMargin: leftMargin) {
-                    // STITCH: carry the paragraph; defer this page's break until it flushes.
-                    // A word split across the break ("ac-"/"tion") gets stitched and
-                    // flushParagraph's stripLineBreakHyphens rejoins it → "action".
-                    skipLeadingLines = contIdx
-                    pendingPageBreaks.append(pageIndex)
-                    stitchedIntoThisPage = true
-                } else {
-                    // Clean boundary: complete the prior paragraph, then mark the page.
-                    flushParagraph()
-                    add(.pageBreak, "", ContentUnitMetadata(pageNumber: pageIndex))
-                }
+                      let first = page.first, !isHeading(first),
+                      !endsWithSentenceTerminator(prev.text),
+                      (endsWithLineBreakHyphen(prev.text)
+                       || lineRanFullWidth(prev, maxRight: priorMaxRight, leftMargin: priorLeftMargin)),
+                      lineIsContinuation(first, leftMargin: leftMargin) {
+                // STITCH: carry the paragraph; defer this page's break until it flushes.
+                // Stitch when the prior page's last line either ran full-width OR ENDS IN
+                // A LINE-BREAK HYPHEN ("…into ac-"). The hyphen is a definitive "this word
+                // continues" signal even when that last line is short (a page's last line
+                // usually is), so a word split across the page break ("ac-"/"tion") gets
+                // stitched and flushParagraph's stripLineBreakHyphens rejoins it → "action".
+                pendingPageBreaks.append(pageIndex)
+                stitchedIntoThisPage = true
             } else {
                 // Clean boundary: complete the prior paragraph, then mark the page.
                 flushParagraph()
@@ -371,21 +344,26 @@ enum ContentUnitBuilder {
             }
 
             for (lineIdx, line) in page.enumerated() {
-                // Drop furniture lines wedged mid-word between a hyphen-split word's halves.
-                if lineIdx < skipLeadingLines { continue }
                 if isHeading(line) {
                     flushParagraph()
                     add(.heading, line.text, ContentUnitMetadata(headingLevel: headingLevel(line)))
                 } else {
-                    // The CONTINUATION line of a page we stitched into (the first kept line,
-                    // at `skipLeadingLines`) continues the buffered paragraph — its gapAbove
-                    // spans the physical page break (a top-of-page gap, ~8.5pt on Antifa) and
-                    // is NOT an intra-page paragraph signal. Letting it trip the paragraph-gap
-                    // flush here would UNDO the stitch — flushing "…ac-" as its own unit before
-                    // "tion" is appended, which is exactly why the cross-page rejoin was refuted
-                    // on real Antifa (23 of 23 dangling boundaries; CC#19, 2026-07-02). Exempt
-                    // only that first kept line; every later line uses the normal gap rule.
-                    let isStitchedContinuation = stitchedIntoThisPage && lineIdx == skipLeadingLines
+                    // The FIRST line of a page we stitched into is the CONTINUATION of the
+                    // buffered paragraph — its gapAbove spans the physical page break (a
+                    // top-of-page gap, ~8.5pt on Antifa) and is NOT an intra-page paragraph
+                    // signal. Letting it trip the paragraph-gap flush here would UNDO the
+                    // stitch — flushing "…ac-" as its own unit before "tion" is appended,
+                    // which is exactly why the cross-page rejoin was refuted on real Antifa
+                    // (23 of 23 dangling boundaries; CC#19, 2026-07-02). Exempt only that
+                    // first continuation line; every later line uses the normal gap rule.
+                    //
+                    // This NEVER drops a line — it only defers a paragraph split. An earlier
+                    // attempt ALSO dropped furniture wedged mid-word (a running header between
+                    // a split word's halves); that was reverted because it ate 56 letters of
+                    // real GEB body prose (the "provably furniture" assumption fails when the
+                    // continuation isn't flush-left-lowercase). Furniture-interposed splits are
+                    // a furniture-DETECTOR matter, not the stitch's — left as a known residual.
+                    let isStitchedContinuation = stitchedIntoThisPage && lineIdx == 0
                     if !buffer.isEmpty, !isStitchedContinuation, line.gapAbove >= paraThreshold {
                         flushParagraph()
                     }
@@ -429,24 +407,6 @@ enum ContentUnitBuilder {
         let trimmed = text.trimmingCharacters(in: CharacterSet(charactersIn: " \t\"'”’)]»"))
         guard let last = trimmed.last else { return false }
         return ".!?…".contains(last)
-    }
-
-    /// When a word is split by a line-break hyphen ACROSS a page break, its tail
-    /// (the continuation) is always a FLUSH-LEFT, LOWERCASE line — it resumes mid-word
-    /// at the body's left margin. Return the index of the first such line within a small
-    /// top-of-page window, so leading page furniture (a running header at `indentX≈146`,
-    /// a page number like "xix" at `indentX≈298`, a centered author line) wedged between
-    /// the two halves can be skipped. The window bound keeps this conservative: if no
-    /// flush-left lowercase line is near the top, we don't skip anything.
-    private static func midWordContinuationIndex(in page: [PDFTextLine],
-                                                 leftMargin: Double,
-                                                 window: Int = 4) -> Int? {
-        for (i, line) in page.enumerated() where i < window {
-            let t = line.text.trimmingCharacters(in: .whitespaces)
-            guard let f = t.first, f.isLowercase else { continue }
-            if line.indentX <= leftMargin + 2.0 { return i }
-        }
-        return nil
     }
 
     /// Does this line read like the CONTINUATION of a paragraph from the previous

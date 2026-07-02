@@ -432,6 +432,85 @@ final class ImporterGateTests: XCTestCase {
                        "cross-page hyphenated words must be stitched + rejoined; \(dangling.count) left")
     }
 
+    /// GENERALIZE the cross-page hyphen fix across the PDF family (Rule 10) AND prove
+    /// it never drops text (Mark's two questions, 2026-07-02). For each real PDF, from a
+    /// SINGLE extraction: build the units the exact way `PDFLibraryImporter` does
+    /// (furniture-clean → resolveHeadings → `unitsFromPDFLines`) and compare the
+    /// non-whitespace/non-hyphen character count IN (cleaned lines) vs OUT (units).
+    ///
+    /// **Why one extraction (CC#19 correction):** an earlier version of this test
+    /// extracted each PDF TWICE — once for the input, once inside `importDocument` for
+    /// the output — and reported GEB "losing 56 letters." That was a TEST ARTIFACT:
+    /// PDFKit's extraction of an 800-page math book (GEB) is not byte-identical run to
+    /// run, so it compared extraction-A's input against extraction-B's output. Using ONE
+    /// extraction for both isolates the builder. A `determinismDrift` probe (two loads)
+    /// is reported so the non-determinism is visible, not mistaken for a pipeline bug.
+    func testStitch_PDF_crossPageHyphen_multiDocFamily() throws {
+        let docs = ["Cryptography for Dummies.pdf", "attention-is-all-you-need_arxiv.pdf",
+                    "Measure What Matters - John Doerr.pdf", "GEBen.pdf",
+                    "The Internet Steps to the Beat.pdf", "Learning_from_the_Enemy.pdf"]
+        func endsInBreakHyphen(_ s: String) -> Bool {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.hasSuffix("-") || t.hasSuffix("\u{00AC}")
+        }
+        func letters(_ s: String) -> String { s.filter { !$0.isWhitespace && $0 != "-" && $0 != "\u{00AC}" } }
+        func cleanedLines(_ url: URL) throws -> [[PDFTextLine]] {
+            let parsed = try PDFDocumentImporter().loadDocument(from: url)
+            return PDFPageFurnitureDetector.detect(in: parsed.linesByPage).cleaned
+        }
+        var report = "════ cross-page hyphen — PDF family (CC#19, single-extraction) ════\n"
+        for name in docs {
+            let url: URL
+            do { url = try src(name) } catch { report += "— \(name): MISSING, skipped\n"; continue }
+
+            // ONE extraction → both input and output derive from it.
+            let parsed = try PDFDocumentImporter().loadDocument(from: url)
+            let cleaned = PDFPageFurnitureDetector.detect(in: parsed.linesByPage).cleaned
+            let inputLetters = letters(cleaned.flatMap { $0 }.map { $0.text }.joined())
+            let allLines = cleaned.flatMap { $0 }
+            let resolved = PDFHeadingKeyDeriver.resolveHeadings(
+                titles: parsed.tocEntries.map { $0.title }, allLines: allLines)
+            let headingSet = Set(resolved.map { $0.line })
+            let units = ContentUnitBuilder.unitsFromPDFLines(
+                cleaned, documentID: UUID(), isHeading: { headingSet.contains($0) })
+            let prose = units.filter { $0.kind == .prose }
+            let outputLetters = letters(units.filter { $0.kind == .prose || $0.kind == .heading }
+                                            .map { $0.text }.joined())
+            let delta = inputLetters.count - outputLetters.count
+
+            // cross-page dangling residual (a real broken WORD across two units)
+            var dangling = 0
+            for i in 0..<max(0, prose.count - 1) {
+                let next = prose[i + 1].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if endsInBreakHyphen(prose[i].text), let f = next.first, f.isLowercase { dangling += 1 }
+            }
+            var endHy = 0
+            for u in prose where endsInBreakHyphen(u.text) { endHy += 1 }
+
+            // Extraction determinism probe (explains any nonzero historical delta).
+            let cleaned2 = try cleanedLines(url)
+            let determinismDrift = abs(inputLetters.count
+                                       - letters(cleaned2.flatMap { $0 }.map { $0.text }.joined()).count)
+
+            report += "— \(name)\n"
+            report += "   pages=\(cleaned.count) prose=\(prose.count)  inputLetters=\(inputLetters.count) outputLetters=\(outputLetters.count) delta=\(delta)\n"
+            report += "   cross-page dangling=\(dangling)  prose-units-ending-in-hyphen=\(endHy)  extraction-determinismDrift=\(determinismDrift)\n"
+
+            // THE SAFETY INVARIANT: from one extraction, mode-1 stitching only REARRANGES
+            // text across a page break — it never DROPS a character. So IN letters == OUT
+            // letters, every doc, zero drift. (This is what proves the reverted furniture-
+            // skip's real-text loss is gone AND that GEB's earlier "56" was a double-
+            // extraction artifact, not a pipeline bug.)
+            XCTAssertEqual(delta, 0, "[\(name)] builder changed letter count by \(delta) from one extraction — must never drop/add")
+            // `dangling` is MEASURED, not asserted: a residual here is a furniture-interposed
+            // split (a running header wedged between a split word's halves) — a furniture-
+            // DETECTOR matter, deliberately NOT patched in the stitch layer. Antifa's own
+            // oracle asserts its dangling==0; this sweep tracks the family's residual honestly.
+        }
+        try? report.write(to: URL(fileURLWithPath: "/tmp/xpage_family.txt"), atomically: true, encoding: .utf8)
+        print(report)
+    }
+
     /// CROSS-PAGE STITCH DIAGNOSIS + FIXTURE CAPTURE (CC#19, 2026-07-02). The HEAD
     /// `endsWithLineBreakHyphen` stitch (721c823) passed the SYNTHETIC harness but is
     /// REFUTED on real Antifa (~27 residual split-hyphens). This test is the honest

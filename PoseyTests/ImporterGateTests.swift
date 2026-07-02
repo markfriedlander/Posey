@@ -432,6 +432,91 @@ final class ImporterGateTests: XCTestCase {
                        "cross-page hyphenated words must be stitched + rejoined; \(dangling.count) left")
     }
 
+    /// REAL-DOC before/after for Thing 2 (CC#19, 2026-07-02; Mark: "synthetic data is not
+    /// useful to real world usage"). Builds units the importer way (single extraction) for
+    /// the REAL GEB and Learning, dumps prose to /tmp for diffing across code versions, and
+    /// measures two real things: (1) Learning "his- tory" residual (should drop to 0 with the
+    /// fix); (2) GEB dialogue damage — a speaker label ("Tortoise:") glued after a dash inside
+    /// a unit (the merge Mark flagged). Run with the fix, `git stash` ContentUnitBuilder, run
+    /// again → diff /tmp/units_* and compare the two counts.
+    func testReal_PDF_thing2OnGEBAndLearning() throws {
+        func buildUnits(_ name: String) throws -> [ContentUnit] {
+            let parsed = try PDFDocumentImporter().loadDocument(from: try src(name))
+            let cleaned = PDFPageFurnitureDetector.detect(in: parsed.linesByPage).cleaned
+            let resolved = PDFHeadingKeyDeriver.resolveHeadings(
+                titles: parsed.tocEntries.map { $0.title }, allLines: cleaned.flatMap { $0 })
+            let headingSet = Set(resolved.map { $0.line })
+            return ContentUnitBuilder.unitsFromPDFLines(
+                cleaned, documentID: UUID(), isHeading: { headingSet.contains($0) })
+        }
+        var report = "════ Thing 2 REAL before/after (GEB + Learning) ════\n"
+
+        // (1) Learning — his- tory residual.
+        let learn = try buildUnits("Learning_from_the_Enemy.pdf").filter { $0.kind == .prose }
+        try learn.map { $0.text }.joined(separator: "\n═══\n")
+            .write(toFile: "/tmp/units_Learning.txt", atomically: true, encoding: .utf8)
+        let learnText = learn.map { $0.text }.joined(separator: " ")
+        let hisTory = try NSRegularExpression(pattern: #"[A-Za-z]{2,}- [a-z]{2,}"#)
+            .numberOfMatches(in: learnText, range: NSRange(learnText.startIndex..., in: learnText))
+        report += "Learning: prose=\(learn.count)  within-'X- y' residual=\(hisTory)\n"
+
+        // (2) GEB — dialogue damage: a speaker glued after a dash INSIDE a unit.
+        let geb = try buildUnits("GEBen.pdf").filter { $0.kind == .prose }
+        try geb.map { $0.text }.joined(separator: "\n═══\n")
+            .write(toFile: "/tmp/units_GEB.txt", atomically: true, encoding: .utf8)
+        let speakers = "Achilles|Tortoise|Crab|Anteater|Author|Zeno|Genie|Babbage|Turing|Sloth"
+        let mergeRe = try NSRegularExpression(pattern: "[-–—]+\\s+(\(speakers)):")
+        var merges: [String] = []
+        for u in geb {
+            let t = u.text
+            for m in mergeRe.matches(in: t, range: NSRange(t.startIndex..., in: t)) {
+                if let r = Range(m.range, in: t) {
+                    let lo = t.index(r.lowerBound, offsetBy: -18, limitedBy: t.startIndex) ?? t.startIndex
+                    merges.append(String(t[lo..<r.upperBound]))
+                }
+            }
+        }
+        report += "GEB: prose=\(geb.count)  dash-then-speaker merges (dialogue damage)=\(merges.count)\n"
+        for e in merges.prefix(10) { report += "   ⚠ \(e.debugDescription)\n" }
+        try? report.write(to: URL(fileURLWithPath: "/tmp/thing2_realdoc.txt"), atomically: true, encoding: .utf8)
+        print(report)
+    }
+
+    /// SYNTHETIC (CC#19, 2026-07-02) — the within-page word-split guard must rejoin a
+    /// wrapped word across a spurious paragraph gap ("his-"/"tory" → "history") WITHOUT
+    /// damaging dialogue (a speaker turn after a "--" em-dash must stay its own paragraph).
+    /// Mark's concern: GEB dialogue ("…that --" | "Tortoise: …"). Deterministic, no import.
+    func testUnit_withinPageGuardRejoinsWordButKeepsDialogue() throws {
+        func ln(_ t: String, _ gap: Double) -> PDFTextLine {
+            PDFTextLine(text: t, fontSize: 12, isBold: false, isAllCaps: false,
+                        indentX: 72, midX: 200, yTop: 0, yBottom: 0, gapAbove: gap, pageIndex: 0)
+        }
+        // Small typical gap (3) so the wide gap (30) reads as a paragraph break.
+        // Case A — word wrap: "his-" then a WIDE gap then lowercase "tory" → must rejoin.
+        let pageA = [[ ln("Padding line one to set a small typical gap.", 3),
+                       ln("Padding line two to set a small typical gap.", 3),
+                       ln("Padding line three of ordinary body text.", 3),
+                       ln("A sentence that ends mid-word as his-", 3),
+                       ln("tory picks up after a spurious wide gap.", 30) ]]
+        let proseA = ContentUnitBuilder.unitsFromPDFLines(pageA, documentID: UUID(), isHeading: { _ in false })
+            .filter { $0.kind == .prose }.map { $0.text }.joined(separator: " ¦ ")
+        XCTAssertTrue(proseA.contains("history"), "word-wrap must rejoin to 'history': \(proseA)")
+        XCTAssertFalse(proseA.contains("his- tory"), "'his- tory' must not remain split: \(proseA)")
+
+        // Case B — dialogue: "…that --" then a WIDE gap then a CAPITAL speaker → must NOT merge.
+        let pageB = [[ ln("Padding line one for a small typical gap.", 3),
+                       ln("Padding line two for a small typical gap.", 3),
+                       ln("Padding line three of ordinary body text.", 3),
+                       ln("Achilles: Something something interesting that --", 3),
+                       ln("Tortoise: I certainly do agree with you.", 30) ]]
+        let proseB = ContentUnitBuilder.unitsFromPDFLines(pageB, documentID: UUID(), isHeading: { _ in false })
+            .filter { $0.kind == .prose }
+        XCTAssertGreaterThanOrEqual(proseB.count, 2,
+            "dialogue speaker turn after '--' must stay its own paragraph, not merge: \(proseB.map { $0.text })")
+        XCTAssertTrue(proseB.contains { $0.text.hasPrefix("Tortoise:") },
+            "the 'Tortoise:' speaker line must begin its own unit")
+    }
+
     /// UNIT TEST (CC#19, 2026-07-02) — `isLonePageNumber` must catch page numbers
     /// (arabic + strict Roman ≥3 chars) but NEVER a real word that happens to use Roman
     /// letters. Guards the fix for the "movexix" corruption (a Roman page number wedged

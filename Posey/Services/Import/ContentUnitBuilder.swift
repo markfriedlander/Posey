@@ -364,7 +364,23 @@ enum ContentUnitBuilder {
                     // continuation isn't flush-left-lowercase). Furniture-interposed splits are
                     // a furniture-DETECTOR matter, not the stitch's — left as a known residual.
                     let isStitchedContinuation = stitchedIntoThisPage && lineIdx == 0
-                    if !buffer.isEmpty, !isStitchedContinuation, line.gapAbove >= paraThreshold {
+                    // WITHIN-PAGE word-split guard (CC#19, 2026-07-02): a paragraph gap does
+                    // NOT end a paragraph when the previous line is a WORD-WRAP hyphen AND the
+                    // next line is a LOWERCASE continuation — the word continues ("his-"/"tory"
+                    // → "history"). On scanned/OCR docs, irregular line spacing produces spurious
+                    // paragraph gaps that would otherwise split a hyphenated word across two
+                    // units, where the per-unit stripLineBreakHyphens can't rejoin it.
+                    // BOTH conditions are required so DIALOGUE is never damaged: a GEB dialogue
+                    // line ends in an em-dash / "--" (NOT a single letter+hyphen) and the next
+                    // line is a CAPITALIZED speaker ("that --" | "Tortoise:") — either check
+                    // alone excludes it, so its paragraph break is preserved (Mark, 2026-07-02).
+                    // Only DEFERS a flush, never drops a line.
+                    let prevWordWrap = lastBufferedLine.map { endsWithWordWrapHyphen($0.text) } ?? false
+                    let nextIsLowerContinuation =
+                        line.text.trimmingCharacters(in: .whitespaces).first?.isLowercase ?? false
+                    let midWordWrap = prevWordWrap && nextIsLowerContinuation
+                    if !buffer.isEmpty, !isStitchedContinuation, !midWordWrap,
+                       line.gapAbove >= paraThreshold {
                         flushParagraph()
                     }
                     buffer.append(line.text)
@@ -387,6 +403,16 @@ enum ContentUnitBuilder {
     private static func endsWithLineBreakHyphen(_ text: String) -> Bool {
         let t = text.trimmingCharacters(in: .whitespaces)
         return t.hasSuffix("-") || t.hasSuffix("\u{00AC}")
+    }
+
+    /// A line ending in a WORD-WRAP hyphen specifically: a single "-"/"¬" IMMEDIATELY
+    /// preceded by a LETTER ("his-", "ac-"). This EXCLUDES a trailing "--" or a spaced
+    /// dash ("that --", "word —") — those are dialogue / aside dashes, not a wrapped
+    /// word. Used by the within-page split guard so it never merges dialogue turns.
+    private static func endsWithWordWrapHyphen(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard t.hasSuffix("-") || t.hasSuffix("\u{00AC}") else { return false }
+        return t.dropLast().last?.isLetter ?? false
     }
 
     /// Did this line run essentially to the right margin (text wrapped because it

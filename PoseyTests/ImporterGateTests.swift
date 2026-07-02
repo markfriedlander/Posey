@@ -450,63 +450,58 @@ final class ImporterGateTests: XCTestCase {
         }
     }
 
-    /// FURNITURE AFTER + SAFETY (CC#19, 2026-07-02) — verifies the absolute-floor
-    /// furniture change. For each real PDF: (1) report what the detector now REMOVES and
-    /// the TAIL of margin lines still surviving; (2) SAFETY — no body text eaten: compare
-    /// the letter count of ALL raw lines vs the furniture-cleaned lines (the delta is the
-    /// furniture removed) and ASSERT a known real BODY sentence is still present in the
-    /// cleaned output. The detector only ever drops ≤8-word margin-band lines, so the
-    /// delta must be small and body prose intact (Dracula-scar guard, Rule 12/13).
-    func testDiag_PDF_furnitureAfterAndSafety() throws {
-        // doc → a real body sentence fragment that MUST survive furniture removal.
-        let docs: [(String, String)] = [
-            ("Antifa, The Anti-Fascist Handbook.pdf", "pushed into ac"),
-            ("GEBen.pdf", "MU-puzzle"),
-            ("Learning_from_the_Enemy.pdf", "intelligence")
-        ]
+    /// FURNITURE SAFETY across the WHOLE PDF corpus (CC#19, 2026-07-02; Mark: "one
+    /// document doesn't prove it works or is safe"). Runs the absolute-floor detector on
+    /// EVERY corpus PDF — books, papers, IRS forms, a resume, a legal agreement, a scanned
+    /// doc: the adversarial cases with many repeated short lines that could trick it.
+    ///
+    /// UNIVERSAL SAFETY PROOF (no per-doc needle): the detector only removes ≤8-word
+    /// margin-band lines, so the N LONGEST lines of each doc are pure body prose and must
+    /// ALL survive verbatim. If furniture removal ever ate a long body line, this fails.
+    /// Also caps the removed fraction to catch gross over-removal, and prints what was
+    /// removed per doc so it can be eyeballed as furniture.
+    func testSafety_PDF_furnitureNoBodyLossWholeCorpus() throws {
+        let docs = ["Antifa, The Anti-Fascist Handbook.pdf", "Branded Agreement.pdf",
+                    "Cryptography for Dummies.pdf", "GEBen.pdf", "IRS-Publication-17.pdf",
+                    "Learning_from_the_Enemy.pdf", "Measure What Matters - John Doerr.pdf",
+                    "Resume Sept 2001.pdf", "The Internet Steps to the Beat.pdf",
+                    "attention-is-all-you-need_arxiv.pdf", "before the model part1 expanded.pdf",
+                    "irs-1040-form.pdf", "scanned-toc-test.pdf"]
         func letters(_ s: String) -> String { s.filter { !$0.isWhitespace && $0 != "-" && $0 != "\u{00AC}" } }
-        var report = "════ FURNITURE AFTER + SAFETY (absolute floor) ════\n"
-        for (name, bodyNeedle) in docs {
+        var report = "════ FURNITURE SAFETY — whole corpus (absolute floor) ════\n"
+        var tested = 0
+        for name in docs {
             let url: URL
             do { url = try src(name) } catch { report += "— \(name): MISSING\n"; continue }
             let lines = try PDFDocumentImporter().loadDocument(from: url).linesByPage
+            guard !lines.isEmpty else { report += "— \(name): no text lines\n"; continue }
+            tested += 1
             let rawLetters = letters(lines.flatMap { $0 }.map { $0.text }.joined())
             let result = PDFPageFurnitureDetector.detect(in: lines)
             let cleanedText = result.cleaned.flatMap { $0 }.map { $0.text }.joined()
-            let cleanedLetters = letters(cleanedText)
-            let removedLetters = rawLetters.count - cleanedLetters.count
+            let removedLetters = rawLetters.count - letters(cleanedText).count
             let pct = rawLetters.count > 0 ? Double(removedLetters) / Double(rawLetters.count) * 100 : 0
 
-            report += "— \(name): pages=\(lines.count)\n"
-            report += "   REMOVED \(result.removed.count) signatures, \(removedLetters) letters (\(String(format: "%.2f", pct))% of \(rawLetters.count))\n"
-            report += "   top removals: \(result.removed.prefix(8).map { "\"\($0.sample.prefix(22))\"×\($0.pages)" }.joined(separator: ", "))\n"
+            report += "— \(name): pages=\(lines.count)  removed \(removedLetters) letters (\(String(format: "%.2f", pct))%)\n"
+            report += "   top removals: \(result.removed.prefix(6).map { "\"\($0.sample.prefix(20))\"×\($0.pages)" }.joined(separator: ", "))\n"
 
-            // Surviving recurring margin lines (band=2, ≥4 pages) — the remaining tail.
-            func band(_ n: Int) -> Set<Int> {
-                var s = Set<Int>(); for i in 0..<min(2, n) { s.insert(i) }
-                for i in max(0, n - 2)..<n { s.insert(i) }; return s
+            // UNIVERSAL SAFETY: the 12 longest raw lines are body prose — each must survive.
+            let longest = lines.flatMap { $0 }
+                .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.count >= 40 }
+                .sorted { $0.count > $1.count }
+                .prefix(12)
+            for bodyLine in longest {
+                XCTAssertTrue(cleanedText.contains(bodyLine),
+                              "[\(name)] furniture removal ATE a long body line: '\(bodyLine.prefix(50))…'")
             }
-            var pagesFor: [String: (Int, String)] = [:]
-            for page in result.cleaned {
-                var seen = Set<String>()
-                for i in band(page.count) {
-                    let t = page[i].text
-                    guard t.split(whereSeparator: { $0 == " " }).count <= 8 else { continue }
-                    let sig = PDFPageFurnitureDetector.signature(t)
-                    guard !sig.isEmpty, seen.insert(sig).inserted else { continue }
-                    let cur = pagesFor[sig]?.0 ?? 0
-                    pagesFor[sig] = (cur + 1, pagesFor[sig]?.1 ?? t)
-                }
-            }
-            let survivors = pagesFor.filter { $0.value.0 >= 4 }.sorted { $0.value.0 > $1.value.0 }
-            report += "   still surviving (≥4 pages): \(survivors.prefix(8).map { "\"\($0.value.1.prefix(18))\"×\($0.value.0)" }.joined(separator: ", "))\n"
-
-            // SAFETY assertion: a real body sentence must survive furniture removal.
-            XCTAssertTrue(cleanedText.contains(bodyNeedle),
-                          "[\(name)] furniture removal ate real body text — '\(bodyNeedle)' missing")
+            // Gross-over-removal guard: furniture is a small fraction even for form-heavy docs.
+            XCTAssertLessThan(pct, 15.0, "[\(name)] removed \(String(format: "%.1f", pct))% — too much to be just furniture")
         }
-        try? report.write(to: URL(fileURLWithPath: "/tmp/furniture_after.txt"), atomically: true, encoding: .utf8)
+        report += "\nTESTED \(tested) real PDFs; longest-body-line survival + <15% removal asserted on each.\n"
+        try? report.write(to: URL(fileURLWithPath: "/tmp/furniture_corpus.txt"), atomically: true, encoding: .utf8)
         print(report)
+        XCTAssertGreaterThanOrEqual(tested, 8, "expected most of the corpus present")
     }
 
     /// SEVERITY PROBE (CC#19, 2026-07-02) for the Learning "his- tory" within-page

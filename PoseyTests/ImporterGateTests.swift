@@ -445,6 +445,42 @@ final class ImporterGateTests: XCTestCase {
     /// run, so it compared extraction-A's input against extraction-B's output. Using ONE
     /// extraction for both isolates the builder. A `determinismDrift` probe (two loads)
     /// is reported so the non-determinism is visible, not mistaken for a pipeline bug.
+    /// SEVERITY PROBE (CC#19, 2026-07-02) for the Learning "his- tory" within-page
+    /// non-rejoin. Import Learning through the REAL importer, then for every prose unit
+    /// find WITHIN-unit "letter- <space> lowercase" artifacts (a wrapped word the
+    /// per-paragraph `stripLineBreakHyphens` should have rejoined but didn't). Print each
+    /// with context. This tells us whether stripLineBreakHyphens is being APPLIED at all
+    /// on this doc (path bug → broad) or the fragments aren't adjacent in the buffer (OCR
+    /// reading-order jumble → narrow, scanned-docs-only). Facts before a fix (Rule 5/10).
+    func testDiag_PDF_learningWithinPageHyphens() throws {
+        let url = try src("Learning_from_the_Enemy.pdf")
+        let db = try freshDB()
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: url)
+        let prose = try db.units(for: doc.id).filter { $0.kind == .prose }
+        let re = try NSRegularExpression(pattern: #"[A-Za-z]{2,}- [a-z]{2,}"#)
+        var artifacts: [String] = []
+        for u in prose {
+            let t = u.text
+            for m in re.matches(in: t, range: NSRange(t.startIndex..., in: t)) {
+                if let r = Range(m.range, in: t) {
+                    let lo = t.index(r.lowerBound, offsetBy: -8, limitedBy: t.startIndex) ?? t.startIndex
+                    let hi = t.index(r.upperBound, offsetBy: 8, limitedBy: t.endIndex) ?? t.endIndex
+                    artifacts.append(String(t[lo..<hi]))
+                }
+            }
+        }
+        // Control: run stripLineBreakHyphens directly on one captured artifact to see if
+        // the normalizer itself would fix it (isolates normalizer-logic vs application).
+        var out = "════ Learning within-page hyphen probe ════\n"
+        out += "prose units=\(prose.count)  within-unit 'X- y' artifacts=\(artifacts.count)\n"
+        for a in artifacts.prefix(20) {
+            let fixed = TextNormalizer.stripLineBreakHyphens(a)
+            out += "  ✗ \(a.debugDescription)  → strip() gives \(fixed.debugDescription)\n"
+        }
+        try? out.write(to: URL(fileURLWithPath: "/tmp/learning_hyphens.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
     func testStitch_PDF_crossPageHyphen_multiDocFamily() throws {
         let docs = ["Cryptography for Dummies.pdf", "attention-is-all-you-need_arxiv.pdf",
                     "Measure What Matters - John Doerr.pdf", "GEBen.pdf",

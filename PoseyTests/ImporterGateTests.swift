@@ -432,6 +432,42 @@ final class ImporterGateTests: XCTestCase {
                        "cross-page hyphenated words must be stitched + rejoined; \(dangling.count) left")
     }
 
+    /// CORPUS within-page residual for Thing 2 (CC#19, 2026-07-02; Mark: "did you check
+    /// more than one document?"). For EVERY corpus PDF, build units the importer way and
+    /// count within-page word-splits left in the prose ("X- y"). Run with the fix, `git
+    /// stash` ContentUnitBuilder, run again → the docs where the count DROPS are the ones
+    /// Thing 2 fixed (proves it on more than one real document, not just Learning).
+    func testReal_PDF_thing2WithinPageResidualCorpus() throws {
+        let docs = ["Antifa, The Anti-Fascist Handbook.pdf", "Cryptography for Dummies.pdf",
+                    "GEBen.pdf", "IRS-Publication-17.pdf", "Learning_from_the_Enemy.pdf",
+                    "Measure What Matters - John Doerr.pdf", "The Internet Steps to the Beat.pdf",
+                    "attention-is-all-you-need_arxiv.pdf", "before the model part1 expanded.pdf",
+                    "scanned-toc-test.pdf", "irs-1040-form.pdf"]
+        let re = try NSRegularExpression(pattern: #"[A-Za-z]{2,}- [a-z]{2,}"#)
+        var report = "════ Thing 2 within-page residual — corpus ════\n"
+        for name in docs {
+            let url: URL
+            do { url = try src(name) } catch { report += "— \(name): MISSING\n"; continue }
+            let parsed = try PDFDocumentImporter().loadDocument(from: url)
+            guard !parsed.linesByPage.isEmpty else { report += "— \(name): no text\n"; continue }
+            let cleaned = PDFPageFurnitureDetector.detect(in: parsed.linesByPage).cleaned
+            let resolved = PDFHeadingKeyDeriver.resolveHeadings(
+                titles: parsed.tocEntries.map { $0.title }, allLines: cleaned.flatMap { $0 })
+            let headingSet = Set(resolved.map { $0.line })
+            let units = ContentUnitBuilder.unitsFromPDFLines(
+                cleaned, documentID: UUID(), isHeading: { headingSet.contains($0) })
+            let text = units.filter { $0.kind == .prose }.map { $0.text }.joined(separator: " ")
+            let n = re.numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text))
+            var samples: [String] = []
+            for m in re.matches(in: text, range: NSRange(text.startIndex..., in: text)).prefix(4) {
+                if let r = Range(m.range, in: text) { samples.append(String(text[r])) }
+            }
+            report += "— \(name): within-page 'X- y' residual = \(n)  \(samples)\n"
+        }
+        try? report.write(to: URL(fileURLWithPath: "/tmp/thing2_corpus_residual.txt"), atomically: true, encoding: .utf8)
+        print(report)
+    }
+
     /// REAL-DOC before/after for Thing 2 (CC#19, 2026-07-02; Mark: "synthetic data is not
     /// useful to real world usage"). Builds units the importer way (single extraction) for
     /// the REAL GEB and Learning, dumps prose to /tmp for diffing across code versions, and

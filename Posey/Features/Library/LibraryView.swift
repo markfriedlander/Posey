@@ -1736,6 +1736,63 @@ extension LibraryViewModel {
                     "note": "Units rebuilt in place. Re-open the doc to see the new text. Re-embed/RAPTOR via REINDEX_DOCUMENT / REBUILD_RAPTOR_TREE."
                 ])
 
+            case "DEBUG_PDF_TOC":
+                // CC#22 diag (item #3): dump the TOC titles the importer's detection
+                // ACTUALLY produces for a doc (parsed.tocEntries, BEFORE heading
+                // resolution) + the skip offset. Pins why a doc yields no chapters
+                // (e.g. Antifa: a clean 12-entry embedded outline, yet 0 headings —
+                // is the outline being used, or is a text detector firing with titles
+                // that don't resolve and blocking it?). Read-only; re-parses in memory.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: DEBUG_PDF_TOC:<doc-id>"}"#
+                }
+                guard let bytes = PDFSourceStore.read(id) else {
+                    return #"{"error":"No saved PDF source for this doc"}"#
+                }
+                let parsedForTOC = try PDFDocumentImporter().loadDocument(fromData: bytes)
+                // Run the ACTUAL heading resolution ON-DEVICE (real fonts) the same way
+                // persistAsUnits does, and report what it finds — the off-device result
+                // can't be trusted here because macOS zeroes font signals.
+                let tocFurniture = PDFPageFurnitureDetector.detect(in: parsedForTOC.linesByPage)
+                let tocAllLines = tocFurniture.cleaned.flatMap { $0 }
+                let tocBodyFont = PDFHeadingKeyDeriver.bodyFontSize(of: tocAllLines)
+                let tocTitles = parsedForTOC.tocEntries.map { $0.title }
+                let tocResolved = PDFHeadingKeyDeriver.resolveHeadings(titles: tocTitles, allLines: tocAllLines)
+                // REGRESSION CHECK (Mark): replicate the OLD selection (single global
+                // top-scorer, then reject if not standout) EXACTLY as resolveHeadings did
+                // before the fix, and diff it against the NEW result per title. This shows,
+                // on EVERY doc, whether the fix only RECOVERS chapters the old code dropped
+                // or ever CHANGES an already-resolved pick (the thing that could regress).
+                var oldResolved: [(String, PDFTextLine)] = []
+                var oldUsed = Set<PDFTextLine>()
+                for title in tocTitles {
+                    let apps = tocAllLines.filter { PDFHeadingKeyDeriver.titleMatches(title: title, text: $0.text) }
+                    guard let top = apps.max(by: { PDFHeadingKeyDeriver.prominence($0, bodyFont: tocBodyFont)
+                                                  < PDFHeadingKeyDeriver.prominence($1, bodyFont: tocBodyFont) }),
+                          PDFHeadingKeyDeriver.standsOut(top, bodyFont: tocBodyFont)
+                          || PDFHeadingKeyDeriver.isNumberedSectionLine(top),
+                          !oldUsed.contains(top) else { continue }
+                    oldUsed.insert(top)
+                    oldResolved.append((title, top))
+                }
+                let oldByTitle = Dictionary(oldResolved.map { ($0.0, $0.1.text) }, uniquingKeysWith: { a, _ in a })
+                let newByTitle = Dictionary(tocResolved.map { ($0.title, $0.line.text) }, uniquingKeysWith: { a, _ in a })
+                var changed: [[String: String]] = []
+                for t in tocTitles where oldByTitle[t] != newByTitle[t] {
+                    changed.append(["title": String(t.prefix(30)),
+                                    "old": oldByTitle[t].map { String($0.prefix(42)) } ?? "—DROPPED—",
+                                    "new": newByTitle[t].map { String($0.prefix(42)) } ?? "—DROPPED—"])
+                }
+                return json([
+                    "documentID": id.uuidString,
+                    "parsedTOCEntryCount": parsedForTOC.tocEntries.count,
+                    "oldResolvedCount": oldResolved.count,
+                    "newResolvedCount": tocResolved.count,
+                    "changedCount": changed.count,
+                    "changed": changed,
+                    "tocSkipUntilOffset": parsedForTOC.tocSkipUntilOffset
+                ])
+
             case "RESET_DOCUMENT_METADATA":
                 // 2026-05-23 — Step 8f: removed alongside the
                 // synthetic-metadata / DocumentMetadataService surface.

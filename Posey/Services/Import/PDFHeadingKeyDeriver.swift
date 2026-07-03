@@ -124,12 +124,25 @@ enum PDFHeadingKeyDeriver {
         var used: Set<PDFTextLine> = []
         for title in titles {
             let apps = appearances(of: title, in: allLines, bodyFont: bodyFont)
-            // Accept the weightiest appearance if it STANDS OUT typographically OR
-            // it's a NUMBERED academic section line (the numbering is the prominence
-            // — see `isNumberedSectionLine`). We're confirming a KNOWN outline title,
-            // not scanning blind, so the body-font numbered heading is safe to take.
-            guard let top = apps.max(by: { $0.score < $1.score }),
-                  standsOut(top.line, bodyFont: bodyFont) || isNumberedSectionLine(top.line),
+            // Choose the weightiest appearance AMONG the ones that LOOK LIKE A HEADING
+            // (stand out typographically OR are a numbered academic section line). We're
+            // confirming a KNOWN outline title, not scanning blind, so a body-font
+            // numbered heading is safe to take.
+            //
+            // IMPORTANT (CC#22, Antifa, verified on device): pick from the heading-shaped
+            // pool — do NOT take the single global top-scorer and then reject it if it
+            // doesn't stand out. Antifa prints its chapter headings in SMALL caps (smaller
+            // than body), so the real ALL-CAPS heading scores LOW, while the plain
+            // contents-page entry (body-size, with a gap above) scores higher. The old
+            // "global top, then check standsOut" logic picked the contents line, found it
+            // wasn't a heading, and dropped the chapter — losing every chapter even though
+            // its real heading was present. Filtering to heading-shaped appearances first
+            // lets the true ALL-CAPS heading win. (Books whose heading IS the top-scorer
+            // are unaffected — it's still in the pool and still weightiest.)
+            let headingApps = apps.filter {
+                standsOut($0.line, bodyFont: bodyFont) || isNumberedSectionLine($0.line)
+            }
+            guard let top = headingApps.max(by: { $0.score < $1.score }),
                   !used.contains(top.line) else { continue }
             used.insert(top.line)
             out.append((title, top.line))

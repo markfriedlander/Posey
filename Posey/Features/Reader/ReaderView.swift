@@ -5165,12 +5165,15 @@ private struct TOCSheet: View {
     /// reader's marks (notes, bookmarks, conversations) and images sit in POSITION order
     /// among them, so there's a single spine to navigate. A filter narrows to one kind.
     enum NavFilter: String, CaseIterable, Identifiable {
+        // Chip order = declaration order (CaseIterable). Images sits right after
+        // Chapters (Mark, 2026-07-03) — structural navigation first (chapters,
+        // images), then the reader's marks (bookmarks, notes, conversations).
         case all = "All"
         case chapters = "Chapters"
+        case images = "Images"
         case bookmarks = "Bookmarks"
         case notes = "Notes"
         case conversations = "Conversations"
-        case images = "Images"
         var id: String { rawValue }
     }
     @State private var selectedFilter: NavFilter = .all
@@ -5228,14 +5231,17 @@ private struct TOCSheet: View {
         let tocEntry: StoredTOCEntry?
     }
 
-    /// Filters actually offered: conversations only when Ask Posey is compiled in; images
-    /// only when the doc has any.
+    /// Filters actually offered, in CHIP ORDER: structural navigation first
+    /// (chapters, then images right after — Mark, 2026-07-03), then the reader's
+    /// marks (bookmarks, notes, conversations). Images only when the doc has any;
+    /// conversations only when Ask Posey is compiled in.
     private var availableFilters: [NavFilter] {
-        var f: [NavFilter] = [.all, .chapters, .bookmarks, .notes]
+        var f: [NavFilter] = [.all, .chapters]
+        if !imageEntries.isEmpty { f.append(.images) }
+        f.append(contentsOf: [.bookmarks, .notes])
         #if POSEY_ENABLE_ASK_POSEY
         f.append(.conversations)
         #endif
-        if !imageEntries.isEmpty { f.append(.images) }
         return f
     }
 

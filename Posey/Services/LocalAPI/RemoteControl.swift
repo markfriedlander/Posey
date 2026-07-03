@@ -205,6 +205,12 @@ extension Notification.Name {
     /// one-surface reader to that fraction of its content — lets the antenna frame any
     /// part of the surface (e.g. an annotation) for capture/verification.
     static let remoteScrollSurface = Notification.Name("PoseyRemoteScrollSurface")
+    /// DEBUG (CC#22). `userInfo["index"]: Int` (1-based). Scrolls the open one-surface
+    /// reader precisely to the Nth `.image` unit in reading order (via
+    /// `layout.unitRange` → glyph rect), so a specific figure can be framed for
+    /// verification — the fraction-based `remoteScrollSurface` is too coarse to land
+    /// on a given figure.
+    static let remoteScrollToImage = Notification.Name("PoseyRemoteScrollToImage")
     /// DEBUG (reader rebuild). `userInfo["pointSize"]: Double`. Rebuilds the open
     /// one-surface reader at a new body point size — the E2 Step-2 durability test
     /// (annotation underlines must re-land on the exact characters after a re-flow).

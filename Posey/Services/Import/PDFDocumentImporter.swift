@@ -11,6 +11,27 @@ import Vision
 struct PageImageRecord: Sendable {
     let imageID: String  // UUID string — embedded in the visual-page marker
     let data: Data       // PNG bytes
+    /// 0-based sheet index this render came from, matching `PDFTextLine.pageIndex`.
+    /// The PDF line path (`unitsFromPDFLines`) uses it to weave the `.image` unit
+    /// back into reading order — the clean line stream OMITS image/blank sheets, so
+    /// without this the render is stored but orphaned (CC#20, 2026-07-02). `nil` for
+    /// reflowable formats (HTML/DOCX/RTF/EPUB), which place images via display markers.
+    let pageIndex: Int?
+
+    /// Top edge of an EMBEDDED FIGURE in PDF page points (y-UP: larger = higher),
+    /// for intra-page placement among the text lines (CC#22, 2026-07-03). `nil`
+    /// means "not position-anchored" — a whole-SHEET render (scanned/cover/visual
+    /// page omitted from the line stream), placed between pages by `pageIndex`
+    /// alone. Set → an embedded figure on a text page, placed at its vertical
+    /// position among that page's lines (`PDFFigureExtractor`).
+    let figureYTop: Double?
+
+    init(imageID: String, data: Data, pageIndex: Int? = nil, figureYTop: Double? = nil) {
+        self.imageID = imageID
+        self.data = data
+        self.pageIndex = pageIndex
+        self.figureYTop = figureYTop
+    }
 }
 
 /// Explicit Sendable so ParsedPDFDocument can cross actor boundaries safely.
@@ -145,6 +166,10 @@ extension PDFDocumentImporter {
         var readableTextPages: [String] = []
         readableTextPages.reserveCapacity(pageCount)
         var imageRecords: [PageImageRecord] = []
+        // Embedded image-XObject draws on text pages, gathered across the whole
+        // document, then filtered (size + recurrence + page-coverage) into real
+        // figures after the loop — the recurrence filter needs the doc-wide view.
+        var allImageDraws: [PDFImageDraw] = []
 
         // 2026-05-22 — Detect running headers/footers across the
         // whole document before per-page extraction. Returns a
@@ -253,35 +278,27 @@ extension PDFDocumentImporter {
             if !pdfText.isEmpty {
                 pageContents.append(.text(pdfText))
                 readableTextPages.append(pdfText)
-                // If the page also contains PDF image XObjects (figures, photos, charts),
-                // preserve them as a visual stop immediately after the text. Neither is dropped.
+                // Gather this text page's embedded image draws for figure extraction.
                 //
-                // 2026-05-27 — suppress the full-page render when the
-                // page already has substantial text. The previous
-                // behavior rendered the entire page bitmap (text +
-                // XObjects + any embedded watermark) and stored it as
-                // the image side-store entry. For converter-watermarked
-                // PDFs (Cryptography for Dummies has a CHM-to-PDF
-                // watermark on every page), the renderer faithfully
-                // captures the watermark — even though
-                // PDFWatermarkStripper successfully scrubbed it from
-                // the text path. Result: the user sees the watermark
-                // bitmap inline despite the text being clean.
-                //
-                // Threshold: a page with > 200 chars of extracted text
-                // is "primarily a text page." Its XObjects are
-                // typically small (nav buttons, line decorations,
-                // watermarks) — not informative figures the reader
-                // would want preserved as a visual stop. Pages BELOW
-                // the threshold (cover, figure-only pages) still get
-                // the full-page render.
-                if pageHasImageXObjects(page) && pdfText.count < 200 {
-                    let imageID = UUID().uuidString
-                    if let pngData = renderPageToPNG(page) {
-                        imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))
-                    }
-                    pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
-                }
+                // REPLACES the old "<200 chars → render the WHOLE page" heuristic.
+                // That heuristic was doubly wrong (CC#22, verified on real docs):
+                //   • it MISSED every real figure that shares a page with body text
+                //     (a "Figure N-N" on a prose page has >200 chars → never rendered),
+                //     which is where essentially all figures live (Crypto 39/39,
+                //     GEB 146/147); and
+                //   • on the near-blank pages it DID fire, it stored a full-page bitmap
+                //     that faithfully re-captured the CHM/converter watermark strip the
+                //     text path had already scrubbed — i.e. it preserved junk, not
+                //     figures.
+                // Instead we scan the page for embedded image XObjects (below) and,
+                // after the whole document is seen, select the real figures (size +
+                // recurrence + page-coverage) and render just each figure's region —
+                // placed at its vertical position in reading order. Scanned pages
+                // (no text layer) never reach here, so their page-image is not
+                // re-added as a figure. Known edge: a figure drawn as pure VECTOR (no
+                // image XObject) on a low-text page is not captured this way — watch
+                // for it on the phone; add a vector-region fallback only if it appears.
+                allImageDraws += PDFFigureExtractor.imageDraws(on: page, pageIndex: index)
             } else {
                 // PDFKit found no text — report progress then try Vision OCR.
                 progress?(.ocr(page: index + 1, of: pageCount))
@@ -315,7 +332,7 @@ extension PDFDocumentImporter {
                     dbgLog("PDF import: page %d OCR rejected as decorative cover (%d chars)", index + 1, ocr.count)
                     let imageID = UUID().uuidString
                     if let pngData = renderPageToPNG(page) {
-                        imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))
+                        imageRecords.append(PageImageRecord(imageID: imageID, data: pngData, pageIndex: index))
                     }
                     pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
                 } else if pageIsEffectivelyBlank(page) {
@@ -336,7 +353,7 @@ extension PDFDocumentImporter {
                     // inline.
                     let imageID = UUID().uuidString
                     if let pngData = renderPageToPNG(page) {
-                        imageRecords.append(PageImageRecord(imageID: imageID, data: pngData))
+                        imageRecords.append(PageImageRecord(imageID: imageID, data: pngData, pageIndex: index))
                     }
                     pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
                 }
@@ -345,6 +362,27 @@ extension PDFDocumentImporter {
 
         guard !readableTextPages.isEmpty else {
             throw ImportError.scannedDocument
+        }
+
+        // Select the real figures across the whole document (size + recurrence +
+        // page-coverage filters — see PDFFigureExtractor) and render each figure's
+        // page region to PNG, anchored at its vertical position (`figureYTop`) so
+        // the unit builder places it among that page's lines in reading order. Each
+        // render is pooled so the transient CGContext/PNG drains — a figure-heavy
+        // book (GEB ~157) would otherwise hold every bitmap at once (jetsam risk on
+        // the 8 GB phone). Rendered figures are additive to any whole-sheet renders
+        // captured above for text-LESS pages.
+        let selectedFigures = PDFFigureExtractor.selectFigures(from: allImageDraws)
+        for figureDraw in selectedFigures {
+            autoreleasepool {
+                guard let page = document.page(at: figureDraw.pageIndex),
+                      let rendered = PDFFigureExtractor.render(figureDraw, on: page) else { return }
+                imageRecords.append(PageImageRecord(
+                    imageID: UUID().uuidString,
+                    data: rendered.pngData,
+                    pageIndex: rendered.pageIndex,
+                    figureYTop: rendered.yTop))
+            }
         }
 
         // 2026-05-22 — Watermark strip. Converter watermarks (ChmMagic,
@@ -993,44 +1031,10 @@ extension PDFDocumentImporter {
     // now reaches the same passes — TXT/MD/RTF/DOCX/HTML/EPUB/PDF.
 
 
-    /// Returns true if the page's PDF resource dictionary contains at least one
-    /// Image-type XObject — indicating the page has embedded figures, photos, or
-    /// charts in addition to any extractable text.
-    ///
-    /// Uses the CGPDFPage resource dictionary directly so the check is fast (no
-    /// rendering needed). False negatives are possible for unusual PDF constructs
-    /// (images in Form XObjects or pattern streams) but those are rare.
-    private func pageHasImageXObjects(_ page: PDFPage) -> Bool {
-        guard let cgPage = page.pageRef,
-              let pageDict = cgPage.dictionary else { return false }
-
-        var resourcesDict: CGPDFDictionaryRef?
-        guard CGPDFDictionaryGetDictionary(pageDict, "Resources", &resourcesDict),
-              let res = resourcesDict else { return false }
-
-        var xObjDict: CGPDFDictionaryRef?
-        guard CGPDFDictionaryGetDictionary(res, "XObject", &xObjDict),
-              let xObj = xObjDict else { return false }
-
-        var found = false
-        // CGPDFDictionaryApplyFunction uses a C function pointer; pass &found as
-        // context. The closure is non-capturing so it satisfies @convention(c).
-        withUnsafeMutablePointer(to: &found) { ptr in
-            CGPDFDictionaryApplyFunction(xObj, { _, obj, ctx in
-                var stream: CGPDFStreamRef?
-                guard CGPDFObjectGetValue(obj, .stream, &stream),
-                      let st = stream,
-                      let stDict = CGPDFStreamGetDictionary(st) else { return }
-                var subtype: UnsafePointer<Int8>?
-                guard CGPDFDictionaryGetName(stDict, "Subtype", &subtype),
-                      let st = subtype else { return }
-                if strcmp(st, "Image") == 0 {
-                    ctx?.assumingMemoryBound(to: Bool.self).pointee = true
-                }
-            }, ptr)
-        }
-        return found
-    }
+    // 2026-07-03 (CC#22): `pageHasImageXObjects` removed. Its only caller was the
+    // "<200 chars → render the whole page" heuristic, now replaced by
+    // `PDFFigureExtractor` (which detects image XObjects itself, with their rects,
+    // during the content-stream scan). No remaining caller.
 }
 
 // ========== BLOCK 05: HELPERS - END ==========

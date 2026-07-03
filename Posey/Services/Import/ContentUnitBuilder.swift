@@ -267,6 +267,7 @@ enum ContentUnitBuilder {
     static func unitsFromPDFLines(
         _ linesByPage: [[PDFTextLine]],
         documentID: UUID,
+        images: [(pageIndex: Int, imageID: String, yTop: Double?)] = [],
         isHeading: (PDFTextLine) -> Bool,
         headingLevel: (PDFTextLine) -> Int = { _ in 1 }
     ) -> [ContentUnit] {
@@ -304,12 +305,75 @@ enum ContentUnitBuilder {
             pendingPageBreaks.removeAll(keepingCapacity: true)
         }
 
+        // PDF images — place each in reading order. Two placements:
+        //  • BETWEEN-PAGE images: a whole-SHEET render (yTop == nil — a scanned /
+        //    cover / visual page omitted from the line stream, the CC#20 reconnect)
+        //    OR a figure whose PAGE has no text lines in the stream (yTop set but its
+        //    sheet was dropped — e.g. all its lines were furniture, or it produced no
+        //    line selection). Placed BETWEEN pages by sheet index. This second case is
+        //    the "straggler" guard: a figure is NEVER silently dropped just because
+        //    its page fell out of the line stream (never-fail-silently).
+        //  • INTRA-PAGE figures (yTop set AND its page IS in the line stream): placed
+        //    at their VERTICAL position among that page's lines, so "Figure 11-3"
+        //    lands between the paragraphs it sits between — not dumped at page end.
+        // An image is a HARD content boundary: emitting one flushes the buffered
+        // paragraph first (also prevents an incorrect cross-page stitch across it).
+        func emitImageUnit(imageID: String, pageIndex: Int) {
+            flushParagraph()
+            add(.image, "Visual content on page \(pageIndex + 1)",
+                ContentUnitMetadata(imageID: imageID))
+        }
+        // The sheet indices that actually appear in the line stream. A figure on a
+        // page NOT in this set cannot be positioned among lines (there are none), so
+        // it falls to the between-page placement rather than being lost.
+        let linePageSet = Set(linesByPage.compactMap { $0.first?.pageIndex })
+        let betweenPageImages = images
+            .filter { $0.yTop == nil || !linePageSet.contains($0.pageIndex) }
+            .sorted { $0.pageIndex < $1.pageIndex }
+        var betweenCursor = 0
+        func emitBetweenBefore(_ p: Int) {
+            while betweenCursor < betweenPageImages.count, betweenPageImages[betweenCursor].pageIndex < p {
+                emitImageUnit(imageID: betweenPageImages[betweenCursor].imageID,
+                              pageIndex: betweenPageImages[betweenCursor].pageIndex); betweenCursor += 1
+            }
+        }
+        func emitBetweenOn(_ p: Int) {
+            while betweenCursor < betweenPageImages.count, betweenPageImages[betweenCursor].pageIndex == p {
+                emitImageUnit(imageID: betweenPageImages[betweenCursor].imageID,
+                              pageIndex: betweenPageImages[betweenCursor].pageIndex); betweenCursor += 1
+            }
+        }
+        // Embedded figures on pages that ARE in the line stream, grouped by page and
+        // sorted TOP→BOTTOM (yTop DESCENDING, since PDF y is up: larger = higher).
+        var figuresByPage: [Int: [(imageID: String, yTop: Double)]] = [:]
+        for img in images {
+            if let y = img.yTop, linePageSet.contains(img.pageIndex) {
+                figuresByPage[img.pageIndex, default: []].append((img.imageID, y))
+            }
+        }
+        for k in figuresByPage.keys { figuresByPage[k]!.sort { $0.yTop > $1.yTop } }
+
         // Geometry of the page we just finished (for the full-width test on its last line).
         var priorMaxRight: Double = 0
         var priorLeftMargin: Double = 0
 
         for (pageIdx, page) in linesByPage.enumerated() {
             guard let pageIndex = page.first?.pageIndex else { continue }
+            // Weave in any between-page images that precede this text page (before the
+            // stitch decision — a flushed buffer here makes the boundary clean).
+            emitBetweenBefore(pageIndex)
+
+            // Embedded figures on THIS page, emitted as we cross their vertical
+            // position while walking the lines top→bottom. A figure whose top is
+            // ABOVE the current line's top is emitted just before that line.
+            let pageFigures = figuresByPage[pageIndex] ?? []
+            var figureCursor = 0
+            func emitFiguresAbove(_ lineYTop: Double) {
+                while figureCursor < pageFigures.count, pageFigures[figureCursor].yTop > lineYTop {
+                    emitImageUnit(imageID: pageFigures[figureCursor].imageID, pageIndex: pageIndex)
+                    figureCursor += 1
+                }
+            }
 
             // Per-page geometry + paragraph threshold.
             let gaps = page.map { $0.gapAbove }.filter { $0 > 0 }.sorted()
@@ -344,6 +408,8 @@ enum ContentUnitBuilder {
             }
 
             for (lineIdx, line) in page.enumerated() {
+                // Place any embedded figure whose top sits above this line, first.
+                emitFiguresAbove(line.yTop)
                 if isHeading(line) {
                     flushParagraph()
                     add(.heading, line.text, ContentUnitMetadata(headingLevel: headingLevel(line)))
@@ -387,11 +453,26 @@ enum ContentUnitBuilder {
                     lastBufferedLine = line
                 }
             }
-            // NB: NO flush here — the buffer carries to the next page for stitching.
+            // Any remaining figures on this page sit BELOW all its text lines.
+            while figureCursor < pageFigures.count {
+                emitImageUnit(imageID: pageFigures[figureCursor].imageID, pageIndex: pageIndex)
+                figureCursor += 1
+            }
+            // A between-page image tagged to this text page renders after its text
+            // (rare — these are normally on omitted image-only pages).
+            // (Flushes the buffer, so no stitch carries off an image-bearing page —
+            // correct: an image is a hard boundary.)
+            emitBetweenOn(pageIndex)
+            // NB: NO flush here otherwise — the buffer carries to the next page for stitching.
             priorMaxRight = maxRight
             priorLeftMargin = leftMargin
         }
         flushParagraph()       // final paragraph + any trailing deferred breaks
+        // Trailing between-page images (past the last text page).
+        while betweenCursor < betweenPageImages.count {
+            emitImageUnit(imageID: betweenPageImages[betweenCursor].imageID,
+                          pageIndex: betweenPageImages[betweenCursor].pageIndex); betweenCursor += 1
+        }
         return units
     }
 

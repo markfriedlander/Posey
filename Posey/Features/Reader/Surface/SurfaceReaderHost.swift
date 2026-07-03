@@ -209,6 +209,13 @@ struct SurfaceReaderHost: UIViewRepresentable {
                     self.scrollToFraction(CGFloat(f))
                 }
                 .store(in: &cancellables)
+            NotificationCenter.default.publisher(for: .remoteScrollToImage)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] note in
+                    guard let self, let idx = note.userInfo?["index"] as? Int else { return }
+                    self.scrollToImage(oneBasedIndex: idx)
+                }
+                .store(in: &cancellables)
             NotificationCenter.default.publisher(for: .remoteSimulateSurfaceDrag)
                 .receive(on: RunLoop.main)
                 .sink { [weak self] _ in self?.surface.onUserScroll?() }   // same path a real drag fires
@@ -291,6 +298,24 @@ struct SurfaceReaderHost: UIViewRepresentable {
             tv.layoutManager.ensureLayout(for: tv.textContainer)
             let maxOff = max(0, tv.contentSize.height - tv.bounds.height)
             tv.setContentOffset(CGPoint(x: 0, y: maxOff * max(0, min(1, f))), animated: true)
+        }
+
+        /// Scroll precisely to the Nth `.image` unit in reading order (1-based), landing
+        /// the figure's top ~12 % below the viewport top so its caption/context above is
+        /// visible. Reuses the surface's own unit→range→glyph-rect geometry, so it lands
+        /// exactly on the figure (unlike the coarse fraction scroll). DEBUG verification.
+        private func scrollToImage(oneBasedIndex: Int) {
+            let imageUnits = parent.viewModel.units.filter { $0.kind == .image }
+            guard oneBasedIndex >= 1, oneBasedIndex <= imageUnits.count else { return }
+            guard let range = surface.content.layout.unitRange(imageUnits[oneBasedIndex - 1].id) else { return }
+            let tv = surface.textView
+            tv.layoutManager.ensureLayout(for: tv.textContainer)
+            let glyphRange = tv.layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let rect = tv.layoutManager.boundingRect(forGlyphRange: glyphRange, in: tv.textContainer)
+            let contentY = rect.minY + tv.textContainerInset.top
+            let maxOff = max(0, tv.contentSize.height - tv.bounds.height)
+            let y = max(0, min(maxOff, contentY - tv.bounds.height * 0.12))
+            tv.setContentOffset(CGPoint(x: 0, y: y), animated: true)
         }
 
         /// Apply every per-update diff: rebuild on content/font change, move the

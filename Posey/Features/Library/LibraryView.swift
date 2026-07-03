@@ -3849,6 +3849,18 @@ extension LibraryViewModel {
                 }
                 return json(["status": "posted", "fraction": s])
 
+            case "SCROLL_TO_IMAGE":
+                // CC#22: scroll precisely to the Nth image unit (1-based) in reading order,
+                // so a specific figure can be framed — fraction scrolling is too coarse.
+                guard let s = arg, let n = Int(s), n >= 1 else {
+                    return #"{"error":"Usage: SCROLL_TO_IMAGE:<1-based image index>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .remoteScrollToImage, object: nil,
+                                                    userInfo: ["index": n])
+                }
+                return json(["status": "posted", "index": n])
+
             case "SIMULATE_DRAG":
                 // Reader rebuild: simulate a user drag on the open surface reader so the
                 // chrome re-reveals — verifies scroll-to-reveal without a physical gesture

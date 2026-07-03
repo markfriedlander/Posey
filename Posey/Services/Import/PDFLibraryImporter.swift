@@ -173,8 +173,18 @@ struct PDFLibraryImporter {
             var levelByLineText: [String: Int] = [:]
             for r in resolved { levelByLineText[r.line.text] = levelByTitle[r.title] ?? 1 }
 
+            // Reconnect stored PDF renders (CC#20) + place extracted figures at
+            // their vertical position (CC#22): pass each image's 0-based sheet index
+            // AND its figure-top (nil = whole-sheet render placed between pages; set
+            // = embedded figure placed among the page's lines). The line stream omits
+            // image-only sheets, so without this images are orphaned. Reflowable
+            // formats leave pageIndex nil; not applicable here.
+            let pdfImages: [(pageIndex: Int, imageID: String, yTop: Double?)] = parsed.images.compactMap { img in
+                img.pageIndex.map { (pageIndex: $0, imageID: img.imageID, yTop: img.figureYTop) }
+            }
             units = ContentUnitBuilder.unitsFromPDFLines(
                 cleanLinesByPage, documentID: documentID,
+                images: pdfImages,
                 isHeading: { headingLineSet.contains($0) },
                 headingLevel: { levelByLineText[$0.text] ?? 1 })
 

@@ -89,6 +89,7 @@ struct PDFLibraryImporter {
         contentHash: String?,
         rowProgress: (@Sendable (Int, Int) -> Void)? = nil
     ) throws -> Document {
+        ImportTrace.shared.event("persist: begin (heading detection + unit build + DB write)")
         // Strip duplicate file extensions (e.g. "report.pdf.pdf" → "report.pdf").
         let rawFilename = url.lastPathComponent
         let ext = url.pathExtension.lowercased()
@@ -119,6 +120,9 @@ struct PDFLibraryImporter {
         }
         enqueueEnhancement(documentID: doc.id, pageFlags: parsed.pageFlags)
 
+        // Log completion but DO NOT close the trace yet — the caller appends the
+        // library-refresh probe (mystery #4) and closes it there (Mark, 2026-07-05).
+        ImportTrace.shared.event("persist: DB write + source save done — IMPORT COMPLETE (doc \(doc.id))")
         return doc
     }
 
@@ -209,14 +213,18 @@ struct PDFLibraryImporter {
             // scored map wins; when it's already good (GEB, the working docs) the
             // built-in wins and nothing changes.
             let seedTitles = normalizedTOCEntries.map { $0.title }
+            ImportTrace.shared.event("persist: builtin resolveHeadings begin (\(allLines.count) lines, \(seedTitles.count) seed titles)")
             let builtinMap = PDFHeadingKeyDeriver.resolveHeadings(
                 titles: seedTitles, allLines: allLines, bodyStartIndex: bodyStartIndex)
+            ImportTrace.shared.event("persist: builtin resolveHeadings done (\(builtinMap.count) anchors); chooseHeadingMap begin")
             let choice = Self.chooseHeadingMap(
                 builtin: builtinMap, seedTitles: seedTitles, allLines: allLines)
+            ImportTrace.shared.event("persist: chooseHeadingMap done (usedSeedless=\(choice.usedSeedless), map=\(choice.map.count)); merge begin")
             let mergedHeadings = Self.mergeResolvedHeadingLines(
                 resolved: choice.map,
                 allLines: allLines
             )
+            ImportTrace.shared.event("persist: heading resolve done (\(mergedHeadings.count) headings, seedless=\(choice.usedSeedless))")
             let mergedLinesByPage = Self.rebuildPages(
                 from: cleanLinesByPage,
                 mergedHeadings: mergedHeadings
@@ -263,6 +271,7 @@ struct PDFLibraryImporter {
             let pdfImages: [(pageIndex: Int, imageID: String, yTop: Double?)] = parsed.images.compactMap { img in
                 img.pageIndex.map { (pageIndex: $0, imageID: img.imageID, yTop: img.figureYTop) }
             }
+            ImportTrace.shared.event("persist: unit build begin")
             units = ContentUnitBuilder.unitsFromPDFLines(
                 mergedLinesByPage, documentID: documentID,
                 images: pdfImages,
@@ -270,6 +279,7 @@ struct PDFLibraryImporter {
                 headingLevel: { levelByLineText[$0.text] ?? 1 },
                 headingTitle: { titleByHeadingLine[$0] },
                 rowProgress: rowProgress)
+            ImportTrace.shared.event("persist: unit build done (\(units.count) units)")
 
             // Link each contents entry to its heading unit by IDENTITY on the one
             // ruler — never by matching text. Heading units are emitted in document
@@ -431,19 +441,24 @@ struct PDFLibraryImporter {
         // at 0.80 — above CBA, comfortably below GEB. placement+order can't detect an
         // INCOMPLETE TOC on its own, so anything under the bar falls through to the
         // A/B gate, which is where CBA's real sections get recovered.
+        ImportTrace.shared.event("    chooseHeadingMap: builtinHealth begin (\(allLines.count) lines)")
         let health = PDFHeadingScorer.builtinHealth(
             map: builtin, seedCount: seedTitles.count, allLines: allLines)
+        ImportTrace.shared.event("    chooseHeadingMap: builtinHealth done (placed=\(health.placed), placedRatio=\(String(format: "%.2f", health.placedRatio)), orderRatio=\(String(format: "%.2f", health.orderRatio)))")
         if health.placed >= 4, health.placedRatio >= 0.80, health.orderRatio >= 0.90 {
             print("[HeadingAB] builtin HEALTHY placed=\(health.placed)/\(seedTitles.count) placedRatio=\(String(format: "%.2f", health.placedRatio)) orderRatio=\(String(format: "%.2f", health.orderRatio)) -> builtin (seedless SKIPPED)")
             return (builtin, false)
         }
 
+        ImportTrace.shared.event("    chooseHeadingMap: seedless path — deriveProfile begin")
         let profile = PDFHeadingScorer.deriveProfile(seedTitles: seedTitles, allLines: allLines)
         let builtinScored = builtin.map {
             (title: $0.title, line: $0.line,
              score: PDFHeadingScorer.resemblance($0.line, profile: profile))
         }
+        ImportTrace.shared.event("    chooseHeadingMap: deriveProfile+builtinScored done; mapQuality(builtin) begin")
         let qBuiltin = PDFHeadingScorer.mapQuality(builtinScored, allLines: allLines)
+        ImportTrace.shared.event("    chooseHeadingMap: mapQuality(builtin) done; detectHeadingsFromPages begin")
 
         // Map B — the SEEDLESS detector builds its own map from the pages (no
         // reliance on the built-in title list). Keep only strong candidates; a real
@@ -451,8 +466,10 @@ struct PDFLibraryImporter {
         // (measured on CBA: real sections ≈0.83, body sentences ≤0.62).
         let seedlessStrong = PDFHeadingScorer.detectHeadingsFromPages(allLines: allLines)
             .filter { $0.score >= 0.65 }
+        ImportTrace.shared.event("    chooseHeadingMap: detectHeadingsFromPages done (\(seedlessStrong.count) strong); mapQuality(seedless) begin")
         let seedlessMapForQ = seedlessStrong.map { (title: $0.line.text, line: $0.line, score: $0.score) }
         let qSeedless = PDFHeadingScorer.mapQuality(seedlessMapForQ, allLines: allLines)
+        ImportTrace.shared.event("    chooseHeadingMap: mapQuality(seedless) done")
 
         // SAFETY MARGIN: only let the seedless map override the built-in when it is
         // CLEARLY stronger (≥1.3×). This is the reliability gate — it fires when the

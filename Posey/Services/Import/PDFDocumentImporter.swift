@@ -85,14 +85,21 @@ struct PDFDocumentImporter {
     private static let visualPageMarkerPrefix = "[[POSEY_VISUAL_PAGE:"
     private static let visualPageMarkerSuffix = "]]"
 
-    /// Progress events emitted during import. Sent only when OCR is needed.
+    /// Progress events emitted during import.
     /// Conforms to Sendable so the callback can cross actor boundaries.
     enum ImportProgress: Sendable {
-        /// Emitted once per page that requires Vision OCR (PDFKit found no text).
+        /// Emitted once at the START of every page so the on-screen counter
+        /// advances on EVERY page, not only on the rare scanned pages. Without
+        /// this, a document that is mostly text pages leaves the counter frozen
+        /// on the last scanned page's number for long stretches, making a
+        /// healthy import look hung (Mark, 2026-07-05, CBA 814-page freeze).
+        case reading(page: Int, of: Int)
+        /// Emitted for a page that requires Vision OCR (PDFKit found no text).
         case ocr(page: Int, of: Int)
 
         var message: String {
             switch self {
+            case .reading(let page, let total): return "Reading page \(page) of \(total)"
             case .ocr(let page, let total): return "OCR: page \(page) of \(total)"
             }
         }
@@ -156,6 +163,11 @@ extension PDFDocumentImporter {
             throw ImportError.emptyDocument
         }
 
+        // Durable, timestamped record of this import's order of operations
+        // (Mark, 2026-07-05). Survives a force-quit; read back via
+        // DUMP_IMPORT_TRACE. Best-effort — never affects the import result.
+        ImportTrace.shared.begin("PDF parse, \(pageCount) pages")
+
         enum PageContent {
             case text(String)
             case visualPlaceholder(pageNumber: Int, imageID: String)
@@ -178,7 +190,9 @@ extension PDFDocumentImporter {
         // margin-zone text get nothing (no-op for those pages).
         // See PDFRunningHeaderDetector for the algorithm + the
         // visual-audit-driven rationale behind the tunables.
+        ImportTrace.shared.event("pre-loop: running-header detect begin")
         let headerStripRanges = PDFRunningHeaderDetector.detect(in: document)
+        ImportTrace.shared.event("pre-loop: running-header detect done")
 
         // 2026-05-22 — Phase 1 of the Tier 1/2 PDF extraction
         // architecture. Walk every page with the confidence detector
@@ -199,7 +213,9 @@ extension PDFDocumentImporter {
         // The final array is what gets persisted in the sidecar so
         // `LIST_PAGE_FLAGS` shows both the static heuristic decision
         // and what Vision actually did.
+        ImportTrace.shared.event("pre-loop: page-confidence assess begin")
         var pageFlags = PDFPageConfidenceDetector.assess(document)
+        ImportTrace.shared.event("pre-loop: page-confidence assess done")
         let flagSummary = pageFlags.filter { $0.needsTier2 }
         dbgLog(
             "PDF page flags: %d/%d pages flagged for Tier 2 (full=%d fusionRepair=%d figureRegion=%d)",
@@ -211,6 +227,11 @@ extension PDFDocumentImporter {
 
         for index in 0..<pageCount {
             guard let page = document.page(at: index) else { continue }
+
+            // Tick the on-screen counter on EVERY page (not just scanned
+            // ones), and record the page start in the durable trace.
+            progress?(.reading(page: index + 1, of: pageCount))
+            ImportTrace.shared.event("p\(index + 1)/\(pageCount) begin")
 
             // Strip running header/footer ranges (if any detected
             // for this page) from the raw PDFKit page text BEFORE
@@ -266,6 +287,10 @@ extension PDFDocumentImporter {
                 }
                 return normalize(stripped)
             }()
+            // If the trace freezes with this page's last line being "begin"
+            // (no "text-extracted"), the stall is in text extraction /
+            // TOC-geometry reflow / normalize for this page.
+            ImportTrace.shared.event("p\(index + 1) text-extracted, \(pdfText.count) chars")
 
             // 2026-05-22 Phase 2.2 Step 4 — Tier 2 Vision OCR no
             // longer runs synchronously during import. Flagged pages
@@ -298,15 +323,19 @@ extension PDFDocumentImporter {
                 // re-added as a figure. Known edge: a figure drawn as pure VECTOR (no
                 // image XObject) on a low-text page is not captured this way — watch
                 // for it on the phone; add a vector-region fallback only if it appears.
+                ImportTrace.shared.event("p\(index + 1) figure-scan begin")
                 allImageDraws += PDFFigureExtractor.imageDraws(
                     on: page,
                     pageIndex: index,
                     pageTextCharacters: pdfText.count
                 )
+                ImportTrace.shared.event("p\(index + 1) figure-scan done, \(allImageDraws.count) draws total")
             } else {
                 // PDFKit found no text — report progress then try Vision OCR.
                 progress?(.ocr(page: index + 1, of: pageCount))
+                ImportTrace.shared.event("p\(index + 1) OCR begin (no text layer)")
                 let ocr = ocrText(from: page)
+                ImportTrace.shared.event("p\(index + 1) OCR done, \(ocr.count) chars")
                 // 2026-05-22 Phase 2 — record fallback Vision outcome
                 // in the page-flags telemetry so calibration sees a
                 // unified view of which pages went through Vision and
@@ -335,9 +364,11 @@ extension PDFDocumentImporter {
                     // Decorative cover detected — treat as visual.
                     dbgLog("PDF import: page %d OCR rejected as decorative cover (%d chars)", index + 1, ocr.count)
                     let imageID = UUID().uuidString
+                    ImportTrace.shared.event("p\(index + 1) render-to-PNG begin (decorative cover)")
                     if let pngData = renderPageToPNG(page) {
                         imageRecords.append(PageImageRecord(imageID: imageID, data: pngData, pageIndex: index))
                     }
+                    ImportTrace.shared.event("p\(index + 1) render-to-PNG done (decorative cover)")
                     pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
                 } else if pageIsEffectivelyBlank(page) {
                     // Task 8 #5 (2026-05-03 — pixel-uniformity
@@ -356,13 +387,16 @@ extension PDFDocumentImporter {
                     // a visual stop so the user sees the figure
                     // inline.
                     let imageID = UUID().uuidString
+                    ImportTrace.shared.event("p\(index + 1) render-to-PNG begin (visual page)")
                     if let pngData = renderPageToPNG(page) {
                         imageRecords.append(PageImageRecord(imageID: imageID, data: pngData, pageIndex: index))
                     }
+                    ImportTrace.shared.event("p\(index + 1) render-to-PNG done (visual page)")
                     pageContents.append(.visualPlaceholder(pageNumber: index + 1, imageID: imageID))
                 }
             }
         }
+        ImportTrace.shared.event("per-page loop done (\(pageCount) pages)")
 
         guard !readableTextPages.isEmpty else {
             throw ImportError.scannedDocument
@@ -376,7 +410,9 @@ extension PDFDocumentImporter {
         // book (GEB ~157) would otherwise hold every bitmap at once (jetsam risk on
         // the 8 GB phone). Rendered figures are additive to any whole-sheet renders
         // captured above for text-LESS pages.
+        ImportTrace.shared.event("post-loop: figure select begin (\(allImageDraws.count) draws)")
         let selectedFigures = PDFFigureExtractor.selectFigures(from: allImageDraws)
+        ImportTrace.shared.event("post-loop: figure render begin (\(selectedFigures.count) figures)")
         for figureDraw in selectedFigures {
             autoreleasepool {
                 guard let page = document.page(at: figureDraw.pageIndex),
@@ -388,6 +424,7 @@ extension PDFDocumentImporter {
                     figureYTop: rendered.yTop))
             }
         }
+        ImportTrace.shared.event("post-loop: figure render done (\(imageRecords.count) image records)")
 
         // 2026-05-22 — Watermark strip. Converter watermarks (ChmMagic,
         // Aspose, Calibre, generic "Evaluation Only" notices) are
@@ -396,6 +433,7 @@ extension PDFDocumentImporter {
         // they were prose, embed into the RAG index, and surface as
         // the document's first sentence. Applied per-page so the
         // downstream TOC detector also sees clean text.
+        ImportTrace.shared.event("post-loop: watermark strip begin")
         readableTextPages = readableTextPages.map { PDFWatermarkStripper.strip($0) }
         pageContents = pageContents.map { content in
             switch content {
@@ -465,7 +503,9 @@ extension PDFDocumentImporter {
         // past it on first open so the TOC isn't read aloud (uniformly poor
         // listening experience). Entries (best-effort) are persisted so the
         // existing TOC sheet can navigate the document.
+        ImportTrace.shared.event("post-loop: text join + normalize done; TOC detect begin")
         let tocResult = PDFTOCDetector.detect(pageTexts: readableTextPages)
+        ImportTrace.shared.event("post-loop: TOC detect done")
         var tocSkipUntilOffset = tocResult?.regionEndOffset ?? 0
         // 2026-05-31 (Bug F) — `buildEntries` moved to the shared
         // `PDFTextStructureDetector` so the end-of-enhancement re-detect path
@@ -547,13 +587,16 @@ extension PDFDocumentImporter {
         // PDF rebuild Piece A (2026-06-29) — extract clean reading-order lines
         // per sheet for the line-based unit builder + heading resolver. PDFKit's
         // own line selections (not glyph bucketing). Empty sheets omitted.
+        ImportTrace.shared.event("post-loop: TOC entries built (\(tocEntries.count)); line extraction begin (\(document.pageCount) pages)")
         var linesByPage: [[PDFTextLine]] = []
         for i in 0..<document.pageCount {
             if let page = document.page(at: i) {
+                ImportTrace.shared.event("line-extract p\(i + 1)/\(document.pageCount)")
                 let ls = PDFLineExtractor.lines(from: page, pageIndex: i)
                 if !ls.isEmpty { linesByPage.append(ls) }
             }
         }
+        ImportTrace.shared.event("post-loop: line extraction done; extraction phase COMPLETE — handing off to persist")
 
         return ParsedPDFDocument(
             title: title,

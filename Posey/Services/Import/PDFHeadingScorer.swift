@@ -271,6 +271,7 @@ enum PDFHeadingScorer {
             return standsOut || opensWithSectionNumber(l.text)
         }
         guard !candidates.isEmpty else { return [] }
+        ImportTrace.shared.event("      detectHeadingsFromPages: candidates=\(candidates.count) of \(allLines.count) lines; pass1 begin")
 
         func median(_ xs: [Double]) -> Double {
             let s = xs.sorted(); let n = s.count
@@ -302,6 +303,8 @@ enum PDFHeadingScorer {
             let s = resemblance(l, profile: profile)
             if s >= 0.70 { picks.append((i, l, s)); chosenIdx.insert(i) }
         }
+
+        ImportTrace.shared.event("      detectHeadingsFromPages: pass1 done (\(picks.count) picks); pass2 begin")
 
         // PASS 2 — gap-fill by the KNOWN number sequence (Mark, 2026-07-05). Between
         // two confident numbered anchors whose numbers SKIP (18 → 24), sections

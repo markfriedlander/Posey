@@ -873,6 +873,11 @@ extension LibraryViewModel {
                         }
                     })
                 loadDocuments()
+                // Mystery #4 probe (Mark, 2026-07-05): the finished book didn't appear
+                // until the app was reopened. The DB definitely has it (single-connection
+                // read, proven), so the open question is whether THIS refresh ran and what
+                // it saw. Record it, then close the durable trace for this import.
+                ImportTrace.shared.end("post-import library refresh ran — \(self.documents.count) documents now listed")
             } catch {
                 present(error)
             }
@@ -3582,6 +3587,17 @@ extension LibraryViewModel {
                 InAppLogBuffer.shared.clear()
                 return json(["cleared": true])
 
+            case "DUMP_IMPORT_TRACE":
+                // Durable, timestamped record of the most recent document
+                // import's order of operations (survives a force-quit).
+                // The LAST line is the step the import was inside when it
+                // froze. See ImportTrace (Mark, 2026-07-05).
+                return json(["trace": ImportTrace.shared.contents()])
+
+            case "CLEAR_IMPORT_TRACE":
+                ImportTrace.shared.clear()
+                return json(["cleared": true])
+
             case "SUBMIT_ASK_POSEY":
                 // SUBMIT_ASK_POSEY:<text> — drive the live submit
                 // path on the open Ask Posey sheet's view model.
@@ -4855,35 +4871,50 @@ extension LibraryViewModel {
     // MARK: — Import handler
 
     #if DEBUG
-    /// DEBUG-only responsiveness probe (Path A verification, 2026-06-15). Runs a
-    /// ~30ms heartbeat on the MainActor; if the main thread is blocked, the
-    /// heartbeat's resumption is delayed and we record the overshoot. The max
-    /// overshoot over an import ≈ the longest momentary UI freeze during it.
-    /// Off-main import (Path A) → small stalls (~tens of ms, the per-chapter
-    /// WebKit hop). Old on-main import → stall ≈ whole import (seconds). Lets the
-    /// antenna self-report responsiveness from ONE import call — no external
-    /// polling/hammering. Compiled out of production.
-    @MainActor
-    final class MainThreadStallProbe {
-        private(set) var maxStallMs: Double = 0
-        private var task: Task<Void, Never>?
-        private let intervalNs: UInt64 = 30_000_000  // 30ms heartbeat
+    /// Measures the LONGEST time the MAIN thread could not run a trivial block —
+    /// i.e. how long the UI was actually frozen. Timed from a BACKGROUND worker
+    /// using the monotonic system clock (`DispatchTime`, backed by
+    /// `mach_absolute_time`), which keeps ticking even while the main thread is
+    /// fully blocked.
+    ///
+    /// The previous version ran its own timer ON the main thread, so a long
+    /// SYNCHRONOUS main-thread block starved the very code meant to measure it:
+    /// it reported ~17 ms for a ~93-SECOND freeze (Mark, 2026-07-05, CBA import).
+    /// A watchdog must never share the worker it is watching — so this one lives
+    /// on its own queue and pings main, timing the round-trip with the steady
+    /// clock. `@unchecked Sendable`: the one mutable field is lock-guarded.
+    final class MainThreadStallProbe: @unchecked Sendable {
+        private let queue = DispatchQueue(label: "posey.mainthread.watchdog", qos: .userInitiated)
+        private let lock = NSLock()
+        private var _maxStallMs: Double = 0
+        private var running = false
+
+        var maxStallMs: Double { lock.lock(); defer { lock.unlock() }; return _maxStallMs }
 
         func start() {
-            task = Task { @MainActor [weak self] in
+            lock.lock(); running = true; lock.unlock()
+            queue.async { [weak self] in
                 guard let self else { return }
-                var last = DispatchTime.now().uptimeNanoseconds
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: self.intervalNs)
-                    let now = DispatchTime.now().uptimeNanoseconds
-                    let elapsedMs = Double(now &- last) / 1_000_000
-                    let stallMs = elapsedMs - Double(self.intervalNs) / 1_000_000
-                    if stallMs > self.maxStallMs { self.maxStallMs = stallMs }
-                    last = now
+                while true {
+                    self.lock.lock(); let go = self.running; self.lock.unlock()
+                    if !go { break }
+                    // Time how long the main thread takes to run a no-op ping.
+                    // If main is blocked, the semaphore isn't signalled until it
+                    // frees — and this background loop measures the true wait.
+                    let sent = DispatchTime.now().uptimeNanoseconds
+                    let sem = DispatchSemaphore(value: 0)
+                    DispatchQueue.main.async { sem.signal() }
+                    _ = sem.wait(timeout: .now() + 300)   // 5-min safety cap
+                    let waitedMs = Double(DispatchTime.now().uptimeNanoseconds &- sent) / 1_000_000
+                    self.lock.lock()
+                    if waitedMs > self._maxStallMs { self._maxStallMs = waitedMs }
+                    self.lock.unlock()
+                    usleep(50_000)   // 50 ms between pings
                 }
             }
         }
-        func stop() { task?.cancel(); task = nil }
+
+        func stop() { lock.lock(); running = false; lock.unlock() }
     }
     #endif
 
@@ -4929,7 +4960,20 @@ extension LibraryViewModel {
                 let parsed = try await parsePDFOffMainThread(url: tempURL) { [weak self] msg in
                     Task { @MainActor [weak self] in self?.importStatusMessage = msg }
                 }
-                doc = try pdfLibraryImporter.persistParsedDocument(parsed, from: tempURL)
+                // Move the heavy TAIL (heading resolution + unit build + DB write) OFF
+                // the main thread — the file-picker path (handlePDFImport) already does
+                // this, but the antenna path did NOT: it called persistParsedDocument
+                // directly on the @MainActor, freezing the UI for ~100s on a big PDF
+                // (Mark, 2026-07-05, CBA 814-page — buttons dead the whole time).
+                importStatusMessage = "Building document structure…"
+                doc = try await persistPDFOffMainThread(
+                    parsed, url: tempURL, databaseManager: databaseManager,
+                    rowProgress: { [weak self] processed, total in
+                        Task { @MainActor [weak self] in
+                            self?.importStatusMessage =
+                                "Building document structure — \(processed) of \(total) rows"
+                        }
+                    })
             } else {
                 // 2026-06-15 (Path A): pure-text formats parse off-main on a
                 // detached task (no WebKit constraint); HTML/EPUB are async and
@@ -4946,6 +4990,10 @@ extension LibraryViewModel {
                 }
             }
             loadDocuments()
+            // Mystery #4 probe (antenna import path) — mirror the user-import path:
+            // record that the on-completion refresh ran + the book count, then close
+            // the durable trace (a no-op for non-PDF imports, which don't open one).
+            ImportTrace.shared.end("post-import (antenna) library refresh ran — \(self.documents.count) documents now listed")
             let matchedExisting = preExistingIDs.contains(doc.id)
             var resp: [String: Any] = ["success": true, "id": doc.id.uuidString,
                          "title": doc.title, "fileType": doc.fileType,

@@ -155,6 +155,21 @@ enum PDFHeadingKeyDeriver {
         let hasFontSignal = allLines.contains { $0.fontSize > 0 }
         let endIndex = min(bodyEndIndex, allLines.count)
 
+        // PERF (Mark, 2026-07-05): the heading-title cluster ranges around each
+        // line are TITLE-INDEPENDENT, yet the inner loop recomputed them for every
+        // (title × line) — ~40 × 32,000 times on the 814-page CBA = ~110s, the
+        // single biggest cost of the whole import. They depend only on (index,
+        // allLines, bodyFont, bodyStartIndex, hasFontSignal), all fixed for this
+        // call, so compute them ONCE per line and reuse across every title. Pure
+        // memoization of a deterministic function → byte-identical headings out
+        // (proven by an A/B check on CBA/GEB/Attention/Antifa: opt==inline, 2026-07-05).
+        var clusterRangesByIndex = [[[Int]]](repeating: [], count: allLines.count)
+        for pos in max(0, bodyStartIndex)..<endIndex {
+            clusterRangesByIndex[pos] = headingTitleClusterRanges(
+                around: pos, allLines: allLines, bodyFont: bodyFont,
+                bodyStartIndex: bodyStartIndex, hasFontSignal: hasFontSignal)
+        }
+
         // Per title (in TOC / outline order) gather its heading-SHAPED candidate lines
         // within the body fence, each with its position (index in document order) and a
         // placement weight. Weight = a large placement base + prominence, so the aligner
@@ -188,9 +203,7 @@ enum PDFHeadingKeyDeriver {
                     title: title,
                     at: pos,
                     allLines: allLines,
-                    bodyFont: bodyFont,
-                    bodyStartIndex: bodyStartIndex,
-                    hasFontSignal: hasFontSignal
+                    clusterRanges: clusterRangesByIndex[pos]
                 )
                 let titleHeadsLine = titleHeadsLine(title: title, text: line.text)
                 guard match.matches else { continue }
@@ -253,6 +266,7 @@ enum PDFHeadingKeyDeriver {
             }
         }
         guard !cands.isEmpty else { return [] }
+        ImportTrace.shared.event("  resolveHeadings: candidates built = \(cands.count) (over \(endIndex) lines × \(titles.count) titles); chain DP begin")
 
         // Weighted 2-D increasing subsequence: choose candidates with STRICTLY
         // increasing title order AND strictly increasing position, maximizing total
@@ -271,6 +285,7 @@ enum PDFHeadingKeyDeriver {
                 }
             }
         }
+        ImportTrace.shared.event("  resolveHeadings: chain DP done (n=\(n))")
         var best = 0
         for i in 1..<n where dp[i] > dp[best] { best = i }
         var chainRev: [Int] = []
@@ -439,27 +454,23 @@ enum PDFHeadingKeyDeriver {
             } ?? MatchQuality(matches: false, titleCoverage: 0, linePurity: 0)
     }
 
+    /// `clusterRanges` are the heading-title cluster ranges around `index`.
+    /// They depend ONLY on the line's position + font context (NOT on the
+    /// title), so the caller precomputes them ONCE per line and reuses them
+    /// across all titles — this removes the titles×lines recomputation that was
+    /// ~110s of an 814-page import (Mark, 2026-07-05). Behavior-identical: the
+    /// ranges are the same values `headingTitleClusterRanges` produced inline.
     private static func bestCandidateMatchQuality(
         title: String,
         at index: Int,
         allLines: [PDFTextLine],
-        bodyFont: Double,
-        bodyStartIndex: Int,
-        hasFontSignal: Bool
+        clusterRanges: [[Int]]
     ) -> MatchQuality {
         guard allLines.indices.contains(index) else {
             return MatchQuality(matches: false, titleCoverage: 0, linePurity: 0)
         }
 
         var best = matchQuality(title: title, text: allLines[index].text)
-
-        let clusterRanges = headingTitleClusterRanges(
-            around: index,
-            allLines: allLines,
-            bodyFont: bodyFont,
-            bodyStartIndex: bodyStartIndex,
-            hasFontSignal: hasFontSignal
-        )
 
         for range in clusterRanges where range.count >= 2 {
             let text = range.map { allLines[$0].text }.joined(separator: " ")

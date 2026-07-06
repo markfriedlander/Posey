@@ -3625,6 +3625,16 @@ extension LibraryViewModel {
                 ImportTrace.shared.clear()
                 return json(["cleared": true])
 
+            case "SET_PREP_VOICE":
+                // DEBUG: flip the prep/import label voice so the toast + Advanced sheet
+                // can be verified in BOTH voices without tapping the toggle (Mark,
+                // 2026-07-06). Writes the shared PrepVoice key → both surfaces update.
+                let v = (arg ?? "").lowercased()
+                let voice: PrepVoice = (v == "incharacter" || v == "posey" || v == "user")
+                    ? .inCharacter : .technical
+                PrepVoice.current = voice
+                return json(["prepVoice": voice.rawValue])
+
             case "SUBMIT_ASK_POSEY":
                 // SUBMIT_ASK_POSEY:<text> — drive the live submit
                 // path on the open Ask Posey sheet's view model.

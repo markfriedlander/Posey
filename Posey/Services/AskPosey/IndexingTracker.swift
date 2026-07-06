@@ -36,11 +36,12 @@ final class IndexingTracker: ObservableObject {
     /// cleared on `.didBuild`. (2026-06-17)
     @Published private(set) var reReadingDocumentIDs: Set<UUID> = []
 
-    /// RAPTOR build progress (clusters summarized / total) per document, for the
-    /// "Studying up — N%" label. Present only while a build is in flight; set to
-    /// 0 on `didStart`, updated on `didProgress`, removed on `didBuild`.
-    /// (2026-06-18)
-    @Published private(set) var reReadingProgress: [UUID: Double] = [:]
+    /// RAPTOR build progress per document — kept as processed/total clusters (like
+    /// embedding) so the board can show a real "N of N", not just a %. RAPTOR always
+    /// reported both counts; they used to be collapsed to a fraction and discarded
+    /// (Mark, 2026-07-06). Present only while a build is in flight; set on `didStart`,
+    /// updated on `didProgress`, removed on `didBuild`. (2026-06-18)
+    @Published private(set) var reReadingProgress: [UUID: IndexingProgress] = [:]
 
     /// 2026-06-19 (Mark) — Tier-2 Vision OCR progress (0…1) per document, for the
     /// status board's pipeline view. Present only while OCR is in flight.
@@ -199,7 +200,7 @@ final class IndexingTracker: ObservableObject {
     /// RAPTOR build progress (0…1) for the "Studying up — N%" label, or nil if
     /// no build is in flight (or it hasn't reported a cluster yet).
     func reReadingFraction(_ documentID: UUID) -> Double? {
-        return reReadingProgress[documentID]
+        return reReadingProgress[documentID]?.fraction
     }
 
     /// 1-based position of a document among those WAITING to be embedded, or nil
@@ -254,7 +255,7 @@ final class IndexingTracker: ObservableObject {
     private func handleRaptorStart(_ note: Notification) {
         guard let id = note.userInfo?[RaptorTreeService.documentIDKey] as? UUID else { return }
         reReadingDocumentIDs.insert(id)
-        reReadingProgress[id] = 0   // "Studying up — 0%" until the first cluster reports
+        reReadingProgress[id] = IndexingProgress(processed: 0, total: 0)   // until the first cluster reports
     }
 
     private func handleRaptorProgress(_ note: Notification) {
@@ -262,7 +263,7 @@ final class IndexingTracker: ObservableObject {
               let done = note.userInfo?[RaptorTreeService.processedClustersKey] as? Int,
               let total = note.userInfo?[RaptorTreeService.totalClustersKey] as? Int,
               total > 0 else { return }
-        reReadingProgress[id] = Double(done) / Double(total)
+        reReadingProgress[id] = IndexingProgress(processed: done, total: total)
     }
 
     private func handleRaptorBuild(_ note: Notification) {

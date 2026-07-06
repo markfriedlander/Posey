@@ -165,6 +165,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("CLEAR_LOGS", .system, "CLEAR_LOGS", ""),
         .init("DUMP_IMPORT_TRACE", .system, "DUMP_IMPORT_TRACE", "Durable, timestamped record of the most recent import's order of operations (page-by-page + free/used memory), written to disk so it SURVIVES a force-quit. The LAST line is the step the import froze inside. Diagnoses import hangs."),
         .init("CLEAR_IMPORT_TRACE", .system, "CLEAR_IMPORT_TRACE", "Delete the on-disk import trace file."),
+        .init("SET_PREP_VOICE", .system, "SET_PREP_VOICE:<technical|inCharacter>", "DEBUG: flip the prep/import label voice (technical for dev, inCharacter for users) shown on the toast + Advanced sheet."),
         .init("SUBMIT_ASK_POSEY", .ask_posey, "SUBMIT_ASK_POSEY:<text>", "Drive the LIVE Ask Posey sheet's send (streams on screen as a real tap). Sheet must be open."),
         .init("SCROLL_ASK_POSEY_TO_LATEST", .ask_posey, "SCROLL_ASK_POSEY_TO_LATEST", ""),
         .init("CREATE_BOOKMARK", .annotations, "CREATE_BOOKMARK:<docID>:<offset>", ""),

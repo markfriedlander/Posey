@@ -62,10 +62,19 @@ public enum PrepVoice: String, Sendable {
     /// stylish, a little imperious, secretly devoted to the book — what USERS see.
     case inCharacter
 
-    /// The active voice. Defaults to `.technical` during development; flip to
-    /// `.inCharacter` for release (and the dev toggle in the Advanced sheet lets
-    /// us preview either). Read on the main actor by the UI.
-    @MainActor public static var current: PrepVoice = .technical
+    /// UserDefaults key backing `current`, shared with the Advanced sheet's
+    /// `@AppStorage` toggle so the toast and the board always agree and the choice
+    /// survives relaunch.
+    public static let defaultsKey = "posey.prepVoice"
+
+    /// The active voice. Defaults to `.technical` during development; the dev toggle
+    /// in the Advanced sheet flips it (and the release default flips to `.inCharacter`).
+    /// Persisted so the toast (reads this) and the board (reads the same key via
+    /// `@AppStorage`) never disagree. Read on the main actor by the UI.
+    @MainActor public static var current: PrepVoice {
+        get { UserDefaults.standard.string(forKey: defaultsKey).flatMap(PrepVoice.init(rawValue:)) ?? .technical }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey) }
+    }
 }
 
 extension PrepStep {

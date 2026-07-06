@@ -44,6 +44,12 @@ struct EmbeddingStatusBoardView: View {
     /// (re-parse / re-embed / rebuild summary tree). Default ON for now; roughly
     /// doubles a document's storage, so it's a user choice as the library grows.
     @AppStorage(DocumentIndexingQueue.keepOriginalsDefaultsKey) private var keepOriginals = true
+    /// DEV toggle (Mark, 2026-07-06): which label voice the toast + this board show —
+    /// `.technical` (plain, for building) or `.inCharacter` (Posey's *Party Girl*
+    /// voice, for users). Persisted under the SAME key `PrepVoice.current` reads, so
+    /// both surfaces agree. Ships technical for dev; release default flips in-character.
+    @AppStorage(PrepVoice.defaultsKey) private var prepVoiceRaw = PrepVoice.technical.rawValue
+    private var prepVoice: PrepVoice { PrepVoice(rawValue: prepVoiceRaw) ?? .technical }
     /// Locally-held order of the WAITING embed lane, so the queue rows support
     /// drag-to-reorder + swipe/Edit-to-remove. Reconciled from the published mirror
     /// (`indexing.embedQueuePositions`) on appear and on every queue change: when
@@ -87,6 +93,11 @@ struct EmbeddingStatusBoardView: View {
                         .accessibilityIdentifier("board.bgPrepToggle")
                     Toggle("Keep original documents", isOn: $keepOriginals)
                         .accessibilityIdentifier("board.keepOriginalsToggle")
+                    Toggle("Posey's voice (in-character labels)", isOn: Binding(
+                        get: { prepVoice == .inCharacter },
+                        set: { prepVoiceRaw = ($0 ? PrepVoice.inCharacter : .technical).rawValue }
+                    ))
+                    .accessibilityIdentifier("board.voiceToggle")
                 } header: {
                     Text("Controls")
                 } footer: {
@@ -232,18 +243,18 @@ struct EmbeddingStatusBoardView: View {
         //     heavy heading/structure build that used to run with NO feedback (Mark,
         //     2026-07-05, the "hang on the last OCR page").
         ForEach(imports, id: \.key) { file, activity in
-            Label("Prep · \(activity.display()) — \(file)", systemImage: "square.and.arrow.down")
+            Label("Prep · \(activity.display(prepVoice)) — \(file)", systemImage: "square.and.arrow.down")
                 .font(.callout.weight(.medium))
         }
         // 0b) Tier-2 Vision OCR (PDF page-image rescue) — a PREP pass before step 1.
         ForEach(ocr, id: \.key) { id, frac in
             let pct = Int((frac * 100).rounded())
-            stageRow(title: "Prep · Reading the page images (OCR) — \(title(id))",
+            stageRow(title: "Prep · \(PrepStep.rescanningPages.label(prepVoice)) — \(title(id))",
                      systemImage: "doc.viewfinder", fraction: frac, detail: "\(pct)%")
         }
         // 1) Chunking (string-split) — brief, no %.
         ForEach(chunking, id: \.self) { id in
-            Label("Step 1 of 3 · Chunking (splitting into chunks) — \(title(id))", systemImage: "scissors")
+            Label("Step 1 of 3 · \(PrepStep.chunking.label(prepVoice)) — \(title(id))", systemImage: "scissors")
                 .font(.callout.weight(.medium))
         }
 
@@ -269,16 +280,17 @@ struct EmbeddingStatusBoardView: View {
 
         // 2) Embedding (per in-flight document — "Reading ahead").
         ForEach(embeds, id: \.key) { id, prog in
-            activityRow(title: "Step 2 of 3 · Embedding (reading ahead) — \(title(id))",
+            activityRow(title: "Step 2 of 3 · \(PrepStep.embedding.label(prepVoice)) — \(title(id))",
                         systemImage: "book", processed: prog.processed,
                         total: prog.total, showRate: false)
         }
 
-        // 3) RAPTOR (per in-flight document — "Studying up").
-        ForEach(raptors, id: \.key) { id, frac in
-            let pct = Int((frac * 100).rounded())
-            stageRow(title: "Step 3 of 3 · Summary tree (studying up / RAPTOR) — \(title(id))",
-                     systemImage: "brain", fraction: frac, detail: "\(pct)%")
+        // 3) RAPTOR (per in-flight document — "Studying up"). N-of-N clusters
+        //    (Mark, 2026-07-06) — like embedding, not a bare %.
+        ForEach(raptors, id: \.key) { id, prog in
+            activityRow(title: "Step 3 of 3 · \(PrepStep.studyingUp.label(prepVoice)) — \(title(id))",
+                        systemImage: "brain", processed: prog.processed,
+                        total: prog.total, showRate: false)
         }
 
         // 4) Queue (waiting to start step 2) — show the actual titles + position,

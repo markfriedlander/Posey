@@ -68,8 +68,9 @@ public struct AskPoseyAvailability {
     ///
     /// 2026-05-31 — Ask Posey is a **post-download unlock feature**. It is
     /// invisible in the reader until the user has downloaded the models it
-    /// needs — **Nomic** (retrieval ranking) AND **at least one MLX model**
-    /// (answer generation). AFM is NOT part of this gate: AFM is used only for
+    /// needs — **any non-default embedder** (retrieval ranking; Nomic or mxbai)
+    /// AND **at least one MLX model** (answer generation). AFM is NOT part of
+    /// this gate: AFM is used only for
     /// background auxiliary tasks (intent classification, summarization, etc.)
     /// when present, and a device may unlock Ask Posey with no AFM at all.
     /// The preferences "Ask Posey" on-ramp stays visible regardless (it's how
@@ -87,8 +88,8 @@ public struct AskPoseyAvailability {
         #endif
     }
 
-    /// The runtime unlock condition: Nomic provisioned AND ≥1 MLX model
-    /// downloaded AND no embedder swap in flight. Cheap, synchronous,
+    /// The runtime unlock condition: a non-default embedder provisioned AND ≥1
+    /// MLX model downloaded AND no embedder swap in flight. Cheap, synchronous,
     /// isolation-free (UserDefaults + the non-isolated downloader + the static
     /// catalog), so SwiftUI can read it directly when deciding reader-chrome
     /// visibility.
@@ -100,11 +101,12 @@ public struct AskPoseyAvailability {
     /// be non-destructive without ever needing two backends loaded for querying.
     /// Re-unlocks automatically when the swap completes and clears its marker.
     public static var isUnlocked: Bool {
-        nomicProvisioned && hasDownloadedMLXModel && !EmbeddingBackend.isSwapInProgress
+        embedderProvisioned && hasDownloadedMLXModel && !EmbeddingBackend.isSwapInProgress
     }
 
-    /// Whether Ask Posey is *set up* on this device — Nomic provisioned AND ≥1
-    /// MLX model downloaded — REGARDLESS of an in-flight swap. The difference
+    /// Whether Ask Posey is *set up* on this device — a non-default embedder
+    /// provisioned AND ≥1 MLX model downloaded — REGARDLESS of an in-flight
+    /// swap. The difference
     /// from `isUnlocked`: `isSetUp` stays true *during* an embedder swap, when
     /// `isUnlocked` is temporarily false.
     ///
@@ -116,20 +118,26 @@ public struct AskPoseyAvailability {
     /// When Ask Posey isn't set up at all (`isSetUp == false`), there's no
     /// sparkle — the Preferences on-ramp is the path.
     public static var isSetUp: Bool {
-        nomicProvisioned && hasDownloadedMLXModel
+        embedderProvisioned && hasDownloadedMLXModel
     }
 
-    /// Persisted once the user has successfully provisioned the Nomic
-    /// embedder (set by `EmbedderMigrationCoordinator` on a completed switch
-    /// to `.nomic`). Sticky: it stays true even if the user later switches the
-    /// active embedder back to NLContextual — the asset remains downloaded, so
-    /// the unlock persists.
-    public static let nomicProvisionedDefaultsKey = "posey.askPosey.nomicProvisioned"
-    public static var nomicProvisioned: Bool {
-        UserDefaults.standard.bool(forKey: nomicProvisionedDefaultsKey)
+    /// Persisted once the user has successfully provisioned ANY non-default
+    /// (downloadable, `modelID != nil`) embedder — Nomic or mxbai — set by
+    /// `EmbedderMigrationCoordinator` on a completed switch to such a backend.
+    /// Sticky: it stays true even if the user later switches the active embedder
+    /// back to NLContextual — the asset remains downloaded, so the unlock
+    /// persists.
+    ///
+    /// NOTE: the stored key string deliberately keeps its legacy
+    /// `…nomicProvisioned` name (2026-07-06, generalized from Nomic-only to
+    /// any-embedder). Keeping the string means devices that already unlocked via
+    /// Nomic stay unlocked — no re-provision, no migration code.
+    public static let embedderProvisionedDefaultsKey = "posey.askPosey.nomicProvisioned"
+    public static var embedderProvisioned: Bool {
+        UserDefaults.standard.bool(forKey: embedderProvisionedDefaultsKey)
     }
-    public static func markNomicProvisioned() {
-        UserDefaults.standard.set(true, forKey: nomicProvisionedDefaultsKey)
+    public static func markEmbedderProvisioned() {
+        UserDefaults.standard.set(true, forKey: embedderProvisionedDefaultsKey)
     }
 
     /// True when at least one curated MLX model is present on disk. Mirrors

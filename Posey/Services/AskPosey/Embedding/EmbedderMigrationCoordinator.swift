@@ -213,10 +213,12 @@ final class EmbedderMigrationCoordinator: ObservableObject {
         UserDefaults.standard.set(target.rawValue, forKey: EmbeddingBackend.defaultsKey)
         EmbeddingBackend.clearSwapMarker()
 
-        // Ask Posey unlock signal — a completed Nomic build marks it provisioned
-        // (sticky; persists even if the user later reverts the active embedder).
-        if target == .nomic {
-            AskPoseyAvailability.markNomicProvisioned()
+        // Ask Posey unlock signal — a completed build of ANY non-default
+        // (downloadable, `modelID != nil`) embedder — Nomic or mxbai — marks it
+        // provisioned (sticky; persists even if the user later reverts the active
+        // embedder). Was `== .nomic` before mxbai was wired in as an option.
+        if target.modelID != nil {
+            AskPoseyAvailability.markEmbedderProvisioned()
         }
 
         await MainActor.run { self.publish(.done(reEmbedded: reEmbedded)) }

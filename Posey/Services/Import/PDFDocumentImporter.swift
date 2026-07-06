@@ -103,6 +103,16 @@ struct PDFDocumentImporter {
             case .ocr(let page, let total): return "OCR: page \(page) of \(total)"
             }
         }
+
+        /// Structured form for the shared toast/board activity (Mark, 2026-07-05).
+        var activity: PrepActivity {
+            switch self {
+            case .reading(let page, let total):
+                return PrepActivity(step: .readingPages, progress: .count(done: page, total: total))
+            case .ocr(let page, let total):
+                return PrepActivity(step: .scanningPages, progress: .count(done: page, total: total))
+            }
+        }
     }
 
     enum ImportError: LocalizedError, Equatable {

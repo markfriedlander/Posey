@@ -525,6 +525,14 @@ final class LibraryViewModel: ObservableObject {
     /// the book is being added while the UI stays usable.
     @Published private(set) var importStatusMessage: String? = nil
 
+    // Coalesce import-activity updates: the reading phase fires ~100×/s, which
+    // flickered so fast it read as a bug (Mark, 2026-07-05). We keep the LATEST
+    // value and refresh the label at most once per `importActivityInterval`, so it
+    // reads as calm, steady progress. A knob — tune the pace here.
+    private var pendingImportActivity: (file: String, activity: PrepActivity)?
+    private var importActivityTickScheduled = false
+    private let importActivityInterval: TimeInterval = 0.5
+
     /// In-character copy for the import banner (Mark's line). Wording is easy
     /// to change here; shown for every format's import.
     static let importBannerMessage = "Posey is reading ahead\u{2026}"
@@ -821,15 +829,49 @@ final class LibraryViewModel: ObservableObject {
 // ========== BLOCK 03: PDF ASYNC IMPORT - START ==========
 
 extension LibraryViewModel {
+    /// Feed the current import's activity to BOTH surfaces from ONE structured value
+    /// (Mark, 2026-07-05): the library toast (`importStatusMessage`) and the Advanced
+    /// sheet's "Now" line render the SAME step + N-of-N/% in the active voice, so they
+    /// can never drift apart the way two independent strings did. Rate-limited so rapid
+    /// phases don't strobe.
+    @MainActor
+    func updateImportActivity(file: String, _ activity: PrepActivity) {
+        pendingImportActivity = (file, activity)
+        guard !importActivityTickScheduled else { return }
+        importActivityTickScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((self?.importActivityInterval ?? 0.5) * 1_000_000_000))
+            self?.importActivityTickScheduled = false
+            self?.flushImportActivity()
+        }
+    }
+
+    /// Apply the latest pending activity to both surfaces (the throttle's tick).
+    @MainActor
+    private func flushImportActivity() {
+        guard let (file, activity) = pendingImportActivity else { return }
+        importStatusMessage = activity.display()
+        IndexingTracker.sharedForChat.setImportActivity(file: file, activity)
+    }
+
+    /// Clear the import activity from both surfaces and drop any pending tick, so a
+    /// late throttle tick can't re-show a stale label after the import finished.
+    @MainActor
+    func clearImportActivityDisplay(file: String) {
+        pendingImportActivity = nil
+        importStatusMessage = nil
+        IndexingTracker.sharedForChat.clearImportActivity(file: file)
+    }
+
     /// Routes PDF imports through an async path so Vision OCR never blocks
     /// the main thread. Phase 1 (parse + OCR) AND phase 2 (heading/structure build +
     /// DB write) both run on a background thread; only the UI refresh returns to main.
     private func handlePDFImport(url: URL) {
         let didAccess = url.startAccessingSecurityScopedResource()
         let fileName = url.lastPathComponent
-        importStatusMessage = Self.importBannerMessage
-        // Surface the import LIVE on the status board (keyed by file name — no id yet).
-        IndexingTracker.sharedForChat.setImportActivity(file: fileName, phase: "Reading the file…")
+        // One structured activity feeds BOTH the toast and the Advanced sheet (Mark,
+        // 2026-07-05) — they can't drift apart, and every step shows real progress.
+        updateImportActivity(file: fileName, PrepActivity(step: .opening))
 
         Task { @MainActor [weak self] in
             guard let self else {
@@ -839,38 +881,23 @@ extension LibraryViewModel {
             }
             defer {
                 if didAccess { url.stopAccessingSecurityScopedResource() }
-                importStatusMessage = nil
-                IndexingTracker.sharedForChat.clearImportActivity(file: fileName)
+                clearImportActivityDisplay(file: fileName)
             }
             do {
                 // 2026-05-16 (B8) — Reject binary-misnamed-as-PDF
                 // before kicking the heavy parse off thread.
                 try FormatPrecheck.checkPDF(url: url)
-                let parsed = try await parsePDFOffMainThread(url: url) { [weak self] message in
-                    Task { @MainActor [weak self] in
-                        self?.importStatusMessage = message
-                        // Mirror the extraction/OCR phase onto the status board (live).
-                        IndexingTracker.sharedForChat.setImportActivity(file: fileName, phase: message)
-                    }
+                let parsed = try await parsePDFOffMainThread(url: url) { [weak self] activity in
+                    Task { @MainActor [weak self] in self?.updateImportActivity(file: fileName, activity) }
                 }
-                // Show the heavy heading/structure-build step live — it used to run
-                // silently, which is why a big import looked hung (Mark, 2026-07-05).
-                IndexingTracker.sharedForChat.setImportActivity(file: fileName, phase: "Building document structure…")
+                // The heading step then reports its own live progress from persist below.
+                updateImportActivity(file: fileName, PrepActivity(step: .findingChapters))
                 // Persist (heading detection + unit building + DB write) is the heavy
-                // TAIL of a PDF import. It was left running on the main actor, which
-                // froze the UI for minutes on large documents — the "hang on the last
-                // OCR page" (Mark, 2026-07-05). It's synchronous and touches only the
-                // thread-safe DB, so run it on the background worker like extraction.
+                // TAIL of a PDF import — run off the main worker so the UI stays live.
                 _ = try await persistPDFOffMainThread(
                     parsed, url: url, databaseManager: self.databaseManager,
-                    rowProgress: { processed, total in
-                        // Off-main callback → marshal to main to update the board's live
-                        // "rows built" count for this file (Mark, 2026-07-05).
-                        Task { @MainActor in
-                            IndexingTracker.sharedForChat.setImportActivity(
-                                file: fileName,
-                                phase: "Building document structure — \(processed) of \(total) rows")
-                        }
+                    onActivity: { [weak self] activity in
+                        Task { @MainActor [weak self] in self?.updateImportActivity(file: fileName, activity) }
                     })
                 loadDocuments()
                 // Mystery #4 probe (Mark, 2026-07-05): the finished book didn't appear
@@ -891,13 +918,13 @@ extension LibraryViewModel {
 /// Returns a `ParsedPDFDocument` (Sendable struct) back to the caller.
 private func parsePDFOffMainThread(
     url: URL,
-    onProgress: @escaping @Sendable (String) -> Void
+    onProgress: @escaping @Sendable (PrepActivity) -> Void
 ) async throws -> ParsedPDFDocument {
     try await withCheckedThrowingContinuation { cont in
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let result = try PDFDocumentImporter().loadDocument(from: url) { progress in
-                    onProgress(progress.message)
+                    onProgress(progress.activity)
                 }
                 cont.resume(returning: result)
             } catch {
@@ -917,13 +944,13 @@ private func persistPDFOffMainThread(
     _ parsed: ParsedPDFDocument,
     url: URL,
     databaseManager: DatabaseManager,
-    rowProgress: @escaping @Sendable (Int, Int) -> Void
+    onActivity: @escaping @Sendable (PrepActivity) -> Void
 ) async throws -> Document {
     try await withCheckedThrowingContinuation { cont in
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let importer = PDFLibraryImporter(databaseManager: databaseManager)
-                let doc = try importer.persistParsedDocument(parsed, from: url, rowProgress: rowProgress)
+                let doc = try importer.persistParsedDocument(parsed, from: url, onActivity: onActivity)
                 cont.resume(returning: doc)
             } catch {
                 cont.resume(throwing: error)
@@ -4933,7 +4960,7 @@ extension LibraryViewModel {
         }
         do {
             importStatusMessage = Self.importBannerMessage
-            defer { importStatusMessage = nil }
+            defer { clearImportActivityDisplay(file: cleanFilename) }
             #if DEBUG
             let stallProbe = MainThreadStallProbe()
             stallProbe.start()
@@ -4957,22 +4984,19 @@ extension LibraryViewModel {
                 // import path. Catches PNG/PDF/random-bytes misnamed
                 // as .pdf via the API.
                 try FormatPrecheck.checkPDF(url: tempURL)
-                let parsed = try await parsePDFOffMainThread(url: tempURL) { [weak self] msg in
-                    Task { @MainActor [weak self] in self?.importStatusMessage = msg }
+                let parsed = try await parsePDFOffMainThread(url: tempURL) { [weak self] activity in
+                    Task { @MainActor [weak self] in self?.updateImportActivity(file: cleanFilename, activity) }
                 }
                 // Move the heavy TAIL (heading resolution + unit build + DB write) OFF
                 // the main thread — the file-picker path (handlePDFImport) already does
                 // this, but the antenna path did NOT: it called persistParsedDocument
                 // directly on the @MainActor, freezing the UI for ~100s on a big PDF
                 // (Mark, 2026-07-05, CBA 814-page — buttons dead the whole time).
-                importStatusMessage = "Building document structure…"
+                updateImportActivity(file: cleanFilename, PrepActivity(step: .findingChapters))
                 doc = try await persistPDFOffMainThread(
                     parsed, url: tempURL, databaseManager: databaseManager,
-                    rowProgress: { [weak self] processed, total in
-                        Task { @MainActor [weak self] in
-                            self?.importStatusMessage =
-                                "Building document structure — \(processed) of \(total) rows"
-                        }
+                    onActivity: { [weak self] activity in
+                        Task { @MainActor [weak self] in self?.updateImportActivity(file: cleanFilename, activity) }
                     })
             } else {
                 // 2026-06-15 (Path A): pure-text formats parse off-main on a

@@ -47,12 +47,12 @@ final class IndexingTracker: ObservableObject {
     @Published private(set) var ocrProgress: [UUID: Double] = [:]
 
     /// 2026-07-05 (Mark) — LIVE IMPORT activity, keyed by FILE NAME (the document has
-    /// no id yet while it's importing). Value = the current phase text ("Reading the
-    /// file…", "OCR: page N of M", "Building document structure…"). Surfaces the
-    /// import — including the heavy heading/structure-build step that used to run
-    /// silently — on the status board so it can be watched live. Present only while a
-    /// file is importing; cleared when it finishes or fails.
-    @Published private(set) var importActivity: [String: String] = [:]
+    /// no id yet while it's importing). Value = a structured `PrepActivity` (step +
+    /// N-of-N/% progress) so BOTH the library toast and the Advanced sheet render the
+    /// SAME thing (they used to be two independent strings that drifted apart), and so
+    /// every step — including the heavy heading step that used to sit silent — shows
+    /// real progress. Present only while a file is importing; cleared on finish/fail.
+    @Published private(set) var importActivity: [String: PrepActivity] = [:]
 
     /// 2026-06-19 — documents in the brief chunking (string-split) stage.
     @Published private(set) var chunkingDocumentIDs: Set<UUID> = []
@@ -292,8 +292,13 @@ final class IndexingTracker: ObservableObject {
 
     /// Set/clear a file's live import phase (main-actor; called from the import path
     /// in LibraryView). Keyed by file name because the document has no id yet.
-    func setImportActivity(file: String, phase: String) { importActivity[file] = phase }
+    func setImportActivity(file: String, _ activity: PrepActivity) { importActivity[file] = activity }
     func clearImportActivity(file: String) { importActivity.removeValue(forKey: file) }
+
+    /// The single in-flight import's activity, if any (imports run one-at-a-time),
+    /// so the library toast can mirror the Advanced sheet's live "Now" line from the
+    /// SAME source of truth. (Mark, 2026-07-05)
+    var currentImportActivity: PrepActivity? { importActivity.values.first }
 
     private func handleQueueChange(_ note: Notification) {
         let embed = note.userInfo?[DocumentIndexingQueue.embedQueueKey] as? [UUID] ?? []

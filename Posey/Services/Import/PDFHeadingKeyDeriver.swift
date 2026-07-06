@@ -150,7 +150,8 @@ enum PDFHeadingKeyDeriver {
     /// heading is placed even when its prominence score is low/negative.)
     static func resolveHeadings(titles: [String], allLines: [PDFTextLine],
                                 bodyStartIndex: Int = 0,
-                                bodyEndIndex: Int = .max) -> [(title: String, line: PDFTextLine)] {
+                                bodyEndIndex: Int = .max,
+                                onTitleProgress: (@Sendable (Int, Int) -> Void)? = nil) -> [(title: String, line: PDFTextLine)] {
         let bodyFont = bodyFontSize(of: allLines)
         let hasFontSignal = allLines.contains { $0.fontSize > 0 }
         let endIndex = min(bodyEndIndex, allLines.count)
@@ -186,6 +187,7 @@ enum PDFHeadingKeyDeriver {
         let placementBase = 1000.0
         var cands: [Cand] = []
         for (t, title) in titles.enumerated() {
+            onTitleProgress?(t, titles.count)
             let titleWords = matchWords(title)
             guard !titleWords.isEmpty else { continue }
             // A title's leading SECTION NUMBER is its disambiguator among near-identical

@@ -66,12 +66,12 @@ struct PDFLibraryImporter {
     /// `persistParsedDocument(_:from:)` — kept for compatibility
     /// with PoseyApp / LocalAPI callers.
     func persistParsedDocument(_ parsed: ParsedPDFDocument, from url: URL,
-                               rowProgress: (@Sendable (Int, Int) -> Void)? = nil) throws -> Document {
+                               onActivity: (@Sendable (PrepActivity) -> Void)? = nil) throws -> Document {
         let sourceData = try? Data(contentsOf: url)
         return try persistParsedPDF(
             parsed, from: url, sourceData: sourceData,
             contentHash: sourceData.map { ContentHasher.sha256($0) },
-            rowProgress: rowProgress
+            onActivity: onActivity
         )
     }
 
@@ -87,7 +87,7 @@ struct PDFLibraryImporter {
         from url: URL,
         sourceData: Data?,
         contentHash: String?,
-        rowProgress: (@Sendable (Int, Int) -> Void)? = nil
+        onActivity: (@Sendable (PrepActivity) -> Void)? = nil
     ) throws -> Document {
         ImportTrace.shared.event("persist: begin (heading detection + unit build + DB write)")
         // Strip duplicate file extensions (e.g. "report.pdf.pdf" → "report.pdf").
@@ -103,7 +103,7 @@ struct PDFLibraryImporter {
             fileName: fileName,
             fileType: ext,
             contentHash: contentHash,
-            rowProgress: rowProgress
+            onActivity: onActivity
         )
         try saveImages(parsed.images, for: doc.id)
 
@@ -134,7 +134,7 @@ struct PDFLibraryImporter {
         fileName: String,
         fileType: String,
         contentHash: String?,
-        rowProgress: (@Sendable (Int, Int) -> Void)? = nil
+        onActivity: (@Sendable (PrepActivity) -> Void)? = nil
     ) throws -> Document {
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
@@ -214,8 +214,13 @@ struct PDFLibraryImporter {
             // built-in wins and nothing changes.
             let seedTitles = normalizedTOCEntries.map { $0.title }
             ImportTrace.shared.event("persist: builtin resolveHeadings begin (\(allLines.count) lines, \(seedTitles.count) seed titles)")
+            onActivity?(PrepActivity(step: .findingChapters, progress: .working))
             let builtinMap = PDFHeadingKeyDeriver.resolveHeadings(
-                titles: seedTitles, allLines: allLines, bodyStartIndex: bodyStartIndex)
+                titles: seedTitles, allLines: allLines, bodyStartIndex: bodyStartIndex,
+                onTitleProgress: { done, total in
+                    onActivity?(PrepActivity(step: .findingChapters,
+                                             progress: .count(done: done, total: total)))
+                })
             ImportTrace.shared.event("persist: builtin resolveHeadings done (\(builtinMap.count) anchors); chooseHeadingMap begin")
             let choice = Self.chooseHeadingMap(
                 builtin: builtinMap, seedTitles: seedTitles, allLines: allLines)
@@ -278,7 +283,10 @@ struct PDFLibraryImporter {
                 isHeading: { headingLineSet.contains($0) },
                 headingLevel: { levelByLineText[$0.text] ?? 1 },
                 headingTitle: { titleByHeadingLine[$0] },
-                rowProgress: rowProgress)
+                rowProgress: { processed, total in
+                    onActivity?(PrepActivity(step: .layingOutText,
+                                             progress: .count(done: processed, total: total)))
+                })
             ImportTrace.shared.event("persist: unit build done (\(units.count) units)")
 
             // Link each contents entry to its heading unit by IDENTITY on the one

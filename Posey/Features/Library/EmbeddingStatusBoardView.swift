@@ -231,8 +231,8 @@ struct EmbeddingStatusBoardView: View {
         // 0a) Live IMPORT — before a document has an id, keyed by FILE NAME. Shows the
         //     heavy heading/structure build that used to run with NO feedback (Mark,
         //     2026-07-05, the "hang on the last OCR page").
-        ForEach(imports, id: \.key) { file, phase in
-            Label("Prep · Importing — \(phase) — \(file)", systemImage: "square.and.arrow.down")
+        ForEach(imports, id: \.key) { file, activity in
+            Label("Prep · \(activity.display()) — \(file)", systemImage: "square.and.arrow.down")
                 .font(.callout.weight(.medium))
         }
         // 0b) Tier-2 Vision OCR (PDF page-image rescue) — a PREP pass before step 1.

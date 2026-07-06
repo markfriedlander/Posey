@@ -349,7 +349,7 @@ actor PDFEnhancementService {
         struct Inputs {
             let plainText: String
             let units: [ContentUnit]
-            let tocCount: Int
+            let tocEntries: [StoredTOCEntry]
             let skipOffset: Int
         }
 
@@ -370,7 +370,7 @@ actor PDFEnhancementService {
                 return Inputs(
                     plainText: pt,
                     units: us,
-                    tocCount: toc.count,
+                    tocEntries: toc,
                     skipOffset: skipOffset
                 )
             }
@@ -381,12 +381,22 @@ actor PDFEnhancementService {
         }
         guard let inputs else { return }
 
-        // Gate: re-detect only when NAVIGATION is missing (no TOC entries).
-        // A pre-existing skip with zero entries still needs entries built, so
-        // the gate keys on tocCount, not skip (see the doc comment above).
-        if inputs.tocCount > 0 {
-            dbgLog("PDFEnhancementService: Bug F re-detect — %@ already has %d TOC entries, skipping",
-                   documentID.uuidString, inputs.tocCount)
+        // Gate: re-detect when NAVIGATION is missing OR provably broken.
+        // The original Bug F gate keyed only on "tocCount == 0", which solved
+        // scanned TOC pages but missed a second real failure mode: Tier-2 page
+        // replacement deletes old unit IDs and mints new ones, so pre-existing
+        // TOC rows can survive while silently pointing at NO LONGER EXISTING
+        // units. That leaves a document with TOC rows in the table but dead
+        // jumps on-device. We keep healthy TOCs untouched, but treat "dangling
+        // TOC anchor" as structurally missing and rebuild from the corrected
+        // text before enhancement completes.
+        if !Self.shouldRedetectStructure(
+            tocEntries: inputs.tocEntries,
+            units: inputs.units,
+            skipOffset: inputs.skipOffset
+        ) {
+            dbgLog("PDFEnhancementService: Bug F re-detect — %@ TOC healthy (%d entries), skipping",
+                   documentID.uuidString, inputs.tocEntries.count)
             return
         }
         if inputs.plainText.isEmpty || inputs.units.isEmpty { return }
@@ -411,19 +421,73 @@ actor PDFEnhancementService {
         if startedPage { pageTexts.append(current.joined(separator: "\n\n")) }
         if pageTexts.isEmpty { return }
 
-        // Run the text-pattern detectors against the corrected text.
-        let detected = PDFTextStructureDetector.detect(
-            pageTexts: pageTexts, plainText: inputs.plainText
+        let existingTOC = inputs.tocEntries.sorted { $0.playOrder < $1.playOrder }
+        let hasDanglingAnchors = Self.hasDanglingTOCAnchors(
+            tocEntries: existingTOC,
+            units: inputs.units
         )
-        guard detected.skipOffset > 0 || !detected.entries.isEmpty else {
-            dbgLog("PDFEnhancementService: Bug F re-detect — nothing recovered on %@",
+
+        let finalSkipOffset: Int
+        let tocEntriesForPersistence: [StoredTOCEntry]
+
+        if existingTOC.isEmpty {
+            // Run the text-pattern detectors against the corrected text.
+            let detected = PDFTextStructureDetector.detect(
+                pageTexts: pageTexts, plainText: inputs.plainText
+            )
+            guard detected.skipOffset > 0 || !detected.entries.isEmpty else {
+                dbgLog("PDFEnhancementService: Bug F re-detect — nothing recovered on %@",
+                       documentID.uuidString)
+                return
+            }
+
+            // Skip offset: prefer the freshly-detected region, but never REGRESS a
+            // skip the importer already established.
+            finalSkipOffset = detected.skipOffset > 0 ? detected.skipOffset : inputs.skipOffset
+            tocEntriesForPersistence = detected.entries.compactMap { e in
+                guard let uid = ContentUnitBuilder.firstUnit(
+                    in: inputs.units, atOrAfterPlainTextOffset: e.plainTextOffset
+                )?.id else { return nil }
+                return StoredTOCEntry(
+                    title: e.title,
+                    plainTextOffset: e.plainTextOffset,
+                    unitID: uid,
+                    playOrder: e.playOrder,
+                    level: e.level
+                )
+            }
+        } else if hasDanglingAnchors {
+            // Preserve the importer's TOC TITLES / ORDER and repair only their
+            // anchors against the corrected body text. This is the safe fix for
+            // page-rewrite orphaning: the TOC already knows what chapters exist,
+            // it just points at unit IDs that were deleted and recreated.
+            finalSkipOffset = inputs.skipOffset
+            let repairedOffsets = PDFTextStructureDetector.buildEntries(
+                for: existingTOC.enumerated().map { index, entry in
+                    PDFTOCDetector.Entry(title: entry.title, pageNumber: index + 1)
+                },
+                in: inputs.plainText,
+                postTOCOffset: finalSkipOffset
+            )
+            tocEntriesForPersistence = zip(existingTOC, repairedOffsets).compactMap { existing, repaired in
+                guard let uid = ContentUnitBuilder.firstUnit(
+                    in: inputs.units, atOrAfterPlainTextOffset: repaired.plainTextOffset
+                )?.id else { return nil }
+                return StoredTOCEntry(
+                    title: existing.title,
+                    plainTextOffset: repaired.plainTextOffset,
+                    unitID: uid,
+                    playOrder: existing.playOrder,
+                    level: existing.level
+                )
+            }
+            dbgLog("PDFEnhancementService: Bug F re-detect — repaired %d dangling TOC anchors on %@",
+                   existingTOC.count, documentID.uuidString)
+        } else {
+            dbgLog("PDFEnhancementService: Bug F re-detect — %@ TOC healthy after gate, skipping",
                    documentID.uuidString)
             return
         }
-
-        // Skip offset: prefer the freshly-detected region, but never REGRESS a
-        // skip the importer already established.
-        let finalSkipOffset = detected.skipOffset > 0 ? detected.skipOffset : inputs.skipOffset
 
         // Promote headings via the hardened shared path. Gate promotion by the
         // skip UNIT (identity) so a TOC-LISTING entry in the front matter is not
@@ -431,7 +495,7 @@ actor PDFEnhancementService {
         // migration #3b (2026-06-28): translate the R1 skip offset to a unit once
         // (against inputs.units) rather than comparing offsets across two rulers.
         let markersByOffset: [Int: ContentUnitBuilder.HeadingMarker] = Dictionary(
-            detected.entries.map {
+            tocEntriesForPersistence.map {
                 ($0.plainTextOffset, ContentUnitBuilder.HeadingMarker(level: $0.level, title: $0.title))
             },
             uniquingKeysWith: { first, _ in first }
@@ -462,28 +526,15 @@ actor PDFEnhancementService {
             in: inputs.units, atOrAfterPlainTextOffset: finalSkipOffset
         )?.id
 
-        let storedTOC: [StoredTOCEntry] = detected.entries.compactMap { e in
-            // Resolve to the durable paragraph identity (same ruler); drop one that
-            // can't anchor (Position Rule).
-            guard let uid = ContentUnitBuilder.firstUnit(
-                in: inputs.units, atOrAfterPlainTextOffset: e.plainTextOffset)?.id else { return nil }
-            return StoredTOCEntry(
-                title: e.title,
-                plainTextOffset: e.plainTextOffset,
-                unitID: uid,
-                playOrder: e.playOrder,
-                level: e.level
-            )
-        }
-
         // Snapshot the accumulated promotions into a `let` so the MainActor.run
         // closure captures by value (Swift 6 concurrency — no captured var).
         let finalPromotions = promotions
+        let finalTOCEntries = tocEntriesForPersistence
         do {
             try await MainActor.run {
                 try db.applyRedetectedStructure(
                     documentID: documentID,
-                    tocEntries: storedTOC,
+                    tocEntries: finalTOCEntries,
                     promotions: finalPromotions,
                     skipUnitID: skipUnitID,
                     skipOffset: finalSkipOffset,
@@ -491,11 +542,45 @@ actor PDFEnhancementService {
                 )
             }
             dbgLog("PDFEnhancementService: Bug F re-detect APPLIED on %@ — toc=%d headings=%d skip=%d",
-                   documentID.uuidString, storedTOC.count, finalPromotions.count, finalSkipOffset)
+                   documentID.uuidString, finalTOCEntries.count, finalPromotions.count, finalSkipOffset)
         } catch {
             dbgLog("PDFEnhancementService: Bug F re-detect — persist failed for %@: %@",
                    documentID.uuidString, String(describing: error))
         }
+    }
+
+    /// Enhancement-side gate for whether a document's post-correction text
+    /// should re-run the text-pattern structure detectors.
+    ///
+    /// Healthy TOCs should be left alone; re-detecting them risks fighting
+    /// outline-derived navigation or duplicating good entries. But a document
+    /// with zero TOC entries or with TOC rows whose anchors no longer resolve
+    /// is already broken for navigation, so the corrected text is allowed to
+    /// rebuild it.
+    nonisolated static func shouldRedetectStructure(
+        tocEntries: [StoredTOCEntry],
+        units: [ContentUnit],
+        skipOffset: Int
+    ) -> Bool {
+        if tocEntries.isEmpty { return true }
+
+        if hasDanglingTOCAnchors(tocEntries: tocEntries, units: units) {
+            return true
+        }
+
+        // Preserve the original "skip does not block recovery" behavior:
+        // a doc may already have a skip region yet still need its missing TOC
+        // rebuilt. The explicit use keeps this contract visible at the gate.
+        _ = skipOffset
+        return false
+    }
+
+    nonisolated static func hasDanglingTOCAnchors(
+        tocEntries: [StoredTOCEntry],
+        units: [ContentUnit]
+    ) -> Bool {
+        let unitIDs = Set(units.map(\.id))
+        return tocEntries.contains(where: { !unitIDs.contains($0.unitID) })
     }
 
     // MARK: Notifications

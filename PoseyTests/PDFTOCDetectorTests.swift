@@ -126,4 +126,28 @@ final class PDFTOCDetectorTests: XCTestCase {
         let pages = Array(repeating: bodyPage, count: 5) + [lateTOCPage]
         XCTAssertNil(PDFTOCDetector.detect(pageTexts: pages))
     }
+
+    func testParsesWrappedDecimalSectionWithoutTrailingDotAsNewEntry() {
+        let tocPage = """
+        Table of Contents
+        5. Payments and Residuals.......................... 41
+        The references herein to payment to SAG shall mean payments to SAG for rateable distribution to the performers involved.
+        5.1 Supplemental Markets Exhibition Of............. 52
+        Theatrical Motion Pictures, The Principal Photography Of Which Commenced After................................................... 53
+        5.2 Supplemental Markets Exhibition Of............. 54
+        """
+
+        let result = PDFTOCDetector.detect(pageTexts: [tocPage, "Body text"])
+        guard let result else { return XCTFail("expected TOC detection") }
+
+        let titles = result.entries.map(\.title)
+        XCTAssertTrue(
+            titles.contains("5.1 Supplemental Markets Exhibition Of"),
+            "decimal section label without trailing dot should begin a fresh entry; got \(titles)"
+        )
+        XCTAssertFalse(
+            titles.contains(where: { $0.contains("The references herein to payment to SAG") }),
+            "preceding prose should not be stitched onto the 5.1 entry; got \(titles)"
+        )
+    }
 }

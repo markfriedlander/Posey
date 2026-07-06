@@ -87,6 +87,244 @@ final class ImporterGateTests: XCTestCase {
         return u
     }
 
+    /// **CHAPTER-ORDER GATE (2026-07-03).** The general resolver's acceptance test:
+    /// real chapters must anchor to BODY headings in READING ORDER. For each real PDF
+    /// import through the production importer (the SIMULATOR runs the iOS PDFKit engine,
+    /// so font signals are real — unlike a macOS off-device run), then walk the stored
+    /// TOC in playOrder and resolve each entry to its unit SEQUENCE. `INVERSIONS` (a
+    /// later chapter anchored EARLIER in the book) are the GEB-style front/back-matter
+    /// mis-anchor we're fixing; `dropped` entries (no unit) are the honest-skip. MEASURE
+    /// -first (Rule 5): writes /tmp/pdf_order.txt per-doc so the real order is VISIBLE,
+    /// across the WIDENED corpus (Mark: not our four — the world). No assertions yet —
+    /// this run is to SEE the resolver's real behavior before/after the fix.
+    func testOrder_PDF_headingsInReadingOrder() throws {
+        // (label, path) — bare names resolve under Posey Test Materials; absolute paths used as-is.
+        let docs: [(String, String)] = [
+            ("Novel/LittleBro",   "world-corpus/class1_doctorow_little-brother_cc.pdf"),
+            ("Paper/ResNet",      "world-corpus/class2_arxiv-resnet_numbered-no-outline.pdf"),
+            ("Magazine/NASA",     "world-corpus/class3_nasa-spinoff-2019_magazine.pdf"),
+            ("Attention",         "attention-is-all-you-need_arxiv.pdf"),
+            ("Antifa",            "Antifa, The Anti-Fascist Handbook.pdf"),
+            ("Crypto",            "Cryptography for Dummies.pdf"),
+            ("Measure",           "Measure What Matters - John Doerr.pdf"),
+            ("Learning",          "Learning_from_the_Enemy.pdf"),
+            ("Internet",          "The Internet Steps to the Beat.pdf"),
+            ("CBA(legal)",        "/Users/markfriedlander/Desktop/Posey-backup-before-history-rewrite-20260519-222856/Posey Test Materials/2005 Codified Basic Agreement - Theatrical Motion Pictures.pdf"),
+            ("GEB",               "GEBen.pdf"),
+            ("Textbook/OpenStax", "world-corpus/class4_openstax_university-physics-vol1_nested-outline.pdf"),
+        ]
+        var report = "════════ PDF CHAPTER-ORDER GATE ════════\n"
+        func flush() { try? report.write(to: URL(fileURLWithPath: "/tmp/pdf_order.txt"), atomically: true, encoding: .utf8) }
+        for (label, name) in docs {
+            let url = name.hasPrefix("/") ? URL(fileURLWithPath: name)
+                                          : Self.corpusDir.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                report += "\n[\(label)] SKIP — not on disk\n"; flush(); continue
+            }
+            do {
+                let db = try freshDB()
+                let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: url)
+                let units = try db.units(for: doc.id)
+                let seqByUnit = Dictionary(units.map { ($0.id, $0.sequence) },
+                                           uniquingKeysWith: { a, _ in a })
+                let toc = (try db.tocEntries(for: doc.id)).sorted { $0.playOrder < $1.playOrder }
+                var placed: [(String, Int)] = []
+                var dropped = 0
+                for e in toc {
+                    if let s = seqByUnit[e.unitID] { placed.append((e.title, s)) } else { dropped += 1 }
+                }
+                var inversions = 0
+                if placed.count > 1 {
+                    for i in 1..<placed.count where placed[i].1 <= placed[i-1].1 { inversions += 1 }
+                }
+                report += "\n[\(label)] toc=\(toc.count) placed=\(placed.count) dropped=\(dropped) INVERSIONS=\(inversions)\n"
+                for (t, s) in placed.prefix(18) {
+                    report += "    seq\(s)\t\(t.prefix(46))\n"
+                }
+                if placed.count > 18 { report += "    … +\(placed.count - 18) more\n" }
+            } catch {
+                report += "\n[\(label)] ERROR: \(error)\n"
+            }
+            flush()
+        }
+        print(report)
+    }
+
+    /// GEB deep-dive (2026-07-04): inspect the still-missing chapter headings on
+    /// the REAL device importer path. Prints candidate body lines, in reading
+    /// order, with page/font/gap and title-match quality so we can tell whether a
+    /// title is missing because no acceptable candidate exists or because the
+    /// resolver/order pass is preferring the wrong one.
+    func testDive_GEB_missingHeadingCandidates() throws {
+        let parsed = try PDFDocumentImporter().loadDocument(from: try src("GEBen.pdf"))
+        let cleaned = PDFPageFurnitureDetector.detect(in: parsed.linesByPage).cleaned
+        let allLines = cleaned.flatMap { $0 }
+
+        var bodyStartIndex = 0
+        if parsed.tocSkipUntilOffset > 0, parsed.plainText.count > 0 {
+            let frac = min(1.0, Double(parsed.tocSkipUntilOffset) / Double(parsed.plainText.count))
+            let totalChars = allLines.reduce(0) { $0 + $1.text.count }
+            if totalChars > 0 {
+                let target = Int(frac * Double(totalChars))
+                var acc = 0
+                for (i, l) in allLines.enumerated() {
+                    if acc >= target { bodyStartIndex = i; break }
+                    acc += l.text.count
+                }
+                bodyStartIndex = min(bodyStartIndex, allLines.count / 4)
+            }
+        }
+
+        let targets = [
+            "Chapter II: Meaning and Form in Mathematics",
+            "Chapter III: Figure and Ground",
+            "Chapter IV: Consistency, Completeness, and Geometry",
+            "Chapter V: Recursive Structures and Processes",
+            "Chapter VI: The Location of Meaning",
+            "Chapter VII: The Propositional Calculus",
+            "Chapter IX: Mumon and Gödel",
+            "Chapter X: Levels of Description, and Computer Systems",
+            "Chapter XI: Brains and Thoughts",
+            "Chapter XII: Minds and Thoughts",
+            "Chapter XIV: On Formally Undecidable Propositions of TNT and Related Systems",
+            "Chapter XVIII: Artificial Intelligence: Retrospects",
+            "Chapter XIX: Artificial Intelligence: Prospects",
+            "Chapter XX: Strange Loops, Or Tangled Hierarchies",
+        ]
+
+        var out = "════ GEB missing heading candidates ════\n"
+        out += "bodyStartIndex=\(bodyStartIndex) totalLines=\(allLines.count)\n\n"
+        for title in targets {
+            let words = Set(
+                title.lowercased()
+                    .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                    .filter { $0.count >= 2 }
+            )
+            let hits = allLines.enumerated().compactMap { idx, line -> (Int, PDFTextLine, Double, Double)? in
+                guard idx >= bodyStartIndex else { return nil }
+                guard !PDFHeadingKeyDeriver.isContentsLeaderLine(line.text) else { return nil }
+                let q = PDFHeadingKeyDeriver.matchQuality(titleSet: words, text: line.text)
+                guard q.matches else { return nil }
+                return (idx, line, q.titleCoverage, q.linePurity)
+            }
+            out += "TITLE: \(title)\n"
+            if hits.isEmpty {
+                out += "  no matching body candidates\n\n"
+                continue
+            }
+            for (idx, line, coverage, purity) in hits.prefix(8) {
+                out += String(
+                    format: "  idx=%d page=%d font=%.1f gap=%.1f caps=%@ bold=%@ cov=%.2f pure=%.2f | %@\n",
+                    idx,
+                    line.pageIndex,
+                    line.fontSize,
+                    line.gapAbove,
+                    line.isAllCaps ? "Y" : "N",
+                    line.isBold ? "Y" : "N",
+                    coverage,
+                    purity,
+                    line.text.prefix(180) as CVarArg
+                )
+            }
+            out += "\n"
+        }
+
+        try? out.write(to: URL(fileURLWithPath: "/tmp/geb_missing_heading_candidates.txt"),
+                       atomically: true, encoding: .utf8)
+        print(out)
+    }
+
+    /// Focused detail on Crypto's 24 inversions (fast — one doc): dump EVERY TOC
+    /// entry in playOrder with its resolved sequence, marking each inversion with the
+    /// prior entry, so the root cause (back-index copies? near-dup subsection titles?)
+    /// is VISIBLE, not guessed (Rule 5). Writes /tmp/crypto_detail.txt.
+    func testOrder_PDF_cryptoDetail() throws {
+        let url = try src("Cryptography for Dummies.pdf")
+        let db = try freshDB()
+        let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: url)
+        let units = try db.units(for: doc.id)
+        let seqByUnit = Dictionary(units.map { ($0.id, $0.sequence) }, uniquingKeysWith: { a, _ in a })
+        let toc = (try db.tocEntries(for: doc.id)).sorted { $0.playOrder < $1.playOrder }
+        var out = "════ CRYPTO order detail — \(toc.count) entries, \(units.count) units ════\n"
+        var prevSeq = Int.min
+        var prevTitle = "—"
+        var inversions = 0
+        for e in toc {
+            if let s = seqByUnit[e.unitID] {
+                let inv = s <= prevSeq
+                if inv { inversions += 1 }
+                let mark = inv ? "   <<< INVERSION (after '\(prevTitle.prefix(28))' seq\(prevSeq))" : ""
+                out += "  play\(e.playOrder)\tseq\(s)\t\(e.title.prefix(52))\(mark)\n"
+                prevSeq = s; prevTitle = e.title
+            } else {
+                out += "  play\(e.playOrder)\tDROPPED\t\(e.title.prefix(52))\n"
+            }
+        }
+        out += "── total inversions: \(inversions) ──\n"
+        try? out.write(to: URL(fileURLWithPath: "/tmp/crypto_detail.txt"), atomically: true, encoding: .utf8)
+        print(out)
+    }
+
+    /// Complete one-ruler (unit-sequence) order check for the three docs the main
+    /// gate never ran (Measure / Learning / Internet) — closes the coverage gap so
+    /// the state is known for EVERY phone doc, not eyeballed from a screenshot top.
+    func testOrder_PDF_completeRemaining() throws {
+        let docs: [(String, String)] = [
+            ("Measure",  "Measure What Matters - John Doerr.pdf"),
+            ("Learning", "Learning_from_the_Enemy.pdf"),
+            ("Internet", "The Internet Steps to the Beat.pdf"),
+        ]
+        var report = ""
+        func flush() { try? report.write(to: URL(fileURLWithPath: "/tmp/order_remaining.txt"), atomically: true, encoding: .utf8) }
+        for (label, name) in docs {
+            let url = Self.corpusDir.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: url.path) else { report += "\n[\(label)] SKIP\n"; flush(); continue }
+            let db = try freshDB()
+            let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: url)
+            let units = try db.units(for: doc.id)
+            let seqByUnit = Dictionary(units.map { ($0.id, $0.sequence) }, uniquingKeysWith: { a, _ in a })
+            let toc = (try db.tocEntries(for: doc.id)).sorted { $0.playOrder < $1.playOrder }
+            var placed: [(String, Int)] = []; var dropped = 0
+            for e in toc { if let s = seqByUnit[e.unitID] { placed.append((e.title, s)) } else { dropped += 1 } }
+            var inv = 0
+            if placed.count > 1 { for i in 1..<placed.count where placed[i].1 <= placed[i-1].1 { inv += 1 } }
+            report += "\n[\(label)] toc=\(toc.count) placed=\(placed.count) dropped=\(dropped) INVERSIONS=\(inv)\n"
+            for (t, s) in placed.prefix(20) { report += "    seq\(s)\t\(t.prefix(46))\n" }
+            flush()
+        }
+        print(report)
+    }
+
+    /// Focused detail on the two single-inversion docs (CBA legal near-dup titles,
+    /// OpenStax textbook) — dump every entry with its sequence, mark the inversion +
+    /// its neighbor, so the residual cause is VISIBLE not guessed. /tmp/stray_detail.txt.
+    func testOrder_PDF_strayDetail() throws {
+        let docs: [(String, String)] = [
+            ("CBA", "/Users/markfriedlander/Desktop/Posey-backup-before-history-rewrite-20260519-222856/Posey Test Materials/2005 Codified Basic Agreement - Theatrical Motion Pictures.pdf"),
+        ]
+        var out = ""
+        func flush() { try? out.write(to: URL(fileURLWithPath: "/tmp/stray_detail.txt"), atomically: true, encoding: .utf8) }
+        for (label, path) in docs {
+            guard FileManager.default.fileExists(atPath: path) else { out += "\n[\(label)] SKIP\n"; flush(); continue }
+            let db = try freshDB()
+            let doc = try PDFLibraryImporter(databaseManager: db).importDocument(from: URL(fileURLWithPath: path))
+            let units = try db.units(for: doc.id)
+            let seqByUnit = Dictionary(units.map { ($0.id, $0.sequence) }, uniquingKeysWith: { a, _ in a })
+            let toc = (try db.tocEntries(for: doc.id)).sorted { $0.playOrder < $1.playOrder }
+            out += "\n════ \(label) — \(toc.count) entries ════\n"
+            var prevSeq = Int.min, prevTitle = "—"
+            for e in toc {
+                if let s = seqByUnit[e.unitID] {
+                    let inv = s <= prevSeq
+                    out += "  seq\(s)\t\(e.title.prefix(50))\(inv ? "   <<< INVERSION after '\(prevTitle.prefix(30))' seq\(prevSeq)" : "")\n"
+                    prevSeq = s; prevTitle = e.title
+                } else { out += "  DROPPED\t\(e.title.prefix(50))\n" }
+            }
+            flush()
+        }
+        print(out)
+    }
+
     /// PDF rebuild (2026-06-29) — DEBUG the CBA TOC anchoring. For each stored
     /// TOC entry, show what its unitID resolved to (kind + sequence + text) and
     /// whether it's sentence-bearing (visible in the navigator). Reveals why the
@@ -569,6 +807,89 @@ final class ImporterGateTests: XCTestCase {
         for w in realWords {
             XCTAssertFalse(PDFPageFurnitureDetector.isLonePageNumber(w), "'\(w)' must NOT be treated as a page number")
         }
+    }
+
+    func testPDFHeadingMergeCombinesWrappedHeadingLines() throws {
+        let lines = [
+            ln("Introduction:", page: 10, midX: 200, gapAbove: 0),
+            ln("A Musico-Logical Offering", page: 10, midX: 200, gapAbove: 16.7),
+            ln("Author:", page: 10, midX: 200, gapAbove: 0.3),
+            ln("Body prose begins here.", page: 10, midX: 260, gapAbove: 0.5),
+        ]
+
+        let merged = PDFLibraryImporter.mergeResolvedHeadingLines(
+            resolved: [("Part I: GEB Introduction: A Musico-Logical Offering", lines[0])],
+            allLines: lines
+        )
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].line.text, "Introduction: A Musico-Logical Offering")
+        XCTAssertEqual(merged[0].consumedLines.map { $0.text }, [
+            "Introduction:",
+            "A Musico-Logical Offering",
+        ])
+    }
+
+    func testPDFHeadingMergeRebuildsPagesWithoutHeadingTailProseLeak() throws {
+        let headingLabel = ln("CHAPTER III", page: 71, midX: 200, gapAbove: 0)
+        let headingTail = ln("Figure and Ground", page: 71, midX: 200, gapAbove: 14.8)
+        let body = ln("Body paragraph starts after the heading.", page: 71, midX: 280, gapAbove: 28)
+        let page = [headingLabel, headingTail, body]
+
+        let merged = PDFLibraryImporter.mergeResolvedHeadingLines(
+            resolved: [("Chapter III: Figure and Ground", headingLabel)],
+            allLines: page
+        )
+        let rebuilt = PDFLibraryImporter.rebuildPages(from: [page], mergedHeadings: merged)
+
+        XCTAssertEqual(rebuilt.count, 1)
+        XCTAssertEqual(rebuilt[0].map { $0.text }, [
+            "CHAPTER III Figure and Ground",
+            "Body paragraph starts after the heading.",
+        ])
+    }
+
+    func testPDFHeadingMergeBridgesWiderHeadingLabelGap() throws {
+        let headingLabel = ln("CHAPTER XX", page: 91, midX: 210, gapAbove: 0)
+        let headingBodyA = ln("Strange Loops,", page: 91, midX: 210, gapAbove: 28.5)
+        let headingBodyB = ln("Or Tangled Hierarchies", page: 91, midX: 210, gapAbove: 0.8)
+        let body = ln("Opening body prose begins here.", page: 91, midX: 280, gapAbove: 14.2)
+        let page = [headingLabel, headingBodyA, headingBodyB, body]
+
+        let merged = PDFLibraryImporter.mergeResolvedHeadingLines(
+            resolved: [("Chapter XX: Strange Loops, Or Tangled Hierarchies", headingBodyA)],
+            allLines: page
+        )
+        let rebuilt = PDFLibraryImporter.rebuildPages(from: [page], mergedHeadings: merged)
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].line.text, "CHAPTER XX Strange Loops, Or Tangled Hierarchies")
+        XCTAssertEqual(rebuilt[0].map { $0.text }, [
+            "CHAPTER XX Strange Loops, Or Tangled Hierarchies",
+            "Opening body prose begins here.",
+        ])
+    }
+
+    func testPDFHeadingMergeStopsBeforeSingleWordBodyOverlap() throws {
+        let headingA = ln("Sonata", page: 69, midX: 210, gapAbove: 0)
+        let headingB = ln("for Unaccompanied Achilles", page: 69, midX: 210, gapAbove: 0.8)
+        let bodyA = ln("The telephone rings; Achilles picks it up.", page: 69, midX: 280, gapAbove: 28.2)
+        let bodyB = ln("Achilles: Hello, this is Achilles.", page: 69, midX: 280, gapAbove: 0.5)
+        let page = [headingA, headingB, bodyA, bodyB]
+
+        let merged = PDFLibraryImporter.mergeResolvedHeadingLines(
+            resolved: [("Sonata for Unaccompanied Achilles", headingA)],
+            allLines: page
+        )
+        let rebuilt = PDFLibraryImporter.rebuildPages(from: [page], mergedHeadings: merged)
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].line.text, "Sonata for Unaccompanied Achilles")
+        XCTAssertEqual(rebuilt[0].map { $0.text }, [
+            "Sonata for Unaccompanied Achilles",
+            "The telephone rings; Achilles picks it up.",
+            "Achilles: Hello, this is Achilles.",
+        ])
     }
 
     /// FURNITURE SAFETY across the WHOLE PDF corpus (CC#19, 2026-07-02; Mark: "one

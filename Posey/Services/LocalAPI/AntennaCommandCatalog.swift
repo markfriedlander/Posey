@@ -88,6 +88,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("REINDEX_DOCUMENT", .indexing, "REINDEX_DOCUMENT:<doc-id>", "Re-chunk + re-embed a doc directly (bypasses PDF enhancement). The fast path to (re)build the index."),
         .init("REPARSE_PDF", .indexing, "REPARSE_PDF:<doc-id>", "Re-run the IMPORT (unit-construction) phase on a PDF from its saved source, replacing units/sentences/TOC in place (same id). Verifies importer fixes without re-sending the file. Pairs with REINDEX_DOCUMENT (embeddings) + REBUILD_RAPTOR_TREE."),
         .init("DEBUG_PDF_TOC", .indexing, "DEBUG_PDF_TOC:<doc-id>", "DEBUG diag: dump the TOC titles the importer's detection produces for a PDF (parsed.tocEntries, before heading resolution) + skip offset. Pins why a doc yields no chapters."),
+        .init("DEBUG_HEADING_AB", .indexing, "DEBUG_HEADING_AB:<doc-id>", "DEBUG diag: run BOTH heading maps for a PDF (built-in resolver vs seedless style-inference scorer) and return each map + mapQuality + body/heading font. Shows why the A/B gate picked one. HEAVY on big docs — one at a time."),
         .init("RESET_DOCUMENT_METADATA", .enhancement, "RESET_DOCUMENT_METADATA", ""),
         .init("EXTRACT_METADATA_NOW", .enhancement, "EXTRACT_METADATA_NOW", ""),
         .init("RUN_METADATA_CHAIN", .enhancement, "RUN_METADATA_CHAIN", ""),

@@ -63,6 +63,12 @@ struct PDFImageDraw: Sendable {
     /// page). Measured: Learning (scanned) has 28 such; Crypto/GEB have zero.
     let pageWidth: Double
     let pageHeight: Double
+    /// How much readable page text survived Tier-1 extraction on this page after
+    /// header/footer stripping + normalization. A near-full-page image on a page
+    /// with almost no surviving text is often a legitimate plate / figure page
+    /// (GEB early illustrations), not a scanned text page. Used only to make the
+    /// full-page-scan filter honest; size/recurrence rules remain universal.
+    let pageTextCharacters: Int
 
     /// Fraction of the page this image covers (0…1).
     var pageCoverage: Double {
@@ -148,11 +154,16 @@ enum PDFFigureExtractor {
     /// largest cover well under this). Tunable; a genuine full-bleed full-page
     /// plate above this bar is the known edge to watch on the phone.
     static let maxPageCoverage: Double = 0.85
+    /// A near-full-page image on a page with less than this much surviving text
+    /// is treated as a visual plate rather than a duplicate scanned text page.
+    /// Generalized rule: page-filling art with only a page number / running label
+    /// should stay in the reading flow; page-filling OCR-backed prose should not.
+    static let maxTextCharsForPlatePage = 80
 
     /// Every image-XObject draw on a page, with its page-space rectangle. No
     /// rendering (cheap) — call once per page during the import loop, then feed
     /// the whole document's draws to `selectFigures`.
-    static func imageDraws(on page: PDFPage, pageIndex: Int) -> [PDFImageDraw] {
+    static func imageDraws(on page: PDFPage, pageIndex: Int, pageTextCharacters: Int) -> [PDFImageDraw] {
         guard let cgPage = page.pageRef else { return [] }
         let pageBounds = page.bounds(for: .mediaBox)
         let state = FigureScanState()
@@ -172,16 +183,19 @@ enum PDFFigureExtractor {
         CGPDFContentStreamRelease(cs)
         return state.draws.map {
             PDFImageDraw(pageIndex: pageIndex, rect: $0.rect, srcW: $0.w, srcH: $0.h,
-                         pageWidth: Double(pageBounds.width), pageHeight: Double(pageBounds.height))
+                         pageWidth: Double(pageBounds.width), pageHeight: Double(pageBounds.height),
+                         pageTextCharacters: pageTextCharacters)
         }
     }
 
     /// True when a draw is large enough to be a real figure (not decoration) and
     /// not so large it IS the page (a scanned sheet).
     static func isFigureSized(_ d: PDFImageDraw) -> Bool {
-        min(d.rect.width, d.rect.height) >= minShortSidePoints
+        let isLikelyPlatePage = d.pageCoverage >= maxPageCoverage
+            && d.pageTextCharacters <= maxTextCharsForPlatePage
+        return min(d.rect.width, d.rect.height) >= minShortSidePoints
             && (d.rect.width * d.rect.height) >= minAreaPoints
-            && d.pageCoverage < maxPageCoverage
+            && (d.pageCoverage < maxPageCoverage || isLikelyPlatePage)
     }
 
     /// From every image draw in the document, select the real figures: keep

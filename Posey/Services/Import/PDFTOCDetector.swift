@@ -180,8 +180,12 @@ struct PDFTOCDetector {
             // like "28. Injuries … Safety 84"). Wrapped continuation lines never
             // start with a label, so this can't false-terminate a multi-line title.
             let endNum = try? NSRegularExpression(pattern: #"\s(\d{1,4})\s*$"#),
-            // Label start: "N." / "N.N." / Roman numeral, then a space + content.
-            let label = try? NSRegularExpression(pattern: #"^(?:\d+(?:\.\d+)?|[IVXLCDM]+)\.\s+\S"#)
+            // Label start: "N", "N.", "N.N", "N.N.", "N.N.N", etc., or a
+            // Roman numeral outline label, then a space + content. Some legal
+            // TOCs print section labels like "5.1 Heading" with NO extra dot
+            // after the final component; treat those as real entry starts so a
+            // prior prose line cannot be stitched onto them.
+            let label = try? NSRegularExpression(pattern: #"^(?:(?:\d+(?:\.\d+){0,3}\.?)|(?:[IVXLCDM]+\.?))\s+\S"#)
         else { return [] }
         func match(_ re: NSRegularExpression, _ s: String) -> NSTextCheckingResult? {
             re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s))

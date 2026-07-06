@@ -822,22 +822,25 @@ final class LibraryViewModel: ObservableObject {
 
 extension LibraryViewModel {
     /// Routes PDF imports through an async path so Vision OCR never blocks
-    /// the main thread. Phase 1 (parse + OCR) runs on a background thread.
-    /// Phase 2 (DB write) returns to the main actor.
+    /// the main thread. Phase 1 (parse + OCR) AND phase 2 (heading/structure build +
+    /// DB write) both run on a background thread; only the UI refresh returns to main.
     private func handlePDFImport(url: URL) {
         let didAccess = url.startAccessingSecurityScopedResource()
+        let fileName = url.lastPathComponent
         importStatusMessage = Self.importBannerMessage
+        // Surface the import LIVE on the status board (keyed by file name — no id yet).
+        IndexingTracker.sharedForChat.setImportActivity(file: fileName, phase: "Reading the file…")
 
-        // Capture the importer as a value — PDFLibraryImporter is a struct,
-        // but we only use it for the DB write (main actor), not in the Task.
         Task { @MainActor [weak self] in
             guard let self else {
                 if didAccess { url.stopAccessingSecurityScopedResource() }
+                IndexingTracker.sharedForChat.clearImportActivity(file: fileName)
                 return
             }
             defer {
                 if didAccess { url.stopAccessingSecurityScopedResource() }
                 importStatusMessage = nil
+                IndexingTracker.sharedForChat.clearImportActivity(file: fileName)
             }
             do {
                 // 2026-05-16 (B8) — Reject binary-misnamed-as-PDF
@@ -846,9 +849,29 @@ extension LibraryViewModel {
                 let parsed = try await parsePDFOffMainThread(url: url) { [weak self] message in
                     Task { @MainActor [weak self] in
                         self?.importStatusMessage = message
+                        // Mirror the extraction/OCR phase onto the status board (live).
+                        IndexingTracker.sharedForChat.setImportActivity(file: fileName, phase: message)
                     }
                 }
-                _ = try pdfLibraryImporter.persistParsedDocument(parsed, from: url)
+                // Show the heavy heading/structure-build step live — it used to run
+                // silently, which is why a big import looked hung (Mark, 2026-07-05).
+                IndexingTracker.sharedForChat.setImportActivity(file: fileName, phase: "Building document structure…")
+                // Persist (heading detection + unit building + DB write) is the heavy
+                // TAIL of a PDF import. It was left running on the main actor, which
+                // froze the UI for minutes on large documents — the "hang on the last
+                // OCR page" (Mark, 2026-07-05). It's synchronous and touches only the
+                // thread-safe DB, so run it on the background worker like extraction.
+                _ = try await persistPDFOffMainThread(
+                    parsed, url: url, databaseManager: self.databaseManager,
+                    rowProgress: { processed, total in
+                        // Off-main callback → marshal to main to update the board's live
+                        // "rows built" count for this file (Mark, 2026-07-05).
+                        Task { @MainActor in
+                            IndexingTracker.sharedForChat.setImportActivity(
+                                file: fileName,
+                                phase: "Building document structure — \(processed) of \(total) rows")
+                        }
+                    })
                 loadDocuments()
             } catch {
                 present(error)
@@ -872,6 +895,31 @@ private func parsePDFOffMainThread(
                     onProgress(progress.message)
                 }
                 cont.resume(returning: result)
+            } catch {
+                cont.resume(throwing: error)
+            }
+        }
+    }
+}
+
+/// Runs `PDFLibraryImporter.persistParsedDocument` — the heavy TAIL of a PDF
+/// import (heading detection + unit building + DB write) — on a background
+/// thread. Leaving it on the main actor froze the UI for minutes on large PDFs
+/// (Mark, 2026-07-05, "hang on the last OCR page"). It is a synchronous operation
+/// touching only the thread-safe (`@unchecked Sendable`) `DatabaseManager`, so it
+/// is safe to run off the main thread — mirrors `parsePDFOffMainThread`.
+private func persistPDFOffMainThread(
+    _ parsed: ParsedPDFDocument,
+    url: URL,
+    databaseManager: DatabaseManager,
+    rowProgress: @escaping @Sendable (Int, Int) -> Void
+) async throws -> Document {
+    try await withCheckedThrowingContinuation { cont in
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let importer = PDFLibraryImporter(databaseManager: databaseManager)
+                let doc = try importer.persistParsedDocument(parsed, from: url, rowProgress: rowProgress)
+                cont.resume(returning: doc)
             } catch {
                 cont.resume(throwing: error)
             }
@@ -1736,6 +1784,53 @@ extension LibraryViewModel {
                     "note": "Units rebuilt in place. Re-open the doc to see the new text. Re-embed/RAPTOR via REINDEX_DOCUMENT / REBUILD_RAPTOR_TREE."
                 ])
 
+            case "DEBUG_HEADING_AB":
+                // A/B observability (CC#26, 2026-07-05, Mark): on-device (real fonts)
+                // run BOTH heading maps for a doc and return what EACH produces so the
+                // decision is VISIBLE — no more flying blind. A = built-in resolver over
+                // the detected TOC titles; B = the seedless style-inference detector
+                // (`PDFHeadingScorer.detectHeadingsFromPages` — its own map from the
+                // pages, no reliance on the built-in title list). Read-only; in-memory.
+                guard let idStr = arg, let id = UUID(uuidString: idStr) else {
+                    return #"{"error":"Usage: DEBUG_HEADING_AB:<doc-id>"}"#
+                }
+                guard let bytes = PDFSourceStore.read(id) else {
+                    return #"{"error":"No saved PDF source for this doc"}"#
+                }
+                let abParsed = try PDFDocumentImporter().loadDocument(fromData: bytes)
+                let abLines = PDFPageFurnitureDetector.detect(in: abParsed.linesByPage).cleaned.flatMap { $0 }
+                let abTitles = PDFLibraryImporter.coalesceWrappedTOCEntries(
+                    abParsed.tocEntries.map(PDFLibraryImporter.normalizeTOCEntry)).map { $0.title }
+                let abBuiltin = PDFHeadingKeyDeriver.resolveHeadings(titles: abTitles, allLines: abLines)
+                let abScored = PDFHeadingScorer.detectHeadingsFromPages(allLines: abLines)
+                let abProfile = PDFHeadingScorer.deriveProfile(seedTitles: abTitles, allLines: abLines)
+                let qA = PDFHeadingScorer.mapQuality(
+                    abBuiltin.map { (title: $0.title, line: $0.line,
+                                     score: PDFHeadingScorer.resemblance($0.line, profile: abProfile)) },
+                    allLines: abLines)
+                let qB = PDFHeadingScorer.mapQuality(
+                    abScored.map { (title: $0.line.text, line: $0.line, score: $0.score) },
+                    allLines: abLines)
+                return json([
+                    "documentID": id.uuidString,
+                    "totalLines": abLines.count,
+                    "bodyFont": abProfile.bodyFont,
+                    "headingFont": abProfile.headingFont,
+                    "seedTitleCount": abTitles.count,
+                    "A_builtin_count": abBuiltin.count,
+                    "A_quality": qA,
+                    "B_seedless_count": abScored.count,
+                    "B_quality": qB,
+                    "A_builtin": abBuiltin.prefix(40).map {
+                        ["title": String($0.title.prefix(60)), "anchoredLine": String($0.line.text.prefix(60))]
+                    },
+                    "B_seedless": abScored.prefix(60).map {
+                        ["text": String($0.line.text.prefix(60)),
+                         "score": String(format: "%.2f", $0.score),
+                         "font": $0.line.fontSize, "caps": $0.line.isAllCaps, "bold": $0.line.isBold]
+                    }
+                ])
+
             case "DEBUG_PDF_TOC":
                 // CC#22 diag (item #3): dump the TOC titles the importer's detection
                 // ACTUALLY produces for a doc (parsed.tocEntries, BEFORE heading
@@ -1756,8 +1851,15 @@ extension LibraryViewModel {
                 let tocFurniture = PDFPageFurnitureDetector.detect(in: parsedForTOC.linesByPage)
                 let tocAllLines = tocFurniture.cleaned.flatMap { $0 }
                 let tocBodyFont = PDFHeadingKeyDeriver.bodyFontSize(of: tocAllLines)
-                let tocTitles = parsedForTOC.tocEntries.map { $0.title }
+                let rawTOCEntries = parsedForTOC.tocEntries
+                let normalizedTOCEntries = rawTOCEntries.map(PDFLibraryImporter.normalizeTOCEntry)
+                let coalescedTOCEntries = PDFLibraryImporter.coalesceWrappedTOCEntries(normalizedTOCEntries)
+                let tocTitles = coalescedTOCEntries.map { $0.title }
                 let tocResolved = PDFHeadingKeyDeriver.resolveHeadings(titles: tocTitles, allLines: tocAllLines)
+                let tocMerged = PDFLibraryImporter.mergeResolvedHeadingLines(
+                    resolved: tocResolved.map { ($0.title, $0.line) },
+                    allLines: tocAllLines
+                )
                 // REGRESSION CHECK (Mark): replicate the OLD selection (single global
                 // top-scorer, then reject if not standout) EXACTLY as resolveHeadings did
                 // before the fix, and diff it against the NEW result per title. This shows,
@@ -1786,6 +1888,48 @@ extension LibraryViewModel {
                 return json([
                     "documentID": id.uuidString,
                     "parsedTOCEntryCount": parsedForTOC.tocEntries.count,
+                    "normalizedTOCEntryCount": normalizedTOCEntries.count,
+                    "coalescedTOCEntryCount": coalescedTOCEntries.count,
+                    "rawEntries": rawTOCEntries.map { [
+                        "title": $0.title,
+                        "playOrder": $0.playOrder,
+                        "level": $0.level,
+                        "plainTextOffset": $0.plainTextOffset
+                    ] },
+                    "normalizedEntries": normalizedTOCEntries.map { [
+                        "title": $0.title,
+                        "playOrder": $0.playOrder,
+                        "level": $0.level,
+                        "plainTextOffset": $0.plainTextOffset
+                    ] },
+                    "coalescedEntries": coalescedTOCEntries.map { [
+                        "title": $0.title,
+                        "playOrder": $0.playOrder,
+                        "level": $0.level,
+                        "plainTextOffset": $0.plainTextOffset
+                    ] },
+                    "resolvedEntries": tocResolved.map { [
+                        "title": $0.title,
+                        "lineText": $0.line.text,
+                        "pageIndex": $0.line.pageIndex,
+                        "yTop": $0.line.yTop,
+                        "yBottom": $0.line.yBottom
+                    ] },
+                    "mergedResolvedEntries": tocMerged.map { [
+                        "title": $0.title,
+                        "lineText": $0.line.text,
+                        "pageIndex": $0.line.pageIndex,
+                        "consumed": $0.consumedLines.map { line in
+                            [
+                                "text": line.text,
+                                "yTop": line.yTop,
+                                "yBottom": line.yBottom,
+                                "fontSize": line.fontSize,
+                                "isBold": line.isBold,
+                                "isAllCaps": line.isAllCaps
+                            ]
+                        }
+                    ] },
                     "oldResolvedCount": oldResolved.count,
                     "newResolvedCount": tocResolved.count,
                     "changedCount": changed.count,

@@ -211,6 +211,7 @@ struct EmbeddingStatusBoardView: View {
 
     @ViewBuilder
     private var activityContent: some View {
+        let imports = indexing.importActivity.sorted { $0.key < $1.key }
         let ocr = indexing.ocrProgress.sorted { $0.key.uuidString < $1.key.uuidString }
         let chunking = indexing.chunkingDocumentIDs.sorted { $0.uuidString < $1.uuidString }
         let embeds = indexing.indexingProgress.sorted { $0.key.uuidString < $1.key.uuidString }
@@ -219,15 +220,22 @@ struct EmbeddingStatusBoardView: View {
         let backfillActive = isBackfillRunning
 
         // Nothing anywhere → idle.
-        if !backfillActive && ocr.isEmpty && chunking.isEmpty && embeds.isEmpty
+        if !backfillActive && imports.isEmpty && ocr.isEmpty && chunking.isEmpty && embeds.isEmpty
             && raptors.isEmpty && queuedCount == 0 && !backfillTerminal {
             Label("Idle — nothing in the pipeline right now", systemImage: "moon.zzz")
                 .foregroundStyle(.secondary)
         }
 
-        // Pipeline order: OCR (prep, PDF only) → 1 chunking → 2 embedding → 3 RAPTOR.
-        // The "Step N of 3" prefix tells Mark where a given title is at a glance.
-        // 0) Tier-2 Vision OCR (PDF page-image rescue) — a PREP pass before step 1.
+        // Pipeline order: IMPORT (parse / OCR / structure-build) → 1 chunking →
+        // 2 embedding → 3 RAPTOR. The "Step N of 3" prefix tells where a title is.
+        // 0a) Live IMPORT — before a document has an id, keyed by FILE NAME. Shows the
+        //     heavy heading/structure build that used to run with NO feedback (Mark,
+        //     2026-07-05, the "hang on the last OCR page").
+        ForEach(imports, id: \.key) { file, phase in
+            Label("Prep · Importing — \(phase) — \(file)", systemImage: "square.and.arrow.down")
+                .font(.callout.weight(.medium))
+        }
+        // 0b) Tier-2 Vision OCR (PDF page-image rescue) — a PREP pass before step 1.
         ForEach(ocr, id: \.key) { id, frac in
             let pct = Int((frac * 100).rounded())
             stageRow(title: "Prep · Reading the page images (OCR) — \(title(id))",

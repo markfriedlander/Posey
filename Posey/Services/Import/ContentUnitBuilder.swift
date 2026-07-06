@@ -269,10 +269,17 @@ enum ContentUnitBuilder {
         documentID: UUID,
         images: [(pageIndex: Int, imageID: String, yTop: Double?)] = [],
         isHeading: (PDFTextLine) -> Bool,
-        headingLevel: (PDFTextLine) -> Int = { _ in 1 }
+        headingLevel: (PDFTextLine) -> Int = { _ in 1 },
+        headingTitle: (PDFTextLine) -> String? = { _ in nil },
+        rowProgress: (@Sendable (Int, Int) -> Void)? = nil
     ) -> [ContentUnit] {
         var units: [ContentUnit] = []
         var sequence = 10
+        // Live "rows built" count for the status board — this structure-build step
+        // used to run with NO feedback (Mark, 2026-07-05). Reported throttled (every
+        // 500 lines) so it never floods the main actor.
+        let totalLines = linesByPage.reduce(0) { $0 + $1.count }
+        var processedLines = 0
         func add(_ kind: ContentUnitKind, _ text: String, _ meta: ContentUnitMetadata = .empty) {
             units.append(ContentUnit(documentID: documentID, sequence: sequence, kind: kind,
                                      text: text, metadata: meta))
@@ -408,11 +415,20 @@ enum ContentUnitBuilder {
             }
 
             for (lineIdx, line) in page.enumerated() {
+                processedLines += 1
+                if processedLines % 500 == 0 { rowProgress?(processedLines, totalLines) }
                 // Place any embedded figure whose top sits above this line, first.
                 emitFiguresAbove(line.yTop)
                 if isHeading(line) {
                     flushParagraph()
-                    add(.heading, line.text, ContentUnitMetadata(headingLevel: headingLevel(line)))
+                    add(
+                        .heading,
+                        line.text,
+                        ContentUnitMetadata(
+                            headingLevel: headingLevel(line),
+                            titleLength: computeTitleLength(in: line.text, title: headingTitle(line))
+                        )
+                    )
                 } else {
                     // The FIRST line of a page we stitched into is the CONTINUATION of the
                     // buffered paragraph — its gapAbove spans the physical page break (a
@@ -467,6 +483,7 @@ enum ContentUnitBuilder {
             priorMaxRight = maxRight
             priorLeftMargin = leftMargin
         }
+        rowProgress?(totalLines, totalLines)
         flushParagraph()       // final paragraph + any trailing deferred breaks
         // Trailing between-page images (past the last text page).
         while betweenCursor < betweenPageImages.count {
@@ -868,7 +885,9 @@ enum ContentUnitBuilder {
                 while ui < u.count, isSep(u[ui]) { ui += 1 }
                 while ti < t.count, isSep(t[ti]) { ti += 1 }
             } else {
-                guard ui < u.count, u[ui] == t[ti] else { return nil }
+                guard ui < u.count,
+                      String(u[ui]).localizedLowercase == String(t[ti]).localizedLowercase
+                else { return nil }
                 ui += 1; ti += 1
             }
         }
@@ -1039,10 +1058,13 @@ enum ContentUnitBuilder {
 
         struct Anchor { let offset: Int; let text: String; let unitID: UUID }
         var anchors: [Anchor] = []
+        var anchorByUnitID: [UUID: Anchor] = [:]
         var cumulative = 0
         for unit in units {
             if unit.kind == .heading {
-                anchors.append(Anchor(offset: cumulative, text: unit.text, unitID: unit.id))
+                let anchor = Anchor(offset: cumulative, text: unit.text, unitID: unit.id)
+                anchors.append(anchor)
+                anchorByUnitID[unit.id] = anchor
             }
             if unit.kind.carriesProseText {
                 cumulative += unit.text.count + 2 // "\n\n" — matches ReaderView + persister
@@ -1052,6 +1074,20 @@ enum ContentUnitBuilder {
 
         return toc.map { entry in
             guard !entry.title.isEmpty else { return entry }
+            // 2026-07-03 — If the importer already resolved this TOC row to a
+            // specific heading unit, TRUST that identity anchor and simply
+            // compute its current offset. Re-matching by title here can undo a
+            // correct import-time choice when the same chapter title appears
+            // again later in the book (contents / synopsis / index / notes).
+            if let exact = anchorByUnitID[entry.unitID] {
+                return StoredTOCEntry(
+                    title: exact.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                    plainTextOffset: exact.offset,
+                    unitID: exact.unitID,
+                    playOrder: entry.playOrder,
+                    level: entry.level
+                )
+            }
             var best: Int? = nil
             var bestExact = false
             var bestDist = Int.max

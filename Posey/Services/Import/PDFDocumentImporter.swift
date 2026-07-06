@@ -298,7 +298,11 @@ extension PDFDocumentImporter {
                 // re-added as a figure. Known edge: a figure drawn as pure VECTOR (no
                 // image XObject) on a low-text page is not captured this way — watch
                 // for it on the phone; add a vector-region fallback only if it appears.
-                allImageDraws += PDFFigureExtractor.imageDraws(on: page, pageIndex: index)
+                allImageDraws += PDFFigureExtractor.imageDraws(
+                    on: page,
+                    pageIndex: index,
+                    pageTextCharacters: pdfText.count
+                )
             } else {
                 // PDFKit found no text — report progress then try Vision OCR.
                 progress?(.ocr(page: index + 1, of: pageCount))

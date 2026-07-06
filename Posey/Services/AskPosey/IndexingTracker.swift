@@ -46,6 +46,14 @@ final class IndexingTracker: ObservableObject {
     /// status board's pipeline view. Present only while OCR is in flight.
     @Published private(set) var ocrProgress: [UUID: Double] = [:]
 
+    /// 2026-07-05 (Mark) — LIVE IMPORT activity, keyed by FILE NAME (the document has
+    /// no id yet while it's importing). Value = the current phase text ("Reading the
+    /// file…", "OCR: page N of M", "Building document structure…"). Surfaces the
+    /// import — including the heavy heading/structure-build step that used to run
+    /// silently — on the status board so it can be watched live. Present only while a
+    /// file is importing; cleared when it finishes or fails.
+    @Published private(set) var importActivity: [String: String] = [:]
+
     /// 2026-06-19 — documents in the brief chunking (string-split) stage.
     @Published private(set) var chunkingDocumentIDs: Set<UUID> = []
 
@@ -281,6 +289,11 @@ final class IndexingTracker: ObservableObject {
     func ocrFraction(_ documentID: UUID) -> Double? { ocrProgress[documentID] }
     /// True while a document is in the brief chunking (string-split) stage.
     func isChunking(_ documentID: UUID) -> Bool { chunkingDocumentIDs.contains(documentID) }
+
+    /// Set/clear a file's live import phase (main-actor; called from the import path
+    /// in LibraryView). Keyed by file name because the document has no id yet.
+    func setImportActivity(file: String, phase: String) { importActivity[file] = phase }
+    func clearImportActivity(file: String) { importActivity.removeValue(forKey: file) }
 
     private func handleQueueChange(_ note: Notification) {
         let embed = note.userInfo?[DocumentIndexingQueue.embedQueueKey] as? [UUID] ?? []

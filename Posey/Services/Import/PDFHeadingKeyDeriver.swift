@@ -40,6 +40,13 @@ struct TitleAppearance {
 // ========== BLOCK 02: KEY DERIVER - START ==========
 
 enum PDFHeadingKeyDeriver {
+    private static let minResolvePurity = 0.5
+    private static let fontlessPureShortLinePurity = 0.9
+    private static let stopWords: Set<String> = [
+        "a", "an", "and", "are", "as", "at", "be", "before", "between", "but",
+        "by", "for", "from", "in", "into", "is", "it", "of", "on", "or", "the",
+        "to", "under", "which", "with"
+    ]
 
     /// Derive this book's heading key from its own chapters (Mark's method).
     /// - titles:   known chapter titles (from outline / printed-TOC detection).
@@ -80,11 +87,10 @@ enum PDFHeadingKeyDeriver {
     /// leading chapter numbers, and OCR garble — we are NOT requiring an exact
     /// substring, which the probes showed fails on real books).
     static func appearances(of title: String, in lines: [PDFTextLine], bodyFont: Double) -> [TitleAppearance] {
-        let titleWords = words(title)
+        let titleWords = matchWords(title)
         guard !titleWords.isEmpty else { return [] }
-        let titleSet = Set(titleWords)
         var out: [TitleAppearance] = []
-        for line in lines where titleMatches(titleSet: titleSet, text: line.text) {
+        for line in lines where titleMatches(title: title, text: line.text) {
             out.append(TitleAppearance(line: line, score: prominence(line, bodyFont: bodyFont)))
         }
         return out
@@ -113,41 +119,164 @@ enum PDFHeadingKeyDeriver {
         Set(resolveHeadings(titles: titles, allLines: allLines).map { $0.line })
     }
 
-    /// Resolve each known title to its heading LINE (weightiest standout
-    /// appearance), preserving the title→line mapping so the importer can anchor
-    /// each TOC entry to the heading unit that line becomes. A title with no
-    /// standout appearance is omitted (caller decides the fallback — never fail
-    /// silently). The line is returned once even if two titles resolve to it.
-    static func resolveHeadings(titles: [String], allLines: [PDFTextLine]) -> [(title: String, line: PDFTextLine)] {
+    /// Resolve each known title to its heading LINE — as an ORDER-AWARE ALIGNMENT,
+    /// not an independent per-title beauty contest.
+    ///
+    /// The old code took each title's single weightiest heading-shaped appearance
+    /// ANYWHERE in the document, independently. That scrambles books whose titles
+    /// repeat: a chapter printed prominently in the front matter (GEB's contents /
+    /// per-chapter synopses) or the back-of-book index could out-score its real body
+    /// heading and win — so a chapter anchored to the front or back of the book and
+    /// the navigator went out of order.
+    ///
+    /// MEASURED across the corpus (GEB / Crypto / Attention / ResNet / a novel,
+    /// 2026-07-03): real chapter headings appear in the BODY in reading ORDER, spread
+    /// across the document; the repeated copies cluster in the front matter (contents,
+    /// synopses) and the trailing index. So we choose the assignment of titles→
+    /// heading-shaped lines whose positions run STRICTLY INCREASING in document order,
+    /// maximizing (first) how many titles are placed and (then) their prominence — a
+    /// weighted 2-D increasing subsequence. A title with no in-order heading-shaped
+    /// candidate is SKIPPED — never force-fit, never dragged forward into the index —
+    /// and the caller reports the count so the reader is told some chapters couldn't be
+    /// placed (never fail silently, never invent a title).
+    ///
+    /// `bodyStartIndex` fences off the front matter (contents / synopses) by ignoring
+    /// candidate lines before it; `bodyEndIndex` (default = end) fences off a trailing
+    /// index. Order-alignment alone can still be fooled by a front/back cluster that is
+    /// itself in order, so these fences are load-bearing, not optional polish.
+    ///
+    /// (Antifa small-caps headings, CC#22: still handled — they're heading-shaped via
+    /// `isAllCaps`, so they're candidates; the count-first objective means a real
+    /// heading is placed even when its prominence score is low/negative.)
+    static func resolveHeadings(titles: [String], allLines: [PDFTextLine],
+                                bodyStartIndex: Int = 0,
+                                bodyEndIndex: Int = .max) -> [(title: String, line: PDFTextLine)] {
         let bodyFont = bodyFontSize(of: allLines)
-        var out: [(title: String, line: PDFTextLine)] = []
-        var used: Set<PDFTextLine> = []
-        for title in titles {
-            let apps = appearances(of: title, in: allLines, bodyFont: bodyFont)
-            // Choose the weightiest appearance AMONG the ones that LOOK LIKE A HEADING
-            // (stand out typographically OR are a numbered academic section line). We're
-            // confirming a KNOWN outline title, not scanning blind, so a body-font
-            // numbered heading is safe to take.
-            //
-            // IMPORTANT (CC#22, Antifa, verified on device): pick from the heading-shaped
-            // pool — do NOT take the single global top-scorer and then reject it if it
-            // doesn't stand out. Antifa prints its chapter headings in SMALL caps (smaller
-            // than body), so the real ALL-CAPS heading scores LOW, while the plain
-            // contents-page entry (body-size, with a gap above) scores higher. The old
-            // "global top, then check standsOut" logic picked the contents line, found it
-            // wasn't a heading, and dropped the chapter — losing every chapter even though
-            // its real heading was present. Filtering to heading-shaped appearances first
-            // lets the true ALL-CAPS heading win. (Books whose heading IS the top-scorer
-            // are unaffected — it's still in the pool and still weightiest.)
-            let headingApps = apps.filter {
-                standsOut($0.line, bodyFont: bodyFont) || isNumberedSectionLine($0.line)
-            }
-            guard let top = headingApps.max(by: { $0.score < $1.score }),
-                  !used.contains(top.line) else { continue }
-            used.insert(top.line)
-            out.append((title, top.line))
+        let hasFontSignal = allLines.contains { $0.fontSize > 0 }
+        let endIndex = min(bodyEndIndex, allLines.count)
+
+        // Per title (in TOC / outline order) gather its heading-SHAPED candidate lines
+        // within the body fence, each with its position (index in document order) and a
+        // placement weight. Weight = a large placement base + prominence, so the aligner
+        // prefers to PLACE another chapter over squeezing prominence (a low-prominence
+        // small-caps heading must still be placed), and prominence only breaks ties among
+        // a title's own in-order candidates.
+        struct Cand {
+            let t: Int
+            let pos: Int
+            let line: PDFTextLine
+            let weight: Double
+            let titleHeadsLine: Bool
         }
-        return out
+        let placementBase = 1000.0
+        var cands: [Cand] = []
+        for (t, title) in titles.enumerated() {
+            let titleWords = matchWords(title)
+            guard !titleWords.isEmpty else { continue }
+            // A title's leading SECTION NUMBER is its disambiguator among near-identical
+            // titles. `words()` drops the 1-char number, so word-matching alone can't tell
+            // "7. Theatrical…" from "4. Theatrical…" (CBA) or "9.3 Conservation of Linear
+            // Momentum" from "9.1 Linear Momentum" (OpenStax) — the later section collides
+            // onto the earlier one and the navigator shows it out of order. So: if BOTH the
+            // title and a candidate line carry a section number, they must MATCH. Arabic
+            // only (clean); roman is left to word-match (OCR-garble risk, and it works).
+            let titleNum = leadingSectionNumber(title)
+            var titleCandidates: [Cand] = []
+            for pos in max(0, bodyStartIndex)..<endIndex {
+                let line = allLines[pos]
+                let match = bestCandidateMatchQuality(
+                    title: title,
+                    at: pos,
+                    allLines: allLines,
+                    bodyFont: bodyFont,
+                    bodyStartIndex: bodyStartIndex,
+                    hasFontSignal: hasFontSignal
+                )
+                let titleHeadsLine = titleHeadsLine(title: title, text: line.text)
+                guard match.matches else { continue }
+                if isContentsLeaderLine(line.text) { continue }
+                guard titleHeadsLine || match.linePurity >= minResolvePurity else { continue }
+                if let tn = titleNum, let ln = leadingSectionNumber(line.text), ln != tn { continue }
+                if let tn = titleNum,
+                   leadingSectionNumber(line.text) == nil,
+                   candidateInheritsConflictingSectionNumber(
+                    for: pos,
+                    titleNum: tn,
+                    title: title,
+                    allLines: allLines,
+                    bodyFont: bodyFont,
+                    bodyStartIndex: bodyStartIndex,
+                    hasFontSignal: hasFontSignal
+                   ) {
+                    continue
+                }
+                let precededByHeadingLabel = previousLineIsHeadingLabel(
+                    before: pos,
+                    in: allLines
+                )
+                if headingCandidateLooksValid(
+                    line,
+                    match: match,
+                    bodyFont: bodyFont,
+                    hasFontSignal: hasFontSignal,
+                    titleHeadsLine: titleHeadsLine,
+                    precededByHeadingLabel: precededByHeadingLabel
+                ) {
+                    let start = earliestHeadingStart(for: pos, title: title, titleNum: titleNum,
+                                                     allLines: allLines, bodyFont: bodyFont,
+                                                     bodyStartIndex: bodyStartIndex,
+                                                     hasFontSignal: hasFontSignal)
+                    let startLine = allLines[start]
+                    // Purity decides WHICH matching heading line we trust; prominence only
+                    // breaks ties among equally-pure candidates.
+                    let weight = placementBase
+                        + headingClusterBonus(at: pos, title: title, allLines: allLines)
+                        + (titleHeadsLine ? 120 : 0)
+                        + (precededByHeadingLabel ? 40 : 0)
+                        + match.linePurity * 100
+                        + prominence(line, bodyFont: bodyFont)
+                    titleCandidates.append(
+                        Cand(
+                            t: t,
+                            pos: start,
+                            line: startLine,
+                            weight: weight,
+                            titleHeadsLine: titleHeadsLine
+                        )
+                    )
+                }
+            }
+            if titleCandidates.contains(where: \.titleHeadsLine) {
+                cands.append(contentsOf: titleCandidates.filter(\.titleHeadsLine))
+            } else {
+                cands.append(contentsOf: titleCandidates)
+            }
+        }
+        guard !cands.isEmpty else { return [] }
+
+        // Weighted 2-D increasing subsequence: choose candidates with STRICTLY
+        // increasing title order AND strictly increasing position, maximizing total
+        // weight. Because titles are used at most once and in order, this places each
+        // chapter at most once, in reading order, skipping any that don't fit the chain.
+        // Sorted by (title, position) so every valid predecessor of i precedes it.
+        let sorted = cands.sorted { $0.t != $1.t ? $0.t < $1.t : $0.pos < $1.pos }
+        let n = sorted.count
+        var dp = sorted.map { $0.weight }
+        var prev = [Int](repeating: -1, count: n)
+        for i in 0..<n {
+            for j in 0..<i where sorted[j].t < sorted[i].t && sorted[j].pos < sorted[i].pos {
+                if dp[j] + sorted[i].weight > dp[i] {
+                    dp[i] = dp[j] + sorted[i].weight
+                    prev[i] = j
+                }
+            }
+        }
+        var best = 0
+        for i in 1..<n where dp[i] > dp[best] { best = i }
+        var chainRev: [Int] = []
+        var k = best
+        while k >= 0 { chainRev.append(k); k = prev[k] }
+        return chainRev.reversed().map { (titles[sorted[$0].t], sorted[$0].line) }
     }
 
     /// A flat-layout academic heading carries its prominence in its NUMBERING, not
@@ -165,11 +294,107 @@ enum PDFHeadingKeyDeriver {
                                options: .regularExpression) != nil
     }
 
+    static func isContentsLeaderLine(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 140 else { return false }
+        return trimmed.range(of: #"\.{3,}\s*\d{1,4}\s*$"#, options: .regularExpression) != nil
+            || trimmed.range(of: #"[·•]{3,}\s*\d{1,4}\s*$"#, options: .regularExpression) != nil
+    }
+
+    static func isHeadingLabelLine(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .range(of: #"^(?i:chapter|part|section|appendix|article|book)\s+[ivxlcdm\d]{1,8}\b[.:]?$"#,
+                   options: .regularExpression) != nil
+    }
+
+    static func isNumericHeadingLabelLine(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .range(of: #"^\d{1,3}(?:\.\d{1,3}){0,3}[.:]?$"#,
+                   options: .regularExpression) != nil
+    }
+
     /// Does this line stand out from body text — i.e. could it be a heading at
     /// all? Bigger font, OR bold, OR ALL-CAPS. A plain body-font, non-bold,
     /// non-caps line is a mention, not a heading, and must not vote for the key.
     static func standsOut(_ line: PDFTextLine, bodyFont: Double) -> Bool {
         line.fontSize > bodyFont + 0.5 || line.isBold || line.isAllCaps
+    }
+
+    private static func headingCandidateLooksValid(
+        _ line: PDFTextLine,
+        match: MatchQuality,
+        bodyFont: Double,
+        hasFontSignal: Bool,
+        titleHeadsLine: Bool,
+        precededByHeadingLabel: Bool
+    ) -> Bool {
+        if standsOut(line, bodyFont: bodyFont) || isNumberedSectionLine(line) { return true }
+        if isNumericHeadingLabelLine(line.text) { return true }
+        if precededByHeadingLabel,
+           match.titleCoverage >= 0.9,
+           looksLikeHeadingClusterFragment(line.text) {
+            return true
+        }
+        if match.titleCoverage >= 0.9,
+           line.gapAbove >= 16,
+           looksLikeHeadingClusterFragment(line.text) {
+            return true
+        }
+        if titleHeadsLine, precededByHeadingLabel, line.text.count <= 120 { return true }
+        if titleHeadsLine, line.gapAbove >= 16 { return true }
+        guard !hasFontSignal else { return false }
+
+        let wordCount = line.text.split(separator: " ").count
+        if line.gapAbove >= 14, wordCount <= 14, line.text.count <= 120 { return true }
+        return match.linePurity >= fontlessPureShortLinePurity && wordCount <= 10 && line.text.count <= 80
+    }
+
+    private static func headingClusterBonus(
+        at index: Int,
+        title: String,
+        allLines: [PDFTextLine]
+    ) -> Double {
+        guard allLines.indices.contains(index) else { return 0 }
+        let current = allLines[index]
+        var bonus = 0.0
+
+        if index > 0 {
+            bonus += neighboringHeadingBonus(
+                neighbor: allLines[index - 1],
+                current: current,
+                title: title
+            )
+        }
+        if index + 1 < allLines.count {
+            bonus += neighboringHeadingBonus(
+                neighbor: allLines[index + 1],
+                current: current,
+                title: title
+            )
+        }
+
+        return bonus
+    }
+
+    private static func neighboringHeadingBonus(
+        neighbor: PDFTextLine,
+        current: PDFTextLine,
+        title: String
+    ) -> Double {
+        guard linesAreAdjacent(neighbor, current) else { return 0 }
+        if isHeadingLabelLine(neighbor.text) { return 80 }
+
+        let quality = matchQuality(title: title, text: neighbor.text)
+        if quality.matches {
+            return 60 + quality.linePurity * 20
+        }
+
+        let wordCount = neighbor.text.split(separator: " ").count
+        if quality.linePurity >= 0.8, wordCount <= 4, neighbor.text.count <= 40 {
+            return 45
+        }
+
+        return 0
     }
 
     /// Does `text` (a candidate heading line / unit) match `title`? Two ways:
@@ -180,14 +405,72 @@ enum PDFHeadingKeyDeriver {
     /// carrying only its first ~7 words; (a) misses it (7/20<0.6) but the line is
     /// fully contained in the title, so (b) catches it on the line side.
     static func titleMatches(title: String, text: String) -> Bool {
-        titleMatches(titleSet: Set(words(title)), text: text)
+        matchQuality(title: title, text: text).matches
     }
     static func titleMatches(titleSet: Set<String>, text: String) -> Bool {
-        let lw = Set(words(text))
-        guard !titleSet.isEmpty, !lw.isEmpty else { return false }
+        matchQuality(titleSet: titleSet, text: text).matches
+    }
+
+    struct MatchQuality {
+        let matches: Bool
+        let titleCoverage: Double
+        let linePurity: Double
+    }
+
+    static func matchQuality(titleSet: Set<String>, text: String) -> MatchQuality {
+        let lw = Set(matchWords(text))
+        guard !titleSet.isEmpty, !lw.isEmpty else {
+            return MatchQuality(matches: false, titleCoverage: 0, linePurity: 0)
+        }
         let inter = titleSet.intersection(lw).count
-        return Double(inter) / Double(titleSet.count) >= 0.6
-            || (lw.count >= 3 && inter >= 3 && Double(inter) / Double(lw.count) >= 0.8)
+        let titleCoverage = Double(inter) / Double(titleSet.count)
+        let linePurity = Double(inter) / Double(lw.count)
+        let matches = titleCoverage >= 0.6
+            || (lw.count >= 3 && inter >= 3 && linePurity >= 0.8)
+        return MatchQuality(matches: matches, titleCoverage: titleCoverage, linePurity: linePurity)
+    }
+
+    static func matchQuality(title: String, text: String) -> MatchQuality {
+        titleWordVariants(for: title)
+            .map { matchQuality(titleSet: Set($0), text: text) }
+            .max { lhs, rhs in
+                if lhs.titleCoverage != rhs.titleCoverage { return lhs.titleCoverage < rhs.titleCoverage }
+                return lhs.linePurity < rhs.linePurity
+            } ?? MatchQuality(matches: false, titleCoverage: 0, linePurity: 0)
+    }
+
+    private static func bestCandidateMatchQuality(
+        title: String,
+        at index: Int,
+        allLines: [PDFTextLine],
+        bodyFont: Double,
+        bodyStartIndex: Int,
+        hasFontSignal: Bool
+    ) -> MatchQuality {
+        guard allLines.indices.contains(index) else {
+            return MatchQuality(matches: false, titleCoverage: 0, linePurity: 0)
+        }
+
+        var best = matchQuality(title: title, text: allLines[index].text)
+
+        let clusterRanges = headingTitleClusterRanges(
+            around: index,
+            allLines: allLines,
+            bodyFont: bodyFont,
+            bodyStartIndex: bodyStartIndex,
+            hasFontSignal: hasFontSignal
+        )
+
+        for range in clusterRanges where range.count >= 2 {
+            let text = range.map { allLines[$0].text }.joined(separator: " ")
+            let candidate = matchQuality(title: title, text: text)
+            if candidate.titleCoverage > best.titleCoverage
+                || (candidate.titleCoverage == best.titleCoverage && candidate.linePurity > best.linePurity) {
+                best = candidate
+            }
+        }
+
+        return best
     }
 
     // MARK: - helpers
@@ -207,10 +490,315 @@ enum PDFHeadingKeyDeriver {
         return counts.max { $0.value < $1.value }?.key ?? 0
     }
 
+    private static func earliestHeadingStart(
+        for pos: Int,
+        title: String,
+        titleNum: String?,
+        allLines: [PDFTextLine],
+        bodyFont: Double,
+        bodyStartIndex: Int,
+        hasFontSignal: Bool
+    ) -> Int {
+        var start = pos
+        var cursor = pos
+        while cursor > bodyStartIndex {
+            let prev = allLines[cursor - 1]
+            let cur = allLines[cursor]
+            guard prev.pageIndex == cur.pageIndex else { break }
+            guard linesAreAdjacent(prev, cur) else { break }
+            guard !isContentsLeaderLine(prev.text) else { break }
+            let prevMatch = matchQuality(title: title, text: prev.text)
+            let prevLooksLikeHeading = headingCandidateLooksValid(
+                prev,
+                match: prevMatch,
+                bodyFont: bodyFont,
+                hasFontSignal: hasFontSignal,
+                titleHeadsLine: false,
+                precededByHeadingLabel: false
+            )
+            guard prevLooksLikeHeading else { break }
+            if let tn = titleNum, let ln = leadingSectionNumber(prev.text), ln != tn { break }
+            let canPrefixWrappedHeading = prev.text.count <= 40 && prev.text.split(separator: " ").count <= 4
+            guard prevMatch.matches || canPrefixWrappedHeading else { break }
+            start = cursor - 1
+            cursor -= 1
+        }
+        return start
+    }
+
+    private static func candidateInheritsConflictingSectionNumber(
+        for pos: Int,
+        titleNum: String,
+        title: String,
+        allLines: [PDFTextLine],
+        bodyFont: Double,
+        bodyStartIndex: Int,
+        hasFontSignal: Bool
+    ) -> Bool {
+        guard allLines.indices.contains(pos) else { return false }
+
+        var cursor = pos
+        while cursor > bodyStartIndex {
+            let prev = allLines[cursor - 1]
+            let cur = allLines[cursor]
+            guard prev.pageIndex == cur.pageIndex else { break }
+            guard linesAreAdjacent(prev, cur) else { break }
+            guard !isContentsLeaderLine(prev.text) else { break }
+
+            let prevMatch = matchQuality(title: title, text: prev.text)
+            let prevLooksLikeHeading = headingCandidateLooksValid(
+                prev,
+                match: prevMatch,
+                bodyFont: bodyFont,
+                hasFontSignal: hasFontSignal,
+                titleHeadsLine: false,
+                precededByHeadingLabel: false
+            )
+            guard prevLooksLikeHeading else { break }
+
+            if let neighborNum = leadingSectionNumber(prev.text) {
+                return neighborNum != titleNum
+            }
+
+            cursor -= 1
+        }
+
+        return false
+    }
+
+    private static func linesAreAdjacent(_ a: PDFTextLine, _ b: PDFTextLine) -> Bool {
+        let upper = a.yTop >= b.yTop ? a : b
+        let lower = upper == a ? b : a
+        let gap = upper.yBottom - lower.yTop
+        return gap <= 32 && gap >= -6
+    }
+
+    private static func previousLineIsHeadingLabel(before index: Int, in allLines: [PDFTextLine]) -> Bool {
+        guard index > 0, allLines.indices.contains(index) else { return false }
+        let previous = allLines[index - 1]
+        let current = allLines[index]
+        guard previous.pageIndex == current.pageIndex else { return false }
+        guard linesAreAdjacent(previous, current) else { return false }
+        return isHeadingLabelLine(previous.text) || isNumericHeadingLabelLine(previous.text)
+    }
+
+    /// Extract a leading ARABIC section number from a title / heading line, if present:
+    /// "7." → "7", "9.3." → "9.3", "3.2.1 Foo" → "3.2.1", "Chapter 7 …" → "7",
+    /// "Part 3 …" → "3". Roman numerals are intentionally NOT matched (OCR-garble risk
+    /// on scanned books; those resolve by word-match, which already works). Used to stop
+    /// a numbered title from matching a DIFFERENTLY-numbered heading line (CBA, OpenStax).
+    static func leadingSectionNumber(_ s: String) -> String? {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        if let r = t.range(of: #"^(?i:chapter|part|section|appendix|article|book)\s+(\d{1,3})\b"#,
+                           options: .regularExpression) {
+            let m = t[r]
+            if let n = m.range(of: #"\d{1,3}"#, options: .regularExpression) { return String(m[n]) }
+        }
+        if let r = t.range(of: #"^\d{1,3}(?:\.\d{1,3}){0,3}"#, options: .regularExpression) {
+            return String(t[r])
+        }
+        return nil
+    }
+
     private static func words(_ s: String) -> [String] {
         s.lowercased()
          .components(separatedBy: CharacterSet.alphanumerics.inverted)
          .filter { $0.count >= 2 }      // drop 1-char noise / lone chapter numbers
+    }
+
+    private static func matchWords(_ s: String) -> [String] {
+        let base = words(s)
+        let filtered = base.filter { !stopWords.contains($0) }
+        // Keep the matcher resilient for genuinely short titles by only
+        // dropping stop words when enough informative words remain.
+        return filtered.count >= 3 ? filtered : base
+    }
+
+    private static func titleHeadsLine(title: String, text: String) -> Bool {
+        titleWordVariants(for: title).contains { tokens in
+            titlePrefixTokensMatch(tokens, text: text)
+        }
+    }
+
+    private static func titleWordVariants(for title: String) -> [[String]] {
+        var variants: [[String]] = []
+
+        let full = matchWords(title)
+        if !full.isEmpty { variants.append(full) }
+
+        if let stripped = stripHeadingLabelPrefix(from: title) {
+            let tail = matchWords(stripped)
+            if tail.count >= 2 && !variants.contains(tail) {
+                variants.append(tail)
+            }
+        }
+
+        return variants
+    }
+
+    private static func stripHeadingLabelPrefix(from title: String) -> String? {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let range = trimmed.range(
+            of: #"^(chapter|part|section|appendix|article|book)\s+[ivxlcdm\d]{1,8}\s*[:.]?\s*"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else { return nil }
+        let remainder = String(trimmed[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return remainder.isEmpty ? nil : remainder
+    }
+
+    private static func titlePrefixTokensMatch(_ titleTokens: [String], text: String) -> Bool {
+        let textTokens = matchWords(text)
+        guard !titleTokens.isEmpty, !textTokens.isEmpty else { return false }
+        return orderedPrefixMatch(prefix: titleTokens, full: textTokens)
+            || (textTokens.count >= 2 && orderedPrefixMatch(prefix: textTokens, full: titleTokens))
+    }
+
+    private static func orderedPrefixMatch(prefix: [String], full: [String]) -> Bool {
+        guard full.count >= prefix.count else { return false }
+        for (lhs, rhs) in zip(prefix, full) {
+            if normalizedHeadingToken(lhs) != normalizedHeadingToken(rhs) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func normalizedHeadingToken(_ token: String) -> String {
+        token.localizedLowercase
+            .replacingOccurrences(of: "l", with: "1")
+            .replacingOccurrences(of: "i", with: "1")
+    }
+
+    private static func headingTitleClusterRanges(
+        around index: Int,
+        allLines: [PDFTextLine],
+        bodyFont: Double,
+        bodyStartIndex: Int,
+        hasFontSignal: Bool
+    ) -> [[Int]] {
+        guard allLines.indices.contains(index) else { return [] }
+        var start = index
+        var end = index
+
+        while let previous = previousHeadingTitleFragmentIndex(
+            before: start,
+            allLines: allLines,
+            bodyFont: bodyFont,
+            bodyStartIndex: bodyStartIndex,
+            hasFontSignal: hasFontSignal
+        ) {
+            start = previous
+        }
+
+        while let next = nextHeadingTitleFragmentIndex(
+            after: end,
+            allLines: allLines,
+            bodyFont: bodyFont,
+            hasFontSignal: hasFontSignal
+        ) {
+            end = next
+        }
+
+        let indices = Array(start...end)
+        guard indices.count > 1 else { return [[index]] }
+
+        var ranges: [[Int]] = [[index]]
+        for lower in 0..<indices.count {
+            for upper in lower..<indices.count {
+                let range = Array(indices[lower...upper])
+                guard range.contains(index) else { continue }
+                guard range.count <= 6 else { continue }
+                let clusterText = range.map { allLines[$0].text }.joined(separator: " ")
+                guard looksLikeHeadingClusterText(clusterText) else { continue }
+                ranges.append(range)
+            }
+        }
+        return ranges
+    }
+
+    private static func previousHeadingTitleFragmentIndex(
+        before index: Int,
+        allLines: [PDFTextLine],
+        bodyFont: Double,
+        bodyStartIndex: Int,
+        hasFontSignal: Bool
+    ) -> Int? {
+        guard index > bodyStartIndex else { return nil }
+        let previous = allLines[index - 1]
+        let current = allLines[index]
+        guard previous.pageIndex == current.pageIndex else { return nil }
+        guard linesAreAdjacent(previous, current) else { return nil }
+        guard headingTitleFragmentLooksPlausible(
+            previous,
+            bodyFont: bodyFont,
+            hasFontSignal: hasFontSignal,
+            allowGapAbove: false
+        ) else { return nil }
+        return index - 1
+    }
+
+    private static func nextHeadingTitleFragmentIndex(
+        after index: Int,
+        allLines: [PDFTextLine],
+        bodyFont: Double,
+        hasFontSignal: Bool
+    ) -> Int? {
+        guard index + 1 < allLines.count else { return nil }
+        let current = allLines[index]
+        let next = allLines[index + 1]
+        guard next.pageIndex == current.pageIndex else { return nil }
+        guard linesAreAdjacent(current, next) else { return nil }
+        guard headingTitleFragmentLooksPlausible(
+            next,
+            bodyFont: bodyFont,
+            hasFontSignal: hasFontSignal,
+            allowGapAbove: false
+        ) else { return nil }
+        return index + 1
+    }
+
+    private static func headingTitleFragmentLooksPlausible(
+        _ line: PDFTextLine,
+        bodyFont: Double,
+        hasFontSignal: Bool,
+        allowGapAbove: Bool
+    ) -> Bool {
+        guard !isContentsLeaderLine(line.text) else { return false }
+        let wordCount = line.text.split(separator: " ").count
+        guard line.text.count <= 120, wordCount <= 12 else { return false }
+        if isHeadingLabelLine(line.text) || isNumericHeadingLabelLine(line.text) { return true }
+        if hasFontSignal && standsOut(line, bodyFont: bodyFont) { return true }
+        if allowGapAbove && line.gapAbove >= 16 { return true }
+        return looksLikeHeadingClusterFragment(line.text) && (!hasFontSignal || line.gapAbove <= 10)
+    }
+
+    private static func looksLikeHeadingClusterFragment(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let words = headingClusterWords(trimmed)
+        guard !words.isEmpty, words.count <= 12, trimmed.count <= 120 else { return false }
+        if isHeadingLabelLine(trimmed) || isNumericHeadingLabelLine(trimmed) { return true }
+        guard let firstLetter = trimmed.first(where: { $0.isLetter }), firstLetter.isUppercase else { return false }
+        guard !trimmed.hasSuffix("."), !trimmed.hasSuffix("!"), !trimmed.hasSuffix("?"), !trimmed.hasSuffix(";"), !trimmed.hasSuffix(":") else {
+            return false
+        }
+        return true
+    }
+
+    private static func looksLikeHeadingClusterText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 240 else { return false }
+        let words = headingClusterWords(trimmed)
+        guard !words.isEmpty, words.count <= 28 else { return false }
+        if let last = trimmed.last, ".!?;".contains(last) {
+            return false
+        }
+        return true
+    }
+
+    private static func headingClusterWords(_ text: String) -> [String] {
+        text.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 2 }
     }
 }
 

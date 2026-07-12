@@ -54,9 +54,16 @@ struct AskPoseyLibraryStatusLabel: View {
     /// breath…" fires ONLY on a true `.critical` pause — a `.serious` stretch is
     /// still embedding (just slower), so it shows progress, not a stall.
     private func resolveStage() -> PoseyVoice.Stage {
+        #if POSEY_ENABLE_ASK_POSEY
+        // Ask Posey builds: a book not yet set up for Ask Posey reads as "not
+        // available". In a v1.0 reader (Ask Posey compiled out) there is no Ask
+        // Posey to be un-set-up — this label is a pure SEARCH-readiness signal,
+        // so we skip this state and fall through to embedding progress → "Ready"
+        // (green the moment the book's leaves are embedded and search is good).
         if !AskPoseyAvailability.isSetUp {
             return .notAvailable
         }
+        #endif
         // True pause (critical) outranks everything — she's genuinely stopped.
         if tracker.isCriticallyPaused(documentID) {
             return .catchingBreath
@@ -115,7 +122,11 @@ struct AskPoseyLibraryStatusLabel: View {
                 .frame(width: 7, height: 7)
         }
         .accessibilityElement(children: .combine)
+        #if POSEY_ENABLE_ASK_POSEY
         .accessibilityLabel("Ask Posey: \(text)")
+        #else
+        .accessibilityLabel("Search readiness: \(text)")
+        #endif
         .task(id: documentID) { refreshAnswerable() }
         // Re-check "answerable" whenever indexing state changes — e.g. the
         // moment a doc's embedding completes, it flips grey "Reading ahead" →

@@ -1110,35 +1110,16 @@ struct ReaderView: View {
         revealChrome()
     }
 
-    /// Capture the active sentence as the Ask Posey anchor and open
-    /// the sheet. The captured anchor is the active sentence at the
-    /// moment of invocation — playback paused or running — so the
-    /// model has stable context even if playback advances while the
-    /// sheet is presenting. M5+ will share this entry point with
-    /// the passage-scoped invocation (text-selection menu); the
-    /// only difference will be how the anchor is built.
+    /// Capture the active sentence as the Ask Posey anchor and open the sheet.
+    /// The anchor is the active sentence at the moment of invocation — playback
+    /// paused or running — so the model has stable context even if playback
+    /// advances while the sheet is presenting.
     ///
-    /// **M5 wiring (2026-05-01).** The chat view model now takes:
-    /// - documentID + plainText so the prompt builder can reach into
-    ///   `ask_posey_conversations` for prior history and compute
-    ///   surrounding context around the anchor offset.
-    /// - A live `AskPoseyService` (when available on the runtime
-    ///   platform) so `send()` actually streams a real AFM response.
-    ///   Both classifier and streamer are nil on platforms without
-    ///   FoundationModels — the view model falls back to the M4 echo
-    ///   stub so previews/tests keep running.
-    ///
-    /// **2026-06-19 — `AskPoseyScope` REMOVED (Mark).** It was an AFM-era
-    /// knob (passage vs document) used to make AFM behave; the classifier
-    /// it fed was removed earlier this session, and retrieval is full-
-    /// document regardless of scope, so it changed nothing real. Now the
-    /// anchor (the current sentence at invocation) ALWAYS passes — it is
-    /// the conversation's header, a bookmark-style link back to where in
-    /// the corpus the conversation began. It is NOT a retrieval gate:
-    /// whether a question is narrow ("this passage") or broad ("the whole
-    /// book") is the LLM's call, from the question itself. The prompt
-    /// always carries the anchor + surrounding window AND the full-doc RAG
-    /// chunks, and the model decides which to lean on.
+    /// The anchor is the conversation's header: a bookmark-style link back to
+    /// where in the corpus the conversation began. It is NOT a retrieval gate —
+    /// the prompt always carries the anchor + surrounding window AND the full-
+    /// document RAG chunks, and the model decides which to lean on based on the
+    /// question (narrow "this passage" vs. broad "the whole book").
 
     /// 2026-05-04 — Quick-action helpers used by the chrome
     /// Ask Posey menu AND the corresponding remoteRegister ids.
@@ -1944,6 +1925,7 @@ private struct ReaderPreferencesSheet: View {
     // the preferences reorganization (the retrieval-strictness picker now
     // lives on the Model Library screen alongside the model + embedder).
 
+    #if POSEY_ENABLE_ASK_POSEY
     /// Push state for the Model Library screen. Owned here (the
     /// always-rendered sheet host) rather than in the below-the-fold
     /// `AskPoseyPreferencesSection`, so the user tap, the
@@ -1954,6 +1936,7 @@ private struct ReaderPreferencesSheet: View {
     /// preferences invitation; flows into the Model Library). Repeats on each
     /// entry until Nomic + ≥1 MLX model are present.
     @State private var showAskPoseyOnboarding = false
+    #endif
 
     /// Lazily-built Markdown export of every annotation + conversation (Data Portability).
     /// nil while the DB is unavailable.
@@ -2123,6 +2106,9 @@ private struct ReaderPreferencesSheet: View {
                 // the gated-download disclosure/license sheets present
                 // correctly. This section is the active-model row + the
                 // "Browse Model Library" link (Hal's settings convention).
+                // Gated: Posey 1.0 ships without Ask Posey, so the whole
+                // on-ramp (section + Model Library + onboarding) compiles out.
+                #if POSEY_ENABLE_ASK_POSEY
                 AskPoseyPreferencesSection(
                     documentID: viewModel.document.id,
                     database: viewModel.databaseManager,
@@ -2130,9 +2116,11 @@ private struct ReaderPreferencesSheet: View {
                     onGetStarted: { showAskPoseyOnboarding = true }
                 )
                 .id("preferences.askPosey.section")
+                #endif
             }
             .navigationTitle("Reader Preferences")
             .navigationBarTitleDisplayMode(.inline)
+            #if POSEY_ENABLE_ASK_POSEY
             .navigationDestination(isPresented: $showModelLibrary) {
                 AskPoseyModelLibraryView(
                     migrationCoordinator: EmbedderMigrationCoordinator.shared,
@@ -2148,6 +2136,7 @@ private struct ReaderPreferencesSheet: View {
                     onNotNow: { showAskPoseyOnboarding = false }
                 )
             }
+            #endif
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
@@ -2158,11 +2147,13 @@ private struct ReaderPreferencesSheet: View {
             ) { _ in
                 dismiss()
             }
+            #if POSEY_ENABLE_ASK_POSEY
             .onReceive(
                 NotificationCenter.default.publisher(for: .remoteOpenModelLibrary)
             ) { _ in
                 showModelLibrary = true
             }
+            #endif
             .onAppear {
                 draftRatePercentage = viewModel.customRatePercentage
                 RemoteControlState.shared.presentedSheet = "preferences"

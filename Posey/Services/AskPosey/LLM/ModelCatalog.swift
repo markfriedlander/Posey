@@ -95,20 +95,21 @@ enum ModelCatalog {
         return firstMLX.id
     }
 
-    /// The model that runs background **`@Generable` tasks** — intent
-    /// classification and query expansion (RAPTOR summaries + metadata call
-    /// AFM directly). 2026-05-31: prefer AFM, whose guided generation forces
-    /// reliable structured output MLX lacks. Falls back to the MLX answer
+    /// The model that runs background **`@Generable` tasks** — query expansion
+    /// and document-metadata extraction. Prefers AFM, whose guided generation
+    /// forces reliable structured output MLX lacks. Falls back to the MLX answer
     /// model when AFM isn't available (a no-Apple-Intelligence device that
-    /// unlocked with Nomic + MLX) — those tasks degrade to free-text rather
-    /// than break.
+    /// unlocked with Nomic + MLX) — those tasks degrade to free-text rather than
+    /// break. RAPTOR summaries do NOT route through here: they use
+    /// `answerModel()` (MLX, never AFM).
     ///
     /// NOTE: conversation **summarization** deliberately does NOT use this —
     /// it routes through `answerModel()` (MLX) instead. It's free-text (not
     /// `@Generable`, so AFM gives it nothing) and it carries the user's full
     /// conversation, so keeping it on the on-device MLX model preserves the
     /// privacy guarantee a privacy-motivated MLX user chose (the #4 decision,
-    /// `dadefb2`). AFM's only exposure here is the short intent query.
+    /// `dadefb2`). AFM's only exposure via this path is the short `@Generable`
+    /// query-expansion + metadata calls.
     ///
     /// Decoupled from `answerModel()` so the answer engine and the background
     /// engine are independent — the background engine is itself swappable the

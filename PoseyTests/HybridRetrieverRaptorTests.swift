@@ -7,12 +7,13 @@ import XCTest
 /// produced in a Release build (only a DEBUG-only antenna verb built them).
 /// The production trigger now lives in `RaptorTreeService` (kicked from
 /// `UnitEmbeddingService` on index completion + `bootstrap` on launch). The
-/// *builder* (cluster → AFM-summarize → verify) needs Apple Foundation Models
-/// and is therefore phone-only to exercise end-to-end. What IS verifiable on
+/// *builder* (cluster → model-summarize → verify) needs a real answer model and
+/// is therefore phone-only to exercise end-to-end. What IS verifiable on
 /// the simulator — and is the crux Mark asked to confirm — is that once a
-/// summary node is stored, `HybridRetriever` actually surfaces it. These tests
-/// prove that via the lexical (BM25) path, which needs no AFM and no embedding
-/// backend, plus the two count helpers `RaptorTreeService` relies on.
+/// summary node is stored (here under the active answer model's id, since
+/// per-model trees scope retrieval by `llm_id`), `HybridRetriever` actually
+/// surfaces it. These tests prove that via the lexical (BM25) path, which needs
+/// no model and no embedding backend, plus the count helpers the service relies on.
 final class HybridRetrieverRaptorTests: XCTestCase {
 
     private func makeDB() throws -> (DatabaseManager, ParsedDocument) {
@@ -52,7 +53,7 @@ final class HybridRetrieverRaptorTests: XCTestCase {
             endUnitID: unit.id, endIntraOffset: 0,
             text: "This cluster summary concerns the Zorblattian voyage and its recurring themes.",
             embedding: nil)
-        try db.replaceSummaryNodes([summary], for: parsed.id)
+        try db.replaceSummaryNodes([summary], for: parsed.id, llmID: ModelCatalog.answerModel().id)
         XCTAssertEqual(try db.raptorSummaryNodeCount(for: parsed.id), 1)
 
         let retriever = HybridRetriever(database: db)
@@ -75,9 +76,9 @@ final class HybridRetrieverRaptorTests: XCTestCase {
             startUnitID: unit.id, startIntraOffset: 0,
             endUnitID: unit.id, endIntraOffset: 0,
             text: "A summary.", embedding: nil)
-        try db.replaceSummaryNodes([summary], for: parsed.id)
+        try db.replaceSummaryNodes([summary], for: parsed.id, llmID: ModelCatalog.answerModel().id)
         XCTAssertEqual(try db.raptorSummaryNodeCount(for: parsed.id), 1)
-        try db.replaceSummaryNodes([], for: parsed.id)
+        try db.replaceSummaryNodes([], for: parsed.id, llmID: ModelCatalog.answerModel().id)
         XCTAssertEqual(try db.raptorSummaryNodeCount(for: parsed.id), 0)
     }
 
@@ -96,7 +97,7 @@ final class HybridRetrieverRaptorTests: XCTestCase {
             startUnitID: unit.id, startIntraOffset: 0,
             endUnitID: unit.id, endIntraOffset: 0,
             text: "A summary node.", embedding: [0.1, 0.2, 0.3])
-        try db.replaceSummaryNodes([summary], for: parsed.id)
+        try db.replaceSummaryNodes([summary], for: parsed.id, llmID: ModelCatalog.answerModel().id)
         // Summary node exists but is NOT an embedded *leaf*.
         XCTAssertEqual(try db.raptorSummaryNodeCount(for: parsed.id), 1)
         XCTAssertEqual(try db.embeddedLeafChunkCount(for: parsed.id), 0)

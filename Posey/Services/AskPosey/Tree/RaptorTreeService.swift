@@ -1,13 +1,10 @@
 import Foundation
-#if canImport(FoundationModels)
-import FoundationModels
-#endif
 
 // ========== BLOCK 01: RAPTOR TREE SERVICE - START ==========
 
 /// Background owner of the production RAPTOR tree build.
 ///
-/// **Why this exists.** `RaptorTreeBuilder` (cluster → AFM-summarize →
+/// **Why this exists.** `RaptorTreeBuilder` (cluster → model-summarize →
 /// verify) was fully implemented but only ever invoked by the DEBUG-only
 /// `BUILD_RAPTOR_TREE` antenna verb, so a shipping Release build produced
 /// ZERO summary nodes — the "collapsed tree" the docstrings advertise never
@@ -34,16 +31,24 @@ import FoundationModels
 ///     pre-existing library (imported before this feature) and resumes any
 ///     build interrupted by termination.
 ///
-/// **State model.** Deliberately schema-free: "does a tree exist?" is just
-/// `raptorSummaryNodeCount(for:) > 0`, and the in-memory queue/`draining`
-/// flag (mirroring `PDFEnhancementService`) serialize the work. No
-/// `raptor_status` column — the count is the single source of truth, so there
-/// is nothing to migrate or keep consistent.
+/// **State model.** Deliberately schema-free: "does a tree exist (for the
+/// active answer model)?" is just `raptorSummaryNodeCount(for:llmID:) > 0`, and
+/// the in-memory queue/`draining` flag (mirroring `PDFEnhancementService`)
+/// serialize the work. No `raptor_status` column — the count is the single
+/// source of truth, so there is nothing to migrate or keep consistent.
 ///
-/// **AFM gate.** RAPTOR summaries require Apple Foundation Models. On a device
-/// where AFM is unavailable the whole service no-ops up front (no clustering,
-/// no per-cluster backoff sleeps) so it never wastes work that can't succeed;
-/// when AFM later becomes available a re-index re-triggers the build.
+/// **Per-model trees (2026-07-08).** Each of the 4 MLX answer models keeps its
+/// OWN summary tree, stored under its `llm_id` in the shared collapsed pool (the
+/// row-level analog of the per-embedder vector columns). A build creates/replaces
+/// only the ACTIVE model's tree; the others are untouched. Retrieval fuses leaves
+/// + only the active model's summaries.
+///
+/// **MLX-answer-model gate.** Trees are built by (and only by) a downloaded MLX
+/// answer model — never AFM (it refused benign literary passages and would route
+/// a private document through Apple's servers). When no MLX model is present the
+/// whole service no-ops up front (no clustering, no per-cluster backoff sleeps)
+/// so it never wastes work that can't produce a valid tree; downloading a model
+/// + a re-index re-triggers the build.
 actor RaptorTreeService {
 
     // MARK: Shared instance
@@ -62,7 +67,7 @@ actor RaptorTreeService {
     /// small)" vs genuinely-pending ones, from the SAME number. (2026-06-28)
     static let minLeavesForBuild = 24
     /// Cap on leaves fed into one build, to bound k-means + the number of
-    /// AFM summary calls on very large books. The builder truncates each
+    /// model summary calls on very large books. The builder truncates each
     /// cluster's source to its own input budget; this bounds breadth.
     private static let maxLeavesForBuild = 600
 
@@ -82,7 +87,7 @@ actor RaptorTreeService {
     static let summaryNodeCountKey = "posey.raptor.summaryNodeCount"
 
     /// Posted on the main thread when a REAL build begins for a document —
-    /// i.e. AFM is available, the leaf-count threshold is met, and clustering
+    /// i.e. an MLX answer model is present, the leaf-count threshold is met, and clustering
     /// is about to run (not for the cheap no-op cases). userInfo: `documentID`.
     /// Drives the reader's "re-reading for the big picture" status. The paired
     /// `didBuildNotification` ends that status. (2026-06-17)
@@ -146,14 +151,17 @@ actor RaptorTreeService {
     /// builds). Skips documents that already have summaries so a tree is
     /// never rebuilt on every launch.
     func bootstrap() async {
-        guard isAFMAvailable else {
-            dbgLog("RaptorTreeService: bootstrap skipped (AFM unavailable)")
+        guard isMLXAnswerModelReady else {
+            dbgLog("RaptorTreeService: bootstrap skipped (no MLX answer model)")
             return
         }
         guard let db = databaseManager else {
             dbgLog("RaptorTreeService: bootstrap skipped (no databaseManager)")
             return
         }
+        // "Needs a tree" is per answer model: a document already carrying the
+        // OTHER models' trees still needs one built under the active model.
+        let activeLLMID = ModelCatalog.answerModel().id
         let candidates: [UUID]
         do {
             candidates = try await MainActor.run { () throws -> [UUID] in
@@ -161,7 +169,7 @@ actor RaptorTreeService {
                 for doc in try db.documents() {
                     let leaves = try db.embeddedLeafChunkCount(for: doc.id)
                     guard leaves >= Self.minLeavesForBuild else { continue }
-                    let summaries = try db.raptorSummaryNodeCount(for: doc.id)
+                    let summaries = try db.raptorSummaryNodeCount(for: doc.id, llmID: activeLLMID)
                     if summaries == 0 { ids.append(doc.id) }
                 }
                 return ids
@@ -187,9 +195,9 @@ actor RaptorTreeService {
     /// Build the summary tree for ONE document and return when done — the
     /// awaitable entry the `DocumentIndexingQueue`'s `LiveDocumentIndexer`
     /// calls inside a document's serial slot, right after its leaves finish
-    /// embedding. Self-gates exactly like the old fire-and-forget path (AFM
-    /// availability, minimum leaf count) so it is a cheap no-op when those
-    /// aren't met, and honors `Task` cancellation inside `buildTree`.
+    /// embedding. Self-gates exactly like the old fire-and-forget path (MLX
+    /// answer model present, minimum leaf count) so it is a cheap no-op when
+    /// those aren't met, and honors `Task` cancellation inside `buildTree`.
     /// (2026-06-18 — replaces the `enqueue` → internal-drain path for the
     /// production pipeline; the document queue now owns embed→RAPTOR ordering.)
     func build(_ documentID: UUID) async {
@@ -216,15 +224,19 @@ actor RaptorTreeService {
 
     // MARK: Build
 
-    /// Build (or rebuild) the layer-1 summary tree for one document:
-    /// load embedded leaves → cluster + AFM-summarize + verify
-    /// (`RaptorTreeBuilder`) → embed each verified summary → store via
-    /// `replaceSummaryNodes`. Best-effort: any failure logs and leaves the
-    /// existing summaries (if any) untouched.
+    /// Build (or rebuild) the active answer model's layer-1 summary tree for one
+    /// document: load embedded leaves → cluster + summarize (active MLX model) +
+    /// verify (`RaptorTreeBuilder`) → embed each verified summary → store via
+    /// `replaceSummaryNodes` under the model's `llm_id`. Best-effort: any failure
+    /// logs and leaves the existing summaries (if any) untouched.
     private func buildTree(for documentID: UUID) async {
-        guard isAFMAvailable else { return }
+        guard isMLXAnswerModelReady else { return }
         guard let db = databaseManager else { return }
         if cancelled.contains(documentID) { cancelled.remove(documentID); return }
+        // The tree we're about to build belongs to whichever answer model is
+        // active now; it's stored + retrieved under this id, alongside (not over)
+        // the other models' trees.
+        let activeLLMID = ModelCatalog.answerModel().id
 
         // Load embedded leaves + the full document text (entity-grounding
         // haystack) in one main-actor hop.
@@ -251,7 +263,7 @@ actor RaptorTreeService {
             return
         }
 
-        // Committed to a real build now (AFM present, threshold met). Announce
+        // Committed to a real build now (MLX answer model present, threshold met). Announce
         // the start so the reader can show "re-reading for the big picture".
         await MainActor.run {
             NotificationCenter.default.post(
@@ -320,7 +332,7 @@ actor RaptorTreeService {
         if cancelled.contains(documentID) { cancelled.remove(documentID); return }
         let summariesToStore = toStore   // immutable snapshot for the @Sendable closure
         do {
-            try await MainActor.run { try db.replaceSummaryNodes(summariesToStore, for: documentID) }
+            try await MainActor.run { try db.replaceSummaryNodes(summariesToStore, for: documentID, llmID: activeLLMID) }
         } catch {
             dbgLog("RaptorTreeService: store failed for %@: %@",
                    documentID.uuidString, String(describing: error))
@@ -346,21 +358,20 @@ actor RaptorTreeService {
         }
     }
 
-    // MARK: AFM availability
+    // MARK: Answer-model availability
 
-    /// True iff Apple Foundation Models can summarize on this device. The
-    /// builder also guards internally, but checking here avoids enqueuing /
-    /// clustering / per-cluster backoff sleeps that could never succeed.
-    private var isAFMAvailable: Bool {
-        #if canImport(FoundationModels)
-        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-            if case .available = SystemLanguageModel.default.availability { return true }
-            return false
-        }
-        return false
-        #else
-        return false
-        #endif
+    /// True iff a downloaded MLX **answer model** is present — the model that
+    /// authors summaries. RAPTOR trees are built by (and keyed to) the active
+    /// answer model, never AFM: AFM refused benign literary passages and would
+    /// route a privacy-motivated user's document through Apple's servers, so it
+    /// is deliberately excluded from tree-building (Mark, 2026-07-08). When no
+    /// MLX model is downloaded, `answerModel()` cannot resolve to one, so the
+    /// service no-ops up front (no clustering / per-cluster backoff sleeps that
+    /// could never produce a valid tree). A later model download + re-index
+    /// re-triggers the build. The builder also guards internally (defense in
+    /// depth).
+    private var isMLXAnswerModelReady: Bool {
+        ModelCatalog.answerModel().source == .mlx
     }
 }
 

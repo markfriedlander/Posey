@@ -213,13 +213,12 @@ final class EmbedderMigrationCoordinator: ObservableObject {
         UserDefaults.standard.set(target.rawValue, forKey: EmbeddingBackend.defaultsKey)
         EmbeddingBackend.clearSwapMarker()
 
-        // Ask Posey unlock signal — a completed build of ANY non-default
-        // (downloadable, `modelID != nil`) embedder — Nomic or mxbai — marks it
-        // provisioned (sticky; persists even if the user later reverts the active
-        // embedder). Was `== .nomic` before mxbai was wired in as an option.
-        if target.modelID != nil {
-            AskPoseyAvailability.markEmbedderProvisioned()
-        }
+        // Ask Posey's unlock is DERIVED from the active backend, not a flag
+        // (`AskPoseyAvailability.embedderProvisioned`, present-based 2026-07-08):
+        // completing this switch set the active backend to `target` above, so a
+        // completed switch to an advanced embedder unlocks automatically — and
+        // deleting it later (reverting the active backend to NLContextual)
+        // re-locks. Nothing to persist here.
 
         await MainActor.run { self.publish(.done(reEmbedded: reEmbedded)) }
     }

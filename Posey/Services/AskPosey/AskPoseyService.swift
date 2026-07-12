@@ -171,52 +171,6 @@ enum AskPoseyServiceError: LocalizedError, Sendable {
 // ========== BLOCK 02: ERRORS - END ==========
 
 
-// ========== BLOCK 03: PROMPT BUILDING - START ==========
-/// Pure-string helpers so the prompt construction can be unit tested
-/// without touching AFM. Keeping them in one place also makes it
-/// straightforward to A/B different prompt shapes during M3 → M5
-/// without rewriting the service.
-///
-/// `nonisolated` because Posey's project default is `MainActor` and
-/// these static properties are referenced from `AskPoseyService`'s
-/// init parameter defaults — which Swift evaluates outside any
-/// actor context, so MainActor-isolated statics warn there.
-nonisolated enum AskPoseyPrompts {
-
-    /// System-level instructions handed to the `LanguageModelSession`
-    /// at init time. Stable across Call 1 (classify) and Call 2
-    /// (respond) — the same persona works for both. Keep this short:
-    /// every token here costs context budget for every call.
-    static let classifierInstructions = """
-    You are Posey, an offline reading assistant. The user is reading a \
-    document and asking questions about it. Your job here is to classify \
-    each question into exactly one of three buckets — never invent a \
-    fourth category, never refuse, never produce free text.
-    """
-
-    /// Build the Call-1 prompt. Single source of truth for the prompt
-    /// shape; tests assert against this.
-    static func classifierPrompt(question: String, anchor: String?) -> String {
-        let trimmedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        var lines: [String] = []
-        if let anchor, !anchor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Anchor first so the model can see what passage was
-            // active at invocation. Quoted to make the boundary
-            // unambiguous when the passage contains punctuation.
-            lines.append("Anchor passage (currently visible to the reader):")
-            lines.append("> \(anchor.trimmingCharacters(in: .whitespacesAndNewlines))")
-            lines.append("")
-        }
-        lines.append("User question: \"\(trimmedQuestion)\"")
-        lines.append("")
-        lines.append("Classify the question into exactly one of:")
-        lines.append("- immediate — the question is about the anchor passage above.")
-        lines.append("- search — a WHERE/location question: the user mainly wants to know where in the document a specific named thing appears (a chapter, a section, a named passage). Canonical shapes: \"where is chapter 5\", \"where does the section about cetology start\", \"which chapter discusses Z\". Answer concisely with the location in prose (the part/chapter and a brief orienting phrase), not a long substantive treatment.")
-        lines.append("- general — ANY question that wants a substantive answer about content, including interpretive, evaluative, comparative, thematic, descriptive, or summary questions. This is the default when in doubt. Even when the question uses verbs like \"find\", \"quote\", \"give me\", \"show me\", \"tell me about\", \"describe\", \"explain\", \"pick\", or contains the word \"passage\" / \"example\" / \"description\" — if the user wants the model to TELL them something about the content (rather than just point them at a location), it is general. Examples that are GENERAL despite their wording: \"find a passage that describes Ahab's leg\" (wants the description, not a page number), \"find me the most vivid description of the whale\" (wants the description), \"tell me about Ahab's character\" (wants substantive prose), \"quote a sentence that shows Ishmael's mood\" (wants a content selection with reasoning), \"describe how the narrator handles dialogue\" (wants analysis).")
-        return lines.joined(separator: "\n")
-    }
-}
-// ========== BLOCK 03: PROMPT BUILDING - END ==========
 
 
 // ========== BLOCK 04: LIVE SERVICE - START ==========
@@ -260,7 +214,7 @@ final class AskPoseyService: AskPoseyStreaming, AskPoseySummarizing {
 
     init(
         model: SystemLanguageModel = .default,
-        instructions: String = AskPoseyPrompts.classifierInstructions,
+        instructions: String = "You are Posey, an offline reading assistant.",
         groundedTemperature: Double = 0.1,
         // 2026-05-04: dropped 0.65 → 0.35. Polish at 0.65 was
         // ignoring the prompt's HARD RULES half the time —
@@ -459,7 +413,6 @@ final class AskPoseyService: AskPoseyStreaming, AskPoseySummarizing {
                 // aggressive when AFM tells us we overshot.
                 dbgLog("AskPosey: grounded call exceeded context window — retrying with droppables stripped")
                 let strippedInputs = AskPoseyPromptInputs(
-                    intent: inputs.intent,
                     // 2026-06-19 — preserve the A/B prompt variant across the
                     // context-overflow strip; dropping it here would silently
                     // answer the retry under `.current` even when the call
@@ -966,13 +919,23 @@ final class AskPoseyService: AskPoseyStreaming, AskPoseySummarizing {
 
     // ========== BLOCK MLX: MLX PROSE STREAMING - START ==========
 
-    /// MLX path for `streamProseResponse`. Runs a single-pass
-    /// generation through `LLMService.streamChat` rather than
-    /// AFM's grounded+polish two-call structure (which is
-    /// AFM-shaped — refusal-retry pattern doesn't apply to MLX
-    /// models that don't have a refusal mode in the same form).
+    /// MLX path for `streamProseResponse` — the live answer engine.
+    /// **Two-pass, both passes on the ACTIVE MLX model** (Mark, 2026-07-08):
+    ///   1. **GROUNDED (accuracy)** — low temperature, grounded in the
+    ///      retrieved passages; NOT streamed to the user. An anti-fabrication
+    ///      entity check runs on the draft and, on a hit, re-prompts once with
+    ///      explicit "say so if the document doesn't" framing; a second miss
+    ///      surfaces the friendly fallback.
+    ///   2. **POLISH (voice)** — rewrites the grounded draft in Posey's voice
+    ///      at a warmer temperature; streamed to the user. On polish failure we
+    ///      fall back to the grounded draft (right answer, no voice).
+    ///      "Doesn't say" refusal-shaped drafts skip polish entirely (polishing
+    ///      an empty draft can invent a number-shaped fact).
     ///
-    /// 2026-05-23 — Step 8g.
+    /// The polish prompt + temperatures are tuning knobs (tuning plan Level 3 /
+    /// Phase 4). AFM is never used here — it is excluded from answering.
+    /// (Two-pass restored on MLX 2026-07-08; was single-pass since Step 8g,
+    /// polish disabled 2026-05-04 for AFM's rule-following, which MLX may fix.)
     private func streamProseResponseMLX(
         inputs: AskPoseyPromptInputs,
         budget: AskPoseyTokenBudget,
@@ -988,37 +951,115 @@ final class AskPoseyService: AskPoseyStreaming, AskPoseySummarizing {
         let output = AskPoseyPromptBuilder.build(inputs, budget: budget)
         let started = Date()
 
-        let messages: [ChatMessage] = [
-            ChatMessage(role: .system, content: output.instructions),
-            ChatMessage(role: .user, content: output.renderedBody)
-        ]
-
-        var fullText = ""
-        let stream = LLMService.shared.streamChat(
-            messages: messages,
-            model: model,
-            options: LLMGenerationOptions(temperature: 0.2)
-        )
-
-        do {
-            for try await snapshot in stream {
-                fullText = snapshot
-                onSnapshot(snapshot)
-            }
-        } catch {
-            throw error
+        func makeMetadata(_ finalText: String) -> AskPoseyResponseMetadata {
+            AskPoseyResponseMetadata(
+                finalText: finalText,
+                promptTokenTotal: output.tokenBreakdown.totalIncludingScaffolding,
+                breakdown: output.tokenBreakdown,
+                droppedSections: output.droppedSections,
+                chunksInjected: output.chunksInjected,
+                fullPromptForLogging: output.combinedForLogging,
+                inferenceDuration: Date().timeIntervalSince(started)
+            )
         }
 
-        let elapsed = Date().timeIntervalSince(started)
-        return AskPoseyResponseMetadata(
-            finalText: fullText,
-            promptTokenTotal: output.tokenBreakdown.totalIncludingScaffolding,
-            breakdown: output.tokenBreakdown,
-            droppedSections: output.droppedSections,
-            chunksInjected: output.chunksInjected,
-            fullPromptForLogging: output.combinedForLogging,
-            inferenceDuration: elapsed
-        )
+        // ---- PASS 1: GROUNDED (accuracy first, low temp; not streamed) ----
+        var grounded = try await runMLXText(
+            model: model,
+            instructions: output.instructions,
+            body: output.renderedBody,
+            temperature: groundedTemperature)
+
+        // Anti-fabrication entity check + one corrective retry. A name in the
+        // answer that isn't in the material the model saw is a fabrication
+        // signal; re-prompt once, and if it still fabricates the question is
+        // genuinely outside the document → friendly fallback.
+        if let ungrounded = ungroundedEntities(in: grounded, against: output, inputs: inputs),
+           !ungrounded.isEmpty {
+            dbgLog("AskPosey MLX: grounded draft has %d ungrounded entities — retrying with refusal framing",
+                   ungrounded.count)
+            let rephrased = AskPoseyPromptBuilder.neutralRephrasingPromptBody(
+                originalUserQuestion: inputs.currentQuestion,
+                originalRenderedBody: output.renderedBody)
+            let retried = try await runMLXText(
+                model: model, instructions: output.instructions,
+                body: rephrased, temperature: groundedTemperature)
+            if let still = ungroundedEntities(in: retried, against: output, inputs: inputs),
+               !still.isEmpty {
+                throw AskPoseyServiceError.permanent(underlyingDescription: "informativeRefusalFailure")
+            }
+            grounded = retried
+        }
+
+        // "Not in the document" drafts skip the polish pass — polishing an
+        // empty draft at a warmer temperature has invented number-shaped facts.
+        if Self.isRefusalShape(grounded) {
+            onSnapshot(grounded)
+            return makeMetadata(grounded)
+        }
+
+        // ---- PASS 2: POLISH (Posey's voice, warmer temp; streamed) ----
+        let polishMessages: [ChatMessage] = [
+            ChatMessage(role: .system, content: AskPoseyPromptBuilder.polishInstructions),
+            ChatMessage(role: .user, content: AskPoseyPromptBuilder.polishPromptBody(
+                question: inputs.currentQuestion, groundedDraft: grounded))
+        ]
+        var polished = ""
+        do {
+            let stream = LLMService.shared.streamChat(
+                messages: polishMessages, model: model,
+                options: LLMGenerationOptions(temperature: polishTemperature))
+            for try await snapshot in stream {
+                polished = snapshot
+                onSnapshot(snapshot)
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Polish broke — fall back to the grounded draft so the user still
+            // gets the correct answer, just without the voice pass.
+            dbgLog("AskPosey MLX: polish pass failed (%@) — falling back to grounded draft",
+                   "\(error)")
+            onSnapshot(grounded)
+            return makeMetadata(grounded)
+        }
+        // The VM's finalize step strips any polish preamble; return raw.
+        return makeMetadata(polished.isEmpty ? grounded : polished)
+    }
+
+    /// One non-streamed MLX generation — collects the full accumulated text.
+    /// Used for the grounded (accuracy) pass, whose output isn't what the user
+    /// sees.
+    private func runMLXText(
+        model: ModelConfiguration, instructions: String,
+        body: String, temperature: Double
+    ) async throws -> String {
+        let messages: [ChatMessage] = [
+            ChatMessage(role: .system, content: instructions),
+            ChatMessage(role: .user, content: body)
+        ]
+        var accumulated = ""
+        let stream = LLMService.shared.streamChat(
+            messages: messages, model: model,
+            options: LLMGenerationOptions(temperature: temperature))
+        for try await snapshot in stream { accumulated = snapshot }
+        return accumulated
+    }
+
+    /// True when a grounded draft is a "the document doesn't say"-style
+    /// non-answer — those skip the polish pass.
+    private static func isRefusalShape(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let phrases = [
+            "the document doesn't say", "the document does not say",
+            "doesn't say", "does not say",
+            "the document doesn't mention", "the document does not mention",
+            "doesn't mention", "isn't mentioned", "is not mentioned",
+            "not in the document", "not present in",
+            "the document doesn't specify", "the document does not specify",
+            "doesn't specify"
+        ]
+        return phrases.contains(where: { lower.contains($0) })
     }
 
     // ========== BLOCK MLX: MLX PROSE STREAMING - END ==========

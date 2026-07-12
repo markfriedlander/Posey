@@ -181,7 +181,12 @@ final class SpoilerCatcher {
             offsetByUnit[u.id] = cum
             cum += u.text.count + 2   // "\n\n" join separator
         }
-        let chunks = (try? database.unitEmbeddingChunks(for: documentID)) ?? []
+        // Scope to leaves + the active model's summaries (what retrieval returns)
+        // so the offset map matches what Ask Posey actually cites — and so the
+        // per-model summary rows (which reuse the same chunk_index values across
+        // models) don't collide in `offsetByChunkIndex`.
+        let chunks = (try? database.unitEmbeddingChunks(
+            for: documentID, summaryLLM: ModelCatalog.answerModel().id)) ?? []
         var offsetByChunkIndex: [Int: Int] = [:]
         for c in chunks {
             if let base = offsetByUnit[c.startUnitID] {

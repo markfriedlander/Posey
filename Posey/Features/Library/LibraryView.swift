@@ -212,8 +212,12 @@ struct LibraryView: View {
                         databaseManager: viewModel.databaseManager
                     )
                     Spacer(minLength: 8)
-                    // Ask Posey readiness, bookending opposite the reading-time
-                    // (Mark's design, 2026-06-18).
+                    // Search-readiness status, bookending opposite the reading-time
+                    // (Mark's design, 2026-06-18). Shown in ALL builds — it tells the
+                    // reader whether this book is indexed for a good search. The label
+                    // strips its Ask-Posey-specific "not available" state when the Ask
+                    // Posey UI is compiled out, so a v1.0 reader reads it as pure
+                    // search readiness (see AskPoseyLibraryStatusLabel).
                     AskPoseyLibraryStatusLabel(
                         documentID: document.id,
                         databaseManager: viewModel.databaseManager
@@ -536,6 +540,15 @@ final class LibraryViewModel: ObservableObject {
     /// In-character copy for the import banner (Mark's line). Wording is easy
     /// to change here; shown for every format's import.
     static let importBannerMessage = "Posey is reading ahead\u{2026}"
+    /// EPUB-only variant of the import banner. An EPUB's chapters are converted
+    /// with `NSAttributedString(html:)`, which must run on the main thread
+    /// (WebKit under UIKit) and is slow, so a sizable book can make this first
+    /// import step take noticeably longer than other formats — long enough that
+    /// the screen looks stuck. Rather than leave the reader staring at a still
+    /// screen, we set expectations in-character. (The underlying main-thread
+    /// cost is parked for a 1.1 import-optimization pass — see next.md.)
+    static let epubImportBannerMessage =
+        "Posey is reading ahead\u{2026} ooh, a proper tome \u{2014} this may take a little longer than usual."
     /// Whether the local API server is running.
     ///
     /// Defaults to **true** for the duration of development so dev sessions
@@ -770,12 +783,14 @@ final class LibraryViewModel: ObservableObject {
 
     /// 2026-06-15 (Path A — off-main import) — EPUB async import path. Mirrors
     /// `handleHTMLImport`: own Task, security-scoped URL access managed in the
-    /// async context. `EPUBLibraryImporter.importDocument` is now `async` and
-    /// runs off-main (hopping to main only for the per-chapter NSAttributedString
-    /// step), so the UI stays responsive while a large EPUB imports.
+    /// async context. `EPUBLibraryImporter.importDocument` is `async` and runs
+    /// off-main EXCEPT the per-chapter `NSAttributedString(html:)` step, which
+    /// WebKit requires to run on the main thread; for a sizable multi-chapter
+    /// book those parses dominate and can hold the UI for several seconds. That
+    /// residual freeze is why the EPUB banner warns the reader up front.
     private func handleEPUBImport(url: URL) {
         Task { @MainActor in
-            importStatusMessage = Self.importBannerMessage
+            importStatusMessage = Self.epubImportBannerMessage
             defer { importStatusMessage = nil }
             let didAccess = url.startAccessingSecurityScopedResource()
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
@@ -1163,7 +1178,6 @@ extension LibraryViewModel {
                     content: "What questions does the book raise about colony structure and honey production?",
                     invocation: "document",
                     anchorOffset: nil,
-                    intent: "general",
                     chunksInjectedJSON: "[]",
                     fullPromptForLogging: nil,
                     summaryOfTurnsThrough: 0,
@@ -1189,7 +1203,6 @@ extension LibraryViewModel {
                     content: "The book raises questions about how the colony coordinates work between the queen and workers,[2][3] and how nectar is converted into long-lasting honey through repeated regurgitation and evaporation.[2][3]",
                     invocation: "document",
                     anchorOffset: nil,
-                    intent: nil,
                     chunksInjectedJSON: chunksJSON,
                     fullPromptForLogging: "[seeded-fixture]",
                     summaryOfTurnsThrough: 0,
@@ -2379,7 +2392,7 @@ extension LibraryViewModel {
                 // BUILD_RAPTOR_TREE:<doc-id>:<k>:<maxChunks>
                 //
                 // 2026-05-30 — end-to-end RAPTOR tier slice: cluster +
-                // AFM-summarize + verify (cosine + entity-grounding), then
+                // summarize (active MLX model) + verify (cosine + entity-grounding), then
                 // EMBED each verified summary (NLContextual) and STORE it in
                 // the collapsed pool (unit_embedding_chunks, chunk_index >=
                 // raptorSummaryIndexBase). Leaves untouched. After this, the
@@ -2426,7 +2439,7 @@ extension LibraryViewModel {
                         text: node.text,
                         embedding: emb))
                 }
-                do { try databaseManager.replaceSummaryNodes(toStore, for: id) }
+                do { try databaseManager.replaceSummaryNodes(toStore, for: id, llmID: ModelCatalog.answerModel().id) }
                 catch { return "{\"error\":\"store failed: \(error)\"}" }
                 let stored = toStore.map { ["chunkIndex": $0.chunkIndex, "embedded": $0.embedding != nil, "text": String($0.text.prefix(140))] as [String: Any] }
                 let payloadB: [String: Any] = [
@@ -2445,7 +2458,7 @@ extension LibraryViewModel {
                 // 2026-05-30 — first end-to-end slice of the RAPTOR tier:
                 // cluster the first <maxChunks> leaf chunks (cosine k-means,
                 // NLContextual embeddings) into <k> groups, summarize each
-                // with the ACTIVE model (AFM @Generable, paced), VERIFY each
+                // with the ACTIVE MLX answer model (paced), VERIFY each
                 // against its source, and return the summaries + member
                 // samples so generation quality can be read directly before
                 // any storage/retrieval wiring. Defaults (AFM+NLContextual)
@@ -2549,7 +2562,8 @@ extension LibraryViewModel {
                 var statRows: [[String: Any]] = []
                 for d in allDocsR {
                     let leaves = (try? databaseManager.embeddedLeafChunkCount(for: d.id)) ?? -1
-                    let summaries = (try? databaseManager.raptorSummaryNodeCount(for: d.id)) ?? -1
+                    // Active answer model's own tree (per-model trees, 2026-07-08).
+                    let summaries = (try? databaseManager.raptorSummaryNodeCount(for: d.id, llmID: ModelCatalog.answerModel().id)) ?? -1
                     statRows.append([
                         "documentID": d.id.uuidString,
                         "title": d.title,
@@ -2580,7 +2594,8 @@ extension LibraryViewModel {
                 for id in clearIDs {
                     await RaptorTreeService.shared.cancel(id)
                     var ok = true
-                    do { try databaseManager.replaceSummaryNodes([], for: id) }
+                    // llmID nil = remove EVERY model's summary rows (the "ALL" this verb promises).
+                    do { try databaseManager.replaceSummaryNodes([], for: id, llmID: nil) }
                     catch { ok = false }
                     let remainingC = (try? databaseManager.raptorSummaryNodeCount(for: id)) ?? -1
                     clearResults.append([
@@ -2616,7 +2631,9 @@ extension LibraryViewModel {
                 var rebuildResults: [[String: Any]] = []
                 for id in rebuildIDs {
                     var ok = true
-                    do { try databaseManager.replaceSummaryNodes([], for: id) }
+                    // Clear just the ACTIVE model's tree; the production build below
+                    // rebuilds it under the same id, leaving other models' trees intact.
+                    do { try databaseManager.replaceSummaryNodes([], for: id, llmID: ModelCatalog.answerModel().id) }
                     catch { ok = false }
                     if ok { await RaptorTreeService.shared.enqueue(id) }
                     rebuildResults.append([
@@ -3066,7 +3083,6 @@ extension LibraryViewModel {
                         "invocation": t.invocation
                     ]
                     if let off = t.anchorOffset { dict["anchorOffset"] = off }
-                    if let intent = t.intent { dict["intent"] = intent }
                     return dict
                 }
                 return json([
@@ -3971,6 +3987,25 @@ extension LibraryViewModel {
                     }
                 }
                 return json(["status": "posted", "target": targetID])
+
+            case "EXPAND_ASK_POSEY_EMBEDDER":
+                // Expand one embedder row's accordion (Download/Select/Delete
+                // action row) for on-device verification — the header Button
+                // can't be reached by the TAP verb. Arg = EmbeddingBackend
+                // rawValue (nlcontextual | nomic | mxbai). Requires the Model
+                // Library to be open (OPEN_PREFERENCES_SHEET + OPEN_MODEL_LIBRARY).
+                let backendRaw = (arg ?? "").trimmingCharacters(in: .whitespaces)
+                guard !backendRaw.isEmpty else {
+                    return #"{"error":"Usage: EXPAND_ASK_POSEY_EMBEDDER:<nlcontextual|nomic|mxbai>"}"#
+                }
+                await MainActor.run {
+                    NotificationCenter.default.post(
+                        name: .remoteExpandAskPoseyEmbedder,
+                        object: nil,
+                        userInfo: ["backend": backendRaw]
+                    )
+                }
+                return json(["status": "posted", "backend": backendRaw])
 
             case "SCROLL_PREFS_TO_ASK_POSEY":
                 // 2026-06-17 — Scroll an already-open prefs sheet's FORM to the
@@ -5070,10 +5105,10 @@ extension LibraryViewModel {
     //     "scope": "passage"|"document"  // default passage if anchor present, else document
     //   }
     //
-    // Runs the FULL pipeline: intent classification → prompt builder
-    // (anchor + surrounding + STM verbatim + summary + RAG chunks +
-    // user question) → fresh LanguageModelSession → AFM stream →
-    // metadata. Persists user + assistant turns to
+    // Runs the FULL pipeline: prompt builder (anchor + surrounding +
+    // STM verbatim + summary + RAG chunks + user question) → the active
+    // MLX answer model's two-pass generation (grounded → in-character
+    // polish) → metadata. Persists user + assistant turns to
     // ask_posey_conversations exactly the same way the UI's send()
     // does, so the sheet sees the new conversation when next opened.
 
@@ -5244,9 +5279,6 @@ extension LibraryViewModel {
                 "sentencesFlagged": stats.sentencesFlagged,
                 "sentencesDropped": stats.sentencesDropped
             ]
-        }
-        if let intent = viewModel.lastIntent {
-            payload["intent"] = intent.rawValue
         }
         // Spoiler firewall (Layer 2) diagnostics for the A/B catcher test.
         if let catch_ = viewModel.lastSpoilerCatch {

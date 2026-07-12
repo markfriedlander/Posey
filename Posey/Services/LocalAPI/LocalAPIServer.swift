@@ -29,8 +29,8 @@ final class LocalAPIServer {
     private var commandHandler: (@Sendable (String) async -> String)?
     private var importHandler:  (@Sendable (String, Data, Bool) async -> String)?
     private var stateHandler:   (@Sendable () async -> String)?
-    /// Ask Posey backend pipeline handler — runs intent classification,
-    /// prompt building, AFM streaming end-to-end and returns JSON.
+    /// Ask Posey backend pipeline handler — runs prompt building + the active
+    /// MLX answer model's two-pass generation end-to-end and returns JSON.
     /// Drives autonomous multi-turn Ask Posey conversation testing
     /// without UI involvement (M6 test infrastructure per Mark).
     /// Receives the raw request body bytes; the handler parses JSON
@@ -348,9 +348,9 @@ extension LocalAPIServer {
 
     // POST /ask {"documentID": "<uuid>", "question": "<text>", "anchorOffset": <int|null>}
     //
-    // Runs the full Ask Posey pipeline (intent classification + prompt
-    // building + AFM streaming) end-to-end and returns the response
-    // as JSON including the response text, classified intent, token
+    // Runs the full Ask Posey pipeline (prompt building + the active MLX
+    // answer model's two-pass generation) end-to-end and returns the response
+    // as JSON including the response text, token
     // breakdown, dropped sections, and chunks injected. Drives
     // autonomous multi-turn Ask Posey conversation testing without UI.
     //

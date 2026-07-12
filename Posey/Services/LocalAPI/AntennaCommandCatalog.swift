@@ -191,6 +191,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("SCROLL_PREFS_TO_LLM", .models, "SCROLL_PREFS_TO_LLM", ""),
         .init("SCROLL_PREFS_TO_ASK_POSEY", .ask_posey, "SCROLL_PREFS_TO_ASK_POSEY", ""),
         .init("OPEN_MODEL_LIBRARY", .models, "OPEN_MODEL_LIBRARY", ""),
+        .init("EXPAND_ASK_POSEY_EMBEDDER", .models, "EXPAND_ASK_POSEY_EMBEDDER:<nlcontextual|nomic|mxbai>", "Expand one embedder row's Download/Select/Delete action row (Model Library must be open). On-device verification only."),
         .init("OPEN_TOC_SHEET", .ui_nav, "OPEN_TOC_SHEET", ""),
         .init("OPEN_VOICE_PICKER_SHEET", .ui_nav, "OPEN_VOICE_PICKER_SHEET", ""),
         .init("TAP_TOC_ENTRY", .ui_nav, "TAP_TOC_ENTRY:<playOrder>", ""),

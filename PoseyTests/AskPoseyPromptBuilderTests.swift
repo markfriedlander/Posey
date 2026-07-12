@@ -87,7 +87,6 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
     }
 
     private func makeInputs(
-        intent: AskPoseyIntent = .immediate,
         anchor: AskPoseyAnchor? = nil,
         surrounding: String? = nil,
         history: [AskPoseyMessage] = [],
@@ -96,7 +95,6 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
         question: String = "What does this passage mean?"
     ) -> AskPoseyPromptInputs {
         AskPoseyPromptInputs(
-            intent: intent,
             anchor: anchor,
             surroundingContext: surrounding,
             conversationHistory: history,
@@ -154,18 +152,6 @@ final class AskPoseyPromptBuilderTests: XCTestCase {
         let out = AskPoseyPromptBuilder.build(inputs)
         XCTAssertTrue(out.renderedBody.contains("SURROUNDING CONTEXT"))
         XCTAssertTrue(out.renderedBody.contains("Two roads diverged"))
-    }
-
-    func testSurroundingContextOmitted_ForSearchIntent() {
-        // .search intent's surrounding window is 0 tokens — even with
-        // text passed in, the section drops.
-        let inputs = makeInputs(
-            intent: .search,
-            anchor: makeAnchor(),
-            surrounding: "Two roads diverged in a yellow wood."
-        )
-        let out = AskPoseyPromptBuilder.build(inputs)
-        XCTAssertFalse(out.renderedBody.contains("SURROUNDING CONTEXT"))
     }
 
     func testRAGChunksRender_WhenPresent() {
@@ -236,9 +222,7 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
         var budget = AskPoseyTokenBudget.afmDefault
         budget.stmBudgetTokens = 200
 
-        let inputs = AskPoseyPromptInputs(
-            intent: .immediate,
-            anchor: makeAnchor(),
+        let inputs = AskPoseyPromptInputs(            anchor: makeAnchor(),
             surroundingContext: nil,
             conversationHistory: history,
             conversationSummary: nil,
@@ -271,9 +255,7 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
         var budget = AskPoseyTokenBudget.afmDefault
         budget.ragBudgetTokens = 500  // Only ~2 chunks fit
 
-        let inputs = AskPoseyPromptInputs(
-            intent: .immediate,
-            anchor: makeAnchor(),
+        let inputs = AskPoseyPromptInputs(            anchor: makeAnchor(),
             surroundingContext: nil,
             conversationHistory: [],
             conversationSummary: nil,
@@ -303,9 +285,7 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
         budget.ragBudgetTokens = 50
 
         let longQuestion = String(repeating: "z", count: 5000)
-        let inputs = AskPoseyPromptInputs(
-            intent: .immediate,
-            anchor: makeAnchor(),
+        let inputs = AskPoseyPromptInputs(            anchor: makeAnchor(),
             surroundingContext: nil,
             conversationHistory: [],
             conversationSummary: nil,
@@ -326,16 +306,9 @@ final class AskPoseyPromptBuilderDropTests: XCTestCase {
 // ========== BLOCK 05: SURROUNDING WINDOW - START ==========
 final class AskPoseySurroundingWindowTests: XCTestCase {
 
-    func testImmediateIntentHasMidsizeWindow() {
-        XCTAssertEqual(AskPoseyPromptBuilder.surroundingWindowTokens(for: .immediate), 150)
-    }
-
-    func testSearchIntentHasZeroWindow() {
-        XCTAssertEqual(AskPoseyPromptBuilder.surroundingWindowTokens(for: .search), 0)
-    }
-
-    func testGeneralIntentHasGenerousWindow() {
-        XCTAssertEqual(AskPoseyPromptBuilder.surroundingWindowTokens(for: .general), 300)
+    func testSurroundingWindowIsTheSingleGenerousConstant() {
+        // Intent buckets removed 2026-07-08 — one fixed generous window.
+        XCTAssertEqual(AskPoseyPromptBuilder.surroundingWindowTokens, 300)
     }
 }
 // ========== BLOCK 05: SURROUNDING WINDOW - END ==========

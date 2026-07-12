@@ -51,9 +51,7 @@ final class AskPoseyConversationsCRUDTests: XCTestCase {
             role: "user",
             content: "What does this passage mean?",
             invocation: "passage",
-            anchorOffset: 1234,
-            intent: "immediate",
-            chunksInjectedJSON: "[]",
+            anchorOffset: 1234,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -66,7 +64,6 @@ final class AskPoseyConversationsCRUDTests: XCTestCase {
         let read = try XCTUnwrap(turns.first)
         XCTAssertEqual(read.role, "user")
         XCTAssertEqual(read.content, "What does this passage mean?")
-        XCTAssertEqual(read.intent, "immediate")
         XCTAssertEqual(read.anchorOffset, 1234)
         XCTAssertEqual(read.invocation, "passage")
         XCTAssertEqual(read.chunksInjectedJSON, "[]")
@@ -82,9 +79,7 @@ final class AskPoseyConversationsCRUDTests: XCTestCase {
             role: "assistant",
             content: "The passage suggests…",
             invocation: "passage",
-            anchorOffset: 1234,
-            intent: nil,
-            chunksInjectedJSON: #"[{"chunkID":7,"startOffset":4096,"text":"snip","relevance":0.91}]"#,
+            anchorOffset: 1234,            chunksInjectedJSON: #"[{"chunkID":7,"startOffset":4096,"text":"snip","relevance":0.91}]"#,
             fullPromptForLogging: "PROMPT BODY OBSERVED BY THE MODEL",
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -93,7 +88,6 @@ final class AskPoseyConversationsCRUDTests: XCTestCase {
 
         let read = try XCTUnwrap(try manager.askPoseyTurns(for: documentID).first)
         XCTAssertEqual(read.role, "assistant")
-        XCTAssertNil(read.intent)
         XCTAssertEqual(read.fullPromptForLogging, "PROMPT BODY OBSERVED BY THE MODEL")
         XCTAssertTrue(read.chunksInjectedJSON.contains("\"chunkID\":7"))
     }
@@ -110,9 +104,7 @@ final class AskPoseyConversationsCRUDTests: XCTestCase {
                 role: "user",
                 content: "Turn at offset \(offset)",
                 invocation: "passage",
-                anchorOffset: 0,
-                intent: nil,
-                chunksInjectedJSON: "[]",
+                anchorOffset: 0,                chunksInjectedJSON: "[]",
                 fullPromptForLogging: nil,
                 summaryOfTurnsThrough: 0,
                 isSummary: false
@@ -137,9 +129,7 @@ final class AskPoseyConversationsCRUDTests: XCTestCase {
                 role: i % 2 == 1 ? "user" : "assistant",
                 content: "Turn #\(i)",
                 invocation: "passage",
-                anchorOffset: 0,
-                intent: nil,
-                chunksInjectedJSON: "[]",
+                anchorOffset: 0,                chunksInjectedJSON: "[]",
                 fullPromptForLogging: nil,
                 summaryOfTurnsThrough: 0,
                 isSummary: false
@@ -162,9 +152,7 @@ final class AskPoseyConversationsCRUDTests: XCTestCase {
             role: "user",
             content: "Real question",
             invocation: "passage",
-            anchorOffset: 0,
-            intent: nil,
-            chunksInjectedJSON: "[]",
+            anchorOffset: 0,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -178,9 +166,7 @@ final class AskPoseyConversationsCRUDTests: XCTestCase {
             role: "assistant",
             content: "Earlier summary text",
             invocation: "passage",
-            anchorOffset: nil,
-            intent: nil,
-            chunksInjectedJSON: "[]",
+            anchorOffset: nil,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 8,
             isSummary: true
@@ -280,9 +266,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             role: "user",
             content: "What does this poem mean?",
             invocation: "passage",
-            anchorOffset: 0,
-            intent: "immediate",
-            chunksInjectedJSON: "[]",
+            anchorOffset: 0,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -295,9 +279,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             role: "assistant",
             content: "The traveler is reflecting on choice.",
             invocation: "passage",
-            anchorOffset: 0,
-            intent: nil,
-            chunksInjectedJSON: "[]",
+            anchorOffset: 0,            chunksInjectedJSON: "[]",
             fullPromptForLogging: "FULL PROMPT",
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -335,9 +317,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             role: "user",
             content: "Mine",
             invocation: "passage",
-            anchorOffset: 0,
-            intent: nil,
-            chunksInjectedJSON: "[]",
+            anchorOffset: 0,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -364,9 +344,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             role: "user",
             content: "Not mine",
             invocation: "passage",
-            anchorOffset: 0,
-            intent: nil,
-            chunksInjectedJSON: "[]",
+            anchorOffset: 0,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -459,9 +437,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             role: "anchor",
             content: "earlier passage",
             invocation: "passage",
-            anchorOffset: 50,
-            intent: nil,
-            chunksInjectedJSON: "[]",
+            anchorOffset: 50,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -501,9 +477,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             role: "anchor",
             content: "anchored passage",
             invocation: "passage",
-            anchorOffset: 0,
-            intent: nil,
-            chunksInjectedJSON: "[]",
+            anchorOffset: 0,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -515,9 +489,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             role: "user",
             content: "Q",
             invocation: "passage",
-            anchorOffset: 0,
-            intent: "immediate",
-            chunksInjectedJSON: "[]",
+            anchorOffset: 0,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
             isSummary: false
@@ -529,9 +501,7 @@ final class AskPoseyChatViewModelHistoryTests: XCTestCase {
             role: "assistant",
             content: "A",
             invocation: "passage",
-            anchorOffset: 0,
-            intent: nil,
-            chunksInjectedJSON: "[]",
+            anchorOffset: 0,            chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
             isSummary: false

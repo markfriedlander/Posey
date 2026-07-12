@@ -71,8 +71,9 @@ public struct AskPoseyAvailability {
     /// needs — **any non-default embedder** (retrieval ranking; Nomic or mxbai)
     /// AND **at least one MLX model** (answer generation). AFM is NOT part of
     /// this gate: AFM is used only for
-    /// background auxiliary tasks (intent classification, summarization, etc.)
-    /// when present, and a device may unlock Ask Posey with no AFM at all.
+    /// background `@Generable` auxiliary tasks (query expansion, document-metadata
+    /// extraction) when present, and a device may unlock Ask Posey with no AFM at
+    /// all.
     /// The preferences "Ask Posey" on-ramp stays visible regardless (it's how
     /// the user discovers + downloads what's needed) — only the *reader*
     /// surfaces are gated on this.
@@ -121,23 +122,24 @@ public struct AskPoseyAvailability {
         embedderProvisioned && hasDownloadedMLXModel
     }
 
-    /// Persisted once the user has successfully provisioned ANY non-default
-    /// (downloadable, `modelID != nil`) embedder — Nomic or mxbai — set by
-    /// `EmbedderMigrationCoordinator` on a completed switch to such a backend.
-    /// Sticky: it stays true even if the user later switches the active embedder
-    /// back to NLContextual — the asset remains downloaded, so the unlock
-    /// persists.
-    ///
-    /// NOTE: the stored key string deliberately keeps its legacy
-    /// `…nomicProvisioned` name (2026-07-06, generalized from Nomic-only to
-    /// any-embedder). Keeping the string means devices that already unlocked via
-    /// Nomic stay unlocked — no re-provision, no migration code.
-    public static let embedderProvisionedDefaultsKey = "posey.askPosey.nomicProvisioned"
+    /// Present-based unlock (Mark, 2026-07-08): Ask Posey is provisioned only
+    /// while the **active** embedder is an advanced, downloadable one — Nomic or
+    /// mxbai — whose model is actually on disk. Selecting an advanced embedder
+    /// provisions Ask Posey; deleting the active one (which reverts the active
+    /// backend to the built-in NLContextual floor) drops this to false and
+    /// re-locks. The Apple NLContextual embedder never unlocks Ask Posey — it's
+    /// strong enough for the reader's search fallback, not for Ask Posey
+    /// retrieval. Derived, not a persisted flag, so it tracks download / delete /
+    /// select with no migration: the unlock simply follows what's present.
     public static var embedderProvisioned: Bool {
-        UserDefaults.standard.bool(forKey: embedderProvisionedDefaultsKey)
-    }
-    public static func markEmbedderProvisioned() {
-        UserDefaults.standard.set(true, forKey: embedderProvisionedDefaultsKey)
+        guard let repo = EmbeddingBackend.current().modelID else { return false }
+        // Disk-truth, not the downloader's tracking set: the active advanced
+        // embedder's model must actually be on disk. Checking disk (rather than
+        // `MLXModelDownloader.isModelDownloaded`) recognizes an embedder fetched
+        // by ANY path — swift-embeddings' own snapshot, a prior install's
+        // App-Group copy — not just ones this app's downloader recorded. The
+        // active backend is never mid-download, so a plain presence check is safe.
+        return SharedModelStore.isRepoDownloaded(repo)
     }
 
     /// True when at least one curated MLX model is present on disk. Mirrors

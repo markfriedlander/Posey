@@ -980,9 +980,6 @@ nonisolated struct StoredAskPoseyTurn: Equatable, Sendable, Identifiable {
     /// was created. `nil` when the invocation didn't capture an anchor
     /// (M6 document-scope) or the row is a summary.
     let anchorOffset: Int?
-    /// `AskPoseyIntent` raw value when this turn is a user message.
-    /// `nil` for assistant turns and pre-M5 legacy rows.
-    let intent: String?
     /// JSON-encoded array of chunk references actually injected into
     /// the prompt that produced this assistant turn. Empty in M5
     /// (`"[]"`); M6 fills it; M7 surfaces it as a "Sources" strip.
@@ -1034,8 +1031,8 @@ extension DatabaseManager {
         INSERT INTO ask_posey_conversations (
             id, document_id, timestamp, role, content, invocation,
             anchor_offset, summary_of_turns_through, is_summary,
-            intent, chunks_injected, full_prompt_for_logging
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            chunks_injected, full_prompt_for_logging
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         let statement = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(statement) }
@@ -1052,16 +1049,11 @@ extension DatabaseManager {
         }
         sqlite3_bind_int(statement, 8, Int32(turn.summaryOfTurnsThrough))
         sqlite3_bind_int(statement, 9, turn.isSummary ? 1 : 0)
-        if let intent = turn.intent {
-            try bind(intent, at: 10, for: statement)
-        } else {
-            sqlite3_bind_null(statement, 10)
-        }
-        try bind(turn.chunksInjectedJSON, at: 11, for: statement)
+        try bind(turn.chunksInjectedJSON, at: 10, for: statement)
         if let prompt = turn.fullPromptForLogging {
-            try bind(prompt, at: 12, for: statement)
+            try bind(prompt, at: 11, for: statement)
         } else {
-            sqlite3_bind_null(statement, 12)
+            sqlite3_bind_null(statement, 11)
         }
         try step(statement)
     }
@@ -1259,7 +1251,7 @@ extension DatabaseManager {
         let baseSQL = """
         SELECT id, document_id, timestamp, role, content, invocation,
                anchor_offset, summary_of_turns_through, is_summary,
-               intent, chunks_injected, full_prompt_for_logging
+               chunks_injected, full_prompt_for_logging
         FROM ask_posey_conversations
         WHERE document_id = ? AND is_summary = 0
         """
@@ -1298,7 +1290,7 @@ extension DatabaseManager {
         let sql = """
         SELECT id, document_id, timestamp, role, content, invocation,
                anchor_offset, summary_of_turns_through, is_summary,
-               intent, chunks_injected, full_prompt_for_logging
+               chunks_injected, full_prompt_for_logging
         FROM ask_posey_conversations
         WHERE document_id = ? AND is_summary = 1
         ORDER BY summary_of_turns_through DESC
@@ -1365,7 +1357,7 @@ extension DatabaseManager {
         let baseSQL = """
         SELECT id, document_id, timestamp, role, content, invocation,
                anchor_offset, summary_of_turns_through, is_summary,
-               intent, chunks_injected, full_prompt_for_logging
+               chunks_injected, full_prompt_for_logging
         FROM ask_posey_conversations
         WHERE document_id = ? AND is_summary = 0
               AND role IN ('user', 'assistant')
@@ -1404,7 +1396,7 @@ extension DatabaseManager {
         let sql = """
         SELECT id, document_id, timestamp, role, content, invocation,
                anchor_offset, summary_of_turns_through, is_summary,
-               intent, chunks_injected, full_prompt_for_logging
+               chunks_injected, full_prompt_for_logging
         FROM ask_posey_conversations
         WHERE document_id = ? AND is_summary = 0 AND role = 'anchor'
         ORDER BY timestamp DESC;
@@ -1450,7 +1442,7 @@ extension DatabaseManager {
         let sql = """
         SELECT id, document_id, timestamp, role, content, invocation,
                anchor_offset, summary_of_turns_through, is_summary,
-               intent, chunks_injected, full_prompt_for_logging
+               chunks_injected, full_prompt_for_logging
         FROM ask_posey_conversations
         WHERE document_id = ? AND is_summary = 0 AND role = 'assistant'
         ORDER BY timestamp ASC;
@@ -1536,9 +1528,8 @@ extension DatabaseManager {
             : Int(sqlite3_column_int(statement, 6))
         let summaryThrough = Int(sqlite3_column_int(statement, 7))
         let isSummary = sqlite3_column_int(statement, 8) != 0
-        let intent = sqliteString(statement, index: 9)
-        let chunksInjected = sqliteString(statement, index: 10) ?? "[]"
-        let fullPrompt = sqliteString(statement, index: 11)
+        let chunksInjected = sqliteString(statement, index: 9) ?? "[]"
+        let fullPrompt = sqliteString(statement, index: 10)
         return StoredAskPoseyTurn(
             id: id,
             documentID: docID,
@@ -1547,7 +1538,6 @@ extension DatabaseManager {
             content: content,
             invocation: invocation,
             anchorOffset: anchorOffset,
-            intent: intent,
             chunksInjectedJSON: chunksInjected,
             fullPromptForLogging: fullPrompt,
             summaryOfTurnsThrough: summaryThrough,
@@ -1785,12 +1775,8 @@ extension DatabaseManager {
             """)
 
         // ========== Ask Posey Milestone 5 — column additions ==========
-        // Five columns added to support the M5 prose response loop and the
+        // Columns added to support the M5 prose response loop and the
         // observability the prompt builder needs:
-        //
-        // - intent: classified AskPoseyIntent ('immediate' | 'search' |
-        //   'general'), nullable for legacy rows. Persisted per turn so
-        //   we can audit how the classifier routed real questions.
         //
         // - chunks_injected: JSON array of chunk references (id, offset,
         //   relevance score) actually injected into the prompt for this
@@ -1807,7 +1793,6 @@ extension DatabaseManager {
         //   M6+ "retrieve relevant older turns when budget is tight"
         //   path. Mirrors the document_chunks pattern. Nullable in M5;
         //   M6 backfills + populates new turns at write time.
-        try addColumnIfNeeded(table: "ask_posey_conversations", column: "intent", definition: "TEXT")
         try addColumnIfNeeded(table: "ask_posey_conversations", column: "chunks_injected", definition: "TEXT NOT NULL DEFAULT '[]'")
         try addColumnIfNeeded(table: "ask_posey_conversations", column: "full_prompt_for_logging", definition: "TEXT")
         try addColumnIfNeeded(table: "ask_posey_conversations", column: "embedding", definition: "BLOB")
@@ -2132,6 +2117,16 @@ extension DatabaseManager {
         // per-backend-column design: coexists with nl/nomic, filled by the
         // backfill worker, read when active.
         try addColumnIfNeeded(table: "unit_embedding_chunks", column: "embedding_mxbai", definition: "BLOB")
+        // 2026-07-08 — PER-LLM RAPTOR SUMMARY TREES. Summary nodes (chunk_index
+        // >= raptorSummaryIndexBase) are now stamped with the id of the MLX answer
+        // model that authored them, so each of the 4 answer models keeps its OWN
+        // persistent tree — the row-level analog of the per-embedder vector columns
+        // above. `llm_id` is NULL on leaf rows (they belong to every model) and set
+        // on summary rows. Retrieval returns leaves + only the ACTIVE model's
+        // summaries; a build replaces only that model's summaries, leaving the
+        // other models' trees intact. AFM never authors a tree, so AFM never
+        // appears here. (See RaptorTreeService / HybridRetriever.)
+        try addColumnIfNeeded(table: "unit_embedding_chunks", column: "llm_id", definition: "TEXT")
         let activeVectorColumn = EmbeddingBackend.current().vectorColumn
         try execute("""
             UPDATE unit_embedding_chunks
@@ -3582,28 +3577,45 @@ extension DatabaseManager {
     /// the old summary rows, insert the new. FTS5 triggers keep the BM25
     /// mirror in sync, so summaries are immediately retrievable by both
     /// semantic and lexical passes.
+    ///
+    /// **Per-LLM scope (2026-07-08).** `llmID` names the answer model whose tree
+    /// this is. When set, ONLY that model's summary rows are deleted + replaced,
+    /// so rebuilding one model's tree never disturbs the other models' trees
+    /// (they coexist as separate `llm_id` rows in the same collapsed pool). Pass
+    /// `nil` ONLY for the dev "clear everything" path — that deletes every
+    /// model's summary rows for the document. Inserted rows are always stamped
+    /// with `llmID` (nil ⇒ NULL, i.e. a model-agnostic summary).
     func replaceSummaryNodes(_ chunks: [StoredUnitEmbeddingChunk],
-                             for documentID: UUID) throws {
+                             for documentID: UUID,
+                             llmID: String?) throws {
         dbLock.lock(); defer { dbLock.unlock() }
         try execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
-            let del = try prepareStatement(
-                sql: "DELETE FROM unit_embedding_chunks WHERE document_id = ? AND chunk_index >= ?;"
-            )
+            // Delete this model's summary rows (or ALL summary rows when llmID is
+            // nil — the dev clear-everything path). Leaves (chunk_index < base)
+            // are never touched.
+            let delSQL = llmID == nil
+                ? "DELETE FROM unit_embedding_chunks WHERE document_id = ? AND chunk_index >= ?;"
+                : "DELETE FROM unit_embedding_chunks WHERE document_id = ? AND chunk_index >= ? AND llm_id = ?;"
+            let del = try prepareStatement(sql: delSQL)
             defer { sqlite3_finalize(del) }
             sqlite3_bind_text(del, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
             sqlite3_bind_int(del, 2, Int32(Self.raptorSummaryIndexBase))
+            if let llmID = llmID {
+                sqlite3_bind_text(del, 3, llmID, -1, SQLITE_TRANSIENT)
+            }
             try step(del)
 
             if !chunks.isEmpty {
                 // Vectors land in the WRITE backend's column (swap target during
                 // a swap, else active). The legacy `embedding` column is frozen.
+                // `llm_id` (appended last) stamps every inserted summary row.
                 let writeCol = EmbeddingBackend.writeBackend().vectorColumn
                 let sql = """
                     INSERT OR REPLACE INTO unit_embedding_chunks
                         (id, document_id, chunk_index, start_unit_id, start_intra_offset,
-                         end_unit_id, end_intra_offset, text, \(writeCol))
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                         end_unit_id, end_intra_offset, text, \(writeCol), llm_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """
                 let ins = try prepareStatement(sql: sql)
                 defer { sqlite3_finalize(ins) }
@@ -3622,6 +3634,11 @@ extension DatabaseManager {
                         sqlite3_bind_blob(ins, 9, &bytes, Int32(bytes.count * MemoryLayout<Double>.size), SQLITE_TRANSIENT)
                     } else {
                         sqlite3_bind_null(ins, 9)
+                    }
+                    if let llmID = llmID {
+                        sqlite3_bind_text(ins, 10, llmID, -1, SQLITE_TRANSIENT)
+                    } else {
+                        sqlite3_bind_null(ins, 10)
                     }
                     try step(ins)
                 }
@@ -4048,15 +4065,22 @@ extension DatabaseManager {
     /// >= raptorSummaryIndexBase`). `RaptorTreeService.bootstrap` uses this
     /// to skip documents that already have a tree (avoids rebuilding on
     /// every launch) and to find pre-feature documents that need one.
-    func raptorSummaryNodeCount(for documentID: UUID) throws -> Int {
+    /// - Parameter llmID: when set, count only THAT answer model's summary nodes
+    ///   (its own tree); when nil, count every model's summary nodes for the
+    ///   document. `RaptorTreeService.bootstrap` passes the active model's id so
+    ///   "has a tree?" means "has a tree *for the model we'd answer with*".
+    func raptorSummaryNodeCount(for documentID: UUID, llmID: String? = nil) throws -> Int {
         dbLock.lock(); defer { dbLock.unlock() }
-        let stmt = try prepareStatement(sql: """
-            SELECT COUNT(*) FROM unit_embedding_chunks
-            WHERE document_id = ? AND chunk_index >= ?;
-            """)
+        let sql = llmID == nil
+            ? "SELECT COUNT(*) FROM unit_embedding_chunks WHERE document_id = ? AND chunk_index >= ?;"
+            : "SELECT COUNT(*) FROM unit_embedding_chunks WHERE document_id = ? AND chunk_index >= ? AND llm_id = ?;"
+        let stmt = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(stmt, 2, Int32(Self.raptorSummaryIndexBase))
+        if let llmID = llmID {
+            sqlite3_bind_text(stmt, 3, llmID, -1, SQLITE_TRANSIENT)
+        }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int(stmt, 0))
     }
@@ -4065,14 +4089,19 @@ extension DatabaseManager {
     /// form of `raptorSummaryNodeCount`) — for the Preparation board's per-doc
     /// step-3 status. A document absent from the result has no tree yet (0 nodes);
     /// node count > 0 means its summary tree is built. (2026-06-28)
-    func raptorSummaryNodeCountsByDocument() throws -> [UUID: Int] {
+    func raptorSummaryNodeCountsByDocument(llmID: String? = nil) throws -> [UUID: Int] {
         dbLock.lock(); defer { dbLock.unlock() }
-        let stmt = try prepareStatement(sql: """
-            SELECT document_id, COUNT(*) FROM unit_embedding_chunks
-            WHERE chunk_index >= ? GROUP BY document_id;
-            """)
+        // Per-model when llmID is set (the Preparation board shows the ACTIVE
+        // model's tree status during tuning); across all models when nil.
+        let sql = llmID == nil
+            ? "SELECT document_id, COUNT(*) FROM unit_embedding_chunks WHERE chunk_index >= ? GROUP BY document_id;"
+            : "SELECT document_id, COUNT(*) FROM unit_embedding_chunks WHERE chunk_index >= ? AND llm_id = ? GROUP BY document_id;"
+        let stmt = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int(stmt, 1, Int32(Self.raptorSummaryIndexBase))
+        if let llmID = llmID {
+            sqlite3_bind_text(stmt, 2, llmID, -1, SQLITE_TRANSIENT)
+        }
         var counts: [UUID: Int] = [:]
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let idCStr = sqlite3_column_text(stmt, 0),
@@ -4085,7 +4114,14 @@ extension DatabaseManager {
     /// Fetch every chunk row for `documentID` (including embedding,
     /// possibly nil). Used by the semantic-pass side of the RRF
     /// hybrid retriever — Swift-side cosine over every row's vector.
-    func unitEmbeddingChunks(for documentID: UUID) throws -> [StoredUnitEmbeddingChunk] {
+    ///
+    /// - Parameter summaryLLM: when set, return leaves (`chunk_index < base`)
+    ///   PLUS only the RAPTOR summary rows authored by that answer model — the
+    ///   collapsed pool the model actually answers from. When nil (default),
+    ///   return every row for the document (leaves + every model's summaries),
+    ///   for diagnostics/dumps and for callers that filter to leaves themselves.
+    func unitEmbeddingChunks(for documentID: UUID,
+                             summaryLLM: String? = nil) throws -> [StoredUnitEmbeddingChunk] {
         dbLock.lock(); defer { dbLock.unlock() }
         // Read the ACTIVE backend's column (`current()`), never `writeBackend()`:
         // during a swap the active column is the complete one; the target column
@@ -4094,18 +4130,27 @@ extension DatabaseManager {
         // so every downstream consumer (HybridRetriever, RAPTOR) is correct with
         // no change. Column name is from the fixed `EmbeddingBackend` enum.
         let activeVectorColumn = EmbeddingBackend.current().vectorColumn
+        // Leaves belong to every model (llm_id NULL, chunk_index < base); summary
+        // rows belong to exactly one model. `(chunk_index < base OR llm_id = ?)`
+        // is robust even if a leaf ever carried a stray llm_id.
+        let summaryFilter = summaryLLM == nil
+            ? ""
+            : " AND (chunk_index < \(Self.raptorSummaryIndexBase) OR llm_id = ?)"
         let sql = """
             SELECT id, chunk_index,
                    start_unit_id, start_intra_offset,
                    end_unit_id, end_intra_offset,
                    text, \(activeVectorColumn)
             FROM unit_embedding_chunks
-            WHERE document_id = ?
+            WHERE document_id = ?\(summaryFilter)
             ORDER BY chunk_index;
             """
         let stmt = try prepareStatement(sql: sql)
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, documentID.uuidString, -1, SQLITE_TRANSIENT)
+        if let summaryLLM = summaryLLM {
+            sqlite3_bind_text(stmt, 2, summaryLLM, -1, SQLITE_TRANSIENT)
+        }
         var rows: [StoredUnitEmbeddingChunk] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard
@@ -4159,18 +4204,27 @@ extension DatabaseManager {
     /// `MATCH` operator — callers are responsible for sanitizing
     /// user input (FTS5 query syntax has its own operators that
     /// can throw if a stray quote appears in a question).
+    ///
+    /// - Parameter summaryLLM: when set, the lexical index — which mirrors EVERY
+    ///   model's summary rows — is scoped to leaves + only that model's
+    ///   summaries, so one model's summaries can't surface in another model's
+    ///   retrieval. nil (default) searches all rows.
     func bm25Search(
         documentID: UUID,
         matchExpression: String,
-        limit: Int
+        limit: Int,
+        summaryLLM: String? = nil
     ) throws -> [UnitEmbeddingChunkBM25Hit] {
         dbLock.lock(); defer { dbLock.unlock() }
+        let summaryFilter = summaryLLM == nil
+            ? ""
+            : " AND (c.chunk_index < \(Self.raptorSummaryIndexBase) OR c.llm_id = ?)"
         let sql = """
             SELECT c.id, c.chunk_index, bm25(unit_embedding_chunks_fts) AS score
             FROM unit_embedding_chunks_fts
             JOIN unit_embedding_chunks c ON c.rowid = unit_embedding_chunks_fts.rowid
             WHERE unit_embedding_chunks_fts MATCH ?
-              AND c.document_id = ?
+              AND c.document_id = ?\(summaryFilter)
             ORDER BY score
             LIMIT ?;
             """
@@ -4178,7 +4232,14 @@ extension DatabaseManager {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, matchExpression, -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 2, documentID.uuidString, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 3, Int32(limit))
+        // `limit` is the last bound parameter; its index depends on whether the
+        // optional summary filter added a bind in between.
+        var limitIndex: Int32 = 3
+        if let summaryLLM = summaryLLM {
+            sqlite3_bind_text(stmt, 3, summaryLLM, -1, SQLITE_TRANSIENT)
+            limitIndex = 4
+        }
+        sqlite3_bind_int(stmt, limitIndex, Int32(limit))
         var hits: [UnitEmbeddingChunkBM25Hit] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard
@@ -4219,12 +4280,17 @@ extension DatabaseManager {
         guard !terms.isEmpty else { return [] }
         let matchExpression = terms.joined(separator: " ")
         dbLock.lock(); defer { dbLock.unlock() }
+        // Leaf-only (`chunk_index < base`): defining-passage quotes for
+        // golden-question authoring must be verbatim document prose, never a
+        // RAPTOR summary (and with per-model trees the lexical index now mirrors
+        // up to 4 models' summary rows, which would otherwise pollute results).
         let sql = """
             SELECT c.chunk_index, c.text, bm25(unit_embedding_chunks_fts) AS score
             FROM unit_embedding_chunks_fts
             JOIN unit_embedding_chunks c ON c.rowid = unit_embedding_chunks_fts.rowid
             WHERE unit_embedding_chunks_fts MATCH ?
               AND c.document_id = ?
+              AND c.chunk_index < ?
             ORDER BY score
             LIMIT ?;
             """
@@ -4232,7 +4298,8 @@ extension DatabaseManager {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, matchExpression, -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 2, documentID.uuidString, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 3, Int32(limit))
+        sqlite3_bind_int(stmt, 3, Int32(Self.raptorSummaryIndexBase))
+        sqlite3_bind_int(stmt, 4, Int32(limit))
         var hits: [UnitEmbeddingChunkTextHit] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let textCStr = sqlite3_column_text(stmt, 1) else { continue }

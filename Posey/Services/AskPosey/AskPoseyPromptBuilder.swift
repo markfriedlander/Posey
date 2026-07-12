@@ -187,9 +187,6 @@ nonisolated enum AskPoseyPromptVariant: String, Sendable, CaseIterable {
 }
 
 nonisolated struct AskPoseyPromptInputs: Sendable {
-    /// Classified intent for the current question. Affects surrounding
-    /// window sizing and the imperative framing in the system block.
-    let intent: AskPoseyIntent
     /// 2026-06-19 — which prose-instruction variant to build. See
     /// `AskPoseyPromptVariant`. Default `.current` (untouched control).
     let promptVariant: AskPoseyPromptVariant
@@ -197,7 +194,7 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
     /// invocation (M5); document-scoped (M6) may pass `nil` and the
     /// builder degrades the anchor section gracefully.
     let anchor: AskPoseyAnchor?
-    /// Sentences immediately around the anchor, sized by intent.
+    /// Sentences immediately around the anchor, sized by a fixed window.
     /// `nil` is acceptable; the builder will just skip the section.
     let surroundingContext: String?
     /// Recent verbatim conversation history, oldest-first, both user
@@ -286,7 +283,6 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
     let readerFurthestOffset: Int?
 
     init(
-        intent: AskPoseyIntent,
         promptVariant: AskPoseyPromptVariant = .current,
         anchor: AskPoseyAnchor?,
         surroundingContext: String?,
@@ -305,7 +301,6 @@ nonisolated struct AskPoseyPromptInputs: Sendable {
         spoilerProtectionActive: Bool = false,
         readerFurthestOffset: Int? = nil
     ) {
-        self.intent = intent
         self.promptVariant = promptVariant
         self.anchor = anchor
         self.surroundingContext = surroundingContext
@@ -709,20 +704,11 @@ nonisolated enum AskPoseyPromptBuilder {
         return true
     }()
 
-    /// Surrounding-sentence window in tokens, keyed off intent. Tight
-    /// for `.immediate` (anchor is the answer's source); zero for
-    /// `.search` (the answer is "where" — surrounding doesn't help);
-    /// generous for `.general` (broader passages around the anchor
-    /// help even when full document RAG isn't yet wired in M5).
-    /// Caller passes `surroundingContext` already trimmed to a sane
+    /// Surrounding-sentence window in tokens. Every question takes the full open
+    /// route, so this is the single generous window: broader passages around the
+    /// anchor help. Caller passes `surroundingContext` already trimmed to a sane
     /// sentence boundary; the builder enforces the upper bound.
-    static func surroundingWindowTokens(for intent: AskPoseyIntent) -> Int {
-        switch intent {
-        case .immediate: return 150
-        case .search:    return 0
-        case .general:   return 300
-        }
-    }
+    static let surroundingWindowTokens = 300
 
     /// 2026-06-17 — Spoiler firewall (Layer 1). The generative "knowing
     /// companion" framing, prepended to the instructions when protection is
@@ -918,7 +904,7 @@ nonisolated enum AskPoseyPromptBuilder {
         if let surrounding = inputs.surroundingContext?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !surrounding.isEmpty {
-            let cap = surroundingWindowTokens(for: inputs.intent)
+            let cap = surroundingWindowTokens
             let trimmed = trimToTokenCeiling(surrounding, ceiling: cap)
             if !trimmed.isEmpty {
                 let block = renderSurroundingBlock(text: trimmed)

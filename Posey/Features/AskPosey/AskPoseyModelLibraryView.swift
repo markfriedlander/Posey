@@ -59,6 +59,13 @@ struct AskPoseyModelLibraryView: View {
     /// `remoteExpandAskPoseyModel` antenna notification.
     @State private var expandedModelID: String?
 
+    /// Single-open accordion for the Embedding Model section (the backend
+    /// rawValue whose card is expanded, nil = all collapsed).
+    @State private var expandedEmbedderRaw: String?
+
+    /// The embedder pending a delete confirmation (nil = no dialog).
+    @State private var backendPendingDelete: EmbeddingBackend?
+
     var body: some View {
         Form {
             llmSection
@@ -74,6 +81,11 @@ struct AskPoseyModelLibraryView: View {
         .onReceive(NotificationCenter.default.publisher(for: .remoteExpandAskPoseyModel)) { note in
             if let id = note.userInfo?["modelID"] as? String {
                 withAnimation(.easeInOut(duration: 0.18)) { expandedModelID = id }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .remoteExpandAskPoseyEmbedder)) { note in
+            if let raw = note.userInfo?["backend"] as? String {
+                withAnimation(.easeInOut(duration: 0.18)) { expandedEmbedderRaw = raw }
             }
         }
         .sheet(item: $modelForLicense) { model in
@@ -113,6 +125,19 @@ struct AskPoseyModelLibraryView: View {
         } message: { model in
             let size = model.sizeGB.map { String(format: "%.1f GB", $0) } ?? "space"
             Text("Deleting frees ~\(size). You can re-download it later.")
+        }
+        .alert(
+            "Delete \(backendPendingDelete?.displayName ?? "embedder")?",
+            isPresented: Binding(
+                get: { backendPendingDelete != nil },
+                set: { if !$0 { backendPendingDelete = nil } }
+            ),
+            presenting: backendPendingDelete
+        ) { backend in
+            Button("Delete", role: .destructive) { deleteEmbedder(backend) }
+            Button("Cancel", role: .cancel) {}
+        } message: { backend in
+            Text("Deleting frees ~\(backend.sizeBlurb ?? "space"). Your library's existing vectors are kept, so re-downloading restores it with no re-embedding.")
         }
     }
 
@@ -160,43 +185,33 @@ struct AskPoseyModelLibraryView: View {
 
     private var embedderSection: some View {
         Section {
+            // Same universal flow as the Language Model rows: a status dot plus an
+            // accordion whose action row is Download / Select / Delete. Apple
+            // NLContextual is the exception — built in, no download/delete, Select
+            // only (see AskPoseyEmbedderRow).
             ForEach(EmbeddingBackend.allCases, id: \.rawValue) { backend in
-                Button {
-                    handleBackendSelection(backend)
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: backend.rawValue == selectedBackendRaw
-                              ? "checkmark.circle.fill"
-                              : "circle")
-                            .foregroundStyle(backend.rawValue == selectedBackendRaw
-                                             ? Color.accentColor : Color.secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(backend.displayName)
-                                    .font(.body)
-                                Spacer()
-                                if let size = backend.sizeBlurb {
-                                    Text(size)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            Text(backend.blurb)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .frame(minHeight: 44)
-                }
-                .buttonStyle(.plain)
-                .disabled(migrationCoordinator.isBusy)
+                AskPoseyEmbedderRow(
+                    backend: backend,
+                    isActive: backend.rawValue == selectedBackendRaw,
+                    isBusy: migrationCoordinator.isBusy,
+                    isExpanded: expandedEmbedderRaw == backend.rawValue,
+                    onToggleExpand: {
+                        expandedEmbedderRaw = (expandedEmbedderRaw == backend.rawValue)
+                            ? nil : backend.rawValue
+                    },
+                    onSelect: { handleBackendSelection(backend) },
+                    onDownload: { downloadEmbedder(backend) },
+                    onCancel: { cancelEmbedderDownload(backend) },
+                    onDelete: { backendPendingDelete = backend }
+                )
+                // Per-backend scroll anchor (parity with the LLM rows).
+                .id("preferences.askPosey.embedder.\(backend.rawValue)")
             }
             migrationStatusFooter
         } header: {
             Label("Embedding Model", systemImage: "brain")
         } footer: {
-            Text("The embedder converts text into vectors that Ask Posey searches against. Changing it re-embeds every chunk in your library — a one-time cost paid in the background.")
+            Text("The embedder turns text into vectors Ask Posey searches. Apple NLContextual is built in and always available — it sharpens search but isn't enough for Ask Posey. Download Nomic or mxbai and Select it to switch (re-embeds your library once, in the background). Delete keeps the vectors it already made, so re-downloading needs no re-embed.")
         }
     }
 
@@ -277,6 +292,42 @@ struct AskPoseyModelLibraryView: View {
         guard backend.rawValue != selectedBackendRaw else { return }
         guard let db = databaseManager else { return }
         migrationCoordinator.beginSwitch(to: backend, database: db)
+    }
+
+    // MARK: - Embedder download / delete (Download → Select → Delete parity)
+
+    /// Fetch a downloadable embedder's model bundle through the same pipeline as
+    /// the answer models. Separate from Select on purpose: downloading costs
+    /// storage, selecting costs the one-time library re-embed. No-op for the
+    /// built-in NLContextual (`modelID == nil`), whose asset iOS manages.
+    private func downloadEmbedder(_ backend: EmbeddingBackend) {
+        guard let repo = backend.modelID else { return }
+        Task { await mlxDownloader.startDownload(modelID: repo, repoID: repo, sizeGB: nil) }
+    }
+
+    private func cancelEmbedderDownload(_ backend: EmbeddingBackend) {
+        guard let repo = backend.modelID else { return }
+        mlxDownloader.cancelDownload(modelID: repo)
+    }
+
+    /// Delete a downloadable embedder's model files. Keeps the vectors it already
+    /// produced (they belong to the documents; deleting a document reclaims
+    /// them). If the deleted embedder was ACTIVE, revert retrieval to the
+    /// built-in NLContextual floor — which also drops
+    /// `AskPoseyAvailability.embedderProvisioned`, re-locking Ask Posey when no
+    /// advanced embedder is active (the present-based gate).
+    private func deleteEmbedder(_ backend: EmbeddingBackend) {
+        guard let repo = backend.modelID else { return }
+        let wasActive = (backend.rawValue == selectedBackendRaw)
+        Task {
+            await mlxDownloader.deleteModel(modelID: repo)
+            await MainActor.run {
+                ModelCatalogService.shared.refreshDownloadStates()
+                if wasActive {
+                    selectedBackendRaw = EmbeddingBackend.nlContextual.rawValue
+                }
+            }
+        }
     }
 
     // MARK: - Actions (Hal's ModelLibraryView flow)

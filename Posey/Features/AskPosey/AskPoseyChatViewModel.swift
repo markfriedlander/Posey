@@ -19,7 +19,7 @@ import FoundationModels
 /// Two `send` paths share the surface:
 /// - **`sendEchoStub`** — preview/test path. Appends a fake assistant
 ///   reply after a short delay. Doesn't touch AFM, doesn't persist.
-/// - **`send`** — live path. Classifies intent, builds the prompt,
+/// - **`send`** — live path. Retrieves context, builds the prompt,
 ///   streams a real AFM response, persists both turns to SQLite. The
 ///   path most users hit.
 ///
@@ -74,13 +74,6 @@ final class AskPoseyChatViewModel: ObservableObject, Identifiable {
     /// loop (token counts, drops, full prompt). Not persisted by the
     /// view model — the assistant turn row carries those fields.
     @Published private(set) var lastMetadata: AskPoseyResponseMetadata?
-
-    /// Last classified intent (from Call 1 of the most recent send).
-    /// Surface for the local-API tuning loop so /ask responses can
-    /// report what the classifier picked. The intent on the persisted
-    /// turn row is the canonical source; this is the in-memory mirror
-    /// for the API path that doesn't re-query SQLite.
-    @Published private(set) var lastIntent: AskPoseyIntent?
 
     /// The passage that was active at sheet invocation. Constant
     /// for the lifetime of this view model — re-opening the sheet
@@ -675,7 +668,6 @@ extension AskPoseyChatViewModel {
             content: displayText,
             invocation: scope,
             anchorOffset: offset,
-            intent: nil,
             chunksInjectedJSON: "[]",
             fullPromptForLogging: nil,
             summaryOfTurnsThrough: 0,
@@ -773,7 +765,6 @@ extension AskPoseyChatViewModel {
     func persistTurn(
         role: AskPoseyMessage.Role,
         content: String,
-        intent: AskPoseyIntent?,
         chunksInjected: [RetrievedChunk],
         fullPromptForLogging: String?
     ) {
@@ -805,7 +796,6 @@ extension AskPoseyChatViewModel {
             content: content,
             invocation: "passage",
             anchorOffset: anchor?.plainTextOffset,
-            intent: intent?.rawValue,
             chunksInjectedJSON: chunksJSON,
             fullPromptForLogging: fullPromptForLogging,
             summaryOfTurnsThrough: 0,
@@ -1077,7 +1067,6 @@ private extension AskPoseyChatViewModel {
                         content: summary,
                         invocation: "passage",
                         anchorOffset: nil,
-                        intent: nil,
                         chunksInjectedJSON: "[]",
                         fullPromptForLogging: nil,
                         summaryOfTurnsThrough: watermark,
@@ -1117,9 +1106,9 @@ private extension AskPoseyChatViewModel {
     /// word. This is a deliberately simple implementation — M6's
     /// retriever can substitute a sentence-segmenter-aware variant
     /// when better quality is needed.
-    func surroundingContext(for intent: AskPoseyIntent) -> String? {
+    func surroundingContext() -> String? {
         guard let anchor else { return nil }
-        let windowTokens = AskPoseyPromptBuilder.surroundingWindowTokens(for: intent)
+        let windowTokens = AskPoseyPromptBuilder.surroundingWindowTokens
         guard windowTokens > 0 else { return nil }
 
         let totalChars = AskPoseyTokenEstimator.chars(in: windowTokens)
@@ -1283,7 +1272,7 @@ extension AskPoseyChatViewModel {
         lastError = nil
 
         persistTurn(
-            role: .user, content: question, intent: nil,
+            role: .user, content: question,
             chunksInjected: [], fullPromptForLogging: nil
         )
 
@@ -1297,7 +1286,7 @@ extension AskPoseyChatViewModel {
         )
         messages.append(assistantMessage)
         persistTurn(
-            role: .assistant, content: answer, intent: nil,
+            role: .assistant, content: answer,
             chunksInjected: [],
             fullPromptForLogging: "[falafel-easter-egg]"
         )
@@ -1338,7 +1327,7 @@ extension AskPoseyChatViewModel {
         lastError = nil
 
         persistTurn(
-            role: .user, content: question, intent: nil,
+            role: .user, content: question,
             chunksInjected: [], fullPromptForLogging: nil
         )
 
@@ -1349,7 +1338,7 @@ extension AskPoseyChatViewModel {
         )
         messages.append(assistantMessage)
         persistTurn(
-            role: .assistant, content: answer, intent: nil,
+            role: .assistant, content: answer,
             chunksInjected: [],
             fullPromptForLogging: "[noise-short-circuit]"
         )
@@ -1365,9 +1354,7 @@ extension AskPoseyChatViewModel {
 
         persistTurn(
             role: .user,
-            content: question,
-            intent: nil,
-            chunksInjected: [],
+            content: question,            chunksInjected: [],
             fullPromptForLogging: nil
         )
 
@@ -1381,9 +1368,7 @@ extension AskPoseyChatViewModel {
         messages.append(assistantMessage)
         persistTurn(
             role: .assistant,
-            content: answer,
-            intent: nil,
-            chunksInjected: [],
+            content: answer,            chunksInjected: [],
             fullPromptForLogging: "[recommendation-short-circuit]"
         )
         isResponding = false
@@ -1476,9 +1461,7 @@ extension AskPoseyChatViewModel {
         }
         persistTurn(
             role: .assistant,
-            content: answer,
-            intent: nil,
-            chunksInjected: [],
+            content: answer,            chunksInjected: [],
             fullPromptForLogging: "[weak-retrieval-short-circuit]"
         )
         isResponding = false
@@ -1559,9 +1542,7 @@ extension AskPoseyChatViewModel {
 
         persistTurn(
             role: .user,
-            content: question,
-            intent: nil,
-            chunksInjected: [],
+            content: question,            chunksInjected: [],
             fullPromptForLogging: nil
         )
 
@@ -1578,9 +1559,7 @@ extension AskPoseyChatViewModel {
         messages.append(assistantMessage)
         persistTurn(
             role: .assistant,
-            content: answer,
-            intent: nil,
-            chunksInjected: [],
+            content: answer,            chunksInjected: [],
             fullPromptForLogging: "[role-short-circuit:\(role)]"
         )
         isResponding = false
@@ -1627,7 +1606,7 @@ extension AskPoseyChatViewModel {
 // ========== BLOCK 05: LIVE SEND (M5) - START ==========
 extension AskPoseyChatViewModel {
 
-    /// Live send path. Classifies intent, builds the prompt, streams
+    /// Live send path. Retrieves context, builds the prompt, streams
     /// a real AFM response, persists both turns. No-op when no
     /// classifier/streamer/DB are available — the caller falls back
     /// to `sendEchoStub` in that case.
@@ -1712,9 +1691,7 @@ extension AskPoseyChatViewModel {
         // preserves what was asked.
         persistTurn(
             role: .user,
-            content: trimmedInput,
-            intent: nil,
-            chunksInjected: [],
+            content: trimmedInput,            chunksInjected: [],
             fullPromptForLogging: nil
         )
 
@@ -1733,14 +1710,10 @@ extension AskPoseyChatViewModel {
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                // Intent classification REMOVED 2026-06-19 (Mark + A/B). The
-                // immediate/search/general classifier was an AFM-era "Call 1"
-                // built to pre-narrow context for AFM's 4K window. On the MLX
-                // answer path (8K budget) the A/B showed it adds ~2× latency and
-                // an AFM dependency for no quality gain, so every question now
-                // takes the single full-retrieval `.general` route (anchor +
-                // surrounding + summary + RAG — the model focuses itself).
-                let intent: AskPoseyIntent = .general
+                // Every question takes the single full-retrieval route: anchor +
+                // surrounding window + conversation summary + full-document RAG.
+                // Retrieval is always full-document; the model focuses itself from
+                // the question.
 
                 // Wait for any in-flight summarization from the
                 // previous turn to land BEFORE building this prompt
@@ -1749,13 +1722,9 @@ extension AskPoseyChatViewModel {
                     await task.value
                 }
 
-                // M6 RAG retrieval — top-K chunks for this question,
-                // dedup'd against anchor + recent STM. M5 used [];
-                // M6 lights up the slot the prompt builder already
-                // accommodates. All intents (including `.search`, a
-                // where/location question) answer in prose from these
-                // chunks — the old `.search` navigation-card path was
-                // removed 2026-06-19 (Mark: the card UI was vestigial).
+                // RAG retrieval — top-K chunks for this question, dedup'd against
+                // the anchor + recent short-term memory. Every question, including
+                // a where/location question, answers in prose from these chunks.
                 let chunks = await self.retrieveRAGChunks(for: trimmedInput)
 
                 // 2026-05-04 — Confidence signal for weak retrieval.
@@ -1837,14 +1806,13 @@ extension AskPoseyChatViewModel {
                 let storedFurthest = (try? self.databaseManager?.furthestReadOffset(for: self.documentID)) ?? nil
                 let furthestOffset = max(storedFurthest ?? 0, self.invocationReadingOffset ?? 0)
                 let inputs = AskPoseyPromptInputs(
-                    intent: intent,
                     // 2026-06-19 — A/B prompt-rebalance: read the process-global
                     // active variant (flipped by the SET_PROMPT_VARIANT antenna
                     // command). Default `.current` → production unchanged. Held
                     // constant for the whole thread; we never toggle mid-thread.
                     promptVariant: AskPoseyPromptVariant.active,
                     anchor: self.anchor,
-                    surroundingContext: self.surroundingContext(for: intent),
+                    surroundingContext: self.surroundingContext(),
                     // 2026-06-20 — the verbatim window is the SINGLE budget-fitted
                     // boundary (`effectiveVerbatimMessages`, ports Hal's
                     // effectiveMemoryDepth — "the single value all STM construction
@@ -1905,7 +1873,6 @@ extension AskPoseyChatViewModel {
                     self.finalizeAssistantTurn(
                         metadata: metadata,
                         placeholderID: placeholderID,
-                        intent: intent,
                         overrideFinalText: overrideText
                     )
                 } catch is CancellationError {
@@ -1913,7 +1880,7 @@ extension AskPoseyChatViewModel {
                     self.removeMessage(id: placeholderID)
                     self.isResponding = false
                 } catch {
-                    self.handleSendError(error, placeholderID: placeholderID, intent: intent)
+                    self.handleSendError(error, placeholderID: placeholderID)
                 }
             }
         }
@@ -1944,7 +1911,6 @@ extension AskPoseyChatViewModel {
     func finalizeAssistantTurn(
         metadata: AskPoseyResponseMetadata,
         placeholderID: UUID,
-        intent: AskPoseyIntent,
         // Spoiler firewall (Layer 2) — when non-nil, this catcher-approved text
         // (the original draft if clean, an in-character rewrite if a spoiler was
         // caught) replaces `metadata.finalText` as the answer shown + persisted.
@@ -2008,7 +1974,6 @@ extension AskPoseyChatViewModel {
             historyForPromptBuilder.append(messages[index])
         }
         lastMetadata = metadata
-        lastIntent = intent
         isResponding = false
 
         persistTurn(
@@ -2017,7 +1982,6 @@ extension AskPoseyChatViewModel {
             // baked in) so the DB matches what the user saw and
             // re-opens of the sheet show the same citations.
             content: attributedFinalText,
-            intent: intent,
             chunksInjected: metadata.chunksInjected,
             fullPromptForLogging: metadata.fullPromptForLogging
         )
@@ -2040,7 +2004,7 @@ extension AskPoseyChatViewModel {
     /// "couldn't answer this one — try rephrasing" message; transient
     /// errors get a softer try-again message; AFM-unavailable gets
     /// the explicit unavailability note.
-    func handleSendError(_ error: Error, placeholderID: UUID, intent: AskPoseyIntent?) {
+    func handleSendError(_ error: Error, placeholderID: UUID) {
         let serviceError: AskPoseyServiceError
         if let typed = error as? AskPoseyServiceError {
             serviceError = typed
@@ -2074,7 +2038,6 @@ extension AskPoseyChatViewModel {
             messages[index].content = bubbleText
             messages[index].isStreaming = false
         }
-        _ = intent  // intent reserved for analytics in M5+ — unused for now
         isResponding = false
     }
 

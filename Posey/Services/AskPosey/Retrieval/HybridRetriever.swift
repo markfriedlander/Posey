@@ -125,11 +125,18 @@ struct HybridRetriever {
             return RetrievalOutcome(results: [], topRelevance: 0, bm25Excluded: false)
         }
 
+        // Per-LLM RAPTOR trees: retrieve leaves + only the ACTIVE answer model's
+        // summary nodes. `answerModel()` is the MLX model Ask Posey answers with
+        // (never AFM once unlocked); its tree is the one that matches how the
+        // answer will actually be written. Both passes below are scoped to it so
+        // no other model's summaries leak in.
+        let summaryLLM = ModelCatalog.answerModel().id
+
         // ── Load every chunk for this document (text + possibly-nil
         //   embedding). This is the source of truth for both passes.
         let allChunks: [StoredUnitEmbeddingChunk]
         do {
-            allChunks = try database.unitEmbeddingChunks(for: documentID)
+            allChunks = try database.unitEmbeddingChunks(for: documentID, summaryLLM: summaryLLM)
         } catch {
             return RetrievalOutcome(results: [], topRelevance: 0, bm25Excluded: false)
         }
@@ -168,7 +175,8 @@ struct HybridRetriever {
         var bm25TopAbs: Double = 0
         if let matchExpr = matchExpr {
             let bm25Hits = (try? database.bm25Search(
-                documentID: documentID, matchExpression: matchExpr, limit: 50
+                documentID: documentID, matchExpression: matchExpr, limit: 50,
+                summaryLLM: summaryLLM
             )) ?? []
             for (i, hit) in bm25Hits.enumerated() {
                 bm25Ranks[hit.chunkID] = i + 1

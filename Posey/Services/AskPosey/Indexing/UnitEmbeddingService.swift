@@ -292,8 +292,9 @@ actor UnitEmbeddingService {
             // serial slot, so embed+RAPTOR for one document finish before the
             // next document starts (this was a fire-and-forget `enqueue` that
             // let doc A's RAPTOR overlap doc B's embed — part of the 2026-06-17
-            // interleaving). RaptorTreeService still self-gates on AFM + a
-            // minimum leaf count, so the build stays a cheap no-op when unmet.
+            // interleaving). RaptorTreeService still self-gates on an MLX answer
+            // model being present + a minimum leaf count, so the build stays a
+            // cheap no-op when unmet.
         }
 
         let batchSize = 32

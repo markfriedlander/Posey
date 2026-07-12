@@ -54,6 +54,21 @@ enum SharedModelStore {
             .appendingPathComponent("models", isDirectory: true)
             .appendingPathComponent(modelID, isDirectory: true)
     }
+
+    /// "Is this HuggingFace repo present on disk?" — a non-empty repo directory.
+    /// Truth-on-disk, independent of HOW it was fetched: the built-in
+    /// `MLXModelDownloader`, `swift-embeddings`' own snapshot, or a prior
+    /// install's surviving App-Group copy all land under the same
+    /// `huggingface/models/<repo>` layout. Used for the embedder unlock gate and
+    /// the Model Library row's downloaded state, so an embedder present by any
+    /// path is recognized (the downloader's tracking set only knows what IT
+    /// fetched). Mid-download a partial dir reads present, so callers that care
+    /// (the row) also check the downloader's in-flight state.
+    static func isRepoDownloaded(_ repo: String) -> Bool {
+        let dir = mlxModelDir(repo)
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        return !contents.isEmpty
+    }
 }
 // ========== BLOCK 01: SHARED MODEL STORE - PATHS - END ==========
 

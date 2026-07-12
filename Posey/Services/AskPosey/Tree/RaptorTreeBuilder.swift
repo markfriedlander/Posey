@@ -25,21 +25,22 @@ public struct RaptorSummaryNode: Sendable {
 }
 
 /// Builds one layer of the RAPTOR tree: cluster the input nodes (cosine
-/// k-means), summarize each cluster with the **active model** (the downloaded
-/// MLX model when present, else AFM — via `ModelCatalog.answerModel()`), and
+/// k-means), summarize each cluster with the **active MLX answer model** (via
+/// `ModelCatalog.answerModel()`; never AFM — the summarizer skips the cluster
+/// rather than fall back to AFM), and
 /// **verify every summary against its own source** before it
 /// is allowed into the pool. Verification is first-class and non-optional:
 /// a hallucinated summary in the retrieval pool produces a confidently-wrong
 /// answer with the same fluency as a correct one, so each summary's
 /// ungrounded sentences are dropped (`AskPoseySummaryVerifier`).
 ///
-/// **AFM pacing is designed in, not bolted on.** A large novel can need
-/// 100+ summary calls; Apple Foundation Models enters a `Code=-1` failure
-/// state under sustained pressure. The build loop is strictly sequential
-/// (one `await`ed call at a time) AND inserts a cooldown between calls, and
-/// it tolerates per-cluster failures (skips, never aborts the whole build) —
-/// the same "usable immediately, improves in background" contract as the PDF
-/// enhancement pipeline.
+/// **Model pacing is designed in, not bolted on.** A large novel can need
+/// 100+ summary calls — sustained heavy on-device generation that builds
+/// thermal + memory pressure (risking throttling / jetsam). The build loop is
+/// strictly sequential (one `await`ed call at a time) AND inserts a cooldown
+/// between calls, and it tolerates per-cluster failures (skips, never aborts
+/// the whole build) — the same "usable immediately, improves in background"
+/// contract as the PDF enhancement pipeline.
 public actor RaptorTreeBuilder {
 
     public struct Config: Sendable {
@@ -50,9 +51,9 @@ public actor RaptorTreeBuilder {
         /// input window). Oversized clusters are truncated for the slice;
         /// the production tree sub-summarizes recursively instead.
         public var maxCharsPerSummaryInput: Int
-        /// Cooldown between AFM summary calls — the load-bearing pacing.
+        /// Cooldown between model summary calls — the load-bearing pacing.
         public var afmCooldownSeconds: Double
-        /// Extra backoff applied after a rate-limit/transient AFM error.
+        /// Extra backoff applied after a rate-limit/transient model error.
         public var afmBackoffSeconds: Double
         /// Clusters with fewer members than this are skipped — too small to
         /// need an abstraction (the member leaves are already in the pool),
@@ -132,15 +133,15 @@ public actor RaptorTreeBuilder {
             }
             guard !source.isEmpty else { continue }
 
-            // Summarize (active model; AFM @Generable). Skip cluster on failure.
-            // Global serial lane — the RAPTOR summary AFM call is heavy
+            // Summarize (active MLX answer model). Skip cluster on failure.
+            // Global serial lane — the RAPTOR summary call is heavy
             // background compute; only one heavy op runs app-wide at a time.
             guard let raw = await HeavyWorkLane.shared.run(
                 label: "RAPTOR-summary",
                 { await self.summarize(source: source) }
             ) else {
-                // Transient/guardrail — back off so a bad streak doesn't trip
-                // AFM's sustained-pressure state, then continue.
+                // Transient/guardrail — back off so a bad streak doesn't build
+                // sustained model pressure (thermal/memory), then continue.
                 try? await Task.sleep(nanoseconds: UInt64(config.afmBackoffSeconds * 1_000_000_000))
                 continue
             }
@@ -189,25 +190,36 @@ public actor RaptorTreeBuilder {
         return out
     }
 
-    // MARK: - Summarization (active model via LLMService: MLX-first, AFM fallback)
+    // MARK: - Summarization (active MLX answer model via LLMService; never AFM)
 
     /// Summarize a cluster's concatenated source into a faithful ~80–130 word
-    /// abstract, using the ACTIVE model (`ModelCatalog.answerModel()` → the
-    /// downloaded MLX model when present, else AFM). Free-text + trim; the caller
-    /// verifies the result (cosine + entity grounding), so output hygiene is
-    /// backstopped and `@Generable`'s only real benefit here (a clean single
-    /// string) isn't needed.
+    /// abstract, using the ACTIVE MLX answer model (`ModelCatalog.answerModel()`).
+    /// Free-text + trim; the caller verifies the result (cosine + entity
+    /// grounding), so output hygiene is backstopped and `@Generable`'s only real
+    /// benefit here (a clean single string) isn't needed.
     ///
     /// **Why route through `answerModel()` (2026-06-18, Mark).** RAPTOR was the
     /// lone summarizer still hardcoded to AFM via `@Generable`; AFM refused
     /// benign literary/poetry passages as "sensitive content" (Dickinson), and
     /// silently summarizing an MLX-for-privacy user's document through AFM (→
     /// possibly Apple PCC) contradicted the 2026-05-29 privacy decision that
-    /// moved conversation summaries to the active model. Now:
-    ///   - MLX users → private, on-device summaries, no AFM content refusals;
-    ///   - no-MLX users → AFM, so RAPTOR still works pre-model-download.
+    /// moved conversation summaries to the active model.
+    ///
+    /// **AFM excluded entirely (2026-07-08, Mark).** Per-model trees are built
+    /// only by downloaded MLX answer models; there is no AFM fallback for tree
+    /// building. If no MLX model is active the cluster is skipped (the service
+    /// won't even reach here — it gates on an MLX answer model up front).
     private func summarize(source: String) async -> String? {
         let model = ModelCatalog.answerModel()
+        // AFM never authors a RAPTOR summary (Mark, 2026-07-08): it refused
+        // benign literary passages and would route a private document through
+        // Apple's servers. The service gates on an MLX answer model being
+        // present, so this only fires as defense in depth (e.g. the model was
+        // removed mid-build) — skip the cluster rather than fall back to AFM.
+        guard model.source == .mlx else {
+            dbgLog("RaptorTreeBuilder: skip summarize — no MLX answer model (never AFM)")
+            return nil
+        }
         let instructions = """
         You summarize a group of related passages from a book or document so a \
         reading companion can find them later. Write a faithful, concise summary \

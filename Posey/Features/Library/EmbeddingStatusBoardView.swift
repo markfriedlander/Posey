@@ -509,7 +509,8 @@ struct EmbeddingStatusBoardView: View {
     private func refresh() {
         coverage = (try? databaseManager.embeddingCoverage()) ?? coverage
         docCoverage = (try? databaseManager.embeddingCoverageByDocument()) ?? docCoverage
-        raptorNodes = (try? databaseManager.raptorSummaryNodeCountsByDocument()) ?? raptorNodes
+        // Per-model trees (2026-07-08): show the ACTIVE answer model's tree status.
+        raptorNodes = (try? databaseManager.raptorSummaryNodeCountsByDocument(llmID: ModelCatalog.answerModel().id)) ?? raptorNodes
         thermal = thermalDescription()
         dbBytes = databaseManager.databaseFileBytes()
         availMB = processAvailableMemoryMB()

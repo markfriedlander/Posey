@@ -152,6 +152,12 @@ extension Notification.Name {
     /// 2026-05-28 — added with the faithful Hal model-management port so
     /// the rebuilt detail card is verifiable on real hardware.
     static let remoteExpandAskPoseyModel = Notification.Name("PoseyRemoteExpandAskPoseyModel")
+    /// userInfo `["backend": <EmbeddingBackend.rawValue>]`. The embedder-row
+    /// analog of `remoteExpandAskPoseyModel`: `AskPoseyModelLibraryView` observes
+    /// it and expands that embedder's accordion so its Download/Select/Delete
+    /// action row is verifiable on real hardware (the header Button can't be
+    /// reached by the TAP verb).
+    static let remoteExpandAskPoseyEmbedder = Notification.Name("PoseyRemoteExpandAskPoseyEmbedder")
     /// No userInfo. AskPoseyPreferencesSection observes; pushes the
     /// `AskPoseyModelLibraryView` navigation destination. Posted by the
     /// `OPEN_MODEL_LIBRARY` verb (and by `SCROLL_PREFS_TO_LLM`, which also

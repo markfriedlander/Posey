@@ -205,9 +205,12 @@
       font-size: 0.85rem;
       color: var(--muted);
       text-align: center;
+      line-height: 1.9;
     }
-    footer a { color: var(--muted); }
-    footer a:hover { color: var(--accent); text-decoration: underline; }
+    footer a { color: var(--accent); }
+    footer a:hover { color: var(--accent-glow); text-decoration: underline; }
+    footer .sep { color: var(--border); padding: 0 0.4rem; }
+    footer .soon { color: var(--muted); }
 
   </style>
 </head>
@@ -279,15 +282,8 @@
       <p>She knows where everything is.</p>
     </div>
 
-    <h2>More</h2>
-    <ul class="links">
-      <li><a href="privacy.html">Privacy</a></li>
-      <li><a href="support.html">Support</a></li>
-      <li><a href="mailto:markfriedlander@yahoo.com">Contact</a></li>
-    </ul>
-
     <footer>
-      <p>Posey 1.0 &nbsp;·&nbsp; iPhone &nbsp;·&nbsp; © 2026 Mark Friedlander</p>
+      <span class="soon">Coming soon</span><span class="sep">·</span><a href="privacy.html">Privacy</a><span class="sep">·</span><a href="support.html">Support</a><span class="sep">·</span><a href="https://github.com/markfriedlander/Posey">Source</a><span class="sep">·</span><a href="index.html">Home</a><span class="sep">·</span>© 2026 <a href="https://markfriedlander.github.io/">Mark Friedlander</a>
     </footer>
 
   </main>

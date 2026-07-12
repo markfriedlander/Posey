@@ -2027,30 +2027,17 @@ extension DatabaseManager {
         // meaning under this invariant, and NULL is required so
         // `EmbedderMigrationCoordinator` can wipe-and-refill.
         //
-        // **Idempotent migration.** First version of this migration
-        // unconditionally DROPped the table on every launch — that
-        // wiped chunk data on every app update / install. The fix:
-        // detect the legacy shape (presence of the `embedding_kind`
-        // column) and migrate only when needed. If the table
-        // already exists in the new shape, leave it alone. If it
-        // doesn't exist yet (fresh install), CREATE IF NOT EXISTS
-        // handles that path.
-        let chunksTableHasLegacyKind: Bool = {
-            do {
-                let stmt = try prepareStatement(sql: "PRAGMA table_info(unit_embedding_chunks);")
-                defer { sqlite3_finalize(stmt) }
-                while sqlite3_step(stmt) == SQLITE_ROW {
-                    if let cName = sqlite3_column_text(stmt, 1) {
-                        let name = String(cString: cName)
-                        if name == "embedding_kind" { return true }
-                    }
-                }
-            } catch { return false }
-            return false
-        }()
-        if chunksTableHasLegacyKind {
-            try execute("DROP TABLE unit_embedding_chunks;")
-        }
+        // **Legacy migration removed (2026-07-09, v1.0 P0 — data-loss hardening.)**
+        // The pre-8a interim schema (an `embedding_kind` column, no per-backend
+        // BLOB columns) is long gone: every DB since 2026-05-23 is the current
+        // shape (Change B's `llm_id` requires it), and this is pre-release with no
+        // external data (fungible dev data). The old one-time migration DROPped
+        // `unit_embedding_chunks` whenever a column probe detected `embedding_kind`
+        // — an unconditional (no IF EXISTS) DROP of the live chunk + embedding
+        // table, i.e. a latent data-loss landmine if that probe ever false-
+        // positived. It never fires on a current DB, so removing it changes no
+        // behavior; current DBs and fresh installs are both handled by the
+        // CREATE TABLE IF NOT EXISTS below.
         try execute("""
             CREATE TABLE IF NOT EXISTS unit_embedding_chunks (
                 id TEXT PRIMARY KEY,

@@ -209,6 +209,16 @@ struct SurfaceReaderHost: UIViewRepresentable {
                     self.scrollToFraction(CGFloat(f))
                 }
                 .store(in: &cancellables)
+            // Restart-from-beginning: move the actual UIKit surface to the top.
+            // The SwiftUI scroll proxy can't drive this text view, so restart
+            // posts this and we scroll here — the screen visibly returns to the
+            // start alongside the cursor reset.
+            NotificationCenter.default.publisher(for: .remoteReaderScrollSurfaceToTop)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in
+                    self?.scrollToFraction(0)
+                }
+                .store(in: &cancellables)
             NotificationCenter.default.publisher(for: .remoteScrollToImage)
                 .receive(on: RunLoop.main)
                 .sink { [weak self] note in

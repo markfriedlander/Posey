@@ -14,6 +14,14 @@ import UIKit
 /// posts the notification, the relevant SwiftUI view observes via
 /// `.onReceive` and performs the equivalent of a user action.
 extension Notification.Name {
+    /// Import progress for a multi-chapter EPUB/HTML parse.
+    /// `userInfo["current"]: Int` (1-based), `userInfo["total"]: Int`.
+    /// The EPUB importer posts one per spine item BEFORE the (main-thread,
+    /// WebKit-bound) render of that chapter; LibraryView updates the import
+    /// toast to a determinate "chapter N of M" so the wait reads as progress
+    /// instead of a hang. Posted off-main; the observer hops to main.
+    static let poseyImportChapterProgress = Notification.Name("PoseyImportChapterProgress")
+
     /// `userInfo["documentID"]: UUID`, `userInfo["offset"]: Int`.
     /// ReaderView observes; calls `viewModel.jumpToOffset(_:)`.
     static let remoteReaderJumpToOffset = Notification.Name("PoseyRemoteReaderJumpToOffset")
@@ -211,6 +219,11 @@ extension Notification.Name {
     /// one-surface reader to that fraction of its content — lets the antenna frame any
     /// part of the surface (e.g. an annotation) for capture/verification.
     static let remoteScrollSurface = Notification.Name("PoseyRemoteScrollSurface")
+    /// Posted by `restartFromBeginning()`. The one-surface reader (a UIKit text
+    /// view whose scrolling the SwiftUI proxy can't drive) observes this and
+    /// scrolls its content to the top, so restart visibly moves the screen to the
+    /// start — not just resetting the playback cursor. No userInfo.
+    static let remoteReaderScrollSurfaceToTop = Notification.Name("PoseyRemoteReaderScrollSurfaceToTop")
     /// DEBUG (CC#22). `userInfo["index"]: Int` (1-based). Scrolls the open one-surface
     /// reader precisely to the Nth `.image` unit in reading order (via
     /// `layout.unitRange` → glyph rect), so a specific figure can be framed for

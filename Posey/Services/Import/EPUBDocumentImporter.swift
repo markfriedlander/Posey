@@ -193,7 +193,19 @@ extension EPUBDocumentImporter {
         // Pass 1 — load + parse every spine item. Cumulative-offset
         // accounting waits for pass 2 (after front-matter filtering)
         // so offsets reflect the FINAL plainText layout.
-        for (path, href) in spineItems {
+        for (index, (path, href)) in spineItems.enumerated() {
+            // Each chapter's HTML render (`loadText` → `renderHTMLOnMain`) is a
+            // synchronous main-thread WebKit parse that Apple requires on main.
+            // Back-to-back they monopolize the main thread (a ~44s hard freeze on
+            // a big book). Post determinate progress + hand the main thread a
+            // frame BEFORE each render so the toast updates to "chapter N of M"
+            // and the app stays responsive between chapters. (Can't remove the
+            // per-chapter block without moving WebKit; this makes it breathe.)
+            NotificationCenter.default.post(
+                name: .poseyImportChapterProgress, object: nil,
+                userInfo: ["current": index + 1, "total": spineItems.count])
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(16))
             guard let chapterData = entryLoader(path) else { continue }
             let chapterDir = (path as NSString).deletingLastPathComponent
             let bareHref = (href as NSString).lastPathComponent

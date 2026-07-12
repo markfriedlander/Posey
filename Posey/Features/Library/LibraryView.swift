@@ -292,6 +292,14 @@ struct LibraryView: View {
                     importProgressBanner(message: message)
                 }
             }
+            // Determinate per-chapter progress for a multi-chapter EPUB/HTML
+            // import (posted by the importer before each main-thread render).
+            // Always compiled — this is a user-facing toast, not antenna chrome.
+            .onReceive(NotificationCenter.default.publisher(for: .poseyImportChapterProgress)) { note in
+                viewModel.setImportChapterProgress(
+                    current: note.userInfo?["current"] as? Int ?? 0,
+                    total: note.userInfo?["total"] as? Int ?? 0)
+            }
             .task { runLaunchTasks() }
             .onAppear {
                 viewModel.loadDocuments()
@@ -549,6 +557,15 @@ final class LibraryViewModel: ObservableObject {
     /// cost is parked for a 1.1 import-optimization pass — see next.md.)
     static let epubImportBannerMessage =
         "Posey is reading ahead\u{2026} ooh, a proper tome \u{2014} this may take a little longer than usual."
+
+    /// Update the import toast to a determinate "chapter N of M" as a multi-chapter
+    /// EPUB/HTML parse advances. Only while an import is actually showing (guards on
+    /// `importStatusMessage != nil`), so a stray late notification can't resurrect
+    /// the banner after the import finished and cleared it.
+    func setImportChapterProgress(current: Int, total: Int) {
+        guard importStatusMessage != nil, total > 0, current > 0 else { return }
+        importStatusMessage = "Posey is reading ahead\u{2026} chapter \(current) of \(total)."
+    }
     /// Whether the local API server is running.
     ///
     /// Defaults to **true** for the duration of development so dev sessions
@@ -1068,6 +1085,45 @@ extension LibraryViewModel {
                      "importedAt": ISO8601DateFormatter().string(from: $0.importedAt)]
                 }
                 return json(arr)
+
+            case "IMPORT_USER_PATH":
+                // Drive the REAL file-picker import path (`handleImport`, WITH its
+                // toast + the exact async structure a user gets), not `apiImport`.
+                // Lets us measure the freeze + screenshot the toast as the user
+                // experiences it. The file must already sit in the app's Documents
+                // dir (push it there with `devicectl device copy to`). Fire-and-
+                // forget (the import runs on its own Task); poll /state for
+                // responsiveness and GET_RENDER_BLOCKED_MS for the true blocked time.
+                guard let name = arg, !name.isEmpty else {
+                    return #"{"error":"Usage: IMPORT_USER_PATH:<filename in app Documents/>"}"#
+                }
+                guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                    return #"{"error":"no Documents dir"}"#
+                }
+                let userURL = dir.appendingPathComponent(name)
+                guard FileManager.default.fileExists(atPath: userURL.path) else {
+                    return #"{"error":"file not found in Documents: \#(name)"}"#
+                }
+                HTMLDocumentImporter.accumulatedRenderBlockedMs = 0
+                ImportPhaseTelemetry.reset()
+                handleImport(result: .success([userURL]))
+                return json(["status": "posted", "path": userURL.lastPathComponent, "channel": "user"])
+
+            case "GET_RENDER_BLOCKED_MS":
+                // Real timings of the last import. renderBlockedMs = WebKit HTML
+                // renders (the stall watchdog is fooled to ~0 by WebKit's nested
+                // runloop). build/persist/images localize where a big import spends
+                // its time; persistMs holds the DB lock, blocking antenna + UI.
+                return json([
+                    "mainThreadRenderBlockedMs": Int(HTMLDocumentImporter.accumulatedRenderBlockedMs.rounded()),
+                    "buildMs": Int(ImportPhaseTelemetry.buildMs.rounded()),
+                    "persistMs": Int(ImportPhaseTelemetry.persistMs.rounded()),
+                    "imagesMs": Int(ImportPhaseTelemetry.imagesMs.rounded()),
+                    "importOnMain": ImportPhaseTelemetry.onMain,
+                    "displayParseMs": Int(ImportPhaseTelemetry.displayParseMs.rounded()),
+                    "unitsMs": Int(ImportPhaseTelemetry.unitsMs.rounded()),
+                    "sentenceIndexMs": Int(ImportPhaseTelemetry.sentenceIndexMs.rounded()),
+                    "tocResolveMs": Int(ImportPhaseTelemetry.tocResolveMs.rounded())])
 
             case "GET_TEXT":
                 guard let idStr = arg, let id = UUID(uuidString: idStr) else {
@@ -5011,6 +5067,10 @@ extension LibraryViewModel {
             stallProbe.start()
             defer { stallProbe.stop() }
             let probeStart = DispatchTime.now().uptimeNanoseconds
+            // Real render-block telemetry (the watchdog above is fooled to ~0 by
+            // WebKit's nested runloop — see HTMLDocumentImporter). Zero it here,
+            // read the accumulated main-thread render time into the response below.
+            HTMLDocumentImporter.accumulatedRenderBlockedMs = 0
             #endif
             let tempURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(cleanFilename)
@@ -5076,6 +5136,9 @@ extension LibraryViewModel {
             stallProbe.stop()
             resp["importMs"] = Int((Double(DispatchTime.now().uptimeNanoseconds &- probeStart) / 1_000_000).rounded())
             resp["mainThreadMaxStallMs"] = Int(stallProbe.maxStallMs.rounded())
+            // The honest number: total wall-clock the main thread spent inside the
+            // synchronous WebKit HTML renders (0 for non-HTML/EPUB formats).
+            resp["mainThreadRenderBlockedMs"] = Int(HTMLDocumentImporter.accumulatedRenderBlockedMs.rounded())
             #endif
             return json(resp)
         } catch {

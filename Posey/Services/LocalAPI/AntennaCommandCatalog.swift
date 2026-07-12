@@ -47,6 +47,8 @@ nonisolated enum AntennaCommandCatalog {
         .init("HELP", .system, "HELP | HELP:<verb> | HELP:<category-or-substring>", "Self-describing catalog of every /command verb. Start here when you don't know which verb to use."),
         .init("LIST_COMMANDS", .system, "LIST_COMMANDS", "Alias of HELP — full verb catalog."),
         .init("LIST_DOCUMENTS", .document, "LIST_DOCUMENTS", "List every imported document with id + title."),
+        .init("IMPORT_USER_PATH", .document, "IMPORT_USER_PATH:<filename in app Documents/>", "Drive the REAL file-picker import path (handleImport, WITH toast) on a file already in the app Documents dir (push via devicectl copy) — measures/screenshots the freeze as the user sees it, unlike POST /import. Fire-and-forget; poll /state + GET_RENDER_BLOCKED_MS."),
+        .init("GET_RENDER_BLOCKED_MS", .document, "GET_RENDER_BLOCKED_MS", "Real main-thread-blocked ms of the last import's WebKit HTML renders (accumulated across chapters). The honest freeze number — the stall watchdog is fooled to ~0 by WebKit's nested runloop."),
         .init("GET_TEXT", .document, "GET_TEXT", ""),
         .init("GET_PLAIN_TEXT", .document, "GET_PLAIN_TEXT", "Return a document's full plain text."),
         .init("EXTRACT_METADATA", .enhancement, "EXTRACT_METADATA", ""),

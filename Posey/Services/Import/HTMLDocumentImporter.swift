@@ -611,8 +611,24 @@ struct HTMLDocumentImporter {
     /// defaults to Windows-1252 on charset-less HTML, misreading UTF-8 multi-byte
     /// sequences (em-dash 0xE2 0x80 0x94) as Latin-1 → mojibake ("â€""). Every
     /// path that reaches here already went through String(data:encoding:.utf8).
+    /// REAL main-thread-blocked telemetry. The background stall watchdog reads
+    /// ~0ms for the EPUB render freeze because WebKit's HTML parser spins a
+    /// nested runloop that answers the watchdog's dispatch ping — so it thinks
+    /// main is responsive while the app is frozen. We measure the truth AT THE
+    /// SOURCE: the wall-clock spent inside each synchronous NSAttributedString
+    /// render, accumulated across every chapter. Reset before an import, read
+    /// after (apiImport / the user-path verb both surface it). @MainActor because
+    /// the only writer (renderHTMLOnMain) and readers (import handlers) are all
+    /// main-actor.
+    @MainActor static var accumulatedRenderBlockedMs: Double = 0
+
     @MainActor
     private static func renderHTMLOnMain(_ data: Data) throws -> NSAttributedString {
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds &- started) / 1_000_000
+            Self.accumulatedRenderBlockedMs += ms
+        }
         do {
             return try NSAttributedString(
                 data: data,

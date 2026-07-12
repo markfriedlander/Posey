@@ -452,6 +452,13 @@ struct ReaderView: View {
                 let off = (i >= 0 && i < segs.count) ? segs[i].startOffset : 0
                 TTSVerifyHarness.shared.recordHighlight(index: i, offset: off)
             }
+            // Restart-from-beginning: explicit scroll to the top of the content.
+            // Fires on every restart (even if the sentence index didn't change),
+            // so the screen visibly returns to the start.
+            .onChange(of: viewModel.restartScrollToken) { _, _ in
+                lastProgrammaticScrollAt = Date()
+                viewModel.scrollToContentStartOnOpen(with: proxy, animated: true)
+            }
             // c13: during playback, the active sentence's measured pixel midY is
             // published; pin it to the upper third. Fires AFTER the anchor has
             // been repositioned to the new sentence (avoids the stale-anchor
@@ -1818,81 +1825,75 @@ private struct ReaderRemoteControlSearchObservers: ViewModifier {
 private struct SmartSkipPromptModifier: ViewModifier {
     @ObservedObject var viewModel: ReaderViewModel
     func body(content: Content) -> some View {
-        content.sheet(isPresented: $viewModel.isPresentingSkipPrompt) {
-            // Swipe-down without choosing = same as "Jump to Chapter"
-            // (the reader is already at the skip offset; user just
-            // dismissed without changing anything). Stops the prompt
-            // from re-appearing.
-            viewModel.confirmSkipKeep()
-        } content: {
-            SmartSkipPromptSheet(viewModel: viewModel)
-        }
+        content
+            .overlay(alignment: .top) {
+                if viewModel.isPresentingSkipPrompt {
+                    SmartSkipBanner(viewModel: viewModel)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.25), value: viewModel.isPresentingSkipPrompt)
     }
 }
 
-/// 2026-05-27 — Bottom-sheet body for the smart-skip prompt. Compact
-/// detent so the document stays visible behind it. Two action buttons,
-/// styled to match Posey's quiet/declarative voice.
-private struct SmartSkipPromptSheet: View {
+/// 2026-07-12 — single-action, non-blocking banner (replaces the old two-button
+/// modal, whose look-alike "Jump to Chapter" / "Start from Beginning" choice was
+/// confusing). Behavior underneath is UNCHANGED: the reader still opens at the
+/// main text with the front matter skipped. The banner is honest that something
+/// was skipped and offers ONE action to reveal it; the ✕ keeps the skip and stops
+/// asking. `revealFromBeginning()` / `confirmSkipKeep()` both flip
+/// `isPresentingSkipPrompt` false, dismissing the banner.
+private struct SmartSkipBanner: View {
     @ObservedObject var viewModel: ReaderViewModel
-    @Environment(\.dismiss) private var dismiss
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.title3)
-                    .foregroundStyle(.tint)
-                Text("Skip the housekeeping?")
-                    .font(.headline)
-                Spacer()
-            }
-            Text("This one starts with some front-matter before the good stuff. Want to jump to the first chapter, or start from the beginning?")
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.to.line")
+                .foregroundStyle(.secondary)
+            Text("Skipped ahead past the front matter.")
                 .font(.subheadline)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
-            VStack(spacing: 10) {
-                Button {
-                    viewModel.confirmSkipKeep()
-                    dismiss()
-                } label: {
-                    Text("Jump to Chapter")
-                        .font(.body.weight(.medium))
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("reader.skipPrompt.jumpToChapter")
-
-                Button {
-                    viewModel.revealFromBeginning()
-                    dismiss()
-                } label: {
-                    Text("Start from Beginning")
-                        .font(.body.weight(.medium))
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("reader.skipPrompt.startFromBeginning")
+            Spacer(minLength: 8)
+            Button("Show it") {
+                viewModel.revealFromBeginning()
             }
+            .font(.subheadline.weight(.semibold))
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("reader.skipPrompt.startFromBeginning")
+
+            Button {
+                viewModel.confirmSkipKeep()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.footnote.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Dismiss")
+            .accessibilityIdentifier("reader.skipPrompt.dismiss")
         }
-        .padding(20)
-        .presentationDetents([.height(240)])
-        .presentationDragIndicator(.visible)
-        .presentationBackgroundInteraction(.enabled)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(.separator, lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
         .accessibilityIdentifier("reader.skipPrompt")
-        // Antenna-driven choice support. The local API posts
-        // `.remoteRespondSkipPrompt` with userInfo["choice"] ∈
-        // {"keep", "beginning"}; we dispatch to the matching handler
-        // and dismiss the sheet. Lets the antenna test the smart-skip
-        // flow without UI interaction.
+        .accessibilityElement(children: .contain)
+        // Antenna-driven choice support (unchanged mapping): "beginning" reveals
+        // the front matter, "keep" dismisses. Lets the antenna drive the flow.
         .onReceive(NotificationCenter.default.publisher(for: .remoteRespondSkipPrompt)) { note in
             let choice = (note.userInfo?["choice"] as? String)?.lowercased() ?? ""
             switch choice {
-            case "keep", "jumptochapter", "chapter":
-                viewModel.confirmSkipKeep()
-                dismiss()
-            case "beginning", "startfrombeginning", "fromtop":
+            case "beginning", "startfrombeginning", "fromtop", "show":
                 viewModel.revealFromBeginning()
-                dismiss()
+            case "keep", "jumptochapter", "chapter", "dismiss":
+                viewModel.confirmSkipKeep()
             default:
                 break
             }
@@ -2573,6 +2574,13 @@ final class ReaderViewModel: ObservableObject {
     /// gives the choice context). The user's action handlers flip
     /// it false again.
     @Published var isPresentingSkipPrompt: Bool = false
+
+    /// Bumped by `restartFromBeginning()` to command an EXPLICIT scroll to the
+    /// top of the content — so the screen visibly jumps to the start alongside
+    /// the audio reset, even when the sentence index was already 0 (a manual
+    /// scroll-away). The reader body observes this and calls
+    /// `scrollToContentStartOnOpen`. Not a side-effect of the read-along band.
+    @Published var restartScrollToken: Int = 0
 
     /// User chose "Jump to Chapter" on the smart-skip prompt. Persist
     /// `skipSource = "user_keep"` so the prompt never reappears, and
@@ -3704,6 +3712,14 @@ final class ReaderViewModel: ObservableObject {
         playbackService.stop()
         playbackService.prepare(at: currentSentenceIndex)
         persistPosition()
+        // Explicitly move the SCREEN to the top of the content. The reader
+        // surface is a UIKit text view the SwiftUI proxy can't drive, so post to
+        // the surface to scroll to the top — this fires even when the cursor was
+        // already 0 (a manual scroll-away). `nextScrollAnchor`/`restartScrollToken`
+        // cover any non-surface reader path (harmless no-op for the surface).
+        nextScrollAnchor = .top
+        restartScrollToken += 1
+        NotificationCenter.default.post(name: .remoteReaderScrollSurfaceToTop, object: nil)
     }
 
     /// 2026-06-03 — TTS-verify harness driver. Starts LIVE playback fresh from

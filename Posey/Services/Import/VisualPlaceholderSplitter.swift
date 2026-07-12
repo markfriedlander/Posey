@@ -68,6 +68,15 @@ enum VisualPlaceholderSplitter {
         @inline(__always) func emitParagraphs(in textChunk: String) {
             let chunkStartOffset = plainOffset
             var partStart = textChunk.startIndex
+            // Character offset of `partStart` from the chunk start, tracked
+            // INCREMENTALLY. The previous code recomputed
+            // `textChunk.distance(from: startIndex, to: trimStart)` PER PARAGRAPH
+            // — each an O(n) walk from the top of the chunk. On one large chunk
+            // (a whole illustrated book, thousands of paragraphs) that was O(n²)
+            // and dominated import (~60s on Sherlock). This yields the EXACT same
+            // offset (`partStartOffset + leadingWSCount` == distance to trimStart)
+            // at O(1) per paragraph, making the whole pass O(n).
+            var partStartOffset = 0
             while partStart < textChunk.endIndex {
                 let separatorRange = textChunk.range(
                     of: "\n\n",
@@ -75,16 +84,14 @@ enum VisualPlaceholderSplitter {
                 )
                 let partEnd = separatorRange?.lowerBound ?? textChunk.endIndex
                 let part = textChunk[partStart..<partEnd]
-                let leadingWS = part.prefix(while: { $0.isWhitespace || $0.isNewline })
-                let trailingWS = part.reversed().prefix(while: { $0.isWhitespace || $0.isNewline })
-                if part.count > leadingWS.count + trailingWS.count {
-                    let trimStart = textChunk.index(partStart, offsetBy: leadingWS.count)
-                    let trimEnd = textChunk.index(partEnd, offsetBy: -trailingWS.count)
+                let leadingWSCount = part.prefix(while: { $0.isWhitespace || $0.isNewline }).count
+                let trailingWSCount = part.reversed().prefix(while: { $0.isWhitespace || $0.isNewline }).count
+                let partCount = part.count
+                if partCount > leadingWSCount + trailingWSCount {
+                    let trimStart = textChunk.index(partStart, offsetBy: leadingWSCount)
+                    let trimEnd = textChunk.index(partEnd, offsetBy: -trailingWSCount)
                     let trimmed = String(textChunk[trimStart..<trimEnd])
-                    let paraOffsetInChunk = textChunk.distance(
-                        from: textChunk.startIndex,
-                        to: trimStart
-                    )
+                    let paraOffsetInChunk = partStartOffset + leadingWSCount
                     let start = chunkStartOffset + paraOffsetInChunk
                     let end = start + trimmed.count
                     blocks.append(DisplayBlock(
@@ -96,6 +103,9 @@ enum VisualPlaceholderSplitter {
                         endOffset: end
                     ))
                 }
+                // Advance past this part + its "\n\n" separator (2 chars; 0 at the
+                // chunk end). Keeps partStartOffset == distance(startIndex, partStart).
+                partStartOffset += partCount + (separatorRange != nil ? 2 : 0)
                 partStart = separatorRange?.upperBound ?? textChunk.endIndex
             }
             // Always advance by the full chunk length — the chars are

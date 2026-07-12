@@ -1,5 +1,27 @@
 import Foundation
 
+/// DEV import-phase telemetry (CC#31, 2026-07-12). The honest render meter proved
+/// the EPUB freeze is NOT the WebKit render (~300ms) but a later phase (~46s). This
+/// localizes WHERE: unit/sentence BUILD (CPU, off the DB lock) vs the PERSIST (the
+/// single DB transaction that holds `dbLock`, blocking the antenna + UI) vs images.
+/// One import at a time (never batched), written from the import (may be off-main),
+/// read by the antenna on main — `nonisolated(unsafe)` statics are adequate.
+enum ImportPhaseTelemetry {
+    nonisolated(unsafe) static var buildMs: Double = 0     // whole build (display parse + units + sentences + TOC)
+    nonisolated(unsafe) static var persistMs: Double = 0   // databaseManager.persistParsedDocument (holds dbLock)
+    nonisolated(unsafe) static var imagesMs: Double = 0     // image deletes + inserts
+    nonisolated(unsafe) static var onMain: Bool = false     // was importParsedDocument on the main thread?
+    // Sub-phases of the build — localize the O(n²) (CC#31, 2026-07-12).
+    nonisolated(unsafe) static var displayParseMs: Double = 0
+    nonisolated(unsafe) static var unitsMs: Double = 0
+    nonisolated(unsafe) static var sentenceIndexMs: Double = 0
+    nonisolated(unsafe) static var tocResolveMs: Double = 0
+    static func reset() {
+        buildMs = 0; persistMs = 0; imagesMs = 0; onMain = false
+        displayParseMs = 0; unitsMs = 0; sentenceIndexMs = 0; tocResolveMs = 0
+    }
+}
+
 // ========== BLOCK 01: EPUB LIBRARY IMPORTER (UNITS) - START ==========
 
 /// Imports EPUB files into the unit-based content model.
@@ -23,8 +45,6 @@ import Foundation
 /// 2026-05-23 — rewritten as part of the architecture rebuild.
 struct EPUBLibraryImporter {
     let databaseManager: DatabaseManager
-    private let importer = EPUBDocumentImporter()
-    private let displayParser = EPUBDisplayParser()
 
     init(databaseManager: DatabaseManager) {
         self.databaseManager = databaseManager
@@ -36,44 +56,68 @@ struct EPUBLibraryImporter {
     // runs off-main automatically. Output byte-identical.
     func importDocument(from url: URL) async throws -> Document {
         try FormatPrecheck.checkEPUB(url: url)
-        let parsed = try await importer.loadDocument(from: url)
-        let contentHash = try? ContentHasher.sha256(of: url)
-        let title = TitleExtractor.resolve(
-            contentTitle: parsed.title,
-            filename: url.lastPathComponent
-        )
-        return try importParsedDocument(
-            title: title,
-            fileName: url.lastPathComponent,
-            fileType: url.pathExtension.lowercased(),
-            parsed: parsed,
-            contentHash: contentHash
-        )
+        // Run the WHOLE parse + build + persist on a detached (off-main) task.
+        // The parse hops to main only for the ~800ms of WebKit renders; the ~tens
+        // of seconds of unit/sentence building then runs off-main so the UI +
+        // antenna stay responsive (was: importOnMain=true, a ~57s hard freeze).
+        // `parsed` is created AND consumed inside the task — it never crosses the
+        // concurrency boundary, so no extra Sendable conformances are needed.
+        let db = databaseManager
+        return try await Task.detached(priority: .userInitiated) {
+            let importer = EPUBDocumentImporter()
+            let parsed = try await importer.loadDocument(from: url)
+            let contentHash = try? ContentHasher.sha256(of: url)
+            let title = TitleExtractor.resolve(
+                contentTitle: parsed.title,
+                filename: url.lastPathComponent
+            )
+            return try Self.importParsedDocument(
+                databaseManager: db,
+                title: title,
+                fileName: url.lastPathComponent,
+                fileType: url.pathExtension.lowercased(),
+                parsed: parsed,
+                contentHash: contentHash
+            )
+        }.value
     }
 
     func importDocument(title: String, fileName: String, rawData: Data, fileType: String = "epub") async throws -> Document {
-        let parsed = try await importer.loadDocument(fromData: rawData)
-        let contentHash = ContentHasher.sha256(rawData)
-        let resolved = TitleExtractor.resolve(
-            contentTitle: parsed.title ?? (title.isEmpty ? nil : title),
-            filename: fileName
-        )
-        return try importParsedDocument(
-            title: resolved,
-            fileName: fileName,
-            fileType: fileType,
-            parsed: parsed,
-            contentHash: contentHash
-        )
+        let db = databaseManager
+        return try await Task.detached(priority: .userInitiated) {
+            let importer = EPUBDocumentImporter()
+            let parsed = try await importer.loadDocument(fromData: rawData)
+            let contentHash = ContentHasher.sha256(rawData)
+            let resolved = TitleExtractor.resolve(
+                contentTitle: parsed.title ?? (title.isEmpty ? nil : title),
+                filename: fileName
+            )
+            return try Self.importParsedDocument(
+                databaseManager: db,
+                title: resolved,
+                fileName: fileName,
+                fileType: fileType,
+                parsed: parsed,
+                contentHash: contentHash
+            )
+        }.value
     }
 
-    private func importParsedDocument(
+    /// `static` so the async `importDocument` can run it inside a `Task.detached`
+    /// — the build phase (unit/sentence construction) is ~tens of seconds of CPU
+    /// for a big book and MUST NOT run on the main thread (measured: importOnMain
+    /// was true, buildMs ~57s → the whole app froze). Takes its dependencies
+    /// explicitly; `parsed` never leaves the detached task, so no extra Sendable
+    /// conformances are needed.
+    private static func importParsedDocument(
+        databaseManager: DatabaseManager,
         title: String,
         fileName: String,
         fileType: String,
         parsed: ParsedEPUBDocument,
         contentHash: String?
     ) throws -> Document {
+        let displayParser = EPUBDisplayParser()
         let existingDocument = try databaseManager.existingDocument(
             matchingFileName: fileName,
             fileType: fileType,
@@ -96,8 +140,15 @@ struct EPUBLibraryImporter {
         // string diverge — dracula 855870 vs 855779 — so a parsed-space offset
         // resolved one unit too late and leaked "There's More to Follow!".)
 
+        // DEV telemetry — localize the import cost (build vs persist vs images).
+        ImportPhaseTelemetry.onMain = Thread.isMainThread
+        let phaseBuildStart = DispatchTime.now().uptimeNanoseconds
+
         // ── Run display parser at import time, build units.
+        let phaseDPStart = DispatchTime.now().uptimeNanoseconds
         let blocks = displayParser.parse(displayText: parsed.displayText)
+        ImportPhaseTelemetry.displayParseMs = Double(DispatchTime.now().uptimeNanoseconds &- phaseDPStart) / 1_000_000
+        let phaseUnitsStart = DispatchTime.now().uptimeNanoseconds
         let baseUnits = ContentUnitBuilder.unitsPreferringBlocks(
             blocks: blocks,
             plainText: parsed.plainText,
@@ -131,6 +182,7 @@ struct EPUBLibraryImporter {
             to: baseUnits,
             headingMarkersByOffset: headingMarkersByOffset
         )
+        ImportPhaseTelemetry.unitsMs = Double(DispatchTime.now().uptimeNanoseconds &- phaseUnitsStart) / 1_000_000
 
         // 2026-06-14 (#2b fix) — compute the content-end boundary in the SAME
         // coordinate space the reader / persister / firstUnit use: the UNIT-JOINED
@@ -156,10 +208,13 @@ struct EPUBLibraryImporter {
         }()
 
         // ── Sentences.
+        let phaseSentStart = DispatchTime.now().uptimeNanoseconds
         let sentences = SentenceIndexer.sentences(for: units)
+        ImportPhaseTelemetry.sentenceIndexMs = Double(DispatchTime.now().uptimeNanoseconds &- phaseSentStart) / 1_000_000
 
         // ── TOC entries. Resolve each heading's offset → its durable paragraph
         // identity (same ruler, at import); drop an entry that can't anchor (Position Rule).
+        let phaseTOCStart = DispatchTime.now().uptimeNanoseconds
         let tocEntries: [StoredTOCEntry] = parsed.tocEntries.compactMap { e in
             guard let uid = ContentUnitBuilder.firstUnit(
                 in: units, atOrAfterPlainTextOffset: e.plainTextOffset)?.id else { return nil }
@@ -171,6 +226,7 @@ struct EPUBLibraryImporter {
                 level: e.level
             )
         }
+        ImportPhaseTelemetry.tocResolveMs = Double(DispatchTime.now().uptimeNanoseconds &- phaseTOCStart) / 1_000_000
 
         // **Bundle 2 follow-up (2026-05-26)** — edition label from
         // EPUB metadata. Prefer "Illustrated by <name>" when the OPF
@@ -204,13 +260,19 @@ struct EPUBLibraryImporter {
             contentHash: contentHash,
             editionLabel: editionLabel
         )
+        ImportPhaseTelemetry.buildMs = Double(DispatchTime.now().uptimeNanoseconds &- phaseBuildStart) / 1_000_000
+
+        let phasePersistStart = DispatchTime.now().uptimeNanoseconds
         try databaseManager.persistParsedDocument(parsedDoc)
+        ImportPhaseTelemetry.persistMs = Double(DispatchTime.now().uptimeNanoseconds &- phasePersistStart) / 1_000_000
 
         // Persist inline images.
+        let phaseImagesStart = DispatchTime.now().uptimeNanoseconds
         try databaseManager.deleteImages(for: documentID)
         for image in parsed.images {
             try databaseManager.insertImage(id: image.imageID, documentID: documentID, data: image.data)
         }
+        ImportPhaseTelemetry.imagesMs = Double(DispatchTime.now().uptimeNanoseconds &- phaseImagesStart) / 1_000_000
 
         if existingDocument == nil {
             try databaseManager.upsertReadingPosition(.initial(for: documentID))

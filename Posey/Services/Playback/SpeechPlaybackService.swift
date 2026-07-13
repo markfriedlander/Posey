@@ -57,12 +57,24 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
     /// Drives line-level read-along. nil when idle/paused/stopped.
     @Published private(set) var spokenWord: SpokenWord?
 
+    /// The current spoken CHUNK's text, for Teleprompter mode (one card per chunk).
+    /// Published on each chunk's `didStart`; nil when idle/paused/stopped or not
+    /// chunking. Line/Glide leave this nil (they speak whole sentences).
+    @Published private(set) var currentChunk: String?
+
     private let synthesizer = AVSpeechSynthesizer()
     private let mode: Mode
     private(set) var voiceMode: VoiceMode
 
     /// Utterance ID → sentence index, for the window currently in the synthesizer queue.
     private var sentenceIndicesByUtteranceID: [ObjectIdentifier: Int] = [:]
+    /// Utterance ID → chunk info (Teleprompter): the chunk's display text + whether it
+    /// is the LAST chunk of its sentence. `didFinish` advances to the next sentence
+    /// only after a sentence's final chunk, so mid-sentence chunks don't over-fill.
+    private var chunkInfoByUtteranceID: [ObjectIdentifier: (text: String, isLast: Bool)] = [:]
+    /// When set (Teleprompter mode), each sentence is spoken as capped chunks — each
+    /// chunk its own utterance AND display card. nil = whole sentences (Line / Glide).
+    var teleprompterChunkMaxChars: Int?
     /// Full segment array for the active document.
     private var activeSegments: [TextSegment] = []
 
@@ -154,6 +166,22 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         }
         // If was paused: state is now idle, currentSentenceIndex preserved.
         // User taps play to resume with new settings.
+    }
+
+    /// Set (or clear) Teleprompter chunking (max characters per chunk; nil = whole
+    /// sentences). Takes effect immediately: if playing, re-enqueues from the current
+    /// sentence so the cards/chunks match the new mode right away.
+    func applyTeleprompterChunking(_ maxChars: Int?) {
+        guard teleprompterChunkMaxChars != maxChars else { return }
+        teleprompterChunkMaxChars = maxChars
+        guard state == .playing || state == .paused else { return }
+        let resumeIndex = currentSentenceIndex ?? 0
+        let wasPlaying = state == .playing
+        stopSynthesizer()
+        if wasPlaying {
+            enqueueWindow(startingAt: resumeIndex)
+            state = .playing
+        }
     }
 
     func play(segments: [TextSegment], startingAt startIndex: Int) {
@@ -293,17 +321,29 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         }
     }
 
-    /// Builds one utterance from the segment at index and adds it to the synthesizer queue.
+    /// Builds the utterance(s) for the segment at index and adds them to the queue.
+    /// In Teleprompter mode the segment is split into capped CHUNKS, each its own
+    /// utterance (spoken back-to-back) so a display card advances on the reliable
+    /// per-utterance signal; otherwise it's one utterance for the whole sentence.
+    /// All chunks map to the SAME sentence id, so the position model is unchanged.
     private func enqueueOneSegment(at index: Int) {
         guard activeSegments.indices.contains(index) else { return }
         let segment = activeSegments[index]
-        let utterance = makeUtterance(for: segment)
-        sentenceIndicesByUtteranceID[ObjectIdentifier(utterance)] = segment.id
-        // 2026-05-12 — record the actual string passed to AVSpeechSynthesizer
-        // so PLAYBACK_STOP_BLOCK_TEST can verify no "Visual content on page N"
-        // placeholder text ever reaches TTS. DEBUG-only; Release stub is no-op.
-        RemoteControlState.shared.recordSpokenUtterance(spokenText(for: segment))
-        synthesizer.speak(utterance)
+        let base = spokenText(for: segment)
+        let pieces: [String] = teleprompterChunkMaxChars
+            .map { SentenceChunker.chunks(base, maxChars: $0) }
+            .flatMap { $0.isEmpty ? nil : $0 } ?? [base]
+        for (ci, piece) in pieces.enumerated() {
+            let utterance = makeUtterance(text: piece)
+            let oid = ObjectIdentifier(utterance)
+            sentenceIndicesByUtteranceID[oid] = segment.id
+            chunkInfoByUtteranceID[oid] = (text: piece, isLast: ci == pieces.count - 1)
+            // 2026-05-12 — record the actual string passed to AVSpeechSynthesizer
+            // so PLAYBACK_STOP_BLOCK_TEST can verify no "Visual content on page N"
+            // placeholder text ever reaches TTS. DEBUG-only; Release stub is no-op.
+            RemoteControlState.shared.recordSpokenUtterance(piece)
+            synthesizer.speak(utterance)
+        }
         nextEnqueueIndex = index + 1
     }
 
@@ -320,9 +360,10 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
         return base
     }
 
-    /// Constructs a mode-aware utterance. This is the single place voice mode is applied.
-    private func makeUtterance(for segment: TextSegment) -> AVSpeechUtterance {
-        let utterance = AVSpeechUtterance(string: spokenText(for: segment))
+    /// Constructs a mode-aware utterance for already-prepared spoken text. This is the
+    /// single place voice mode is applied.
+    private func makeUtterance(text: String) -> AVSpeechUtterance {
+        let utterance = AVSpeechUtterance(string: text)
         switch voiceMode {
         case .bestAvailable:
             utterance.prefersAssistiveTechnologySettings = true
@@ -369,7 +410,9 @@ final class SpeechPlaybackService: NSObject, ObservableObject {
             synthesizer.stopSpeaking(at: .immediate)
         }
         sentenceIndicesByUtteranceID.removeAll()
+        chunkInfoByUtteranceID.removeAll()
         spokenWord = nil
+        currentChunk = nil
         if state != .finished {
             state = .idle
         }
@@ -540,6 +583,7 @@ extension SpeechPlaybackService: AVSpeechSynthesizerDelegate {
             // overwrites it after.
             self.state = .playing
             self.currentSentenceIndex = self.sentenceIndicesByUtteranceID[utteranceID]
+            self.currentChunk = self.chunkInfoByUtteranceID[utteranceID]?.text
         }
     }
 
@@ -561,7 +605,13 @@ extension SpeechPlaybackService: AVSpeechSynthesizerDelegate {
     ) {
         let utteranceID = ObjectIdentifier(utterance)
         Task { @MainActor in
+            let wasLastChunk = self.chunkInfoByUtteranceID[utteranceID]?.isLast ?? true
             self.sentenceIndicesByUtteranceID.removeValue(forKey: utteranceID)
+            self.chunkInfoByUtteranceID.removeValue(forKey: utteranceID)
+            // Advance the sliding window only after a sentence's FINAL chunk — a
+            // sentence's earlier chunks (Teleprompter) are already queued. For whole
+            // sentences every utterance is the "last chunk", so behavior is unchanged.
+            guard wasLastChunk else { return }
             // Extend the sliding window: enqueue one more PLAYABLE segment
             // (gliding past skipped/table segments) if available.
             if let index = self.firstPlayable(from: self.nextEnqueueIndex) {

@@ -230,21 +230,21 @@ final class PlaybackPreferences {
         }
     }
 
-    /// Read-along highlight granularity (word / line / sentence / paragraph) — the
-    /// user-facing DIAL (Mark, 2026-06-26). Persisted by raw name so new cases append
-    /// without migration. Default `.line` (the gliding-line read-along feel). The enum
-    /// itself lives on `ReaderTuning` (the reader owns the rendering); this is the
-    /// persistence home, mirroring how `fontSize` is a reader-render value stored here.
-    var readAlongGranularity: ReaderTuning.ReadAlongGranularity {
+    /// Read-along MODE (Line / Glide / Teleprompter) — the user-facing choice
+    /// (Mark, 2026-07-12). Persisted by raw name. Default `.line`. The enum itself
+    /// lives on `ReaderTuning` (the reader owns the rendering); this is the persistence
+    /// home, mirroring how `fontSize` is a reader-render value stored here. New key
+    /// (`readAlongMode`) so the retired word/sentence/paragraph values don't linger.
+    var readAlongMode: ReaderTuning.ReadAlongMode {
         get {
-            guard let raw = UserDefaults.standard.string(forKey: "posey.reader.readAlongGranularity"),
-                  let value = ReaderTuning.ReadAlongGranularity(rawValue: raw) else {
+            guard let raw = UserDefaults.standard.string(forKey: "posey.reader.readAlongMode"),
+                  let value = ReaderTuning.ReadAlongMode(rawValue: raw) else {
                 return .line
             }
             return value
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: "posey.reader.readAlongGranularity")
+            UserDefaults.standard.set(newValue.rawValue, forKey: "posey.reader.readAlongMode")
         }
     }
 

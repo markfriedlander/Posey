@@ -3667,6 +3667,21 @@ extension LibraryViewModel {
                 let snap = await MainActor.run { RemoteControlState.shared.snapshot() }
                 return json(snap)
 
+            case "SPEECH_CONTROL_TEST":
+                // DEBUG diagnostic: speak a fixed sentence through a BARE
+                // AVSpeechSynthesizer (no read-along machinery) and log every
+                // willSpeakRange offset (CTL WR lines) — to see whether the sparse
+                // word-boundary gaps that freeze the highlight are the engine/voice
+                // (Apple) or Posey's playback path. arg = "best" (default, Posey's
+                // voice) or "default" (compact voice). Read results via LOGS.
+                #if DEBUG
+                let mode = arg ?? "best"
+                await MainActor.run { SpeechControlTest.shared.run(mode: mode) }
+                return json(["status": "speaking", "mode": mode])
+                #else
+                return json(["error": "debug only"])
+                #endif
+
             case "LOGS":
                 // LOGS, LOGS:<limit>, LOGS:<limit>:<sinceEpochMs>
                 // Returns recent log lines from the in-app circular
@@ -4260,11 +4275,11 @@ extension LibraryViewModel {
                 return json(["status": "posted", "text": text])
 
             case "SET_READALONG_LEVEL":
-                // Set the read-along highlight granularity dial
-                // (word | line | sentence | paragraph) on the open reader at runtime.
+                // Set the read-along MODE (line | glide | teleprompter) on the open
+                // reader at runtime.
                 guard let lvl = arg?.lowercased(),
-                      ["word", "line", "sentence", "paragraph"].contains(lvl) else {
-                    return #"{"error":"Usage: SET_READALONG_LEVEL:<word|line|sentence|paragraph>"}"#
+                      ["line", "glide", "teleprompter"].contains(lvl) else {
+                    return #"{"error":"Usage: SET_READALONG_LEVEL:<line|glide|teleprompter>"}"#
                 }
                 await MainActor.run {
                     NotificationCenter.default.post(name: .remoteSetReadAlongLevel, object: nil,

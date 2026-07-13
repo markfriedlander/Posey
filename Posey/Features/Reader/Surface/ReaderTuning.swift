@@ -25,39 +25,47 @@ struct ReaderTuning: Equatable {
     var highlightLinesAbove: Int = 0
     var highlightLinesBelow: Int = 0
 
-    /// How much of the text the read-along glow covers as the voice reads — a user-facing
-    /// DIAL (Mark, 2026-06-26; `.paragraph` added 2026-06-26 pm). From tightest to widest:
-    /// `.word` lights only the single word being spoken; `.line` lights just the visual line
-    /// the voice is on (the gliding-line feel); `.sentence` lights the whole spoken sentence;
-    /// `.paragraph` lights the entire paragraph being read. The scroll always pins the active
-    /// LINE to the focal point regardless — only the glow's extent changes with this dial.
-    /// `String`-backed so it persists in `PlaybackPreferences` and round-trips through the
-    /// `SET_READALONG_LEVEL` antenna verb by raw name; `CaseIterable` drives the Preferences
-    /// picker. Order is tightest→widest so the picker reads naturally.
-    enum ReadAlongGranularity: String, CaseIterable, Equatable {
-        case word, line, sentence, paragraph
+    /// How the read-along highlight follows the voice — a user-facing MODE
+    /// (Mark, 2026-07-12). Three genuinely different behaviors, not sizes of one glow:
+    /// - `.line` — light the visual line the voice is on, pinned to the focal spot.
+    ///   Rides ONLY the voice's real word-position reports, so it's exact when the
+    ///   voice reports densely (compact voices) and can pause on premium/Siri voices
+    ///   that report their position sparsely. The honest, no-estimation mode.
+    /// - `.glide` — same line highlight, but it keeps gliding forward at reading pace
+    ///   to bridge the stretches where the voice goes quiet, correcting to the real
+    ///   position whenever a report arrives (forward-only, never snaps backward).
+    ///   Smooth on any voice, but approximate during the gaps.
+    /// - `.teleprompter` — show one sentence at a time held in the same spot, advancing
+    ///   on the reliable "starting this sentence" signal. Works on any voice, no
+    ///   estimation; a fixed-anchor, focused presentation.
+    /// `String`-backed so it persists in `PlaybackPreferences` and round-trips through
+    /// the `SET_READALONG_LEVEL` antenna verb by raw name; `CaseIterable` drives the
+    /// Preferences picker.
+    enum ReadAlongMode: String, CaseIterable, Equatable {
+        case line, glide, teleprompter
 
         /// Title shown in the Preferences picker.
         var displayName: String {
             switch self {
-            case .word:      return "Word"
-            case .line:      return "Line"
-            case .sentence:  return "Sentence"
-            case .paragraph: return "Paragraph"
+            case .line:         return "Line"
+            case .glide:        return "Glide"
+            case .teleprompter: return "Teleprompter"
             }
         }
 
         /// One-line explanation under the picker.
         var description: String {
             switch self {
-            case .word:      return "Glow only the single word being spoken."
-            case .line:      return "Glow the line the voice is on as it glides — the read-along feel."
-            case .sentence:  return "Glow the whole sentence being spoken."
-            case .paragraph: return "Glow the entire paragraph being read."
+            case .line:
+                return "Follow the exact line the voice is on. Precise, but can pause on some premium voices."
+            case .glide:
+                return "The highlight glides along at reading pace, so it keeps moving even when the voice goes quiet. Smooth, but approximate."
+            case .teleprompter:
+                return "Show one sentence at a time, held in the same spot. Reliable on any voice."
             }
         }
     }
-    var readAlongGranularity: ReadAlongGranularity = .line
+    var readAlongMode: ReadAlongMode = .line
 
     /// Surface insets. Big bottom inset lets even the last line reach the focal
     /// position; top/side are reading margins. The LEFT margin is widened into a

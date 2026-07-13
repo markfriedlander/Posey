@@ -47,6 +47,13 @@ struct SurfaceReaderHost: UIViewRepresentable {
         context.coordinator.sync(with: viewModel)
     }
 
+    /// Reader torn down — stop the read-along glide timer. A `CADisplayLink` retains
+    /// its target, so we must invalidate it here (SwiftUI calls this on the main
+    /// thread) or the engine leaks and keeps ticking after the reader closes.
+    static func dismantleUIView(_ uiView: UITextView, coordinator: Coordinator) {
+        MainActor.assumeIsolated { coordinator.tearDown() }
+    }
+
     // ----- Coordinator: owns the surface + engine, applies ViewModel state diffs -----
 
     @MainActor
@@ -91,7 +98,7 @@ struct SurfaceReaderHost: UIViewRepresentable {
             )
             surface.reload(content: content)
             surface.bodyPointSize = vm.fontSize
-            surface.tuning.readAlongGranularity = vm.readAlongGranularity   // honor saved dial
+            surface.tuning.readAlongMode = vm.readAlongMode   // honor saved mode
             builtContentToken = Self.contentToken(vm)
             builtFontSize = vm.fontSize
 
@@ -99,6 +106,9 @@ struct SurfaceReaderHost: UIViewRepresentable {
             subscribeReadAlong(vm)
             applyMarkers(vm, force: true)
             applyBand(vm, force: true)
+            engine.handleContentReload()
+            engine.updateGlide(mode: vm.readAlongMode,
+                               isPlaying: vm.playbackState == .playing && !vm.isSearchActive)
         }
 
         private func wireCallbacks(_ vm: ReaderViewModel) {
@@ -201,6 +211,16 @@ struct SurfaceReaderHost: UIViewRepresentable {
                     self.lastBandSegmentIndex = word.index
                 }
                 .store(in: &cancellables)
+            // Teleprompter drives per-SENTENCE off the reliable `currentSentenceIndex`
+            // signal (didStart-driven — fires on any voice, even one that reports no
+            // words), independent of the per-word reports above. Ignored in line/glide.
+            vm.$currentSentenceIndex
+                .receive(on: RunLoop.main)
+                .sink { [weak self] index in
+                    guard let self, self.surface.tuning.readAlongMode == .teleprompter else { return }
+                    self.engine.onSpokenSentence(playbackIndex: index)
+                }
+                .store(in: &cancellables)
             // Antenna test hooks, re-pointed from the retired toy cover to the real reader.
             NotificationCenter.default.publisher(for: .remoteScrollSurface)
                 .receive(on: RunLoop.main)
@@ -234,11 +254,11 @@ struct SurfaceReaderHost: UIViewRepresentable {
                 .receive(on: RunLoop.main)
                 .sink { [weak self] note in
                     guard let self, let lvl = note.userInfo?["level"] as? String,
-                          let g = ReaderTuning.ReadAlongGranularity(rawValue: lvl) else { return }
+                          let g = ReaderTuning.ReadAlongMode(rawValue: lvl) else { return }
                     // Drive the user preference (not just the surface) so the antenna verb,
                     // the Preferences picker, and persistence share one source of truth; the
                     // VM's didSet persists it and the next sync applies it to the surface.
-                    self.parent.viewModel.readAlongGranularity = g
+                    self.parent.viewModel.readAlongMode = g
                 }
                 .store(in: &cancellables)
             NotificationCenter.default.publisher(for: .remoteSurfaceTapImage)
@@ -336,11 +356,21 @@ struct SurfaceReaderHost: UIViewRepresentable {
                 build(from: vm)                 // structural change → full rebuild + re-apply
                 return
             }
-            // Read-along dial can change without a rebuild (Preferences picker / antenna);
+            // Read-along mode can change without a rebuild (Preferences picker / antenna);
             // the engine reads tuning live on the next spoken word, so this is enough.
-            surface.tuning.readAlongGranularity = vm.readAlongGranularity
+            surface.tuning.readAlongMode = vm.readAlongMode
+            // Start/stop the glide timer to match the live mode + playback state. Glide
+            // runs ONLY while gliding AND playing, so the highlight never drifts paused.
+            engine.updateGlide(mode: vm.readAlongMode,
+                               isPlaying: vm.playbackState == .playing && !vm.isSearchActive)
             applyMarkers(vm, force: false)
             applyBand(vm, force: false)
+        }
+
+        /// Reader torn down: stop the read-along glide timer and drop subscriptions.
+        func tearDown() {
+            engine.reset()            // invalidates the glide display link
+            cancellables.removeAll()
         }
 
         /// Read-along / search band: while searching, follow the search hit; otherwise
@@ -367,7 +397,25 @@ struct SurfaceReaderHost: UIViewRepresentable {
             // Pin the sentence's first line (and glide). During active playback the
             // word-level subscription immediately refines this to the spoken line.
             if vm.isSearchActive {
-                engine.onSpokenSentence(playbackIndex: seg.playbackIndex)
+                // Mark the FOUND substring, not the sentence's opening. Locate the
+                // query inside this matched segment's own text and light exactly it,
+                // wherever it sits — a hit can be deep in a long sentence, and
+                // anchoring at the sentence start would glow the wrong words. Both
+                // `seg.text` and its surface `range` come from the same segment, so
+                // this is surface-space math; the length guard falls back to the
+                // sentence line if text and surface range ever diverge (attachments).
+                let q = vm.searchQuery.trimmingCharacters(in: .whitespaces)
+                let segText = seg.text as NSString
+                let local = q.isEmpty
+                    ? NSRange(location: NSNotFound, length: 0)
+                    : segText.range(of: q, options: .caseInsensitive)
+                if local.location != NSNotFound, NSMaxRange(local) <= seg.range.length {
+                    let matchRange = NSRange(location: seg.range.location + local.location,
+                                             length: local.length)
+                    engine.highlightExactRange(matchRange)
+                } else {
+                    engine.onSpokenSentence(playbackIndex: seg.playbackIndex)
+                }
             } else if vm.playbackState != .playing {
                 engine.onSpokenSentence(playbackIndex: seg.playbackIndex)
             }

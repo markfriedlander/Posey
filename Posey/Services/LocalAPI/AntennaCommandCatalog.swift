@@ -205,7 +205,7 @@ nonisolated enum AntennaCommandCatalog {
         .init("SCROLL_TO_IMAGE", .ui_nav, "SCROLL_TO_IMAGE:<1-based image index>", "DEBUG: scroll precisely to the Nth image unit in reading order (frame a specific figure — fraction scroll is too coarse)."),
         .init("SIMULATE_DRAG", .ui_nav, "SIMULATE_DRAG", "TEST: simulate a user drag on the open reader → re-reveals the auto-fading chrome (scroll-to-reveal, no physical gesture needed)."),
         .init("CHROME", .ui_nav, "CHROME:<pin|fade|auto>", "TEST: pin holds the reader chrome visible (its buttons stay registered so TAP:reader.* works), fade hides it, auto restores normal auto-fade."),
-        .init("SET_READALONG_LEVEL", .ui_nav, "SET_READALONG_LEVEL:<word|line|sentence|paragraph>", "TEST: set the read-along highlight granularity dial on the open reader (word/line/sentence/paragraph)."),
+        .init("SET_READALONG_LEVEL", .ui_nav, "SET_READALONG_LEVEL:<line|glide|teleprompter>", "TEST: set the read-along MODE on the open reader (line/glide/teleprompter)."),
         .init("SURFACE_TAP_IMAGE", .ui_nav, "SURFACE_TAP_IMAGE", "TEST: tap the first image/table on the open reader → opens the full-screen viewer (image-zoom restore)."),
         .init("TAP_AT", .ui_nav, "TAP_AT:<x>,<y>", "General human-equivalent tap (points): routes to the glyph button / image / text under the point on the open reader."),
         .init("SURFACE_FONT", .ui_nav, "SURFACE_FONT:<pointSize>", "DEBUG: rebuild the open one-surface reader at a new body point size (E2 annotation re-flow durability test)."),

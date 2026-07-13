@@ -126,6 +126,13 @@ struct ReaderView: View {
         )
     }
 
+    /// The current sentence's text, for the Teleprompter full-screen presentation.
+    /// Empty when the index is out of range (nothing to show).
+    private var currentTeleprompterText: String {
+        let i = viewModel.currentSentenceIndex
+        return viewModel.segments.indices.contains(i) ? viewModel.segments[i].text : ""
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             // Cutover (2026-06-26) — the reader renders through ONE owned
@@ -262,6 +269,23 @@ struct ReaderView: View {
                     .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
                 }
             }
+            // Teleprompter (Mark, 2026-07-12): while this mode is PLAYING, take the whole
+            // reading area with ONE sentence at a time (full-screen, flush-left). Placed
+            // BELOW the chrome overlays so the transport (pause) stays reachable on a tap.
+            .overlay {
+                if viewModel.readAlongMode == .teleprompter, viewModel.playbackState == .playing {
+                    ZStack {
+                        // Black fills the whole screen (incl. under the notch); the TEXT
+                        // stays inside the safe area so it never slides under the notch and
+                        // centers within the visible area — correct in portrait AND landscape.
+                        Color(.systemBackground).ignoresSafeArea()
+                        TeleprompterView(text: viewModel.currentChunk ?? currentTeleprompterText,
+                                         onReveal: { revealChrome() })
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: viewModel.playbackState)
             .overlay(alignment: .top) {
                 if !viewModel.isSearchActive {
                     topChromeCluster
@@ -2064,19 +2088,19 @@ private struct ReaderPreferencesSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    // Read-along highlight granularity dial (Mark, 2026-06-26). Menu
-                    // style (not segmented) — four options read better in a list than
-                    // crammed into a segmented control.
-                    Picker("Read-along highlight",
-                           selection: $viewModel.readAlongGranularity) {
-                        ForEach(ReaderTuning.ReadAlongGranularity.allCases, id: \.self) { level in
-                            Text(level.displayName).tag(level)
+                    // Read-along MODE (Mark, 2026-07-12): Line / Glide / Teleprompter —
+                    // three genuinely different follow behaviors. Menu style reads
+                    // better in a list than a segmented control.
+                    Picker("Read-along mode",
+                           selection: $viewModel.readAlongMode) {
+                        ForEach(ReaderTuning.ReadAlongMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
                         }
                     }
                     .pickerStyle(.menu)
-                    .accessibilityIdentifier("preferences.readAlongGranularity")
+                    .accessibilityIdentifier("preferences.readAlongMode")
 
-                    Text(viewModel.readAlongGranularity.description)
+                    Text(viewModel.readAlongMode.description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {
@@ -2528,14 +2552,19 @@ final class ReaderViewModel: ObservableObject {
         didSet { PlaybackPreferences.shared.fontSize = fontSize }
     }
 
-    /// Read-along highlight granularity dial (word / line / sentence / paragraph),
-    /// surfaced as a Preferences picker. didSet writes through to PlaybackPreferences;
-    /// the SurfaceReaderHost reads it on each sync and applies it to the surface tuning,
-    /// so a change takes effect live mid-read. The antenna `SET_READALONG_LEVEL` verb
-    /// drives this same property, keeping one source of truth.
-    @Published var readAlongGranularity: ReaderTuning.ReadAlongGranularity
-        = PlaybackPreferences.shared.readAlongGranularity {
-        didSet { PlaybackPreferences.shared.readAlongGranularity = readAlongGranularity }
+    /// Read-along MODE (Line / Glide / Teleprompter), surfaced as a Preferences picker.
+    /// didSet writes through to PlaybackPreferences; the SurfaceReaderHost reads it on
+    /// each sync and applies it to the surface tuning, so a change takes effect live
+    /// mid-read. The antenna `SET_READALONG_LEVEL` verb drives this same property,
+    /// keeping one source of truth.
+    @Published var readAlongMode: ReaderTuning.ReadAlongMode
+        = PlaybackPreferences.shared.readAlongMode {
+        didSet {
+            PlaybackPreferences.shared.readAlongMode = readAlongMode
+            // Teleprompter reads whole sentences (natural voice, "B"); the "A" variant
+            // chunks the audio. Line/Glide are always whole sentences. Applies live.
+            playbackService.applyTeleprompterChunking(teleprompterAudioChunkCap())
+        }
     }
 
     /// 2026-05-21 — True when the document carries a known content-end
@@ -2915,6 +2944,9 @@ final class ReaderViewModel: ObservableObject {
     /// surface reader's read-along lights + glides the exact visual line the voice is
     /// on (line-level sync / single point of gaze). nil when not playing.
     @Published private(set) var spokenWord: SpeechPlaybackService.SpokenWord?
+    /// The current spoken CHUNK text (Teleprompter), republished from the playback
+    /// service — drives the full-screen one-card presentation. nil in Line/Glide.
+    @Published private(set) var currentChunk: String?
     @Published private(set) var playbackState: SpeechPlaybackService.PlaybackState = .idle
     // Step 9 — focusedDisplayBlockID deleted; focusedUnitID replaces it.
     @Published var isShowingError = false
@@ -4467,16 +4499,113 @@ final class ReaderViewModel: ObservableObject {
         return context.joined(separator: "\n\n")
     }
 
+    // ===== Teleprompter card timing — two variants (Mark chose "B", 2026-07-13) =====
+    //
+    //  • "B" — NATURAL VOICE (tpChunkedAudio = false, DEFAULT, Mark's pick). The voice
+    //    reads WHOLE sentences with natural prosody; the display cards are chunked
+    //    (SentenceChunker) and ESTIMATED within the sentence from a learned reading rate
+    //    (tpRate), then RE-SYNCED to the reliable per-sentence signal at each boundary
+    //    (startTeleprompterCard / teleprompterTick). A little card drift mid-sentence,
+    //    corrected every sentence. Mark: "the voice sounds natural — big win; drift is
+    //    basically irrelevant, it picks up very quickly."
+    //
+    //  • "A" — CHUNKED AUDIO (set tpChunkedAudio = true to enable — ALL of A's code is
+    //    present and compiled; only this flag gates it). HOW A WORKS end-to-end, so it
+    //    never has to be re-derived:
+    //      1. teleprompterAudioChunkCap() returns TeleprompterView.chunkMaxChars in A →
+    //         playbackService.teleprompterChunkMaxChars is set → SpeechPlaybackService
+    //         .enqueueOneSegment splits each sentence into chunks (SentenceChunker) and
+    //         speaks EACH CHUNK as its own back-to-back AVSpeechUtterance, all mapped to
+    //         the SAME sentence id (position/resume model unchanged). didFinish advances
+    //         to the next sentence only after a sentence's LAST chunk
+    //         (chunkInfoByUtteranceID.isLast) so mid-sentence chunks don't over-fill.
+    //      2. SpeechPlaybackService publishes `currentChunk` on each chunk's didStart.
+    //      3. The playbackService.$currentChunk sink below (guarded `if tpChunkedAudio`)
+    //         copies it into self.currentChunk → the card flips on the RELIABLE per-chunk
+    //         signal: perfectly in sync, zero drift. The B estimate/timer is skipped.
+    //    TRADE-OFF (why B won): A is perfectly synced but STACCATO — the voice pauses
+    //    between chunk utterances and mid-phrase splits break prosody; variable chunk
+    //    sizes also make the visuals lurch. B trades a little card drift for a natural
+    //    voice + softer feel. To A/B test: flip tpChunkedAudio (or wire an antenna verb
+    //    to `setTeleprompterChunkedAudio`-style setter for a live toggle) + rebuild.
+    private var tpChunkedAudio = false
+    private var tpChunks: [String] = []
+    private var tpCumChars: [Int] = []
+    private var tpTotalChars = 1
+    private var tpCardIndex = 0
+    private var tpSentenceStart: Date?
+    private var tpRate: Double = 14   // chars/sec, learned from finished sentences
+
+    /// Audio chunk cap for the playback service: nil (whole sentences) except in
+    /// Teleprompter's chunked-audio "A" variant.
+    private func teleprompterAudioChunkCap() -> Int? {
+        (readAlongMode == .teleprompter && tpChunkedAudio) ? TeleprompterView.chunkMaxChars : nil
+    }
+
+    /// A new sentence started: lay out its display cards and (B) restart the estimate,
+    /// learning the reading rate from the sentence we just finished.
+    private func startTeleprompterCard(sentenceIndex: Int) {
+        guard readAlongMode == .teleprompter, !tpChunkedAudio,
+              segments.indices.contains(sentenceIndex) else { return }
+        if let start = tpSentenceStart, tpTotalChars > 1 {
+            let dur = Date().timeIntervalSince(start)
+            if dur > 0.3 {
+                tpRate = max(6, min(40, 0.5 * tpRate + 0.5 * (Double(tpTotalChars) / dur)))
+            }
+        }
+        var cs = SentenceChunker.chunks(segments[sentenceIndex].text, maxChars: TeleprompterView.chunkMaxChars)
+        if cs.isEmpty { cs = [segments[sentenceIndex].text] }
+        tpChunks = cs
+        tpCumChars = []
+        var acc = 0
+        for c in cs { tpCumChars.append(acc); acc += c.count + 1 }
+        tpTotalChars = max(1, acc)
+        tpCardIndex = 0
+        tpSentenceStart = Date()
+        currentChunk = cs[0]
+    }
+
+    /// ~10×/s: advance the estimated card within the current sentence (forward-only).
+    private func teleprompterTick() {
+        guard !tpChunkedAudio, readAlongMode == .teleprompter, playbackState == .playing,
+              let start = tpSentenceStart, tpChunks.count > 1 else { return }
+        let estChars = Date().timeIntervalSince(start) * tpRate
+        var i = tpCardIndex
+        while i + 1 < tpChunks.count, Double(tpCumChars[i + 1]) <= estChars { i += 1 }
+        if i != tpCardIndex {
+            tpCardIndex = i
+            currentChunk = tpChunks[i]
+        }
+    }
+
     private func observePlayback() {
         guard cancellables.isEmpty else {
             return
         }
+
+        // Teleprompter audio chunking (only in the "A" chunked-audio variant).
+        playbackService.teleprompterChunkMaxChars = teleprompterAudioChunkCap()
+        // In "A" the card follows the spoken chunk; in "B" (default) the card is driven
+        // by the estimate (teleprompterTick), so ignore the playback chunk there.
+        playbackService.$currentChunk
+            .receive(on: RunLoop.main)
+            .sink { [weak self] chunk in
+                guard let self, self.tpChunkedAudio else { return }
+                self.currentChunk = chunk
+            }
+            .store(in: &cancellables)
+        // Teleprompter "B": advance the estimated card ~10×/s within a sentence.
+        Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+            .sink { [weak self] _ in self?.teleprompterTick() }
+            .store(in: &cancellables)
 
         playbackService.$currentSentenceIndex
             .compactMap { $0 }
             .sink { [weak self] index in
                 guard let self else { return }
                 self.currentSentenceIndex = self.boundedSentenceIndex(index)
+                // Re-sync the Teleprompter cards to this new sentence (reliable signal).
+                self.startTeleprompterCard(sentenceIndex: self.currentSentenceIndex)
                 self.pauseForVisualBlockIfNeeded(atSentenceIndex: self.currentSentenceIndex)
                 self.persistPosition()
                 // M8: refresh lock-screen sentence text on every advance.

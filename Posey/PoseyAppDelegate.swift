@@ -30,6 +30,13 @@ final class PoseyAppDelegate: NSObject, UIApplicationDelegate {
         SharedModelStore.configure(appGroupID: "group.com.MarkFriedlander.aifamily")
         SharedModelStore.touchHeartbeat()
 
+        // Version-safety, no-orphans: once per launch, reap any superseded plain
+        // (pre-version) model copies this app still claims. Off-main — file I/O on
+        // a coordinated store — and after configure(), which the store requires
+        // before any access. See sweepSupersededPlainCopies below for why all three
+        // family apps must run this, not just the one deleting a model.
+        Task.detached { sweepSupersededPlainCopies() }
+
         UNUserNotificationCenter.current().delegate = self
         return true
     }
@@ -51,6 +58,46 @@ final class PoseyAppDelegate: NSObject, UIApplicationDelegate {
             return
         }
         BackgroundDownloadCoordinator.shared.backgroundCompletionHandler = completionHandler
+    }
+}
+
+/// Launch-time sweep of superseded PLAIN copies (version-safety, no-orphans).
+///
+/// Before model identity carried a version, a curated model lived in its plain `repo`
+/// folder. Now each curated (pinned, non-`plainFolderRepos`) model lives under its
+/// version-stamped identity `repo@<sha>`, and the plain copy is never trusted. The
+/// per-download / per-adopt reap (MLXModelDownloader) removes a plain copy the moment its
+/// stamped replacement lands — but a model the user never re-triggers would keep its stale
+/// plain copy forever. This closes that gap: for every pinned non-plain repo with a plain
+/// copy still on disk, drop THIS app's claim on the bare id and, once no app in the family
+/// still claims it, delete the folder.
+///
+/// Why this must run in EVERY family app, not just the one deleting a model: the store
+/// deletes a shared copy only when the LAST claimant releases it. On a device with more than
+/// one of the family apps installed, an old shared plain copy survives until every app that
+/// still claims it has swept. Idempotent; a true no-op on a device that never had a
+/// pre-version copy. `plainFolderRepos` (the embedders + sd-turbo) are skipped: their
+/// required identity IS the bare id, so their plain folder is the real copy.
+nonisolated func sweepSupersededPlainCopies() {
+    let fm = FileManager.default
+    for repoID in SharedModelStore.pinnedRevisions.keys {
+        // Only stamped repos have a superseded plain form; this guard skips plainFolderRepos.
+        guard SharedModelStore.requiredIdentity(forRepoID: repoID) != repoID else { continue }
+        guard SharedModelStore.isRepoDownloaded(repoID) else { continue }
+        // Drop our claim on the bare id; the store deletes files only when no app in the
+        // family still claims it. Re-check presence before removing (a concurrent reap on
+        // the same launch may have taken it already).
+        let safeToDelete = SharedModelStore.releaseClaim(modelID: repoID)
+        guard safeToDelete, SharedModelStore.isRepoDownloaded(repoID) else {
+            dbgLog("MLX-SWEEP: kept plain copy of %@ — another app still claims it", repoID)
+            continue
+        }
+        do {
+            try fm.removeItem(at: SharedModelStore.mlxModelDir(repoID))
+            dbgLog("MLX-SWEEP: reaped superseded plain copy of %@ (now version-stamped)", repoID)
+        } catch {
+            dbgLog("MLX-SWEEP: failed to reap plain %@: %@", repoID, error.localizedDescription)
+        }
     }
 }
 // ========== BLOCK 01: APP DELEGATE - END ==========

@@ -1,6 +1,7 @@
 import Foundation
 import CoreML
 @preconcurrency import Embeddings
+import SharedModelStoreKit
 
 // ========== BLOCK 01: EMBEDDER LOAD-TEST GATE - START ==========
 

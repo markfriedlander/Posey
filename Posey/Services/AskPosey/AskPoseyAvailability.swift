@@ -1,4 +1,5 @@
 import Foundation
+import SharedModelStoreKit
 #if canImport(FoundationModels)
 import FoundationModels
 #endif

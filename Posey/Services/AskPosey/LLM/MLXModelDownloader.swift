@@ -38,6 +38,7 @@ import Foundation
 import SwiftUI
 import Combine
 import UIKit
+import SharedModelStoreKit
 
 
 // ==== BLOCK 01: BACKGROUND DOWNLOAD COORDINATOR - START ====
@@ -218,6 +219,10 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     func startDownload(modelID: String, repoID: String) async throws {
         dbgLog("MLX-DL: startDownload modelID=%@ repoID=%@", modelID, repoID)
 
+        // Pinned revision (shared across the app family) applied to every file URL
+        // below — a pinned repo fetches its known-good commit, else "main" (HEAD).
+        let revision = SharedModelStore.revision(forRepoID: repoID)
+
         // DEDUP: cancel any in-flight tasks for this model in EITHER session
         // before enqueuing fresh ones. Without this, repeat calls accumulate
         // duplicate tasks racing for the same bytes.
@@ -295,7 +300,7 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
                 continue
             }
 
-            guard let url = URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(filename)") else {
+            guard let url = URL(string: "https://huggingface.co/\(repoID)/resolve/\(revision)/\(filename)") else {
                 dbgLog("MLX-DL: Could not build URL for %@; skipping", filename)
                 continue
             }
@@ -337,7 +342,7 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
 
     // MARK: - HuggingFace Tree API
     //
-    // GET https://huggingface.co/api/models/<repo>/tree/main
+    // GET https://huggingface.co/api/models/<repo>/tree/<revision>   (revision = pinned SHA, else main)
     // Returns a JSON array of {"type": "file"|"directory", "path": "...", "size": Int}
     // PUBLIC endpoint — no auth required.
     /// (path, size) per file in the repo. The `size` is the HF tree API's byte
@@ -346,7 +351,10 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     /// accumulated as tasks report (which made the % lurch — 99%→2%→… — badly
     /// for many-file repos like Qwen's 10-file multimodal build).
     private func fetchRepoFileList(repoID: String) async throws -> [(path: String, size: Int64)] {
-        guard let url = URL(string: "https://huggingface.co/api/models/\(repoID)/tree/main") else {
+        // Same pinned revision the file downloads use, so the file LIST matches the
+        // bytes we fetch (a pinned repo lists its pinned commit, else "main").
+        let revision = SharedModelStore.revision(forRepoID: repoID)
+        guard let url = URL(string: "https://huggingface.co/api/models/\(repoID)/tree/\(revision)") else {
             throw NSError(domain: "BackgroundDownloadCoordinator", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "Bad repo ID: \(repoID)"
             ])
@@ -381,10 +389,12 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     }
 
     fileprivate func modelDirectory(for modelID: String) -> URL {
-        // 2026-06-16 — models now live in the shared App Group container
-        // (`SharedModelStore`) instead of purgeable Caches. Same
-        // `huggingface/models/<id>` layout, just a different root.
-        SharedModelStore.mlxModelDir(modelID)
+        // Models live in the shared App Group container (`SharedModelStore`). The folder
+        // is keyed by the VERSION-LOCKED identity (`requiredIdentity` folds the pinned
+        // commit in) so a pinned model downloads into its own `repo@<sha>` folder and can
+        // never be confused with a legacy/other-version copy. Unpinned models keep the
+        // bare `repo` folder (identity == repo).
+        SharedModelStore.mlxModelDir(SharedModelStore.requiredIdentity(forRepoID: modelID))
     }
 
     // MARK: - Completion Notification
@@ -398,7 +408,29 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
         // no app still claims it. `id` IS the repo path for MLX models.
         let cfg = ModelCatalog.all.first { $0.id == modelID }
         let sizeBytes = cfg?.sizeGB.map { Int64($0 * 1_073_741_824) }
-        SharedModelStore.claim(modelID: modelID, repo: cfg?.repoID, sizeBytes: sizeBytes)
+        // Version-locked identity (repo + pinned commit) — the id every store call keys
+        // on, so a pinned model's claim, sentinel, and backup-exclusion all belong to its
+        // exact commit, not the bare repo name.
+        let identity = SharedModelStore.requiredIdentity(forRepoID: modelID)
+        SharedModelStore.claim(modelID: identity, repo: cfg?.repoID, sizeBytes: sizeBytes)
+        // App-Group containers are iCloud-backed by default — exclude the multi-GB,
+        // re-downloadable model files (iCloud quota; App Review 2.5.1). Write the
+        // durable completion sentinel so a sibling app waiting on this repo can adopt
+        // it (vs. mistaking a half-downloaded folder for a finished one). Free the
+        // cross-app download slot now that we're done.
+        SharedModelStore.excludeFromBackup(identity)
+        SharedModelStore.markRepoComplete(identity)
+        SharedModelStore.releaseDownloadLock(modelID: identity)
+        // Orphan-reap the legacy plain-name copy (downloaded before versions were part of
+        // identity), now that we hold the version-locked copy: drop our claim on the OLD
+        // bare id and, only if no app still claims it, remove the stale folder. Runs for a
+        // PINNED repo only (identity != bare); a no-op when nothing legacy exists.
+        if identity != modelID,
+           SharedModelStore.releaseClaim(modelID: modelID),
+           SharedModelStore.isRepoDownloaded(modelID) {
+            try? FileManager.default.removeItem(at: SharedModelStore.mlxModelDir(modelID))
+            dbgLog("MLX-DL: reaped orphaned legacy copy of %@ after locking to its pinned commit", modelID)
+        }
         // 2026-06-16 — auto-select the just-downloaded model when no usable MLX
         // model is selected yet (the picker still shows AFM/unselected). Makes
         // the model ACTIVE immediately — lights up the picker radio (selection is
@@ -413,6 +445,16 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
             dbgLog("MLX-DL: auto-selected %@ as the active answer model (no prior MLX selection).", modelID)
         }
         NotificationCenter.default.post(name: .mlxModelDidDownload, object: nil, userInfo: ["modelID": modelID])
+    }
+
+    /// Finalize a model whose files a SIBLING family app downloaded into the shared
+    /// container: run the SAME completion path we use for our own downloads (mark
+    /// present, claim, exclude-from-backup, auto-select, notify). No URLSession tasks
+    /// were involved — the sibling delivered the bytes; we adopt them.
+    @MainActor
+    func adoptCompletedDownload(modelID: String) {
+        dbgLog("MLX-DL: finalizing adopted model %@ (downloaded by a sibling app)", modelID)
+        notifyModelDownloadComplete(modelID: modelID)
     }
 
     // MARK: - URLSessionDownloadDelegate
@@ -460,6 +502,15 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
             let delta = max(0, totalBytesWritten - prev)
             self.bytesWrittenByTask[key] = totalBytesWritten
             self.bytesWrittenByModel[context.modelID, default: 0] += delta
+
+            // Keep our cross-app download lock fresh so a sibling app doesn't judge it
+            // stale mid-download (throttled — the stale window is 10 minutes). No-op if
+            // we don't actually hold the lock.
+            let lockNow = Date()
+            if lockNow.timeIntervalSince(self.lastLockRefreshByModel[context.modelID] ?? .distantPast) >= 60 {
+                SharedModelStore.refreshDownloadLock(modelID: SharedModelStore.requiredIdentity(forRepoID: context.modelID))
+                self.lastLockRefreshByModel[context.modelID] = lockNow
+            }
 
             // 2026-06-17 — only accumulate the expected total dynamically when we
             // DON'T already have a fixed total from the HF sizes. With a fixed
@@ -512,6 +563,8 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     private var bytesExpectedByTask: [TaskKey: Int64] = [:]
     private var lastByteLogTimeByTask: [TaskKey: Date] = [:]
     private var lastByteLogBytesByTask: [TaskKey: Int64] = [:]
+    /// Per-model throttle for cross-app download-lock heartbeats (see `didWriteData`).
+    private var lastLockRefreshByModel: [String: Date] = [:]
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let kind = sessionKind(of: session)
@@ -728,8 +781,10 @@ final class MLXModelDownloader: ObservableObject {
     }
 
     private func modelPath(for modelID: String) -> URL {
-        // 2026-06-16 — shared App Group container (see modelDirectory).
-        SharedModelStore.mlxModelDir(modelID)
+        // Version-locked identity dir (see modelDirectory) — so `isModelDownloaded`,
+        // `getModelPath`, and model loading all resolve the pinned-commit copy, and a
+        // legacy bare-name copy correctly reads as "the locked copy isn't here yet."
+        SharedModelStore.mlxModelDir(SharedModelStore.requiredIdentity(forRepoID: modelID))
     }
 
     // MARK: - Download Queue
@@ -961,6 +1016,15 @@ final class MLXModelDownloader: ObservableObject {
             return
         }
 
+        // A sibling family app may have already completed the version-LOCKED copy we
+        // don't yet track — adopt it (no re-download) rather than fetching a duplicate.
+        if SharedModelStore.isLockedCopyReady(forRepoID: modelID) {
+            await MainActor.run {
+                BackgroundDownloadCoordinator.shared.adoptCompletedDownload(modelID: modelID)
+            }
+            return
+        }
+
         let alreadyDownloading = await MainActor.run { () -> Bool in
             if let state = downloadStates[modelID], state.isDownloading {
                 dbgLog("MLX-DL: Download already in progress for %@", modelID)
@@ -1072,13 +1136,36 @@ final class MLXModelDownloader: ObservableObject {
                 }
             }
 
+            // Cross-app download lock + sibling-adoption are keyed on the VERSION-LOCKED
+            // identity, so two apps contend only over the SAME pinned commit (a legacy
+            // copy and a locked copy never collide). Defined here so the catch blocks can
+            // release it too.
+            let lockID = SharedModelStore.requiredIdentity(forRepoID: modelID)
             do {
+                // Cross-app download lock: only one family app fetches a given commit at a
+                // time. If a sibling holds the slot, wait for it to finish and ADOPT its
+                // copy instead of downloading a duplicate; only fetch ourselves if the
+                // slot is free, already ours, or the holder's lock went stale.
+                if !SharedModelStore.acquireDownloadLock(modelID: lockID) {
+                    dbgLog("MLX-DL: %@ is being downloaded by another app — waiting to adopt its copy", modelID)
+                    if await self.waitForSiblingDownload(modelID: modelID) {
+                        await MainActor.run { BackgroundDownloadCoordinator.shared.adoptCompletedDownload(modelID: modelID) }
+                        progressPollingTask?.cancel()
+                        return
+                    }
+                    // Holder's lock vanished or went stale without finishing — take the
+                    // slot and download it ourselves.
+                    _ = SharedModelStore.acquireDownloadLock(modelID: lockID)
+                    dbgLog("MLX-DL: sibling lock for %@ stale/abandoned; downloading it ourselves", modelID)
+                }
+
                 dbgLog("MLX-DL: Starting download for %@ from %@ via BGDL", modelID, repoID)
                 try await BackgroundDownloadCoordinator.shared.startDownload(modelID: modelID, repoID: repoID)
 
                 let alreadyComplete = await MainActor.run { self.isModelDownloaded(modelID) }
                 if alreadyComplete {
                     dbgLog("MLX-DL: %@ already complete on coordinator start; done", modelID)
+                    SharedModelStore.releaseDownloadLock(modelID: lockID)
                     progressPollingTask?.cancel()
                     return
                 }
@@ -1088,6 +1175,7 @@ final class MLXModelDownloader: ObservableObject {
                 dbgLog("MLX-DL: Download notification received for %@; coordinator handled bookkeeping", modelID)
             } catch is CancellationError {
                 await BackgroundDownloadCoordinator.shared.cancelDownload(modelID: modelID)
+                SharedModelStore.releaseDownloadLock(modelID: lockID)
                 progressPollingTask?.cancel()
                 await MainActor.run {
                     if var state = self.downloadStates[modelID] {
@@ -1103,6 +1191,7 @@ final class MLXModelDownloader: ObservableObject {
                     self.processNextInQueue()
                 }
             } catch {
+                SharedModelStore.releaseDownloadLock(modelID: lockID)
                 progressPollingTask?.cancel()
                 let errMsg = error.localizedDescription
                 await MainActor.run {
@@ -1120,6 +1209,29 @@ final class MLXModelDownloader: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Wait while a SIBLING family app holds the cross-app download lock for
+    /// `modelID`. Returns true once that app's download is verifiably COMPLETE (the
+    /// shared completion sentinel is present) so we can adopt its copy; returns false
+    /// if the holder's lock disappears or goes stale WITHOUT the download completing
+    /// (we should fetch it ourselves). Bounded by the lock's stale window; honors
+    /// task cancellation.
+    private func waitForSiblingDownload(modelID: String) async -> Bool {
+        // Both the lock and the completion check key on the version-LOCKED identity, so
+        // we only wait for (and adopt) the exact pinned commit — never a legacy/other copy.
+        let lockID = SharedModelStore.requiredIdentity(forRepoID: modelID)
+        while !Task.isCancelled {
+            if SharedModelStore.isLockedCopyReady(forRepoID: modelID) { return true }
+            guard let lock = SharedModelStore.downloadLock(modelID: lockID) else {
+                return SharedModelStore.isLockedCopyReady(forRepoID: modelID)   // holder gone
+            }
+            if Date().timeIntervalSince1970 - lock.since >= SharedModelStore.downloadLockStaleSeconds {
+                return SharedModelStore.isLockedCopyReady(forRepoID: modelID)   // holder stale
+            }
+            try? await Task.sleep(nanoseconds: 3_000_000_000)     // 3s poll
+        }
+        return SharedModelStore.isLockedCopyReady(forRepoID: modelID)
     }
 
     private func processNextInQueue() {
@@ -1151,12 +1263,12 @@ final class MLXModelDownloader: ObservableObject {
 
     func deleteModel(modelID: String) async {
         let expectedPath = modelPath(for: modelID)
-        // 2026-06-16 — release this app's manifest claim first. The files are
-        // only physically removed when NO sibling app (Hal) still claims them
-        // (sole participant today → always true). When a sibling still claims
-        // it, the model is kept on disk and merely dropped from THIS app's list
-        // via the `else` branch below.
-        let safeToDelete = SharedModelStore.releaseClaim(modelID: modelID)
+        // Release THIS app's manifest claim first, keyed by the version-locked identity
+        // (matching the folder we'd delete). Files are physically removed only when NO
+        // sibling app still claims that exact copy; if one does, the copy stays on disk
+        // and is merely dropped from THIS app's list via the `else` branch below.
+        let safeToDelete = SharedModelStore.releaseClaim(
+            modelID: SharedModelStore.requiredIdentity(forRepoID: modelID))
 
         if safeToDelete && FileManager.default.fileExists(atPath: expectedPath.path) {
             do {

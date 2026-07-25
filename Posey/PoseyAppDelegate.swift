@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import SharedModelStoreKit
 
 #if canImport(UIKit)
 import UIKit
@@ -21,6 +22,14 @@ final class PoseyAppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // Cross-app model store (SharedModelStoreKit): tell the shared store which
+        // App Group container this app uses, then stamp our "still alive" heartbeat
+        // so our model claims aren't reaped as if this were an uninstalled app.
+        // MUST run before any store access — without configure() the store falls back
+        // to per-app Caches and already-downloaded models would read as absent.
+        SharedModelStore.configure(appGroupID: "group.com.MarkFriedlander.aifamily")
+        SharedModelStore.touchHeartbeat()
+
         UNUserNotificationCenter.current().delegate = self
         return true
     }

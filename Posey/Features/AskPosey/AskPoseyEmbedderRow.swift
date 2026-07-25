@@ -1,4 +1,5 @@
 import SwiftUI
+import SharedModelStoreKit
 
 // ========== BLOCK 01: ASK POSEY EMBEDDER ROW - START ==========
 

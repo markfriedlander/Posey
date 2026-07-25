@@ -2,6 +2,7 @@ import Foundation
 import NaturalLanguage
 import CoreML
 @preconcurrency import Embeddings
+import SharedModelStoreKit
 
 // ========== BLOCK 01: EMBEDDING PROVIDER - START ==========
 
@@ -469,6 +470,15 @@ final class EmbeddingProvider: @unchecked Sendable {
             self.nomicBundle = loaded
             lock.unlock()
             EmbeddingBackend.recordLoadSuccess()
+            // Claim-on-adopt (shared-store contract): the embedder loads through
+            // swift-embeddings, which writes it into the shared store but never records a
+            // claim, so without this it sits UNCLAIMED and a sibling app's "no claimants →
+            // safe to delete" could pull it out from under us. Claim it (by its plain repo
+            // id — embedders stay plain-foldered, loaded by the external library) and exclude
+            // it from iCloud backup, exactly as the LLM loaders do. Idempotent per load.
+            SharedModelStore.claim(modelID: repoID, repo: repoID,
+                                   sizeBytes: SharedModelStore.sizeOnDisk(repoID))
+            SharedModelStore.excludeFromBackup(repoID)
         } else {
             lock.lock()
             self.nomicLoadAttempted = false
@@ -584,6 +594,12 @@ final class EmbeddingProvider: @unchecked Sendable {
             self.mxbaiBundle = loaded
             lock.unlock()
             EmbeddingBackend.recordLoadSuccess()
+            // Claim-on-adopt: same as Nomic above — swift-embeddings never records a claim,
+            // so claim the embedder (plain repo id) + exclude from backup, so it is a tracked
+            // co-owned model instead of an unclaimed orphan a sibling could delete.
+            SharedModelStore.claim(modelID: repoID, repo: repoID,
+                                   sizeBytes: SharedModelStore.sizeOnDisk(repoID))
+            SharedModelStore.excludeFromBackup(repoID)
         } else {
             lock.lock()
             self.mxbaiLoadAttempted = false

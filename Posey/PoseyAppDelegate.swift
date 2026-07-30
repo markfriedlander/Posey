@@ -30,12 +30,21 @@ final class PoseyAppDelegate: NSObject, UIApplicationDelegate {
         SharedModelStore.configure(appGroupID: "group.com.MarkFriedlander.aifamily")
         SharedModelStore.touchHeartbeat()
 
-        // Version-safety, no-orphans: once per launch, reap any superseded plain
-        // (pre-version) model copies this app still claims. Off-main — file I/O on
-        // a coordinated store — and after configure(), which the store requires
-        // before any access. See sweepSupersededPlainCopies below for why all three
-        // family apps must run this, not just the one deleting a model.
-        Task.detached { sweepSupersededPlainCopies() }
+        // Launch store-maintenance, all off-main (coordinated file I/O), and after
+        // configure() + touchHeartbeat() (which marks US alive so Posey is never reaped
+        // as stale). In order:
+        //  1. graceStampMissingHeartbeats() — give pre-lease (heartbeat-less) claims a
+        //     fresh lease window so a long-deleted app's immortal claim can age out.
+        //  2. reapStaleClaims() — drop provably-dead claimants across ALL models and
+        //     delete any now-unclaimed model files. Every family app runs this so a
+        //     deleted sibling's models get reclaimed by whoever launches (new in 1.1.0).
+        //  3. sweepSupersededPlainCopies() — reclaim THIS app's own superseded plain
+        //     (pre-version) copies from the version-safety migration (existing behavior).
+        Task.detached {
+            SharedModelStore.graceStampMissingHeartbeats()
+            SharedModelStore.reapStaleClaims()
+            sweepSupersededPlainCopies()
+        }
 
         UNUserNotificationCenter.current().delegate = self
         return true

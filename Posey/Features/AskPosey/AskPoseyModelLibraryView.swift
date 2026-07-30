@@ -1,4 +1,5 @@
 import SwiftUI
+import SharedModelStoreKit   // SharedModelStore.clearEntireSharedStore() (Clear all family models)
 
 // ========== BLOCK 01: ASK POSEY MODEL LIBRARY VIEW - START ==========
 
@@ -50,6 +51,7 @@ struct AskPoseyModelLibraryView: View {
     private var hasSeenHardwareDisclosure: Bool = false
 
     @State private var modelPendingDelete: ModelConfiguration?
+    @State private var showingClearFamilyAlert = false   // Clear all family models (last resort)
     @State private var modelForLicense: ModelConfiguration?
     @State private var showingHardwareDisclosure = false
     @State private var pendingModelAfterDisclosure: ModelConfiguration?
@@ -70,6 +72,7 @@ struct AskPoseyModelLibraryView: View {
         Form {
             llmSection
             embedderSection
+            storageSection
         }
         .navigationTitle("Model Library")
         .navigationBarTitleDisplayMode(.inline)
@@ -138,6 +141,47 @@ struct AskPoseyModelLibraryView: View {
             Button("Cancel", role: .cancel) {}
         } message: { backend in
             Text("Deleting frees ~\(backend.sizeBlurb ?? "space"). Your library's existing vectors are kept, so re-downloading restores it with no re-embedding.")
+        }
+        .alert("Clear all family models?", isPresented: $showingClearFamilyAlert) {
+            Button("Clear all family models", role: .destructive) {
+                let removed = SharedModelStore.clearEntireSharedStore()
+                ModelCatalogService.shared.refreshDownloadStates()
+                print("POSEY: cleared entire shared store: \(removed) repos removed")
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes every downloaded AI model shared across Hal, Posey, and AI Camera to reclaim all model storage at once. Each app re-downloads what it needs the next time you use it. Your library, notes, and settings are not affected.")
+        }
+    }
+
+    // MARK: - Storage section (last-resort family clear)
+
+    /// The family-wide safety valve, matching the one in Hal's Maintenance screen.
+    /// Distinct from the per-model Delete rows above (which release only Posey's claim
+    /// and delete a model no sibling still uses): this removes EVERY shared model for
+    /// the whole family at once and resets the manifest, to reclaim all model storage
+    /// immediately. Manifest-aware (SharedModelStore.clearEntireSharedStore) so it never
+    /// leaves ghost entries. Each app re-downloads on next use.
+    private var storageSection: some View {
+        Section {
+            Button {
+                showingClearFamilyAlert = true
+            } label: {
+                HStack(alignment: .top) {
+                    Image(systemName: "trash.fill")
+                        .foregroundColor(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Clear all family models")
+                            .foregroundColor(.red)
+                        Text("Removes every shared model for Hal, Posey, and AI Camera at once. Each app re-downloads as needed. Last resort.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+            }
+        } header: {
+            Label("Storage", systemImage: "externaldrive")
         }
     }
 
